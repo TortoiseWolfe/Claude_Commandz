@@ -152,7 +152,12 @@ If **all** generators are idle and unassigned work exists:
    - Set `assignedTo: "generator-N"` for all queue items of that feature
    - Set `terminals.generator-N.status: "working"`
    - Set `terminals.generator-N.feature: "[feature]"`
-3. Auto-execute `/wireframe-prep` then `/wireframe`
+3. **Validate JSON before writing:**
+   ```bash
+   python3 -c "import json; json.load(open('docs/design/wireframes/.terminal-status.json'))"
+   ```
+   If validation fails, fix the JSON structure before proceeding.
+4. Auto-execute `/wireframe-prep` then `/wireframe`
 
 **Priority rule:** Manager-assigned work ALWAYS takes precedence over self-assignment. If Manager has already assigned a feature to a different generator, respect that assignment.
 

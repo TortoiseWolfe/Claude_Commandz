@@ -147,6 +147,13 @@ cat docs/design/wireframes/.terminal-status.json | jq '.'
 "Reviewer: Reviewed [NNN]-[feature-name] - [N] PASS, [N] REGEN queued"
 ```
 
+**Validate JSON before writing:**
+```bash
+# Test parse - will error if invalid JSON
+python3 -c "import json; json.load(open('docs/design/wireframes/.terminal-status.json'))"
+```
+If validation fails, fix the JSON structure before proceeding.
+
 **Write** updated `.terminal-status.json`.
 
 **Output:**
