@@ -18,7 +18,7 @@ $ARGUMENTS
 You were primed at session start (e.g., "You are the Validator terminal").
 Use that context to determine your role automatically.
 
-**Valid roles**: manager, assistant-manager, planner, generator-1, generator-2, generator-3, viewer, reviewer, validator, author, tester, implementer, auditor
+**Valid roles**: manager, assistant-manager, planner, generator-1, generator-2, generator-3, viewer, reviewer, validator, inspector, author, tester, implementer, auditor
 
 **Note**: Generators are numbered (generator-1, generator-2, generator-3). Detect from primer "You are the Generator-N terminal".
 
@@ -48,6 +48,7 @@ Run additional checks based on role:
 | Role | Additional Check |
 |------|------------------|
 | validator | `python3 docs/design/wireframes/validate-wireframe.py --check-escalation` |
+| inspector | `python3 docs/design/wireframes/inspect-wireframes.py --all` |
 | generator-N | First queue item assigned to THIS generator number |
 | reviewer | `ls -t docs/design/wireframes/*/*.issues.md 2>/dev/null \| head -3` |
 | planner | Check for assignments in queue |
@@ -63,6 +64,7 @@ Run additional checks based on role:
 | reviewer | "Run `/wireframe-screenshots --all` to find work" | "Auto-execute `/wireframe-screenshots --feature [NNN]`" |
 | planner | "Self-assign next unplanned feature (see below)" | "Auto-execute `/wireframe-plan [feature]`" |
 | validator | "Run `--check-escalation`. [N] candidates." | "Escalate [issue] to GENERAL_ISSUES.md, add _check_*() method" |
+| inspector | "Run `inspect-wireframes.py --all` for pattern violations" | "Check cross-SVG consistency, log PATTERN_VIOLATION issues" |
 | viewer | "Auto-execute `/hot-reload-viewer`" | "Viewer should be running at localhost:3000" |
 | manager | "All roles have work. Standing by." | "Auto-assign work to idle downstream roles" |
 | assistant-manager | "Check skill files need updates" | "Assist Manager with assignments or check skills" |
@@ -102,6 +104,7 @@ After displaying status, automatically invoke the appropriate action:
 | generator-N | Queue has items for THIS generator | `Skill: wireframe-prep` then `Skill: wireframe` with feature |
 | reviewer | Queue has items | `Skill: wireframe-screenshots` with `--feature [NNN]` |
 | validator | Escalation candidates > 0 | Run `python3 validate-wireframe.py --check-escalation`, update GENERAL_ISSUES.md |
+| inspector | Reviewed SVGs pending inspection | Run `python3 inspect-wireframes.py --feature [NNN]`, log PATTERN_VIOLATION to *.issues.md |
 | viewer | Not running | `Skill: hot-reload-viewer` |
 | author | Idle | `Skill: session-summary` |
 | tester | Tests exist | `Skill: test` |
