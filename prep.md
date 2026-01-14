@@ -10,7 +10,7 @@ Read and internalize key project files without summarizing.
 - `/prep` - Load root context only
 - `/prep [terminal]` - Load root + terminal-specific context
 
-**Valid terminals**: manager, assistant, planner, generator, viewer, reviewer, validator, author, tester, implementer, auditor
+**Valid terminals**: manager, assistant, planner, generator, viewer, reviewer, validator, inspector, author, tester, implementer, auditor
 
 ## Instructions
 
@@ -32,6 +32,7 @@ Load additional context based on terminal:
 | viewer | `docs/design/wireframes/CLAUDE.md` |
 | reviewer | `docs/design/wireframes/CLAUDE.md` + recent issues files |
 | validator | `docs/design/wireframes/CLAUDE.md` + `GENERAL_ISSUES.md` |
+| inspector | `docs/design/wireframes/CLAUDE.md` + all SVG patterns |
 | author | `docs/CLAUDE.md` |
 | tester | Root context only (no tests folder yet) |
 | implementer | Root context only (no src folder yet) |
@@ -52,6 +53,11 @@ ls -t docs/design/wireframes/*/*.issues.md 2>/dev/null | head -5
 **validator**: Show escalation candidates count
 ```bash
 python docs/design/wireframes/validate-wireframe.py --check-escalation 2>/dev/null | grep -c "candidate" || echo "0"
+```
+
+**inspector**: Show SVG count and last inspection
+```bash
+ls docs/design/wireframes/*/*.svg 2>/dev/null | wc -l
 ```
 
 ### 4. Output
