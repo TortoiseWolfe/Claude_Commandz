@@ -61,7 +61,7 @@ Run additional checks based on role:
 |------|-----------|---------------------|
 | generator-N | "Self-assign unassigned work (see below)" | "Auto-execute `/wireframe-prep [feature]`" |
 | reviewer | "Run `/wireframe-screenshots --all` to find work" | "Auto-execute `/wireframe-screenshots --feature [NNN]`" |
-| planner | "No unassigned features." | "Auto-execute `/wireframe-plan [feature]`" |
+| planner | "Self-assign next unplanned feature (see below)" | "Auto-execute `/wireframe-plan [feature]`" |
 | validator | "Run `--check-escalation`. [N] candidates." | "Escalate [issue] to GENERAL_ISSUES.md, add _check_*() method" |
 | viewer | "Auto-execute `/hot-reload-viewer`" | "Viewer should be running at localhost:3000" |
 | manager | "All roles have work. Standing by." | "Auto-assign work to idle downstream roles" |
@@ -162,6 +162,46 @@ If **all** generators are idle and unassigned work exists:
 **Priority rule:** Manager-assigned work ALWAYS takes precedence over self-assignment. If Manager has already assigned a feature to a different generator, respect that assignment.
 
 If no unassigned work exists either, output: "No work available. Standing by."
+
+### Planner Self-Assignment Logic
+
+When Planner runs `/next` and no items assigned to planner in queue:
+
+**GUARD CHECK:**
+```bash
+cat docs/design/wireframes/.terminal-status.json | jq '.queue[] | select(.assignedTo == "planner")'
+```
+
+If items exist → Follow queue, don't self-assign.
+
+If NO planner items:
+
+1. **Read IMPLEMENTATION_ORDER.md** - Parse Tier 1-9 ordered feature list
+2. **Check each feature in order** for existing `assignments.json`:
+   ```bash
+   ls docs/design/wireframes/NNN-feature/assignments.json 2>/dev/null
+   ```
+3. **Find first unplanned** - Feature without assignments.json
+4. **Self-assign**:
+   - Add to queue: `{"feature": "NNN-feature", "action": "PLAN", "assignedTo": "planner", "reason": "Self-assigned from IMPLEMENTATION_ORDER.md"}`
+   - Update: `terminals.planner.status: "active"`, `terminals.planner.feature: "NNN-feature"`
+   - Log: `"Planner: Self-assigned NNN-feature from IMPLEMENTATION_ORDER.md"`
+5. **Validate JSON** then **auto-execute** `/wireframe-plan NNN`
+
+If all features planned → "All features have wireframe plans. Standing by for implementation phase."
+
+**Output format:**
+```
+PLANNER Terminal
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Status: idle → active
+Queue:  0 items → 1 item (self-assigned)
+
+SELF-ASSIGNING:
+→ Next unplanned: 002-cookie-consent
+→ Based on: IMPLEMENTATION_ORDER.md (Tier 1, position 5)
+→ Auto-executing: /wireframe-plan 002
+```
 
 ## Examples
 
