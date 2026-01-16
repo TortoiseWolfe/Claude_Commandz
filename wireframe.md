@@ -8,6 +8,47 @@ description: Generate clean UI wireframes with numbered callouts (v5)
 
 ---
 
+## Theme Selection by Feature Type
+
+Choose the theme based on what the feature delivers:
+
+| Feature Type | Theme | Layout | Examples |
+|--------------|-------|--------|----------|
+| **Frontend** | LIGHT | Desktop + Mobile side-by-side | Forms, dashboards, user settings, profile pages |
+| **Backend** | DARK | Full-width architecture diagram | RLS policies, OAuth flows, CSRF protection, CI/CD pipelines |
+| **Hybrid** | BOTH | One of each | Admin dashboard (light) + API architecture (dark) |
+
+### Decision Guide
+
+**Use LIGHT theme when:**
+- Feature has user-facing screens (forms, modals, pages)
+- User Stories describe UI interactions ("As a user, I can see/click/enter...")
+- Spec mentions responsive design or mobile considerations
+- Feature involves visual components (buttons, inputs, cards)
+
+**Use DARK theme when:**
+- Feature is infrastructure/backend only (no UI)
+- User Stories describe system behavior ("The system enforces/validates/triggers...")
+- Spec focuses on security policies, data flow, or integrations
+- Feature involves database schemas, API contracts, or auth flows
+
+**Use BOTH themes when:**
+- Feature has backend logic AND user-facing dashboards
+- Example: Analytics (dark: data pipeline) + (light: analytics dashboard)
+- Example: Payments (dark: Stripe integration flow) + (light: checkout UI)
+
+### Theme Analysis Tool
+
+Run before planning SVGs:
+
+```bash
+python3 docs/design/wireframes/validate-wireframe.py --analyze-themes [spec.md]
+```
+
+This outputs JSON classifying each User Story as `light` or `dark` based on keywords.
+
+---
+
 ## Layout (1920×1080 canvas)
 
 ```
@@ -47,7 +88,7 @@ description: Generate clean UI wireframes with numbered callouts (v5)
 
 ```xml
 <!-- CENTERED, HUMAN-READABLE - no pipe, no page count -->
-<text x="700" y="28" text-anchor="middle" font-family="system-ui, sans-serif"
+<text x="960" y="28" text-anchor="middle" font-family="system-ui, sans-serif"
       font-size="18" font-weight="700" fill="#4b5563" letter-spacing="1">
   COOKIE CONSENT - MODAL FLOW
 </text>

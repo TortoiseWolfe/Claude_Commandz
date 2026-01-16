@@ -2,15 +2,28 @@
 description: Update wireframe status with interactive menu (modifies wireframe-status.json)
 ---
 
-Update the status of wireframes in the central tracker.
+# Wireframe Status Manager
 
-## Single Source of Truth
+Update the status of wireframes in the central tracker with an interactive menu.
 
 **File:** `docs/design/wireframes/wireframe-status.json`
 
-The viewer dynamically loads status from this JSON file. Updates here are reflected in:
-- Wireframe viewer sidebar (feature and SVG badges)
-- Any other tools that read the JSON
+## Usage
+
+```
+/wireframe-status                    # Interactive dashboard
+/wireframe-status [feature]          # Status + actions for specific feature
+/wireframe-status [feature]:[svg]    # Status for specific SVG
+/wireframe-status --queue            # Show items from .terminal-status.json queue
+```
+
+**Examples**:
+```
+/wireframe-status                    # Show dashboard with all features
+/wireframe-status 001                # Show 001-wcag-aa-compliance status
+/wireframe-status 003:02             # Show 003 SVG #2 status
+/wireframe-status --queue            # Show pending review items
+```
 
 ## Arguments
 
@@ -18,127 +31,150 @@ The viewer dynamically loads status from this JSON file. Updates here are reflec
 $ARGUMENTS
 ```
 
-- `FEATURE` - Feature number (e.g., `000`, `001`) or feature name
-- `FEATURE:SVG` - Specific SVG (e.g., `000:01` for first SVG)
-- If empty, shows status summary of all features
+- No args: Interactive dashboard with feature selection
+- `FEATURE`: Feature number (e.g., `000`, `001`)
+- `FEATURE:SVG`: Specific SVG (e.g., `003:02` for third feature, second SVG)
+- `--queue`: Show items from `.terminal-status.json` queue
+
+---
+
+## Instructions
+
+### 1. No Arguments → Interactive Dashboard
+
+Display status summary:
+
+```bash
+python3 docs/design/wireframes/wireframe-status-manager.py summary
+```
+
+Then present interactive menu using `AskUserQuestion`:
+
+**Question**: "Select an action:"
+**Options**:
+1. View feature status (enter number)
+2. List by status (draft/review/approved)
+3. Show queue items
+4. Validate JSON structure
+
+### 2. Feature Argument → Feature Detail + Actions
+
+```bash
+python3 docs/design/wireframes/wireframe-status-manager.py get [feature]
+```
+
+Display current status, then present action menu:
+
+**Question**: "Update status for [feature]:"
+**Options**:
+
+| Option | Action |
+|--------|--------|
+| Set to REVIEW | Ready for reviewer |
+| Set to APPROVED | Passed all checks |
+| Set to ISSUES | Problems found |
+| Set to REGENERATING | Being regenerated |
+| Back to dashboard | Return to main menu |
+
+### 3. Update Status
+
+After user selection:
+
+```bash
+# Update entire feature
+python3 docs/design/wireframes/wireframe-status-manager.py set [feature] [status]
+
+# Update single SVG
+python3 docs/design/wireframes/wireframe-status-manager.py set-svg [feature] [svg] [status]
+```
+
+### 4. Queue Integration (--queue)
+
+Read `.terminal-status.json` and show pending items:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Wireframe Queue                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PENDING REVIEW (4)                                                          │
+│                                                                             │
+│ 1. 001-wcag-aa-compliance (3 SVGs) → reviewer                               │
+│ 2. 002-cookie-consent (3 SVGs) → reviewer                                   │
+│ 3. 005-security-hardening (3 SVGs) → reviewer                               │
+│ 4. 007-e2e-testing-framework (2 SVGs) → reviewer                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Quick action: /wireframe-status 001 to update                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5. Sync Queue and Status
+
+When updating status to APPROVED or ISSUES:
+1. Update `wireframe-status.json` via Python script
+2. Optionally remove from `.terminal-status.json` queue if complete
+
+---
 
 ## Status Values
 
-| # | Key | Emoji | Meaning |
-|---|-----|-------|---------|
-| 1 | draft | 📝 | Initial `/wireframe` generation |
-| 2 | regenerating | 🔄 | Being regenerated after issues |
-| 3 | review | 👁️ | Under `/wireframe-review` |
-| 4 | issues | 🔴 | Review found problems (needs regenerate) |
-| 5 | patchable | 🟡 | Minor fixes only |
-| 6 | approved | ✅ | Passed review |
-| 7 | planning | 📋 | In `/speckit.plan` phase |
-| 8 | tasked | 📝 | Has `tasks.md` |
-| 9 | inprogress | 🚧 | `/speckit.implement` started |
-| 10 | complete | ✅ | Implementation done |
-| 11 | blocked | ⛔ | Waiting on dependency |
+| Key | Emoji | Meaning | Valid Transitions |
+|-----|-------|---------|-------------------|
+| draft | 📝 | Initial generation | → regenerating, review |
+| regenerating | 🔄 | Being regenerated | → draft, review |
+| review | 👁️ | Under review | → issues, patchable, approved |
+| issues | 🔴 | Has problems | → regenerating |
+| patchable | 🟡 | Minor fixes needed | → regenerating, approved |
+| approved | ✅ | Passed review | → planning |
+| planning | 📋 | In planning phase | → tasked |
+| tasked | 📝 | Has tasks.md | → inprogress |
+| inprogress | 🚧 | Implementation started | → complete, blocked |
+| complete | ✅ | Implementation done | (terminal) |
+| blocked | ⛔ | Waiting on dependency | → inprogress |
 
-## Process
+---
 
-### 1. Read Current Status
-
-```bash
-# Read the JSON file
-cat docs/design/wireframes/wireframe-status.json
-```
-
-If no arguments, show status summary.
-
-**Concise output format** (1-2 lines):
-> "Status: [N] approved, [N] patchable, [N] issues, [N] draft. Ready."
-
-Only include non-zero counts. DO NOT create detailed tables or list individual features.
-
-If feature number provided:
-1. Find feature in JSON (e.g., `000-rls-implementation`)
-2. Show current status
-3. Present menu using `AskUserQuestion`
-
-### 2. Present Menu
-
-Use `AskUserQuestion` tool to present status options:
-
-```
-Current: 000-rls-implementation → draft (📝)
-
-Select new status:
-```
-
-Options (use key names in JSON):
-- draft (📝)
-- regenerating (🔄)
-- review (👁️)
-- issues (🔴)
-- patchable (🟡)
-- approved (✅)
-- planning (📋)
-- tasked (📝)
-- inprogress (🚧)
-- complete (✅)
-- blocked (⛔)
-
-### 3. Update wireframe-status.json
-
-1. Read `docs/design/wireframes/wireframe-status.json`
-2. Find the feature object
-3. Update `status` field (and optionally SVG statuses)
-4. Write updated JSON file
-
-**Before:**
-```json
-{
-  "000-rls-implementation": {
-    "status": "draft",
-    "svgs": {
-      "01-rls-overview.svg": "draft",
-      "02-rls-requirements.svg": "draft"
-    }
-  }
-}
-```
-
-**After (feature-level update):**
-```json
-{
-  "000-rls-implementation": {
-    "status": "approved",
-    "svgs": {
-      "01-rls-overview.svg": "approved",
-      "02-rls-requirements.svg": "approved"
-    }
-  }
-}
-```
-
-### 4. Report
-
-Output summary of changes:
-```
-Updated 000-rls-implementation: draft → approved
-- Feature status: approved
-- 2 SVGs updated to approved
-```
-
-## Per-SVG Status
-
-For granular SVG updates:
+## Batch Operations
 
 ```bash
-/wireframe-status 000:01
+# Set all features in a category to same status
+python3 docs/design/wireframes/wireframe-status-manager.py batch-set foundation approved
+
+# List features needing attention
+python3 docs/design/wireframes/wireframe-status-manager.py list issues
+python3 docs/design/wireframes/wireframe-status-manager.py list patchable
 ```
 
-This updates only `01-*.svg` status within the feature, leaving feature status unchanged.
+---
 
-## Automation Note
+## Other Commands
 
-This skill is for **manual overrides**. Status is normally auto-updated by:
-- `/wireframe` → draft or regenerating
-- `/wireframe-review` → review, issues, patchable, or approved
-- `/speckit.plan` → planning
-- `/speckit.tasks` → tasked
-- `/speckit.implement` → inprogress or complete
+```bash
+# List features with specific status
+python3 docs/design/wireframes/wireframe-status-manager.py list draft
+
+# List all features
+python3 docs/design/wireframes/wireframe-status-manager.py features
+
+# Validate JSON structure
+python3 docs/design/wireframes/wireframe-status-manager.py validate
+
+# Show menu options for feature
+python3 docs/design/wireframes/wireframe-status-manager.py menu [feature]
+```
+
+---
+
+## Related Skills
+
+- `/queue-check` - View terminal queue and status
+- `/dispatch` - Send tasks to terminals
+- `/wireframe-review` - Review workflow for screenshots
+
+---
+
+## DO NOT
+
+- Read/write JSON manually (use Python script)
+- Create verbose tables (Python output is sufficient)
+- Skip the AskUserQuestion for status updates
+- Update status without checking current state first

@@ -12,85 +12,79 @@ description: Plan wireframe assignments for a feature (Planner terminal)
 
 ## Workflow
 
-### 1. Read Feature Spec
+### 1. Parse Feature Spec
 
 ```bash
-# Find and read the spec
-cat features/*/NNN-*/spec.md
+python3 docs/design/wireframes/wireframe-plan-generator.py parse [feature]
 ```
 
-Extract:
-- Feature name and description
-- User Stories (US-XXX)
-- Functional Requirements (FR-XXX)
-- Success Criteria (SC-XXX)
+Shows extracted User Stories (US-XXX), Requirements (FR-XXX), and Criteria (SC-XXX).
 
-### 2. Determine SVG Count
+### 2. Get SVG Suggestions
 
-**Guidelines:**
-- 1 SVG per major user flow or screen
-- Complex features: 2-4 SVGs
-- Simple features: 1-2 SVGs
-- Backend/architecture features: 1-2 SVGs (diagrams)
-
-### 3. Create Assignments
-
-Output to `docs/design/wireframes/NNN-feature/assignments.json`:
-
-```json
-{
-  "feature": "NNN-feature-name",
-  "plannedAt": "ISO-8601-timestamp",
-  "svgCount": N,
-  "assignments": [
-    {
-      "svg": "01-descriptive-name.svg",
-      "focus": "One sentence describing what this SVG shows",
-      "userStories": ["US-001", "US-002"],
-      "requirements": ["FR-001", "FR-002", "SC-001"],
-      "mode": "new"
-    }
-  ]
-}
-```
-
-### 4. Update Queue
-
-Add assignments to `.terminal-status.json` queue:
-
-```json
-{
-  "feature": "NNN-feature",
-  "svg": "01-name.svg",
-  "action": "GENERATE",
-  "reason": "Planned by Planner",
-  "assignedTo": null
-}
-```
-
-**Validate JSON before writing:**
 ```bash
-# Test parse - will error if invalid JSON
-python3 -c "import json; json.load(open('docs/design/wireframes/.terminal-status.json'))"
+python3 docs/design/wireframes/wireframe-plan-generator.py suggest [feature]
 ```
-If validation fails, fix the JSON structure before proceeding.
 
-### 5. Handoff
+Shows recommended SVG count and names based on complexity analysis.
 
-Output summary for Manager:
+### 3. Review Suggestions with User
 
+Use `AskUserQuestion` to confirm:
+- SVG count (accept suggestion or override)
+- SVG names/focus areas
+- Any additional screens needed
+
+### 4. Create Assignments
+
+```bash
+python3 docs/design/wireframes/wireframe-plan-generator.py create [feature]
 ```
-WIREFRAME PLAN COMPLETE
 
-Feature: NNN-feature-name
-SVGs Planned: N
+Creates `docs/design/wireframes/NNN-feature/assignments.json` with:
+- SVG names
+- Focus descriptions
+- Linked requirements
+- Mode (new/regen)
 
-Assignments:
-  01-name.svg → [US-001, US-002] - "Focus description"
-  02-name.svg → [US-003] - "Focus description"
+**If user requested changes:** Edit the generated assignments.json before proceeding.
 
-Queue updated. Generator terminals can now pick up assignments.
+### 5. Assign to Generator
+
+```bash
+# Auto-assign to least-loaded generator
+python3 docs/design/wireframes/wireframe-plan-generator.py assign [feature]
+
+# Or specify generator
+python3 docs/design/wireframes/wireframe-plan-generator.py assign [feature] generator-2
 ```
+
+This:
+- Uses `queue_manager.py` to find least-loaded generator
+- Adds all SVGs to queue with same generator (feature-grouped)
+- Updates terminal status
+
+### 6. Show Summary
+
+```bash
+python3 docs/design/wireframes/wireframe-plan-generator.py summary [feature]
+```
+
+Output the planning summary and handoff message.
+
+## Quick Workflow
+
+```bash
+# Full automated flow
+python3 docs/design/wireframes/wireframe-plan-generator.py suggest [feature]
+# Review with user via AskUserQuestion
+python3 docs/design/wireframes/wireframe-plan-generator.py assign [feature]
+```
+
+## Output Files
+
+- `docs/design/wireframes/NNN-feature/assignments.json` - Machine-readable assignments
+- `.terminal-status.json` queue updated via `queue_manager.py`
 
 ## SVG Naming Convention
 
@@ -102,7 +96,8 @@ NN-kebab-case-description.svg
 03-dashboard-overview.svg
 ```
 
-## Output Files
+## DO NOT
 
-- `docs/design/wireframes/NNN-feature/assignments.json` - Machine-readable assignments
-- `.terminal-status.json` queue updated with GENERATE actions
+- Use jq for queue operations (use queue_manager.py)
+- Skip user confirmation of SVG count/names
+- Assign different SVGs from same feature to different generators
