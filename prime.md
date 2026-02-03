@@ -1,6 +1,5 @@
 ---
 description: Prime a terminal with role-specific context
-scope: personal
 ---
 
 Load focused context for a specific terminal role.
@@ -14,7 +13,7 @@ Load focused context for a specific terminal role.
 
 ## Valid Roles
 
-operator, cto, architect, coordinator, security, toolsmith, devops, product-owner, planner, wireframe-generator, preview-host, wireframe-qa, validator, inspector, author, test-engineer, developer, auditor, qa-lead, tech-writer, docker-captain
+operator, stw-liaison, cto, architect, coordinator, security, toolsmith, devops, product-owner, planner, wireframe-generator, preview-host, wireframe-qa, validator, inspector, author, test-engineer, developer, auditor, qa-lead, tech-writer, docker-captain
 
 ## Instructions
 
@@ -27,6 +26,7 @@ Read `CLAUDE.md` (~60 lines).
 | Role | File |
 |------|------|
 | operator | `.claude/roles/operator.md` |
+| stw-liaison | `.claude/roles/stw-liaison.md` |
 | cto, architect, security, toolsmith, devops, product-owner | `.claude/roles/council.md` |
 | planner, wireframe-generator, preview-host, wireframe-qa, validator, inspector | `.claude/roles/wireframe-pipeline.md` |
 | developer, test-engineer, auditor | `.claude/roles/implementation.md` |
@@ -88,6 +88,9 @@ If inventory loaded, also report:
 
 If audit template generated:
 > "Generated [topic] audit template at [path]."
+
+Always include this reminder at the end of output:
+> **Context low?** Use `/clear` then `/prime [role]` - NOT `/compact`
 
 ## DO NOT
 

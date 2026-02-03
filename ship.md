@@ -24,8 +24,11 @@ Ship the current feature branch: commit, merge to main, and cleanup.
 
 ## Commit Phase
 
-3. **Stage all changes**:
-   - Run `git add -A` (through Docker if Docker-first)
+3. **Stage changes**:
+   - Run `git status` to see all uncommitted changes (staged, unstaged, untracked)
+   - If there are changes, show the user the full list and ask which to include
+   - Default assumption: everything gets committed unless the user says otherwise
+   - Stage confirmed files with `git add` (through Docker if Docker-first)
    - Run `git diff --cached --stat` to summarize staged changes
    - If no changes to commit, skip to Merge Phase (or Final Report if already on main)
 
