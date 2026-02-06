@@ -3,6 +3,12 @@
 # Exit quickly if interrupted
 trap 'exit 0' SIGPIPE
 
+# Require jq for token tracking
+if ! command -v jq &>/dev/null; then
+    echo "⚠ jq not found - install with: curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq"
+    exit 0
+fi
+
 # Cache static values
 USER_NAME="${USER:-$(whoami)}"
 HOST_NAME="${HOSTNAME:-$(hostname -s)}"
