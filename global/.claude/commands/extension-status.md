@@ -123,9 +123,14 @@ gh api repos/<REPO>/branches \
 # Age of last main commit
 gh api repos/<REPO>/commits/main -q '.commit.committer.date'
 
-# Dependabot alerts (requires admin on repo; degrade gracefully)
-gh api repos/<REPO>/dependabot/alerts 2>/dev/null \
-  -q '[.[] | select(.state == "open")] | length' || echo "(no dependabot access)"
+# Dependabot alerts (requires admin on repo + alerts enabled; degrade gracefully)
+# Note: `gh api` writes error bodies to stdout on non-2xx, so we probe with --silent
+# first and only render the count on success. See TortoiseWolfe/Claude_Commandz#5.
+if gh api repos/<REPO>/dependabot/alerts --silent 2>/dev/null; then
+  gh api repos/<REPO>/dependabot/alerts -q '[.[] | select(.state == "open")] | length' 2>/dev/null
+else
+  echo "(no dependabot access)"
+fi
 ```
 
 **Render**: flag any branch other than `main` or release branches (`release/*`, `v*`) as a cleanup candidate. Flag last-commit age >30d as `⚠ stale main`.
