@@ -90,30 +90,48 @@ gh release list --repo <REPO> --limit 3 --json tagName,publishedAt
 gh api repos/<REPO>/releases/latest \
   -q '{tag: .tag_name, assets: [.assets[] | {name, downloads: .download_count}]}'
 
-# Catalog content hash — detects ANY change to the catalog, not just wireframe entries.
-# Catches: new extensions added, version bumps for other extensions, schema changes,
-# removal of this extension's entry.
+# Fetch the catalog once, reuse for hash + version.
 #
-# Why curl + sha256sum instead of `gh api .../contents/... --jq .sha`?
+# Why curl instead of `gh api .../contents/... --jq .sha`?
 # Some sandboxed environments (notably the remote-trigger CCR runtime) enforce a
 # per-session repo allowlist on `gh`, blocking calls to repos outside the session's
-# `sources`. curl against the raw public URL bypasses that restriction. The hash
-# differs from GitHub's blob SHA but is functionally equivalent for "did this file
-# change?" — that's all we need.
-CATALOG_HASH=$(curl -fsSL https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json | sha256sum | awk '{print $1}')
+# `sources`. curl against the raw public URL bypasses that restriction.
+CATALOG_JSON=$(curl -fsSL https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json)
 
-# Catalog-advertised version of THIS extension
-curl -fsSL https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json \
-  | jq -r '.extensions.wireframe.version // empty'
+# Content hash — detects ANY change to the catalog, not just wireframe entries.
+# Catches: new extensions added, version bumps for other extensions, schema changes,
+# removal of this extension's entry. Differs from GitHub's blob SHA but functionally
+# equivalent for "did this file change?" — that's all we need.
+CATALOG_HASH=$(printf '%s' "$CATALOG_JSON" | sha256sum | awk '{print $1}')
 
-# Most recent commits touching the catalog file (only fetched if hash drift detected).
-# `gh api` works for this in normal local runs; remote sandbox may block it. Treat
-# as best-effort — render the recent-commits block only if the call succeeds.
+# Version of THIS extension as advertised by the catalog (used for version-drift check).
+CATALOG_VERSION=$(printf '%s' "$CATALOG_JSON" | jq -r '.extensions.wireframe.version // empty')
+
+# Most recent commits touching the catalog file (only rendered if hash drift detected).
+#
+# This is a best-effort enrichment. The call has three known failure modes that we
+# distinguish so a real outage doesn't masquerade as a sandbox restriction:
+#   1. Sandbox allowlist blocks (remote-trigger CCR): stderr contains "Access denied"
+#      or "not configured for this session" → render `(sandbox restriction)`
+#   2. Network/upstream errors (502/503/429/DNS): non-zero exit, stderr present
+#      → render `(commit list unavailable: <one-line stderr>)` so the failure is visible
+#   3. Success: render the bullet list
+#
 # Note: path filter goes in URL query string, not as -f path=... — that endpoint
 # shape returns 404 with -f path=.
-gh api 'repos/github/spec-kit/commits?path=extensions/catalog.community.json&per_page=3' \
+COMMITS_STDERR=$(mktemp)
+COMMITS_OUT=$(gh api 'repos/github/spec-kit/commits?path=extensions/catalog.community.json&per_page=3' \
   --jq '.[] | {sha: .sha[0:7], date: .commit.committer.date, msg: (.commit.message | split("\n")[0])}' \
-  2>/dev/null || echo "(commit list unavailable in this environment)"
+  2>"$COMMITS_STDERR")
+COMMITS_EXIT=$?
+if [ $COMMITS_EXIT -eq 0 ]; then
+  printf '%s\n' "$COMMITS_OUT"
+elif grep -qE 'Access denied|not configured for this session' "$COMMITS_STDERR"; then
+  echo "(commit list unavailable: sandbox restriction on cross-repo gh api)"
+else
+  echo "(commit list unavailable: $(head -1 "$COMMITS_STDERR" | tr -d '\n' | cut -c1-120))"
+fi
+rm -f "$COMMITS_STDERR"
 ```
 
 **Hash drift check**: compare current `CATALOG_HASH` against the last-seen hash stored in the rolling tracking issue (see "Persisting state across runs" below). If different, render:
@@ -125,9 +143,9 @@ gh api 'repos/github/spec-kit/commits?path=extensions/catalog.community.json&per
   - ...
 ```
 
-(If the recent-commits fetch failed in this environment, render `(commit list unavailable)` instead of the bullet list.)
+(If the recent-commits fetch failed, the bullet list is replaced by the failure-mode message rendered by the bash block above — sandbox restriction or upstream error, distinguished so a real GitHub outage doesn't look like a sandbox block.)
 
-**Version drift check** (sub-check, only when `REPO == TortoiseWolfe/spec-kit-extension-wireframe`): if local latest tag differs from catalog wireframe version, flag as `⚠ catalog version drift: catalog=vX.Y.Z, local=vA.B.C`. Suggest: "File a catalog bump PR against github/spec-kit".
+**Version drift check** (sub-check, only when `REPO == TortoiseWolfe/spec-kit-extension-wireframe`): compare `CATALOG_VERSION` (from the bash block above) against the local latest release tag. If different, flag as `⚠ catalog version drift: catalog=$CATALOG_VERSION, local=<latest-tag>`. Suggest: "File a catalog bump PR against github/spec-kit".
 
 For override repos, skip both drift checks — we don't know their catalog relationship.
 
