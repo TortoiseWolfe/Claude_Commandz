@@ -49,8 +49,11 @@ gh issue list --repo <REPO> --state open --limit 50 \
 gh pr list --repo <REPO> --state open --limit 50 \
   --json number,title,author,createdAt,updatedAt
 
-# Upstream catalog mentions of wireframe (last 30 days)
-gh search issues "wireframe" --repo github/spec-kit \
+# Upstream catalog mentions (last 30 days). Broadened beyond "wireframe" to also catch
+# extension-system breaking changes ("community extension", "extensions catalog") that
+# would affect any extension, including this one.
+gh search issues 'wireframe OR "community extension" OR "extensions catalog"' \
+  --repo github/spec-kit \
   --created ">=$(date -d '30 days ago' +%Y-%m-%d)" \
   --limit 20 --json number,title,state,author,updatedAt,url
 ```
@@ -87,25 +90,77 @@ gh release list --repo <REPO> --limit 3 --json tagName,publishedAt
 gh api repos/<REPO>/releases/latest \
   -q '{tag: .tag_name, assets: [.assets[] | {name, downloads: .download_count}]}'
 
-# Catalog-advertised version (only meaningful for the wireframe extension)
-curl -s https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json \
+# Catalog content hash — detects ANY change to the catalog, not just wireframe entries.
+# Catches: new extensions added, version bumps for other extensions, schema changes,
+# removal of this extension's entry.
+#
+# Why curl + sha256sum instead of `gh api .../contents/... --jq .sha`?
+# Some sandboxed environments (notably the remote-trigger CCR runtime) enforce a
+# per-session repo allowlist on `gh`, blocking calls to repos outside the session's
+# `sources`. curl against the raw public URL bypasses that restriction. The hash
+# differs from GitHub's blob SHA but is functionally equivalent for "did this file
+# change?" — that's all we need.
+CATALOG_HASH=$(curl -fsSL https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json | sha256sum | awk '{print $1}')
+
+# Catalog-advertised version of THIS extension
+curl -fsSL https://raw.githubusercontent.com/github/spec-kit/main/extensions/catalog.community.json \
   | jq -r '.extensions.wireframe.version // empty'
+
+# Most recent commits touching the catalog file (only fetched if hash drift detected).
+# `gh api` works for this in normal local runs; remote sandbox may block it. Treat
+# as best-effort — render the recent-commits block only if the call succeeds.
+# Note: path filter goes in URL query string, not as -f path=... — that endpoint
+# shape returns 404 with -f path=.
+gh api 'repos/github/spec-kit/commits?path=extensions/catalog.community.json&per_page=3' \
+  --jq '.[] | {sha: .sha[0:7], date: .commit.committer.date, msg: (.commit.message | split("\n")[0])}' \
+  2>/dev/null || echo "(commit list unavailable in this environment)"
 ```
 
-**Drift check**: if local latest tag differs from catalog version, flag as `⚠ catalog drift: catalog=vX.Y.Z, local=vA.B.C`. Suggest: "File a catalog bump PR against github/spec-kit".
+**Hash drift check**: compare current `CATALOG_HASH` against the last-seen hash stored in the rolling tracking issue (see "Persisting state across runs" below). If different, render:
 
-Only apply the drift check when `REPO == TortoiseWolfe/spec-kit-extension-wireframe` — for override repos, skip it (we don't know their catalog relationship).
+```
+⚠ Upstream catalog changed since last run
+  Recent commits:
+  - <sha7> <date> <msg>
+  - ...
+```
+
+(If the recent-commits fetch failed in this environment, render `(commit list unavailable)` instead of the bullet list.)
+
+**Version drift check** (sub-check, only when `REPO == TortoiseWolfe/spec-kit-extension-wireframe`): if local latest tag differs from catalog wireframe version, flag as `⚠ catalog version drift: catalog=vX.Y.Z, local=vA.B.C`. Suggest: "File a catalog bump PR against github/spec-kit".
+
+For override repos, skip both drift checks — we don't know their catalog relationship.
+
+### Persisting state across runs (last-seen catalog hash)
+
+The scheduled remote routine has no persistent storage between runs. To remember the last-seen catalog content hash, embed it as a hidden HTML comment at the bottom of each posted comment in the rolling tracking issue:
+
+```html
+<!-- extension-status-state: catalog_hash=<sha256> run_at=<iso8601> -->
+```
+
+On each run:
+1. Fetch the **most recent** comment on the tracking issue (sorted by createdAt desc): `gh issue view <ISSUE_NUMBER> --repo <REPO> --json comments --jq '.comments | sort_by(.createdAt) | reverse | .[0].body'`
+2. Parse the hidden state line with: `grep -oP 'catalog_hash=\K[a-f0-9]+'`
+3. Compare to the freshly-computed `CATALOG_HASH`. If different → drift; if same → no drift.
+4. Always append a fresh `<!-- extension-status-state: ... -->` line at the bottom of the new comment, regardless of drift status. This becomes the next run's anchor.
+
+If no prior comment exists or the parse fails, treat as "no prior state" — render `(no prior hash recorded)` instead of a drift line, and post the state line as the seed for next run.
+
+**Migration note**: earlier runs used `catalog_sha=<gh-blob-sha>` (or `catalog_sha=unavailable` when the sandboxed `gh api` call was blocked). The current scheme uses `catalog_hash=<sha256-of-content>`. The first run after this change will see no `catalog_hash` line in the prior comment and seed cleanly.
 
 ### 5. External mentions (section 4)
 
 ```bash
+# Phrase search (quoted) — without quotes GitHub tokenizes the hyphens and matches generic "wireframe"
 # Mentions anywhere on GitHub (last 30 days to keep noise low)
-gh search issues "spec-kit-extension-wireframe" \
+gh search issues '"spec-kit-extension-wireframe"' \
   --created ">=$(date -d '30 days ago' +%Y-%m-%d)" \
   --limit 20 --json repository,title,number,author,state,createdAt,url
 
+# Phrase search (quoted) — without quotes GitHub tokenizes the hyphens and matches generic "wireframe"
 # Code that references the extension (indicates adoption)
-gh search code "spec-kit-extension-wireframe" \
+gh search code '"spec-kit-extension-wireframe"' \
   --limit 20 --json repository,path,url
 ```
 
