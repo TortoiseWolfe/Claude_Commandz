@@ -26,14 +26,43 @@ at `/graphify-init`, and **stop**. Do not silently initialize.
 ```bash
 graphify check-update .
 ```
-Purpose-built and cron-safe: reports whether a semantic re-extraction is pending.
+Purpose-built and cron-safe. **Empty output means nothing is pending — this is
+the authoritative signal.** Trust it over the SHA comparison below.
 
-Then compare the graph's build commit against HEAD:
+`GRAPH_REPORT.md` also records the commit it was built from, but **a SHA
+mismatch alone does not justify re-extracting.** Installing the skill, editing
+`CLAUDE.md`, or committing `graphify-out/` all move HEAD without changing a
+single indexed file. Measured across five repos after a round of graphify
+commits: all five reported "STALE" by SHA, and **zero had an indexed source file
+change** — the diffs were entirely `.claude/skills/graphify/*` and config.
+
+On a content repo that false positive is expensive: it triggers a semantic
+re-extract, which is hours of `claude-cli` quota for no new information.
+
+So filter the diff before believing it:
+
 ```bash
-grep -A2 "Graph Freshness" graphify-out/GRAPH_REPORT.md
-git rev-parse --short HEAD
+BUILT=$(grep -oP 'Built from commit: `\K[0-9a-f]+' graphify-out/GRAPH_REPORT.md)
+git -c core.quotepath=false diff --name-only "$BUILT..HEAD" \
+  | grep -vE '^(graphify-out/|\.claude/|\.husky/|\.githooks/|CLAUDE\.md|AGENTS\.md|\.gitattributes|\.graphifyignore|\.claudeignore|\.gitignore|\.prettierignore)'
 ```
-`GRAPH_REPORT.md` records the commit it was built from.
+
+`core.quotepath=false` is load-bearing: git wraps paths containing non-ASCII in
+double quotes, and a leading `"` defeats the `^graphify-out/` anchor. Without it
+a wiki article named `Career_Strategy_w-_Chelsea_—_Skills…md` slips through and
+fakes a refresh.
+
+The excluded set is everything **graphify itself installs**: its skill directory,
+the `CLAUDE.md`/`AGENTS.md` section, the ignore files, the hook scripts
+(`.husky/`, `.githooks/`), and `.gitattributes` — which it edits to register the
+`graph.json` merge driver. None of these feed the graph.
+
+**Empty result → the graph is current regardless of what the SHA says.** Report
+that and stop. Only files that actually feed the graph should trigger work.
+
+Then sanity-check what survives against what this repo actually indexes. Binary
+assets that were never in the graph (`.skp`, `.png`, `.glb`, `Zone.Identifier`
+files) will still show up in a raw diff and are not a reason to re-extract.
 
 ### Step 1b — Merge-commit check (do not skip; the hook is wrong here)
 

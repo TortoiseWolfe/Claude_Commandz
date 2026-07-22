@@ -146,9 +146,28 @@ Two caveats to surface honestly:
 - **`graph.html` is skipped above 5,000 nodes.** Don't point the user at a file
   that was never written. Offer `graphify tree` instead — it emits a D3
   collapsible-tree HTML with no node cap.
-- **Community names need an LLM backend.** Without one they stay `Community N`
-  placeholders (hub names still work). Mention `graphify label` as optional
-  polish; do not configure a key unasked.
+- **Community names need an LLM backend.** Without one, graphify falls back to
+  naming each community after its **hub node** — `react`, `messaging.ts`,
+  `test-user-factory.ts`. Those are mechanical, not descriptive.
+
+  **`--missing-only` is a trap here.** It treats hub-derived names as
+  already-labeled and skips the LLM entirely, reporting success while changing
+  nothing. To actually get semantic names, omit it:
+  ```bash
+  graphify label . --backend claude-cli        # relabels all
+  graphify label . --backend claude-cli --missing-only   # SKIPS hub-named ones
+  ```
+  Measured on ScriptHammer: `--missing-only` renamed 0 of 568. Without it, all
+  573 became semantic — `Messaging Gate & UI Widgets`, `Local Message Cache &
+  Encryption`, `Sign-In & Password Reset`. Roughly 6 LLM calls at batch-size 100,
+  so it is cheap relative to extraction and worth doing on any repo you navigate.
+
+  **Verify by inspecting the labels file, not the report.** Grepping
+  `Community [0-9]` in `GRAPH_REPORT.md` counts community *ID references* in the
+  node listings, not unnamed labels — it will mislead you:
+  ```bash
+  python3 -c "import json;v=json.load(open('graphify-out/.graphify_labels.json'));print(list(v.values())[:10])"
+  ```
 - Clustering is **order-dependent on `PYTHONHASHSEED`**. Bare runs shift the
   community count between invocations (576 → 565 → 563 observed). The git hook
   pins `PYTHONHASHSEED=0` for exactly this reason — do the same for reproducible
