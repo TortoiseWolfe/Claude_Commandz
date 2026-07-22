@@ -196,6 +196,19 @@ anything**:
    ```
    A `.next` or `node_modules` entry here means the ignore rules need fixing.
 
+5. **Self-ingestion — check this before every refresh.** `graphify-out/` must be
+   in `.graphifyignore`. `export wiki` writes hundreds of markdown articles
+   there, `graphify-out/` is meant to be committed, and tracked files are
+   scannable — so without the rule the tool re-ingests its own summaries and the
+   graph begins citing itself.
+   ```bash
+   grep -q '^graphify-out/$' .graphifyignore || echo "MISSING — fix before refreshing"
+   ```
+   Caught live: a TranScripts refresh that should have touched 4 new files began
+   working through 145 generated wiki articles. `.gitignore` cannot fix this —
+   the rule must be in `.graphifyignore`, which governs indexing rather than
+   version control.
+
 Present these as a short list with a recommendation each. The user decides.
 
 ## Step 6 — Privacy re-check
