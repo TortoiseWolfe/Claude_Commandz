@@ -48,15 +48,31 @@ Mark ambiguous content with `[REVIEW: reason]` for human review:
 - Q&A where relevance is unclear
 - Tangents that might circle back to strategy
 
+## Critical: Preserve URL and timestamps (non-negotiable)
+
+Every cleaned transcript **must** carry source traceability from the raw file through to the cleaned markdown. Never strip these:
+
+1. **Source URL:** the raw transcript's line 2 should be `Source: https://youtu.be/<VIDEO_ID>`. The cleaned output **must** keep this as line 2 (right under the H1 title). If the raw file's line 2 contains a URL in any other format (e.g., `https://youtu.be/...`), normalize it to `Source: https://youtu.be/...`.
+
+2. **Timestamp anchors:** the raw transcript may contain inline timestamps like `[0:15:32]` before dialogue chunks. When you create a cleaned `##` section header, find the timestamp of the first piece of dialogue that section summarizes, and prepend a clickable YouTube deep-link anchor to the header:
+
+   ```markdown
+   ## [0:15:32](https://youtu.be/VIDEOID?t=932) Section Title
+   ```
+
+   The `?t=` value is the timestamp expressed in total seconds (0:15:32 → 932). Convert H:MM:SS correctly. If the raw input has no timestamps, skip the anchor for that section and note `[REVIEW: no timestamp available]` at the end of the cleaned file's front matter.
+
+3. **Never drop either one during cleaning.** They are load-bearing for downstream Custom GPTs and Claude Projects that cite sources with clickable deep-links. See `memory/feedback_transcript_workflow.md` for the reasoning.
+
 ## Output Format
 
 ```markdown
-Title of Session (Week/Topic if applicable)
-Source URL (if present)
+# Title of Session (Week/Topic if applicable)
+Source: https://youtu.be/VIDEOID
 
 ---
 
-## Section Header
+## [0:00:15](https://youtu.be/VIDEOID?t=15) Section Header
 
 - Bullet points for lists
 - **Bold** for emphasis on key terms
@@ -66,17 +82,20 @@ Source URL (if present)
 
 ---
 
-## Next Major Section
+## [0:08:42](https://youtu.be/VIDEOID?t=522) Next Major Section
 ```
 
 ## Process
 1. Read the entire transcript first
-2. Identify the core educational structure and topics
-3. Remove clear filler content
-4. Clean verbal filler from remaining content
-5. Reorganize into logical sections with markdown headers
-6. Flag any ambiguous sections with [REVIEW: reason]
-7. Add section breaks (---) between major topics
-8. Write the cleaned version
+2. Extract the Source URL from raw line 2 (or wherever it lives — normalize to `Source: https://youtu.be/...`)
+3. Identify the core educational structure and topics
+4. Remove clear filler content
+5. Clean verbal filler from remaining content
+6. Reorganize into logical sections with markdown headers
+7. For each section, find the first timestamp in the raw content it covers and compute the `?t=SECONDS` anchor
+8. Prepend `[H:MM:SS](url?t=N)` to each section header
+9. Flag any ambiguous sections with `[REVIEW: reason]`
+10. Add section breaks (---) between major topics
+11. Write the cleaned version with `Source:` as line 2
 
-Report the approximate reduction percentage when complete.
+Report the approximate reduction percentage when complete, and confirm that URL and at least one timestamp anchor are present.
