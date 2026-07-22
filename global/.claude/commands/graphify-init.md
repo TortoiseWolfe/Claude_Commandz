@@ -47,6 +47,9 @@ first extraction is free or costs tokens, so the user should see the reasoning.
 (`.graphifyignore` evaluates last, and can only ever exclude *more*).
 
 ```
+# NEVER index our own generated output. This line is not optional.
+graphify-out/
+
 node_modules/
 .next/
 dist/
@@ -59,6 +62,25 @@ package-lock.json
 pnpm-lock.yaml
 *.min.js
 *.map
+```
+
+**The `graphify-out/` rule is the single most important line in this file.**
+Graphify's own docs say to commit `graphify-out/`, and `export wiki` writes
+100–600 markdown articles into it. Those are tracked files in the repo, so the
+next `graphify extract` **scans them as source documents** — the tool re-ingests
+its own summaries.
+
+On a content repo that is expensive *and* corrupting: a TranScripts refresh that
+should have touched 4 new files began working through **145 generated wiki
+articles**, 34 deep before it was killed. The resulting graph would cite its own
+summaries as sources — the "AI quoting AI" feedback loop, where small errors
+harden into facts because nothing outside the graph ever contradicts them.
+
+`.gitignore` does not save you here: `graphify-out/` is *meant* to be committed,
+so git-ignoring it defeats the purpose. The exclusion has to live in
+`.graphifyignore`, which controls indexing rather than version control. Verify:
+```bash
+graphify extract . --code-only 2>&1 | head -3   # doc count must exclude wiki/
 ```
 
 **Content repos:** also exclude machine-generated source data. In TranScripts,
