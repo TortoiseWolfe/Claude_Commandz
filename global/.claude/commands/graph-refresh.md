@@ -81,10 +81,21 @@ BUILT=$(grep -oP 'Built from commit: `\K[0-9a-f]+' graphify-out/GRAPH_REPORT.md)
 git log --merges --oneline "$BUILT..HEAD" 2>/dev/null
 ```
 
-- **Any merge commits listed** → the incremental graph cannot be trusted. Force a
-  full re-extract in Step 2 and say why.
-- **None, and the SHA matches HEAD, and `check-update` is quiet** → genuine
-  no-op. Say so and stop; that costs nothing and is the common case.
+**Order matters: this is a modifier, not a trigger.** Run the indexed-file filter
+*first*. Merge commits only matter once you have established that a rebuild is
+actually needed:
+
+- **0 indexed files changed** → **CURRENT, regardless of merge commits.** Stop.
+  Merges between an ancestor and HEAD do not imply missed content; the hook's
+  blind spot only matters if the hook was the thing that rebuilt.
+- **Files changed AND merge commits present** → `update` inherits the blind spot.
+  Use `extract --force` (Step 2).
+- **Files changed, no merges** → plain `update` is sufficient.
+
+Measured false positive: ScriptHammer after merging PR #336 reported 2 merge
+commits since its build SHA, but 0 indexed files changed — the diff was 10 files,
+all graphify config. Treating the merge count as a standalone trigger would have
+forced a full re-extract for nothing. On a content repo that is hours of quota.
 
 ## Step 2 — Update
 
