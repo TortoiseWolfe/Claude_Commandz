@@ -1,8 +1,124 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(echo:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(du:*)",
+      "Bash(env:*)",
+      "Bash(source:*)",
+      "Bash(chmod:*)",
+      "Bash(command:*)",
+      "Bash(command -v:*)",
+      "Bash(xargs:*)",
+      "Bash(comm:*)",
+      "Bash(test:*)",
+      "Bash(ln:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git log:*)",
+      "Bash(git config:*)",
+      "Bash(git clone:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(git mv:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(node:*)",
+      "Bash(npm install:*)",
+      "Bash(npm --version:*)",
+      "Bash(npm root:*)",
+      "Bash(pnpm install:*)",
+      "Bash(nvm install:*)",
+      "Bash(npx playwright test:*)",
+      "Bash(python3:*)",
+      "Bash(pip3 install:*)",
+      "Bash(curl:*)",
+      "Bash(gh:*)",
+      "Bash(gh auth status:*)",
+      "Bash(gh repo view:*)",
+      "Bash(gh api:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker stats:*)",
+      "Bash(docker cp:*)",
+      "Bash(docker info:*)",
+      "Bash(claude --version:*)",
+      "Bash(claude:*)",
+      "Bash(snap list:*)",
+      "Bash(dpkg:*)",
+      "Bash(sudo apt update:*)",
+      "Bash(sudo apt install:*)",
+      "Bash(gitleaks detect:*)",
+      "Bash(for:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:scripthammer.com)"
+    ],
+    "defaultMode": "auto"
+  },
   "statusLine": {
     "type": "command",
     "command": "bash ~/.claude/statusline-command.sh"
   },
+  "enabledPlugins": {
+    "claude-md-management@claude-plugins-official": true,
+    "hookify@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true,
+    "claude-code-setup@claude-plugins-official": true,
+    "supabase@claude-plugins-official": true,
+    "coderabbit@claude-plugins-official": true,
+    "deep-plan@piercelamb-plugins": true,
+    "deep-project@piercelamb-plugins": true,
+    "deep-implement@piercelamb-plugins": true,
+    "creative-writing-skills@creative-writing-skills": true,
+    "creative-writing@grey-haven-plugins": true
+  },
   "alwaysThinkingEnabled": true,
-  "model": "opus"
+  "effortLevel": "high",
+  "tui": "fullscreen",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark-daltonized",
+  "remoteControlAtStartup": false,
+  "skipAutoPermissionPrompt": true,
+  "model": "opus[1m]",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/roadmap-drift.sh session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/roadmap-drift.sh stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
 }
