@@ -59,6 +59,17 @@ Either way:
 
 3. Write the body using the template in **Appendix A** below. Substitute `<owner>/<repo>`, `<ISSUE_NUMBER>` (use `#NNN` placeholder; fix after create), memory path, current branch.
 
+3.5. **Capture the stamp values** and substitute them into the template's trailing `roadmap-stamp` line. This must match the tip the drift hook measures against, so drift reads 0 immediately after this runs — even with unpushed commits:
+
+   ```bash
+   BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
+   BRANCH="${BRANCH:-main}"
+   TIP="origin/$BRANCH"
+   git merge-base --is-ancestor "$TIP" HEAD 2>/dev/null && TIP=HEAD
+   TIP_SHA="$(git rev-parse "$TIP")"
+   GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
 4. Create:
    ```bash
    gh issue create \
@@ -78,6 +89,14 @@ Either way:
 6. Append the first comment using the appropriate template from **Appendix B**:
    - **3a-i case** → use the "session work" template; describe what shipped this session
    - **3a-ii case** → use the "seeded baseline" template; explicit that no work happened, this is the starting snapshot
+
+7. **Seed the drift-hook cache** (same as 3b step 6) so the next session start is exact and the new issue is not hidden by the hook's negative cache:
+
+   ```bash
+   [ -f ~/.claude/hooks/roadmap-drift.sh ] && bash ~/.claude/hooks/roadmap-drift.sh seed-cache \
+     "<owner>/<repo>" "<actual>" "$TIP_SHA" "$BRANCH" "$GENERATED"
+   bash ~/.claude/hooks/roadmap-drift.sh check    # expect: drift 0 commits (exact, ...)
+   ```
 
 ### 3b. UPDATE (subsequent runs in this repo)
 
@@ -100,12 +119,38 @@ The issue already exists. You're doing two things: (1) rewriting the body to ref
    - **Backlog** → add anything new captured this session. Remove anything that got built or de-scoped.
    - **What's the "next session should"** sentence at the bottom of the roadmap section → rewrite to reflect the new top priority.
 
+3.5. **Refresh the stamp** on the trailing `roadmap-stamp` line — replace the existing one, never append a second. Same values as 3a:
+
+   ```bash
+   BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
+   BRANCH="${BRANCH:-main}"
+   TIP="origin/$BRANCH"
+   git merge-base --is-ancestor "$TIP" HEAD 2>/dev/null && TIP=HEAD
+   TIP_SHA="$(git rev-parse "$TIP")"
+   GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
+   If the old body had no stamp (pre-existing issue), add one — that is the upgrade from approximate drift to exact, and it needs no migration.
+
 4. Write the updated body back:
    ```bash
    gh issue edit <issue-number> --repo <owner>/<repo> --body-file /tmp/new-body.md
    ```
 
 5. Append a comment using the "session work" template from **Appendix B**. The comment is the audit trail — it explains what changed in the body and why.
+
+6. **Seed the drift-hook cache** so the next session start is exact and needs no network — and so a newly seeded roadmap issue is never hidden behind the hook's 72-hour negative cache. Skip silently if the script is absent; the stamp in the body is the durable artifact, the cache is only an optimisation:
+
+   ```bash
+   [ -f ~/.claude/hooks/roadmap-drift.sh ] && bash ~/.claude/hooks/roadmap-drift.sh seed-cache \
+     "<owner>/<repo>" "<issue-number>" "$TIP_SHA" "$BRANCH" "$GENERATED"
+   ```
+
+   Then confirm it agrees — this single assertion proves the stamp, the cache and the tip-selection rule are consistent:
+
+   ```bash
+   bash ~/.claude/hooks/roadmap-drift.sh check     # expect: drift 0 commits (exact, ...)
+   ```
 
 ### 4. Surface the URL
 
@@ -211,7 +256,13 @@ Sessions end. The next session starts cold. Without a single canonical "what was
 Run `/session-prime` at session-end. The skill rewrites the body to reflect what changed in the roadmap and appends a comment with the audit trail.
 
 If the prime prompt itself becomes stale (memory file renamed, project changed shape), edit the body's prime-prompt block directly.
+
+<!-- roadmap-stamp v1 sha=<TIP_SHA> branch=<BRANCH> generated=<GENERATED> issue=#NNN -->
 ```
+
+**The stamp is the last line, and it is load-bearing.** It records the commit this roadmap was written against, so staleness becomes measurable instead of asserted — `git rev-list --count --first-parent <sha>..origin/<branch>`. It renders invisibly on GitHub. `~/.claude/hooks/roadmap-drift.sh` reads it; without it that hook falls back to the issue's last body edit, which is approximate because any edit resets the baseline.
+
+If the body already contains a `roadmap-stamp` line, **replace it** — never append a second.
 
 ---
 
