@@ -48,7 +48,7 @@ const unnamed = Object.entries(checks).filter(([, cmd]) =>
   (String(cmd).match(COMPOSE_RE) || []).some((seg) => !PROJECT_RE.test(seg)))
 if (unnamed.length) {
   const which = unnamed.map(([k]) => k).join(', ')
-  log(`ERROR: ${which} run docker compose without -p; each worktree would leak a network. Add -p ${name}-wf.`)
+  log(`ERROR: ${which} run docker compose without -p; each worktree would leak a network. Add -p ${name.toLowerCase()}-wf (compose project names must be lowercase).`)
   return { error: 'check runs docker compose without -p', checks: unnamed.map(([k]) => k) }
 }
 const composeProjects = [...new Set(Object.values(checks).flatMap((cmd) =>
