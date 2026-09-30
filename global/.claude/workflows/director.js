@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Baseline', detail: 'pin base, build once, checks green and acceptance red at base' },
     { title: 'Work', detail: 'per item: worktree, worker, independent checker, retry/escalate' },
     { title: 'Review', detail: 'blind Opus review, at most 2 rounds' },
+    { title: 'Cleanup', detail: 'prune the unused networks of the compose projects the checks name' },
   ],
 }
 
@@ -36,6 +37,22 @@ if (!repo || !goal || Object.keys(checks).length === 0) {
 const name = repo.slice(repo.lastIndexOf('/') + 1)
 const parent = repo.slice(0, repo.lastIndexOf('/'))
 const wtPath = (id) => `${parent}/${name}-wf-${id}`
+
+// Every `docker compose` in a check must name its project. Without -p, compose names the
+// project after the directory, so each worktree creates its own <dir>_default network and
+// nothing ever removes it. On 2026-09-30 that exhausted Docker's address pools ("all
+// predefined address pools have been fully subnetted") and blocked every new compose run.
+const COMPOSE_RE = /docker[ -]compose\b[^;|&]*/g
+const PROJECT_RE = /\s(?:-p|--project-name)[\s=]+([A-Za-z0-9][A-Za-z0-9_.-]*)/
+const unnamed = Object.entries(checks).filter(([, cmd]) =>
+  (String(cmd).match(COMPOSE_RE) || []).some((seg) => !PROJECT_RE.test(seg)))
+if (unnamed.length) {
+  const which = unnamed.map(([k]) => k).join(', ')
+  log(`ERROR: ${which} run docker compose without -p; each worktree would leak a network. Add -p ${name}-wf.`)
+  return { error: 'check runs docker compose without -p', checks: unnamed.map(([k]) => k) }
+}
+const composeProjects = [...new Set(Object.values(checks).flatMap((cmd) =>
+  (String(cmd).match(COMPOSE_RE) || []).map((seg) => seg.match(PROJECT_RE)[1])))]
 
 const RULES = `House rules for this task:
 - Work only inside the worktree path given. Never touch the main checkout at ${repo}, never push, never switch branches, never merge.
@@ -68,6 +85,15 @@ ${script}
 SCRIPT>>>`
   const text = await call(prompt, { label, phase: phaseName, agentType: 'shell-proxy', model: 'haiku' })
   return String(text || '')
+}
+
+// Remove this run's compose networks once nothing uses them. prune skips any network with
+// a container attached, and the label filter keeps it to the projects named in the checks.
+async function pruneNetworks(phaseName) {
+  if (!composeProjects.length) return
+  const script = composeProjects.map((p) =>
+    `docker network prune -f --filter label=com.docker.compose.project=${p} >/dev/null 2>&1; echo "__RC_PRUNE_${p.replace(/[^A-Za-z0-9]/g, '_')}=$?__"`).join('\n')
+  await sh(script, 'prune networks', phaseName)
 }
 
 function sentinel(text, key) {
@@ -192,6 +218,7 @@ const baseSha = sentinel(baseOut, 'BASE')
 const porcelain = sentinel(baseOut, 'PORCELAIN')
 if (!baseSha || !/^[0-9a-f]{40}$/.test(baseSha) || sentinel(baseOut, 'RC_BASEWT') !== '0') {
   log('Baseline setup failed; stopping.')
+  await pruneNetworks('Baseline')
   return { error: 'baseline failed', output: tailOf(baseOut, 30) }
 }
 const ready = []
@@ -328,6 +355,8 @@ const metrics = {
   })(),
 }
 log(`Ready ${metrics.ready}, capped ${metrics.capped}, deferred ${deferred.length}, lost ${metrics.lost}`)
+phase('Cleanup')
+await pruneNetworks('Cleanup')
 return {
   repo, baseRef, baseSha, porcelainAtStart: porcelain,
   worktrees: [baseWt, ...done.map((r) => r.worktree).filter(Boolean)],
