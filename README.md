@@ -15,7 +15,7 @@ Claude_Commandz/
 │   ├── .claude/workflows/        # saved Workflow scripts: director.js (tiered Opus/Haiku/Sonnet); client-specific workflows are kept out of this public repo
 │   ├── .claude/agents/           # tiered subagents: shell-proxy, worker-mechanical, worker-builder, reviewer-senior
 │   ├── .claude/skills/agent-notes/  # Muse <-> Claude Code note protocol over Gmail
-│   ├── .claude/scripts/          # jev_precheck.py — Jev shadow pre-screen used by director.js
+│   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); openclaw_tray.py (4-tool client for the OpenClaw tray MCP)
 │   ├── .claude/hooks/            # roadmap-drift.sh; client-specific hooks are kept out of this public repo
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
@@ -48,7 +48,7 @@ mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
 cp -a global/.claude/workflows/. ~/.claude/workflows/
 cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
-mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key (not backed up)
+mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key; openclaw_tray.py reads the tray token at run time (neither backed up)
 mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
 
 # All project commands (assumes ~/repos/<name>/ already exists — clone those first)
@@ -73,7 +73,7 @@ mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
 cp -a global/.claude/workflows/. ~/.claude/workflows/
 cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
-mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key (not backed up)
+mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key; openclaw_tray.py reads the tray token at run time (neither backed up)
 mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
 ```
 
@@ -116,7 +116,7 @@ cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 cp ~/.claude/workflows/director.js global/.claude/workflows/   # client-specific workflows stay out (public repo)
 cp -a ~/.claude/agents/. global/.claude/agents/
 cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
-cp ~/.claude/scripts/jev_precheck.py global/.claude/scripts/
+cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
 cp ~/.claude/hooks/roadmap-drift.sh global/.claude/hooks/
 
 # Per-repo — only loops over dirs already tracked here
