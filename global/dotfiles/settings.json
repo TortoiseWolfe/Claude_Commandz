@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
+  },
   "permissions": {
     "allow": [
       "Bash(ls:*)",
@@ -77,9 +80,6 @@
     "defaultMode": "auto"
   },
   "model": "opus",
-  "env": {
-    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
-  },
   "hooks": {
     "SessionStart": [
       {
@@ -98,6 +98,16 @@
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/greg-inbox.sh session-start",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/explore-override-drift.sh session-start",
             "timeout": 10
           }
         ]
