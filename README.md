@@ -46,6 +46,7 @@ mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
 cp -a global/.claude/workflows/. ~/.claude/workflows/
 cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
+mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key (not backed up)
 
 # All project commands (assumes ~/repos/<name>/ already exists — clone those first)
 for d in repos/*/; do
@@ -69,6 +70,7 @@ mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
 cp -a global/.claude/workflows/. ~/.claude/workflows/
 cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
+mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key (not backed up)
 ```
 
 ### Scenario C — Single repo only

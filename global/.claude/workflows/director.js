@@ -103,8 +103,9 @@ const PLAN_SCHEMA = {
           check: { type: 'string', description: 'name of one command in the checks map (regression gate, green at base)' },
           accept_cmd: { type: 'string', description: 'shell command run from the worktree root; exits non-zero at base and 0 once the item is done' },
           acceptance: { type: 'array', items: { type: 'string' } },
+          jev_checks: { type: 'array', items: { type: 'string' }, description: '2-6 narrow yes/no checks for the Jev shadow pre-screen, each quoting the exact code text the finished diff must contain' },
         },
-        required: ['id', 'tier', 'title', 'instructions', 'files', 'check', 'accept_cmd', 'acceptance'],
+        required: ['id', 'tier', 'title', 'instructions', 'files', 'check', 'accept_cmd', 'acceptance', 'jev_checks'],
       },
     },
     opus_keep: {
@@ -147,6 +148,7 @@ Split it into items. For each item:
 ${checkMenu}
 - accept_cmd: a shell command run from the worktree root that FAILS at ${baseRef} and PASSES once the item is done. Prefer \`git grep -q\` / \`test -f\` / a single Docker test; the host grep is ugrep and skips gitignored files. No host installs.
 - acceptance: the plain-language criteria the reviewer will hold it to.
+- jev_checks: 2-6 yes/no questions for a cheap text-matching pre-screen (Jev). Each must quote the EXACT code text the finished diff should contain, for example: "In the change, is plywood-5/8 written as \`actual: 19.0 / 32\`?". Jev compares text and does no arithmetic: "19/32 inch" scored 0.69 on a wrong value, while the exact code text scored 0.03.
 Use short kebab-case ids.`,
   { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA, effort: 'high', agentType: 'Plan' }
 )
@@ -230,6 +232,11 @@ async function runCheck(it, wt, round) {
     'echo "__HEAD=$(git rev-parse HEAD)__"',
     'echo "__DIRTY=$(git status --porcelain | wc -l | tr -d \' \')__"',
     `git diff --name-only ${baseSha}..HEAD | sed 's/^/__FILE=/;s/$/__/'`,
+    ...(it.jev_checks && it.jev_checks.length ? [
+      `cat > ${L}-jev-acc.txt <<'JEV_ACC_EOF'\n${it.acceptance.join('\n')}\nJEV_ACC_EOF`,
+      `cat > ${L}-jev-q.json <<'JEV_Q_EOF'\n${JSON.stringify(it.jev_checks)}\nJEV_Q_EOF`,
+      `git diff ${baseSha}..HEAD | python3 ~/.claude/scripts/jev_precheck.py --acceptance ${L}-jev-acc.txt --questions-file ${L}-jev-q.json`,
+    ] : []),
   ].join('\n'), `check:${it.id}`, 'Work')
   const reasons = []
   const rcCheck = sentinel(out, 'RC_CHECK'), rcAccept = sentinel(out, 'RC_ACCEPT')
@@ -242,7 +249,9 @@ async function runCheck(it, wt, round) {
   const stray = files.filter((f) => !it.files.includes(f))
   if (stray.length) reasons.push(`touched files outside scope: ${stray.join(', ')}`)
   if (files.length === 0) reasons.push('diff against base is empty')
-  return { pass: reasons.length === 0, reasons, head, tail: tailOf(out, 25) }
+  const jevMinRaw = sentinel(out, 'JEV_MIN')
+  const jev = jevMinRaw === null ? null : { min: /^[0-9.]+$/.test(jevMinRaw) ? Number(jevMinRaw) : null, raw: jevMinRaw, per: sentinels(out, 'JEV_Q[0-9]+') }
+  return { pass: reasons.length === 0, reasons, head, jev, tail: tailOf(out, 25) }
 }
 
 const results = await pipeline(ready, async (it) => {
@@ -257,7 +266,7 @@ const results = await pipeline(ready, async (it) => {
   if (rcSetup !== '0') return { id: it.id, status: rcSetup === 'EXISTS' ? 'refused-existing-branch' : 'setup-failed', tier: it.tier }
 
   let tier = it.tier, escalated = false, checkFails = 0, reviewRounds = 0, workerRounds = 0
-  let firstCheckPass = null, firstReviewPass = null, feedback = null, lastCheck = null, lastVerdict = null
+  let firstCheckPass = null, firstReviewPass = null, feedback = null, lastCheck = null, lastVerdict = null, jevAtFirstReview = null
   while (workerRounds < MAX_WORKER_ROUNDS) {
     workerRounds++
     await call(workerPrompt(it, wt, feedback), tier === 'haiku'
@@ -283,14 +292,14 @@ Acceptance: ${it.acceptance.join(' | ')}
 The regression check and acceptance command already pass. Judge what tests miss: values wrong against the spec, requirements dropped, scope creep, broken repo conventions, misleading docs. pass = you'd merge it as is. revise = at least one concrete blocking item (file, line, wrong, should be).`,
       { label: `review:${it.id}`, phase: 'Review', agentType: 'reviewer-senior', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA })
     reviewRounds++
-    if (firstReviewPass === null) firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'
+    if (firstReviewPass === null) { firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'; jevAtFirstReview = lastCheck.jev }
     if (lastVerdict && lastVerdict.verdict === 'pass') {
-      return { id: it.id, status: 'ready', branch: `wf/${it.id}`, worktree: wt, head: lastCheck.head, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, notes: lastVerdict.notes || '' }
+      return { id: it.id, status: 'ready', branch: `wf/${it.id}`, worktree: wt, head: lastCheck.head, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview, notes: lastVerdict.notes || '' }
     }
     if (reviewRounds >= MAX_REVIEW_ROUNDS) break
     feedback = `Reviewer blocking items:\n- ${(lastVerdict ? lastVerdict.blocking : ['reviewer returned nothing']).join('\n- ')}`
   }
-  return { id: it.id, status: 'capped', branch: `wf/${it.id}`, worktree: wt, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass,
+  return { id: it.id, status: 'capped', branch: `wf/${it.id}`, worktree: wt, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview,
     lastCheckReasons: lastCheck ? lastCheck.reasons : [], lastBlocking: lastVerdict ? lastVerdict.blocking : [] }
 })
 
@@ -312,6 +321,11 @@ const metrics = {
   ready: done.filter((r) => r.status === 'ready').length,
   capped: done.filter((r) => r.status === 'capped').length,
   lost: ready.length - done.length,
+  // Shadow Jev pre-screen: would "every check >= 0.5" have agreed with Opus's first-round verdict?
+  jevShadow: (() => {
+    const scored = done.filter((r) => r.jevAtFirstReview && r.jevAtFirstReview.min !== null && r.firstReviewPass !== null)
+    return { scored: scored.length, agreedWithOpus: scored.filter((r) => (r.jevAtFirstReview.min >= 0.5) === r.firstReviewPass).length }
+  })(),
 }
 log(`Ready ${metrics.ready}, capped ${metrics.capped}, deferred ${deferred.length}, lost ${metrics.lost}`)
 return {
