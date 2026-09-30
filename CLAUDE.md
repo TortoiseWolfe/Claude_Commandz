@@ -82,6 +82,10 @@ a private mailbox stays out, even when it lives in a backed-up folder:
 
 Before adding a new file from those folders, read it for names, addresses and client details first.
 
+Those private items ARE backed up, in the private hub repo `TortoiseWolfe/workspace` (`~/repos`),
+under `hub/claude-private/` at the same mirror paths, along with `~/.claude/plans/` and every
+project's `memory/`. Refresh there with `hub/scripts/sync-private.sh`.
+
 ## Exclusions (intentional)
 
 - **`mercor-*` commands in `good_prompt_bad_prompt`** — ephemeral evaluation tooling, not worth preserving. If they reappear after a refresh, delete them before committing.
