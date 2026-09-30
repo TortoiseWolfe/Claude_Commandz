@@ -4,23 +4,28 @@ Instructions for Claude Code when working inside the `Claude_Commandz` repositor
 
 ## Purpose
 
-This repo is a **disaster-recovery backup**, not a live source of truth. It mirrors three things:
+This repo is a **disaster-recovery backup**, not a live source of truth. It mirrors four things:
 
 1. `~/.claude/commands/` — user-level global slash commands
-2. `~/.claude/` dotfiles — `settings.json`, `statusline-command.sh`, etc.
-3. Each `~/repos/<project>/.claude/commands/` — per-project slash commands
+2. `~/.claude/{workflows,agents,skills,scripts,hooks}/` — saved Workflow scripts, tiered subagents, user skills, helper scripts and hook scripts (selected files; see "Public repo" below)
+3. `~/.claude/` dotfiles — `settings.json`, `statusline-command.sh`, etc.
+4. Each `~/repos/<project>/.claude/commands/` — per-project slash commands
 
 If the machine dies, this repo is how everything above gets restored.
 
 ## Structure invariant (do not violate)
 
-Every backed-up file lives at its **original relative path** under one of two roots:
+Every backed-up file lives at its **original relative path** under one of three roots:
 
 ```
-global/.claude/commands/<file>        mirrors  ~/.claude/commands/<file>
+global/.claude/<dir>/<file>           mirrors  ~/.claude/<dir>/<file>
+                                      <dir> = commands | workflows | agents | skills | scripts | hooks
 global/dotfiles/<file>                mirrors  ~/.claude/<file>    (selected files)
 repos/<name>/.claude/commands/<file>  mirrors  ~/repos/<name>/.claude/commands/<file>
 ```
+
+A new `~/.claude/<dir>/` gets backed up as `global/.claude/<dir>/`, never under `dotfiles/` or a
+renamed folder. Skills keep their whole folder (`skills/<name>/SKILL.md` plus anything beside it).
 
 Restore is always a direct `cp -a` with no path rewriting. Because of this:
 
@@ -50,6 +55,13 @@ cp -a ~/.claude/commands/. global/.claude/commands/
 cp ~/.claude/settings.json global/dotfiles/settings.json
 cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 
+# Workflows, agents, skills, scripts, hooks — only the files already tracked here
+cp ~/.claude/workflows/director.js global/.claude/workflows/
+cp -a ~/.claude/agents/. global/.claude/agents/
+cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
+cp ~/.claude/scripts/jev_precheck.py global/.claude/scripts/
+cp ~/.claude/hooks/roadmap-drift.sh global/.claude/hooks/
+
 # Per-repo commands — loop over existing repos/<name>/ dirs
 for d in repos/*/; do
   name=$(basename "$d")
@@ -59,6 +71,16 @@ done
 ```
 
 Then review `git status`, drop intentionally-excluded files (see below), and commit.
+
+## Public repo
+
+`TortoiseWolfe/Claude_Commandz` is **public**. Anything that names a client, a client's people or
+a private mailbox stays out, even when it lives in a backed-up folder:
+
+- `~/.claude/workflows/rescuedogs-weekly-review.js`, `~/.claude/skills/greg/`, `~/.claude/hooks/greg-inbox.sh*`
+- Keys and tokens never come here (`~/.config/typesafe/api-key`, OpenClaw tokens). `jev_precheck.py` reads its key at run time.
+
+Before adding a new file from those folders, read it for names, addresses and client details first.
 
 ## Exclusions (intentional)
 
