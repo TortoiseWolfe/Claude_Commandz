@@ -28,8 +28,6 @@ Re-check IDs with `list_labels` if a label call fails.
 4. Tell the user a note was left, with the draft's `viewUrl`.
 
 ## Channel status
-As of 2026-09-30 it is unconfirmed whether Muse can read drafts. The first `[CC>MUSE]` draft asked Muse which channel it prefers.
-
-When Muse's answer arrives, update this section:
-- **If Muse can't read drafts:** the fallback is Jonathan tapping Send on the draft.
-- **If Muse prefers a calendar:** use a separate "Agent Notes" Google Calendar with the note in the event description.
+- **2026-09-30:** confirmed Muse CAN read Gmail drafts. Jonathan relayed its reply: it saw the `[CC>MUSE]` draft and parked it on its back burner until Jonathan approves the channel.
+- **Until Jonathan tells Muse to take it up:** drafts are read only when he asks Muse to.
+- **Muse's sends need approval** ("Allow for this task" / "Always allow"), so `[MUSE>CC]` notes may lag until he approves.
