@@ -12,6 +12,9 @@ Claude_Commandz/
 ├── CLAUDE.md                     # instructions for Claude Code working in this repo
 ├── global/
 │   ├── .claude/commands/         # 65 files — mirror of ~/.claude/commands/
+│   ├── .claude/workflows/        # saved Workflow scripts: director.js (tiered Opus/Haiku/Sonnet); client-specific workflows are kept out of this public repo
+│   ├── .claude/agents/           # tiered subagents: shell-proxy, worker-mechanical, worker-builder, reviewer-senior
+│   ├── .claude/skills/agent-notes/  # Muse <-> Claude Code note protocol over Gmail
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
     ├── ScriptHammer/.claude/commands/                         (23 files)
@@ -39,6 +42,10 @@ cp -a global/.claude/commands/. ~/.claude/commands/
 cp global/dotfiles/settings.json ~/.claude/settings.json
 cp global/dotfiles/statusline-command.sh ~/.claude/statusline-command.sh
 chmod +x ~/.claude/statusline-command.sh
+mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
+cp -a global/.claude/workflows/. ~/.claude/workflows/
+cp -a global/.claude/agents/. ~/.claude/agents/
+cp -a global/.claude/skills/. ~/.claude/skills/
 
 # All project commands (assumes ~/repos/<name>/ already exists — clone those first)
 for d in repos/*/; do
@@ -58,6 +65,10 @@ cp -a global/.claude/commands/. ~/.claude/commands/
 cp global/dotfiles/settings.json ~/.claude/settings.json
 cp global/dotfiles/statusline-command.sh ~/.claude/statusline-command.sh
 chmod +x ~/.claude/statusline-command.sh
+mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
+cp -a global/.claude/workflows/. ~/.claude/workflows/
+cp -a global/.claude/agents/. ~/.claude/agents/
+cp -a global/.claude/skills/. ~/.claude/skills/
 ```
 
 ### Scenario C — Single repo only
@@ -96,6 +107,9 @@ When global or project commands evolve, re-sync into this repo and commit:
 cp -a ~/.claude/commands/. global/.claude/commands/
 cp ~/.claude/settings.json global/dotfiles/settings.json
 cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
+cp ~/.claude/workflows/director.js global/.claude/workflows/   # client-specific workflows stay out (public repo)
+cp -a ~/.claude/agents/. global/.claude/agents/
+cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
 
 # Per-repo — only loops over dirs already tracked here
 for d in repos/*/; do
