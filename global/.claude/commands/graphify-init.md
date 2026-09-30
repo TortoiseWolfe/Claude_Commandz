@@ -49,6 +49,10 @@ first extraction is free or costs tokens, so the user should see the reasoning.
 ```
 # NEVER index our own generated output. This line is not optional.
 graphify-out/
+# `graphify install --project` (Step 4) writes these into the tree; unexcluded, the first
+# scan indexes them as documents (ada-stair-generator 2026-09-30: 30 docs instead of 20).
+.claude/skills/
+.claude/CLAUDE.md
 
 node_modules/
 .next/
@@ -76,9 +80,9 @@ articles**, 34 deep before it was killed. The resulting graph would cite its own
 summaries as sources — the "AI quoting AI" feedback loop, where small errors
 harden into facts because nothing outside the graph ever contradicts them.
 
-`.gitignore` does not save you here: `graphify-out/` is *meant* to be committed,
-so git-ignoring it defeats the purpose. The exclusion has to live in
-`.graphifyignore`, which controls indexing rather than version control. Verify:
+`.gitignore` alone does not save you here. Step 3 git-ignores `graphify-out/` in this
+workspace, but indexing is controlled by `.graphifyignore`, so the exclusion has to
+live there as well. Verify:
 ```bash
 graphify extract . --code-only 2>&1 | head -3   # doc count must exclude wiki/
 ```
@@ -94,14 +98,18 @@ harder to un-leak than a file.
 
 ## Step 3 — Ignore files for git and Claude
 
-Append to `.gitignore`:
+Append to `.gitignore` (the convention in geolarp, ScriptHammer, Chattanooga-Digital and
+ada-stair-generator. graphify's docs say to commit `graphify-out/`, but this workspace does not):
 ```
-# graphify — the rest of graphify-out/ is meant to be committed
-graphify-out/cost.json
-graphify-out/20*/
+# graphify: local and regenerable. Rebuild with /graphify-init, or run `graphify update .` (AST-only, free).
+# NOT committed: graph.json, the cache and the wiki run to megabytes and delta-compress poorly,
+# so committing them would grow the repo forever.
+graphify-out/
 ```
-(`graphify-out/20*/` catches the dated backup dirs `cluster-only` creates on
-every re-cluster.)
+What IS committed is the wiring only: `.graphifyignore`, `.claudeignore`, the `CLAUDE.md`
+section, `.claude/CLAUDE.md`, and the hook in `.claude/settings.json`. Built in a worktree?
+Then copy `graphify-out/` into the real checkout (there is no `rsync` here; use `cp -a`), and
+write that checkout's absolute path into `graphify-out/.graphify_root`.
 
 Create or append `.claudeignore`:
 ```
@@ -121,6 +129,10 @@ graphify install --project
 Project-scoped keeps this contained to repos you deliberately set up. Writes a
 `CLAUDE.md` section plus a `PreToolUse` hook nudging toward `graphify query`.
 
+It also copies the skill into `.claude/skills/graphify/`. **Don't commit that copy**: the
+global `~/.claude/skills/graphify` serves it, and none of the graphed repos track it. Delete
+it after install. Keep `.claude/CLAUDE.md`, which is committed in the other repos.
+
 Do **not** pass `--strict` on first setup — it *blocks* the session's first raw
 file read and redirects it to the graph, which is disorienting before the graph
 has earned trust. Add later with `graphify install --project --strict`.
@@ -136,9 +148,17 @@ graphify extract . --code-only
 costs real usage. Pick the backend deliberately:
 
 ```bash
-graphify extract . --backend claude-cli    # no API key — shells out to Claude Code
+GRAPHIFY_CLAUDE_CLI_MODEL=sonnet graphify extract . --backend claude-cli    # no API key — shells out to Claude Code
 graphify extract . --backend claude        # requires ANTHROPIC_API_KEY (separate billing)
 ```
+
+**Always set `GRAPHIFY_CLAUDE_CLI_MODEL=sonnet`.** Without it, claude-cli runs your settings
+model (Opus), which graphify's own source calls "overkill for the structured-JSON extraction".
+
+**Code repo that wants its docs too:** the same command without `--code-only`. Code goes
+through the local AST, and docs, yaml and images go through the LLM. Measured on
+ada-stair-generator 2026-09-30: 20 docs + 2 images in ONE call, 266,977 in / 6,437 out tokens
+on Sonnet. `.json` is not a doc type, so data files cost nothing.
 
 `claude-cli` is the right default on this machine — no API key is configured and
 none is needed. It reuses the Claude Code subscription. The catch: it is **forced
@@ -176,7 +196,7 @@ Two caveats to surface honestly:
   already-labeled and skips the LLM entirely, reporting success while changing
   nothing. To actually get semantic names, omit it:
   ```bash
-  graphify label . --backend claude-cli        # relabels all
+  GRAPHIFY_CLAUDE_CLI_MODEL=sonnet graphify label . --backend claude-cli --model sonnet   # relabels all
   graphify label . --backend claude-cli --missing-only   # SKIPS hub-named ones
   ```
   Measured on ScriptHammer: `--missing-only` renamed 0 of 568. Without it, all
