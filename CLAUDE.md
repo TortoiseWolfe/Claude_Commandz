@@ -59,7 +59,7 @@ cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 cp ~/.claude/workflows/director.js global/.claude/workflows/
 cp -a ~/.claude/agents/. global/.claude/agents/
 cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
-cp ~/.claude/scripts/jev_precheck.py global/.claude/scripts/
+cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
 cp ~/.claude/hooks/roadmap-drift.sh global/.claude/hooks/
 
 # Per-repo commands — loop over existing repos/<name>/ dirs
