@@ -60,7 +60,7 @@ cp ~/.claude/workflows/director.js global/.claude/workflows/
 cp -a ~/.claude/agents/. global/.claude/agents/
 cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
 cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
-cp ~/.claude/hooks/roadmap-drift.sh global/.claude/hooks/
+cp ~/.claude/hooks/roadmap-drift.sh ~/.claude/hooks/explore-override-drift.sh ~/.claude/hooks/explore-override-drift.ref global/.claude/hooks/
 
 # Per-repo commands — loop over existing repos/<name>/ dirs
 for d in repos/*/; do
