@@ -6,11 +6,13 @@ reply, so text cannot reach the log by accident. Stdlib only."""
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
 DEFAULT_PATH = "~/.local/share/ledger/panel.jsonl"   # read at call time so tests can point it elsewhere
 FIELDS = ("ts", "repo", "expert", "model", "input_tokens", "output_tokens", "ms", "class", "gate")
 OPTIONAL = ("estimated", "neurons")   # present only when true / reported
+_APPEND_LOCK = threading.Lock()   # the panel asks its experts on threads; one line per write, never interleaved
 
 
 def utc_iso():
@@ -39,13 +41,20 @@ def record(repo, expert, model, input_tokens, output_tokens, ms, cls, gate, esti
 
 def append(rec, path=None):
     """Append one line; the directory is created mode 700 and the file mode 600. Never raises:
-    bookkeeping must not be a reason for a review to fail. -> True if the line was written."""
+    bookkeeping must not be a reason for a review to fail. -> True if the line was written.
+
+    Safe to call from several threads at once: the whole line goes out in ONE locked os.write on an
+    O_APPEND descriptor, so concurrent lines can never interleave."""
     try:
         p = os.path.expanduser(path or DEFAULT_PATH)
+        line = (json.dumps(rec, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, separators=(",", ":"), ensure_ascii=True) + "\n")
+        with _APPEND_LOCK:
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
         return True
     except OSError:
         return False
