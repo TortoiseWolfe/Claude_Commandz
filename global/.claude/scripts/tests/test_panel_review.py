@@ -31,9 +31,9 @@ KEYS = {"groq": "gsk_SECRETGROQKEY", "gemini": "AIzaSECRETGEMINIKEY",
 ACCOUNT_ID = "ACCT_ID_0123456789"
 PASS = {"verdict": "pass", "blocking": []}
 REVISE = {"verdict": "revise", "blocking": ["off by one"]}
-ALL_EXPERTS = ["groq", "groq_qwen", "gemini", "cloudflare", "antigravity", "openrouter", "grok", "local"]
+ALL_EXPERTS = ["groq", "groq_qwen", "gemini", "cloudflare", "antigravity", "openrouter", "grok", "copilot", "local"]
 API_EXPERTS = ["groq", "groq_qwen", "gemini", "cloudflare", "openrouter", "local"]   # reached by post_json
-TRAINING = ("gemini", "antigravity", "openrouter", "grok")
+TRAINING = ("gemini", "antigravity", "openrouter", "grok", "copilot")
 AGY_TOKEN = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 
@@ -132,7 +132,7 @@ class FakeRunner:
         return self.rc, (self.reply if isinstance(self.reply, str) else json.dumps(self.reply))
 
 
-def make_deps(net, clock, runner=None, keys=KEYS, installed=("grok", "agy"), scanner=CLEAN, existing=(AGY_TOKEN,), **kw):
+def make_deps(net, clock, runner=None, keys=KEYS, installed=("grok", "agy", "copilot", "gh", "bash"), scanner=CLEAN, existing=(AGY_TOKEN,), **kw):
     def read_key(path):
         for name, val in keys.items():
             if f"/{name}/" in path:
@@ -316,6 +316,7 @@ class ConfigTests(unittest.TestCase):
                 "antigravity": ("cli", ["public"], True),
                 "openrouter": ("openai_compat", ["public"], True),
                 "grok": ("cli", ["public"], True),
+                "copilot": ("cli", ["public"], True),
                 "local": ("ollama", ["public", "own", "client"], False)}
         for name, (kind, classes, trains) in want.items():
             self.assertEqual((d[name]["kind"], d[name]["classes"], d[name]["trains"]), (kind, classes, trains), name)
@@ -339,6 +340,9 @@ class ConfigTests(unittest.TestCase):
                          (["agy", "--print-timeout", "120s", "-p={prompt}"], ["which:agy", "exists:" + AGY_TOKEN]))
         self.assertNotIn("model", d["antigravity"])   # --model is opt-in
         self.assertEqual((d["grok"]["cmd"], d["grok"]["enabled_if"]), (["grok", "-p"], "which:grok"))
+        self.assertEqual((d["copilot"]["cmd"][0], os.path.basename(d["copilot"]["cmd"][1]), d["copilot"]["cmd"][2]),
+                         ("bash", "copilot_ask.sh", "{prompt}"))   # the wrapper holds the read-only flags
+        self.assertEqual(d["copilot"]["enabled_if"], ["which:copilot", "which:gh"])
         self.assertEqual(d["antigravity"]["enabled_if"], ["which:agy", "exists:" + AGY_TOKEN])   # never read
         self.assertEqual([n for n, e in d.items() if "enabled" in e], [])   # nothing ships switched off
         self.assertTrue(d["openrouter"]["model"].endswith(":free"))
@@ -907,14 +911,14 @@ class FlowTests(Base):
 
     def called(self):
         """Names of the experts that actually received a request, in panel order."""
-        cli = {"grok": "grok", "agy": "antigravity"}
+        cli = {"grok": "grok", "agy": "antigravity", "bash": "copilot"}
         hit = {n for n in API_EXPERTS if self.net.calls[n]} | {cli[c["cmd"][0]] for c in self.runner.calls}
         return [n for n in ALL_EXPERTS if n in hit]
 
     # routing ---------------------------------------------------------------
     def test_public_asks_every_expert(self):
         r = self.run_panel()
-        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["pass"] * 8)
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["pass"] * len(ALL_EXPERTS))
         self.assertEqual(self.called(), ALL_EXPERTS)
         self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("pass", 0))
         self.assertEqual(r.lines["GATE"], "send")
@@ -991,7 +995,7 @@ class FlowTests(Base):
         self.runner.rc = 2
         r = self.run_panel()
         self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("none", 0))
-        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["error"] * 8)
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["error"] * len(ALL_EXPERTS))
 
     def test_sentinels_are_distinct_for_experts_whose_names_share_a_prefix(self):
         self.net.answers["groq_qwen"] = REVISE
@@ -1010,7 +1014,7 @@ class FlowTests(Base):
     def test_dry_run_makes_no_calls_at_all(self):
         r = self.run_panel("--dry-run")
         self.assertEqual((self.net.posts, self.net.gets, self.runner.calls), ([], [], []))
-        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["would_call"] * 8)
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["would_call"] * len(ALL_EXPERTS))
         self.assertEqual(r.lines["PANEL_DRYRUN"], ",".join(ALL_EXPERTS))
         self.assertEqual((r.lines["GATE"], r.lines["PANEL_MAJORITY"], r.rc), ("send", "none", 0))
         self.assertTrue(r.json["dry_run"])
@@ -1029,7 +1033,7 @@ class FlowTests(Base):
         r = self.run_panel()
         wire = json.dumps(self.net.posts) + json.dumps(self.runner.calls)
         self.assertEqual(len(self.net.posts), 6)       # groq, groq_qwen, gemini, cloudflare, openrouter, local
-        self.assertEqual(len(self.runner.calls), 2)    # antigravity, grok
+        self.assertEqual(len(self.runner.calls), 3)    # antigravity, grok, copilot
         for original in ORIGINALS:
             self.assertNotIn(original, wire)
             self.assertNotIn(original, r.stdout)
@@ -1043,7 +1047,7 @@ class FlowTests(Base):
                               else p["payload"]["messages"][0]["content"]) for p in self.net.posts}
         for c in self.runner.calls:
             prompts[c["cmd"][0]] = cli_prompt(c)
-        self.assertEqual(len(prompts), 8)
+        self.assertEqual(len(prompts), len(ALL_EXPERTS))
         self.assertEqual(len(set(prompts.values())), 1)
         p = prompts["groq"]
         for part in ("SPEC:", "ACCEPTANCE:", "DIFF:", "prints hello", '"verdict":"pass"|"revise"'):
@@ -1080,26 +1084,26 @@ class FlowTests(Base):
     def test_signed_out_means_agy_is_never_launched_even_though_it_is_installed(self):
         r = self.run_panel(signed_in=False)        # agy is on PATH in the fake deps, the token file is absent
         self.assertEqual(r.lines["PANEL_antigravity"], "unavailable")
-        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["grok"])
+        self.assertEqual(sorted(c["cmd"][0] for c in self.runner.calls), ["bash", "grok"])   # grok + copilot
         self.assertNotIn("antigravity", [x["expert"] for x in self.ledger_lines()])
         self.assertEqual(r.lines["PANEL_MAJORITY"], "pass")
 
     def test_signed_in_means_agy_is_asked_like_any_other_expert(self):
         r = self.run_panel()
         self.assertEqual(r.lines["PANEL_antigravity"], "pass")
-        self.assertEqual(sorted(c["cmd"][0] for c in self.runner.calls), ["agy", "grok"])   # concurrent: any order
+        self.assertEqual(sorted(c["cmd"][0] for c in self.runner.calls), ["agy", "bash", "grok"])   # concurrent: any order; bash = copilot
 
     def test_dry_run_launches_nothing_whether_or_not_signed_in(self):
         r = self.run_panel("--dry-run", signed_in=False)
         self.assertEqual((self.runner.calls, r.lines["PANEL_antigravity"]), ([], "unavailable"))
-        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,groq_qwen,gemini,cloudflare,openrouter,grok,local")
+        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,groq_qwen,gemini,cloudflare,openrouter,grok,copilot,local")
         r = self.run_panel("--dry-run")
         self.assertEqual((self.runner.calls, r.lines["PANEL_antigravity"]), ([], "would_call"))
 
     def test_config_can_still_switch_it_off_while_signed_in(self):
         r = self.run_panel(config={"experts": [{"name": "antigravity", "enabled": False}]})
         self.assertEqual(r.lines["PANEL_antigravity"], "unavailable")
-        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["grok"])
+        self.assertEqual(sorted(c["cmd"][0] for c in self.runner.calls), ["bash", "grok"])   # grok + copilot
 
     def test_the_probe_path_can_be_overridden_in_config(self):
         cfg = {"experts": [{"name": "antigravity", "enabled_if": ["which:agy", "exists:~/elsewhere/token"]}]}
@@ -1321,7 +1325,7 @@ class HardRuleTests(unittest.TestCase):
     def test_the_default_experts_serve_exactly_what_the_brief_says(self):
         want = {"groq": ["own", "public"], "groq_qwen": ["own", "public"], "gemini": ["public"],
                 "cloudflare": ["own", "public"], "antigravity": ["public"], "openrouter": ["public"],
-                "grok": ["public"], "local": ["public", "own", "client"]}
+                "grok": ["public"], "copilot": ["public"], "local": ["public", "own", "client"]}
         for e in pr.DEFAULT_CONFIG["experts"]:
             self.assertEqual(sorted(self.serves(e)), sorted(want[e["name"]]), e["name"])
         for cls in self.ALL:
@@ -1512,7 +1516,7 @@ class ConcurrencyTests(Base):
     def test_the_summary_keeps_panel_order_whatever_order_they_finish_in(self):
         r = self.run_panel()
         self.assertEqual(list(r.json["experts"]), ["groq", "groq_qwen", "gemini", "cloudflare", "antigravity",
-                                                   "openrouter", "grok", "local"])
+                                                   "openrouter", "grok", "copilot", "local"])
 
     def test_every_sentinel_is_printed_once_and_whole(self):
         r = self.run_panel()
@@ -1546,7 +1550,7 @@ class ConcurrencyTests(Base):
     def test_ledger_lines_from_concurrent_experts_never_interleave(self):
         self.run_panel("--repo", "R")
         raw = Path(self.ledger).read_text().splitlines()
-        self.assertEqual(len(raw), 8)
+        self.assertEqual(len(raw), len(ALL_EXPERTS))
         for line in raw:
             self.assertEqual(json.loads(line)["repo"], "R")   # every line is a whole JSON object
 
