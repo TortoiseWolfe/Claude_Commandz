@@ -1,2 +1,6 @@
 # Reviewed 2026-10-01: a 17-char placeholder in a BEFORE/AFTER teaching example, not a key.
 global/.claude/commands/secrets-scan.md:generic-api-key:207
+# Reviewed 2026-10-01: synthetic fixtures in the secret-guard / redactor tests, not real keys.
+global/.claude/scripts/tests/test_redact_view.py:private-key:85
+global/.claude/scripts/tests/test_secret_guard.py:generic-api-key:53
+global/.claude/scripts/tests/test_secret_guard.py:generic-api-key:54
