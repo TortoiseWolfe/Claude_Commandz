@@ -14,7 +14,7 @@ export const meta = {
 // Invoke: Workflow({ name: 'director', args: { repo: '/abs/path', goal: '...', checks: {...}, base: 'origin/main', logDir: '<scratchpad>' } })
 // Merging, pushing and worktree cleanup stay in the main loop. This script never pushes.
 // Extracted from ~/.claude/skills/game-demo/references/gauntlet-workflow.md and
-// ~/.claude/workflows/rescuedogs-weekly-review.js.
+// a private weekly-review workflow (kept in the private hub, not this repo).
 
 // args may arrive as an object OR a JSON string depending on how it was passed.
 let A = args
