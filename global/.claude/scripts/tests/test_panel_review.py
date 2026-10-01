@@ -11,6 +11,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -37,15 +38,19 @@ AGY_TOKEN = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 
 class FakeClock:
+    """Thread-safe: the panel asks its experts on worker threads, all sharing this clock."""
+
     def __init__(self):
         self.t, self.sleeps = 1000.0, []
+        self._lock = threading.Lock()
 
     def now(self):
         return self.t
 
     def sleep(self, s):
-        self.sleeps.append(s)
-        self.t += s
+        with self._lock:
+            self.sleeps.append(s)
+            self.t += s
 
 
 class FakeNet:
@@ -63,6 +68,7 @@ class FakeNet:
         self.report_usage = True  # False: a provider that returns no usage block at all
         self.neurons = {}         # {expert: float}: providers that meter in neurons (Cloudflare)
         self.content = {}         # {expert: "str" | "dict" | "list"}: shape of choices[0].message.content
+        self._lock = threading.Lock()
 
     @staticmethod
     def provider(url, payload):
@@ -76,12 +82,14 @@ class FakeNet:
 
     def post_json(self, url, headers, payload, timeout):
         who = self.provider(url, payload)
-        self.calls[who] += 1
-        self.posts.append({"who": who, "url": url, "headers": headers, "payload": payload,
-                           "t": self.clock.now(), "timeout": timeout})
+        with self._lock:
+            self.calls[who] += 1
+            n = self.calls[who]
+            self.posts.append({"who": who, "url": url, "headers": headers, "payload": payload,
+                               "t": self.clock.now(), "timeout": timeout})
         ans = self.answers[who]
         if callable(ans):
-            ans = ans(payload, self.calls[who])
+            ans = ans(payload, n)
         if isinstance(ans, tuple):
             return ans
         text = ans if isinstance(ans, str) else json.dumps(ans)
@@ -315,7 +323,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(d["groq_qwen"]["model"], "qwen/qwen3.8-27b")
         self.assertEqual(d["groq_qwen"]["endpoint"], d["groq"]["endpoint"])
         self.assertEqual(d["groq_qwen"]["key_file"], d["groq"]["key_file"])
-        self.assertEqual((d["groq_qwen"]["pacer"], d["groq"]["pacer"]), ("groq", "groq"))
+        self.assertEqual((d["groq_qwen"]["pacer"], d["groq"]["pacer"]), ("groq_qwen", "groq"))   # limits are per model
+        self.assertEqual(pr.DEFAULT_CONFIG["pacers"], {"groq": {"tpm_limit": 7000}, "groq_qwen": {"tpm_limit": 7000}})
+        self.assertEqual((d["gemini"]["timeout"], d["gemini"]["thinking_level"]), (180, "low"))
+        self.assertEqual((d["gemini"]["retries_429"], d["gemini"]["max_retry_wait"]), (1, 60))
+        self.assertFalse({"retries_429", "max_retry_wait"} & set(d["groq"]))   # Groq keeps one retry, 30 s cap
+        self.assertEqual(d["groq"]["extra"], {"reasoning_effort": "low"})   # gpt-oss otherwise burns its token cap thinking
+        self.assertNotIn("timeout", d["groq"])   # the others keep the top-level timeout
         self.assertEqual(d["cloudflare"]["endpoint"], "https://api.cloudflare.com/client/v4/accounts/"
                                                       "{account_id}/ai/v1/chat/completions")
         self.assertEqual(d["cloudflare"]["model"], "@cf/qwen/qwen2.5-coder-32b-instruct")
@@ -441,7 +455,8 @@ class GroqTests(Base):
         self.assertEqual(post["headers"], {"Authorization": "Bearer " + KEYS["groq"]})
         self.assertEqual(post["payload"]["model"], "qwen/qwen3.8-27b")
 
-    def test_both_groq_experts_draw_on_one_budget(self):
+    def test_two_experts_naming_one_pacer_group_draw_on_one_budget(self):
+        self.spec("groq_qwen")["pacer"] = "groq"   # the old shape; the defaults now give each model its own
         diff = self.many_files(1, 15000)      # one chunk of about 4K prompt tokens (+1500 reserved)
         deps = self.deps()
         self.assertIs(self.ex("groq")._pacer(self.cfg, deps), self.ex("groq_qwen")._pacer(self.cfg, deps))
@@ -494,7 +509,8 @@ class GroqTests(Base):
         self.review("groq", self.many_files(2, 4000))
         self.assertTrue(self.clock.sleeps)
 
-    def test_real_usage_from_one_groq_expert_delays_the_other(self):
+    def test_real_usage_from_one_expert_delays_another_in_the_same_group(self):
+        self.spec("groq_qwen")["pacer"] = "groq"
         self.net.usage = 6900
         self.review("groq")
         self.review("groq_qwen")
@@ -1071,7 +1087,7 @@ class FlowTests(Base):
     def test_signed_in_means_agy_is_asked_like_any_other_expert(self):
         r = self.run_panel()
         self.assertEqual(r.lines["PANEL_antigravity"], "pass")
-        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["agy", "grok"])
+        self.assertEqual(sorted(c["cmd"][0] for c in self.runner.calls), ["agy", "grok"])   # concurrent: any order
 
     def test_dry_run_launches_nothing_whether_or_not_signed_in(self):
         r = self.run_panel("--dry-run", signed_in=False)
@@ -1124,8 +1140,8 @@ class FlowTests(Base):
 
     def test_one_exact_schema_line_per_called_expert(self):
         self.run_panel("--repo", "ScriptHammer", cls="own")
-        lines = self.ledger_lines()
-        self.assertEqual([x["expert"] for x in lines], ["groq", "groq_qwen", "cloudflare", "local"])
+        lines = self.ledger_lines()   # experts run concurrently, so lines land in completion order
+        self.assertEqual(sorted(x["expert"] for x in lines), ["cloudflare", "groq", "groq_qwen", "local"])
         want_model = {"groq": "openai/gpt-oss-120b", "groq_qwen": "qwen/qwen3.8-27b",
                       "cloudflare": "@cf/qwen/qwen2.5-coder-32b-instruct", "local": "qwen2.5-coder:7b"}
         for x in lines:
@@ -1454,6 +1470,621 @@ class NeuronsTests(Base):
         self.assertEqual(r["neurons"], round(3.60909090909 * r["chunks"], 4))
         self.assertNotIn("neurons", self.review("groq"))
         self.assertNotIn("neurons", self.review("local"))
+
+
+class ConcurrencyTests(Base):
+    """The panel asks its experts on threads. Barriers and events, not sleeps, make these deterministic:
+    a one-at-a-time panel would deadlock on them and the 5 s guard would turn that into an error verdict."""
+
+    run_panel = FlowTests.run_panel
+    called = FlowTests.called
+
+    def test_experts_are_in_flight_at_the_same_time(self):
+        barrier = threading.Barrier(4)   # groq, groq_qwen, gemini, cloudflare must all be waiting at once
+
+        def meet(payload, n):
+            barrier.wait(timeout=5)
+            return PASS
+        for name in ("groq", "groq_qwen", "gemini", "cloudflare"):
+            self.net.answers[name] = meet
+        r = self.run_panel()
+        for name in ("groq", "groq_qwen", "gemini", "cloudflare"):
+            self.assertEqual(r.lines["PANEL_" + name], "pass", name)
+
+    def test_a_slow_expert_does_not_hold_up_the_others(self):
+        others_done = threading.Event()
+        answered = []
+
+        def slow(payload, n):   # first in panel order, and it refuses to answer until two others have
+            self.assertTrue(others_done.wait(timeout=5), "the panel serialised its experts")
+            return PASS
+
+        def quick(payload, n):
+            answered.append(1)
+            if len(answered) >= 2:
+                others_done.set()
+            return PASS
+        self.net.answers.update({"groq": slow, "groq_qwen": quick, "cloudflare": quick})
+        r = self.run_panel(cls="own")
+        self.assertEqual([r.lines["PANEL_" + n] for n in ("groq", "groq_qwen", "cloudflare", "local")], ["pass"] * 4)
+        self.assertEqual(r.lines["PANEL_MAJORITY"], "pass")
+
+    def test_the_summary_keeps_panel_order_whatever_order_they_finish_in(self):
+        r = self.run_panel()
+        self.assertEqual(list(r.json["experts"]), ["groq", "groq_qwen", "gemini", "cloudflare", "antigravity",
+                                                   "openrouter", "grok", "local"])
+
+    def test_every_sentinel_is_printed_once_and_whole(self):
+        r = self.run_panel()
+        for name in ("groq", "groq_qwen", "gemini", "cloudflare", "antigravity", "openrouter", "grok", "local"):
+            self.assertEqual(r.stdout.count(f"__PANEL_{name}="), 1, name)
+
+    def test_a_worker_that_blows_up_costs_only_its_own_verdict(self):
+        real = pr.review_with
+
+        def flaky(ex, *a, **kw):
+            if ex.name == "groq":
+                raise RuntimeError("bug in one worker")
+            return real(ex, *a, **kw)
+        with mock.patch.object(pr, "review_with", flaky):
+            r = self.run_panel(cls="own")
+        self.assertEqual(r.lines["PANEL_groq"], "error")
+        self.assertEqual(r.json["experts"]["groq"]["note"], "RuntimeError")
+        for name in ("groq_qwen", "cloudflare", "local"):
+            self.assertEqual(r.lines["PANEL_" + name], "pass", name)
+        self.assertEqual(r.rc, 0)
+
+    def test_wall_time_is_the_slowest_expert_not_the_sum(self):
+        # real threads, real (tiny) sleeps: 4 experts x 0.4 s would take 1.6 s one at a time
+        import time as real_time
+        for name in ("groq", "groq_qwen", "gemini", "cloudflare"):
+            self.net.answers[name] = lambda payload, n: (real_time.sleep(0.4), PASS)[1]
+        t0 = real_time.monotonic()
+        self.run_panel()
+        self.assertLess(real_time.monotonic() - t0, 1.2)
+
+    def test_ledger_lines_from_concurrent_experts_never_interleave(self):
+        self.run_panel("--repo", "R")
+        raw = Path(self.ledger).read_text().splitlines()
+        self.assertEqual(len(raw), 8)
+        for line in raw:
+            self.assertEqual(json.loads(line)["repo"], "R")   # every line is a whole JSON object
+
+    def test_ledger_log_append_is_safe_from_many_threads(self):
+        path = os.path.join(self.tmp, "many", "panel.jsonl")
+        big = "x" * 300
+
+        def hammer(i):
+            for j in range(150):
+                ledger_log.append(ledger_log.record(big, f"e{i}", "m", j, j, j, "public", "send"), path)
+        ts = [threading.Thread(target=hammer, args=(i,)) for i in range(8)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        lines = Path(path).read_text().splitlines()
+        self.assertEqual(len(lines), 8 * 150)
+        self.assertEqual({json.loads(x)["expert"] for x in lines}, {f"e{i}" for i in range(8)})
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+
+class PerModelPacerTests(Base):
+    def test_each_groq_model_has_its_own_pacer_at_7k(self):
+        deps = self.deps()
+        a, b = self.ex("groq")._pacer(self.cfg, deps), self.ex("groq_qwen")._pacer(self.cfg, deps)
+        self.assertIsNot(a, b)
+        self.assertEqual((a.limit, b.limit), (7000, 7000))
+        self.assertIs(a, self.ex("groq")._pacer(self.cfg, deps))   # but one model keeps one pacer
+
+    def test_one_models_spend_does_not_make_the_other_wait(self):
+        diff = self.many_files(1, 15000)      # about 4K prompt tokens + 1500 reserved = ~5.5K per call
+        self.net.usage = 6900
+        self.review("groq", diff)
+        self.review("groq_qwen", diff)
+        self.assertEqual(self.clock.sleeps, [], "a different model has a different minute")
+        self.review("groq", diff)             # but the same model does wait for its own
+        self.assertTrue(self.clock.sleeps)
+
+    def test_a_call_is_budgeted_as_prompt_plus_max_completion_tokens(self):
+        self.net.usage = 10   # the provider reports almost nothing; the reservation must still be 1500 + prompt
+        deps = self.deps()
+        self.review("groq")
+        prompt = self.net.posts[0]["payload"]["messages"][0]["content"]
+        (ts, spent), = self.ex("groq")._pacer(self.cfg, deps).events
+        self.assertEqual(spent, pr.est_tokens(prompt) + 1500)
+
+    def test_concurrent_acquires_never_overspend_a_minute(self):
+        clock = FakeClock()
+        real_time = __import__("time")
+
+        def slow_now():   # widen any check-then-act window so an unlocked pacer would overspend
+            real_time.sleep(0.0005)
+            return clock.now()
+        p = pr.Pacer(7000, slow_now, clock.sleep)
+        spent, lock = [], threading.Lock()
+
+        def worker():
+            for _ in range(4):
+                ev = p.acquire(3000)
+                with lock:
+                    spent.append((ev[0], ev[1]))
+        ts = [threading.Thread(target=worker) for _ in range(6)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(len(spent), 24)
+        self.assertLessEqual(max_window(spent), 7000)
+
+
+def rate_limited(headers=None, message=None, details=None):
+    """A 429 as post_json delivers it: (429, body) with the rate-limit headers under "_headers"."""
+    body = {}
+    if headers:
+        body["_headers"] = headers
+    if message is not None or details:
+        body["error"] = {"message": message or "", **({"details": details} if details else {})}
+    return 429, body
+
+
+class WaitParsingTests(unittest.TestCase):
+    def test_parse_wait_reads_seconds_and_unit_suffixes(self):
+        for raw, want in (("3", 3.0), ("1.687s", 1.687), ("2m59.56s", 179.56), ("250ms", 0.25), (" 21s ", 21.0)):
+            self.assertAlmostEqual(pr.parse_wait(raw), want, msg=raw)
+        for raw in ("", None, "soon", "Wed, 21 Oct 2026 07:28:00 GMT", "1.5x"):
+            self.assertIsNone(pr.parse_wait(raw), raw)
+
+    def test_retry_delay_prefers_retry_after_then_reset_tokens_then_body_then_default(self):
+        both = {"_headers": {"retry-after": "4", "x-ratelimit-reset-tokens": "9s"}}
+        m = pr.RETRY_MARGIN   # a hint is followed by a small margin: providers' "retry in" runs a hair short
+        self.assertEqual(pr.retry_delay(both, 20), 4.0 + m)
+        self.assertEqual(pr.retry_delay({"_headers": {"x-ratelimit-reset-tokens": "1.687s"}}, 20), 1.687 + m)
+        self.assertEqual(pr.retry_delay({"error": {"details": [{"@type": "x"}, {"retryDelay": "21s"}]}}, 20), 21.0 + m)
+        self.assertEqual(pr.retry_delay({}, 20), 20.0)
+        self.assertEqual(pr.retry_delay({"_headers": {"retry-after": "junk"}}, 7), 7.0)
+
+    def test_retry_delay_is_capped_at_30_seconds(self):
+        self.assertEqual(pr.retry_delay({"_headers": {"retry-after": "600"}}, 20), 30.0)
+        self.assertEqual(pr.retry_delay({"_headers": {"retry-after": "29.5"}}, 20), 30.0)   # margin counts toward the cap
+        self.assertEqual(pr.retry_delay({}, 90), 30.0)
+
+    def test_scrub_masks_keys_and_urls_squeezes_space_and_cuts_to_200(self):
+        out = pr.scrub("Limit for gsk_abcdefghijkl1234 and MYKEY\n  see https://console.groq.com/docs/rate-limits", ("MYKEY",))
+        self.assertEqual(out, "Limit for <key> and <key> see <url>")
+        self.assertEqual(len(pr.scrub("y" * 900)), 200)
+
+    def test_error_body_keeps_the_json_and_only_the_rate_limit_headers(self):
+        import email.message
+        import urllib.error
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = "3"
+        hdrs["X-Ratelimit-Reset-Tokens"] = "1.687s"
+        hdrs["Set-Cookie"] = "secret=1"
+        err = urllib.error.HTTPError("u", 429, "Too Many", hdrs, io.BytesIO(b'{"error":{"message":"slow down"}}'))
+        body = pr.error_body(err)
+        self.assertEqual(body["error"]["message"], "slow down")
+        self.assertEqual(body["_headers"], {"retry-after": "3", "x-ratelimit-reset-tokens": "1.687s"})
+        junk = urllib.error.HTTPError("u", 500, "x", email.message.Message(), io.BytesIO(b"<html>nope</html>"))
+        self.assertEqual(pr.error_body(junk), {})
+
+    def test_real_post_json_hands_back_status_and_error_body_for_an_http_error(self):
+        import email.message
+        import urllib.error
+        hdrs = email.message.Message()
+        hdrs["retry-after"] = "5"
+        err = urllib.error.HTTPError("u", 429, "x", hdrs, io.BytesIO(b'{"error":{"message":"m"}}'))
+        with mock.patch.object(pr.urllib.request, "urlopen", side_effect=err):
+            status, obj = pr.real_post_json("https://x", {}, {}, 5)
+        self.assertEqual((status, obj["error"]["message"], obj["_headers"]), (429, "m", {"retry-after": "5"}))
+
+
+class RateLimitRetryTests(Base):
+    def test_waits_what_retry_after_says_plus_the_margin_then_retries_once(self):
+        self.net.answers["groq_qwen"] = lambda p, n: rate_limited({"retry-after": "3"}) if n == 1 else PASS
+        r = self.review("groq_qwen")
+        self.assertEqual((r["verdict"], self.net.calls["groq_qwen"]), ("pass", 2))
+        self.assertEqual(self.clock.sleeps, [3.0 + pr.RETRY_MARGIN])
+
+    def test_falls_back_to_x_ratelimit_reset_tokens(self):
+        self.net.answers["groq"] = lambda p, n: rate_limited({"x-ratelimit-reset-tokens": "1.687s"}) if n == 1 else PASS
+        self.assertEqual(self.review("groq")["verdict"], "pass")
+        self.assertEqual(self.clock.sleeps, [1.687 + pr.RETRY_MARGIN])
+
+    def test_a_long_wait_is_capped_at_30_seconds(self):
+        self.net.answers["groq"] = lambda p, n: rate_limited({"retry-after": "120"}) if n == 1 else PASS
+        self.review("groq")
+        self.assertEqual(self.clock.sleeps, [30.0])
+
+    def test_no_hint_uses_the_experts_retry_wait(self):
+        self.net.answers["groq"] = lambda p, n: (429, {}) if n == 1 else PASS
+        self.review("groq")
+        self.assertEqual(self.clock.sleeps, [20])
+
+    def test_gemini_429_is_retried_after_its_body_retry_delay(self):
+        self.net.answers["gemini"] = lambda p, n: rate_limited(details=[{"retryDelay": "21s"}]) if n == 1 else PASS
+        self.assertEqual(self.review("gemini")["verdict"], "pass")
+        self.assertEqual(self.clock.sleeps, [21.0 + pr.RETRY_MARGIN])
+
+    def test_a_retry_that_worked_is_still_mentioned_so_a_slow_expert_can_be_explained(self):
+        self.net.answers["gemini"] = lambda p, n: rate_limited({"retry-after": "9"}) if n == 1 else PASS
+        r = self.review("gemini")
+        self.assertEqual((r["verdict"], r["note"]), ("pass", "retried after 429"))
+
+    def test_retries_429_sets_how_many_times_a_429_is_retried(self):
+        self.net.answers["gemini"] = lambda p, n: rate_limited({"retry-after": "2"}) if n <= 2 else PASS
+        self.spec("gemini")["retries_429"] = 2
+        r = self.review("gemini")
+        self.assertEqual((r["verdict"], self.net.calls["gemini"], r["note"]), ("pass", 3, "retried after 429 x2"))
+        self.assertEqual(self.clock.sleeps, [2.0 + pr.RETRY_MARGIN] * 2)
+        self.net.answers["gemini"] = rate_limited({"retry-after": "1"}, "quota")
+        r = self.review("gemini")   # 2 retries, then it gives up: 3 calls
+        self.assertEqual((r["verdict"], r["note"], self.net.calls["gemini"]), ("error", "HTTP_429: quota", 3 + 3))
+
+    def test_a_quota_failure_names_which_limit_was_hit(self):
+        body = {"error": {"message": "You exceeded your current quota. " + "pad " * 80, "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+                {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "20"}]}]}}
+        self.net.answers["gemini"] = (429, body)
+        note = self.review("gemini")["note"]
+        self.assertTrue(note.startswith("HTTP_429 [GenerateRequestsPerDayPerProjectPerModel-FreeTier limit 20]: You exceeded"), note)
+        self.assertEqual(pr.quota_summary({"error": {"details": [{"violations": [{"quotaId": "bad id!"}]}]}}), "")
+        self.assertEqual(pr.quota_summary({}), "")
+
+    def test_max_retry_wait_raises_or_lowers_the_cap_per_expert(self):
+        self.net.answers["gemini"] = lambda p, n: rate_limited({"retry-after": "53.6"}) if n == 1 else PASS
+        self.review("gemini")   # gemini's own cap is 60: it waits out the whole 53.6 s hint (+ margin)
+        self.assertEqual(self.clock.sleeps, [53.6 + pr.RETRY_MARGIN])
+        self.clock.sleeps.clear()
+        self.net.answers["groq"] = lambda p, n: rate_limited({"retry-after": "53.6"}) if n == 1 else PASS
+        self.review("groq")     # everyone else keeps the 30 s cap
+        self.assertEqual(self.clock.sleeps, [30.0])
+        self.clock.sleeps.clear()
+        for junk in (0, -1, 500, "60", True, None):
+            self.spec("groq")["max_retry_wait"] = junk
+            self.assertEqual(self.ex("groq").max_retry_wait(), 30.0, junk)
+
+    def test_junk_retries_429_means_the_default_of_one(self):
+        for junk in (-1, 99, "3", True, None, 2.5):
+            self.spec("groq")["retries_429"] = junk
+            self.assertEqual(self.ex("groq").retries_429(), 1, junk)
+        self.spec("groq")["retries_429"] = 0
+        self.net.answers["groq"] = (429, {})
+        self.assertEqual((self.review("groq")["note"], self.net.calls["groq"]), ("HTTP_429", 1))
+
+    def test_the_second_429_puts_the_provider_message_in_the_note_cut_to_200(self):
+        self.net.answers["groq_qwen"] = rate_limited({"retry-after": "1"}, "Rate limit reached for model qwen " + "z" * 400)
+        r = self.review("groq_qwen")
+        self.assertEqual(r["verdict"], "error")
+        self.assertEqual(r["note"], "HTTP_429: " + ("Rate limit reached for model qwen " + "z" * 400)[:200])
+        self.assertEqual(self.net.calls["groq_qwen"], 2)   # one retry, never more
+
+    def test_the_note_never_carries_a_key_or_a_url(self):
+        msg = f"bad {KEYS['groq']} at https://console.groq.com/x?k=1"
+        self.net.answers["groq"] = rate_limited(message=msg)
+        note = self.review("groq")["note"]
+        self.assertEqual(note, "HTTP_429: bad <key> at <url>")
+
+    def test_only_a_429_message_is_echoed(self):
+        self.net.answers["groq"] = (500, {"error": {"message": "internal text that must not be shown"}})
+        self.assertEqual(self.review("groq")["note"], "HTTP_500")
+        self.assertEqual(self.net.calls["groq"], 1)
+
+
+class JsonModeTests(Base):
+    def rf(self, post):
+        return post["payload"].get("response_format")
+
+    def test_every_openai_compat_expert_asks_for_json_mode_and_the_others_do_not(self):
+        for name in ("groq", "groq_qwen", "cloudflare", "openrouter"):
+            self.review(name)
+        for name in ("gemini", "local"):
+            self.review(name)
+        for post in self.net.posts:
+            if post["who"] in ("gemini", "local"):
+                self.assertNotIn("response_format", post["payload"], post["who"])
+            else:
+                self.assertEqual(self.rf(post), {"type": "json_object"}, post["who"])
+
+    def test_json_mode_can_be_switched_off_per_expert(self):
+        self.spec("groq")["json_mode"] = False
+        self.review("groq")
+        self.assertNotIn("response_format", self.net.posts[0]["payload"])
+
+    def test_a_400_about_response_format_retries_once_without_it_and_remembers(self):
+        self.net.answers["groq"] = lambda p, n: ((400, {"error": {"message": "response_format is not supported by this model"}})
+                                                 if "response_format" in p else PASS)
+        r = self.review("groq", self.many_files(8, 7500))   # several chunks
+        self.assertEqual(r["verdict"], "pass")
+        with_rf = [p for p in self.net.posts if self.rf(p)]
+        self.assertEqual(len(with_rf), 1, "tried once, then never again for this expert in this run")
+        self.assertEqual(self.net.calls["groq"], r["chunks"] + 1)
+        self.assertNotIn("response_format", self.net.posts[-1]["payload"])
+        self.assertEqual(r["note"], "provider rejected response_format; sent without")
+
+    def test_the_note_names_the_providers_error_code_when_it_gives_one(self):
+        self.net.answers["groq"] = lambda p, n: ((400, {"error": {"message": "Failed to validate JSON", "code": "json_validate_failed"}})
+                                                 if "response_format" in p else PASS)
+        self.assertEqual(self.review("groq")["note"], "provider rejected response_format (json_validate_failed); sent without")
+
+    def test_groq_gets_low_reasoning_effort_so_it_cannot_think_its_whole_budget_away(self):
+        self.review("groq")
+        self.assertEqual(self.net.posts[0]["payload"]["reasoning_effort"], "low")
+        self.review("groq_qwen")
+        self.assertNotIn("reasoning_effort", self.net.posts[1]["payload"])
+
+    def test_the_fallback_is_per_expert(self):
+        self.net.answers["groq"] = lambda p, n: ((400, {"error": {"message": "invalid response_format"}})
+                                                 if "response_format" in p else PASS)
+        self.review("groq")
+        self.review("groq_qwen")
+        self.assertEqual(self.rf(next(p for p in self.net.posts if p["who"] == "groq_qwen")), {"type": "json_object"})
+
+    def test_a_400_about_something_else_is_an_error_not_a_retry(self):
+        self.net.answers["groq"] = (400, {"error": {"message": "model not found"}})
+        r = self.review("groq")
+        self.assertEqual((r["verdict"], r["note"], self.net.calls["groq"]), ("error", "HTTP_400", 1))
+
+    def test_a_400_that_persists_without_json_mode_is_an_error_after_one_retry(self):
+        self.net.answers["groq"] = (400, {"error": {"message": "response_format again"}})
+        r = self.review("groq")
+        self.assertEqual((r["verdict"], r["note"], self.net.calls["groq"]), ("error", "HTTP_400", 2))
+
+
+class UnparseableRetryTests(Base):
+    def test_one_follow_up_after_an_unreadable_reply_and_its_answer_is_used(self):
+        self.net.answers["groq"] = lambda p, n: "I think it looks fine, no JSON here" if n == 1 else REVISE
+        r = self.review("groq")
+        self.assertEqual((r["verdict"], r["blocking"], self.net.calls["groq"]), ("revise", ["off by one"], 2))
+        self.assertEqual(r["note"], "reply needed one JSON retry")
+
+    def test_the_follow_up_is_the_prompt_the_bad_reply_and_the_short_instruction(self):
+        self.net.answers["groq"] = lambda p, n: "not json at all" if n == 1 else PASS
+        self.review("groq")
+        first, second = (p["payload"]["messages"] for p in self.net.posts)
+        self.assertEqual(len(first), 1)
+        self.assertEqual([m["role"] for m in second], ["user", "assistant", "user"])
+        self.assertEqual(second[0]["content"], first[0]["content"])
+        self.assertEqual(second[1]["content"], "not json at all")
+        self.assertEqual(second[2]["content"], "Your previous reply was not valid JSON. Reply with ONLY the JSON object.")
+
+    def test_gives_up_after_exactly_one_retry(self):
+        self.net.answers["groq"] = "still prose"
+        r = self.review("groq")
+        self.assertEqual((r["verdict"], r["note"], self.net.calls["groq"]), ("error", "unparseable reply", 2))
+
+    def test_an_empty_reply_gets_the_instruction_on_the_prompt_not_an_empty_assistant_turn(self):
+        self.net.answers["groq"] = lambda p, n: "" if n == 1 else PASS
+        self.assertEqual(self.review("groq")["verdict"], "pass")
+        second = self.net.posts[1]["payload"]["messages"]
+        self.assertEqual([m["role"] for m in second], ["user"])
+        self.assertTrue(second[0]["content"].endswith("Reply with ONLY the JSON object."))
+
+    def test_a_readable_first_reply_is_never_retried(self):
+        self.review("groq")
+        self.assertEqual(self.net.calls["groq"], 1)
+
+    def test_every_chunk_gets_its_own_single_retry(self):
+        self.net.answers["groq"] = lambda p, n: "prose" if n % 2 else PASS
+        r = self.review("groq", self.many_files(8, 7500))
+        self.assertEqual((r["verdict"], self.net.calls["groq"]), ("pass", 2 * r["chunks"]))
+
+    def test_tokens_are_counted_for_both_calls(self):
+        self.net.answers["groq"] = lambda p, n: "prose" if n == 1 else PASS
+        r = self.review("groq")
+        self.assertEqual((r["input_tokens"], r["output_tokens"]), (2 * (self.net.usage - 20), 40))
+
+    def test_gemini_and_local_use_their_own_roles_for_the_follow_up(self):
+        for name in ("gemini", "local"):
+            self.net.answers[name] = lambda p, n: "prose" if n == 1 else PASS
+            self.assertEqual(self.review(name)["verdict"], "pass", name)
+        gem1, gem2 = [p for p in self.net.posts if p["who"] == "gemini"]
+        self.assertEqual(len(gem1["payload"]["contents"]), 1)
+        self.assertEqual([c["role"] for c in gem2["payload"]["contents"]], ["user", "model", "user"])
+        loc2 = [p for p in self.net.posts if p["who"] == "local"][1]
+        self.assertEqual([m["role"] for m in loc2["payload"]["messages"]], ["user", "assistant", "user"])
+
+    def test_a_cli_expert_is_re_asked_with_the_instruction_appended(self):
+        replies = iter(["prose", json.dumps(PASS)])
+        calls = self.runner.calls
+        self.deps_run_cmd = lambda cmd, timeout: (calls.append({"cmd": cmd, "timeout": timeout}), (0, next(replies)))[1]
+        deps = self.deps()
+        deps.run_cmd = self.deps_run_cmd
+        r = pr.review_with(self.ex("antigravity"), self.cfg, deps, SPEC, ACCEPT, DIFF)
+        self.assertEqual((r["verdict"], len(self.runner.calls)), ("pass", 2))
+        self.assertTrue(cli_prompt(self.runner.calls[1]).endswith(pr.RETRY_NOTE))
+        self.assertNotIn(pr.RETRY_NOTE, cli_prompt(self.runner.calls[0]))
+
+    def test_every_prompt_tells_the_expert_it_has_no_tools(self):
+        # agy is a full agent: told nothing, it tried `run_command ls scripts/`, was denied, and printed nothing
+        self.review("groq")
+        sent = self.net.posts[0]["payload"]["messages"][0]["content"]
+        self.assertIn("You have no tools and no shell here", sent)
+        self.assertIn("do not run commands, read files or browse", sent)
+
+
+class RawReplyCaptureTests(Base):
+    """Unreadable replies are kept for diagnosis for the public class ONLY."""
+    run_panel = FlowTests.run_panel
+
+    def errors_dir(self):
+        return Path(self.ledger).parent / "panel-errors"
+
+    def files(self):
+        d = self.errors_dir()
+        return sorted(d.iterdir()) if d.exists() else []
+
+    def test_public_keeps_the_raw_reply_up_to_2000_chars_with_private_modes(self):
+        self.net.answers["groq"] = "here is a long essay " + "w" * 5000
+        self.run_panel(cls="public")
+        files = [f for f in self.files() if "-groq." in f.name or re.search(r"-groq-\d+\.txt$", f.name)]
+        self.assertEqual(len(files), 2, "the first reply and the follow-up's reply are both kept")
+        for f in files:
+            self.assertRegex(f.name, r"^\d{8}T\d{6}Z-groq(-\d+)?\.txt$")
+            self.assertEqual(f.read_text(), ("here is a long essay " + "w" * 5000)[:2000])
+            self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.errors_dir().stat().st_mode), 0o700)
+
+    def test_own_and_client_never_write_one(self):
+        for cls in ("own", "client"):
+            self.net.answers.update({n: "prose only" for n in API_EXPERTS})
+            self.run_panel(cls=cls)
+            self.assertFalse(self.errors_dir().exists(), cls)
+
+    def test_a_public_run_that_the_gate_narrowed_to_local_writes_none(self):
+        self.net.answers["local"] = "prose only"
+        self.run_panel("--never-send", "*.py", cls="public")
+        self.assertEqual(self.files(), [])
+
+    def test_a_readable_reply_writes_nothing(self):
+        self.run_panel(cls="public")
+        self.assertEqual(self.files(), [])
+
+    def test_the_summary_and_ledger_carry_no_reply_text(self):
+        self.net.answers["groq"] = "SECRETREPLYTEXT " * 20
+        r = self.run_panel(cls="public")
+        self.assertNotIn("SECRETREPLYTEXT", r.stdout)
+        self.assertNotIn("SECRETREPLYTEXT", Path(self.ledger).read_text())
+
+    def test_the_errors_dir_can_be_pointed_elsewhere(self):
+        self.net.answers["groq"] = "prose"
+        target = os.path.join(self.tmp, "elsewhere")
+        self.run_panel(cls="public", errors_dir=target)
+        self.assertTrue(os.listdir(target))
+        self.assertFalse(self.errors_dir().exists())
+
+    def test_save_raw_reply_never_raises_and_never_overwrites(self):
+        d = os.path.join(self.tmp, "e")
+        a, b = pr.save_raw_reply(d, "x", "one"), pr.save_raw_reply(d, "x", "two")
+        self.assertNotEqual(a, b)
+        self.assertEqual((Path(a).read_text(), Path(b).read_text()), ("one", "two"))
+        blocked = os.path.join(self.tmp, "afile")
+        Path(blocked).write_text("x")
+        self.assertIsNone(pr.save_raw_reply(os.path.join(blocked, "sub"), "x", "t"))
+
+
+class TimeoutConfigTests(Base):
+    run_panel = FlowTests.run_panel
+
+    def test_gemini_gets_180_and_the_others_the_top_level_timeout(self):
+        self.review("gemini")
+        self.review("groq")
+        t = {p["who"]: p["timeout"] for p in self.net.posts}
+        self.assertEqual((t["gemini"], t["groq"]), (180, 120))
+
+    def test_a_top_level_timeout_does_not_shorten_geminis_own(self):
+        self.cfg["timeout"] = 30
+        self.review("gemini")
+        self.review("local")
+        t = {p["who"]: p["timeout"] for p in self.net.posts}
+        self.assertEqual((t["gemini"], t["local"]), (180, 30))
+
+    def test_a_config_file_can_set_any_experts_timeout(self):
+        cfg_path = os.path.join(self.tmp, "c.json")
+        Path(cfg_path).write_text(json.dumps({"experts": [{"name": "gemini", "timeout": 45},
+                                                          {"name": "antigravity", "timeout": 300}]}))
+        cfg, status = pr.load_config(cfg_path)
+        self.assertEqual(status, "file")
+        experts = pr.make_experts(cfg)
+        deps = self.deps()
+        pr.review_with(experts["gemini"], cfg, deps, SPEC, ACCEPT, DIFF)
+        pr.review_with(experts["antigravity"], cfg, deps, SPEC, ACCEPT, DIFF)
+        self.assertEqual(self.net.posts[0]["timeout"], 45)
+        self.assertEqual(self.runner.calls[0]["timeout"], 300)
+
+    def test_a_junk_timeout_falls_back_to_the_top_level_one(self):
+        for junk in (0, -5, "fast", True, None):
+            self.spec("gemini")["timeout"] = junk
+            self.assertEqual(self.ex("gemini").timeout(self.cfg), 120, junk)
+
+    def test_a_cli_expert_without_its_own_timeout_uses_the_top_level_one(self):
+        self.review("antigravity")
+        self.assertEqual(self.runner.calls[0]["timeout"], 120)
+
+
+class GeminiThinkingTests(Base):
+    def gen(self, post):
+        return post["payload"]["generationConfig"]
+
+    def test_the_request_asks_for_low_thinking_by_default(self):
+        self.review("gemini")
+        self.assertEqual(self.gen(self.net.posts[0])["thinkingConfig"], {"thinkingLevel": "low"})
+        self.assertEqual(self.gen(self.net.posts[0])["responseMimeType"], "application/json")
+
+    def test_no_thinking_level_means_no_thinking_config(self):
+        del self.spec("gemini")["thinking_level"]
+        self.review("gemini")
+        self.assertNotIn("thinkingConfig", self.gen(self.net.posts[0]))
+
+    def test_a_model_that_rejects_it_gets_one_retry_without_and_it_is_remembered(self):
+        self.net.answers["gemini"] = lambda p, n: (
+            (400, {"error": {"message": "Invalid value at 'generation_config.thinking_config.thinking_level'"}})
+            if "thinkingConfig" in p["generationConfig"] else PASS)
+        r = self.review("gemini", self.many_files(3, 150000))
+        self.assertEqual(r["verdict"], "pass")
+        self.assertEqual(sum("thinkingConfig" in self.gen(p) for p in self.net.posts), 1)
+        self.assertEqual(self.net.calls["gemini"], r["chunks"] + 1)
+        self.assertEqual(r["note"], "provider rejected thinkingConfig; sent without")
+
+
+class FakeResponse:
+    """What urlopen returns, delivering `pieces` one read1() at a time; each read1 moves `clock` on."""
+
+    def __init__(self, pieces, clock=None, tick=0.0, status=200):
+        self.pieces, self.clock, self.tick, self.status = list(pieces), clock, tick, status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read1(self, n=-1):
+        if self.clock is not None:
+            self.clock[0] += self.tick
+        return self.pieces.pop(0) if self.pieces else b""
+
+
+class DeadlineTests(Base):
+    def test_a_reply_that_arrives_in_pieces_is_assembled_and_parsed(self):
+        resp = FakeResponse([b"   ", b'{"a":', b" 1}"])
+        with mock.patch.object(pr.urllib.request, "urlopen", return_value=resp):
+            self.assertEqual(pr.real_post_json("https://x", {}, {}, 30), (200, {"a": 1}))
+
+    def test_a_slow_reply_kept_alive_with_trickled_bytes_still_hits_the_deadline(self):
+        # OpenRouter sends a few bytes every ~3 s while the model thinks: urllib's socket timeout never fires
+        clock = [1000.0]
+        resp = FakeResponse([b"\n"] * 100 + [b'{"ok": true}'], clock, tick=3.0)
+        with mock.patch.object(pr.urllib.request, "urlopen", return_value=resp), \
+                mock.patch.object(pr.time, "monotonic", lambda: clock[0]):
+            with self.assertRaises(TimeoutError):
+                pr.real_post_json("https://x", {}, {}, 120)
+        self.assertLess(clock[0] - 1000.0, 130, "gave up near the deadline, not after the whole 100 pieces")
+
+    def test_the_same_reply_inside_the_deadline_is_fine(self):
+        clock = [1000.0]
+        resp = FakeResponse([b"\n"] * 10 + [b'{"ok": true}'], clock, tick=3.0)
+        with mock.patch.object(pr.urllib.request, "urlopen", return_value=resp), \
+                mock.patch.object(pr.time, "monotonic", lambda: clock[0]):
+            self.assertEqual(pr.real_post_json("https://x", {}, {}, 120), (200, {"ok": True}))
+
+    def test_a_deadline_miss_is_an_error_verdict_not_a_hang_and_later_chunks_are_skipped(self):
+        def late(url, headers, payload, timeout):
+            raise TimeoutError("no complete reply within 120s")
+        deps = self.deps()
+        deps.post_json = late
+        r = pr.review_with(self.ex("openrouter"), self.cfg, deps, SPEC, ACCEPT, self.many_files(3, 150000))
+        self.assertEqual(r["verdict"], "error")
+        self.assertEqual(r["note"], "TimeoutError; later chunks skipped")
+
+    def test_openrouter_is_sent_reasoning_off_and_other_experts_are_not(self):
+        self.review("openrouter")
+        self.review("cloudflare")
+        sent = {p["who"]: p["payload"] for p in self.net.posts}
+        self.assertEqual(sent["openrouter"]["reasoning"], {"enabled": False})
+        self.assertNotIn("reasoning", sent["cloudflare"])
+
+    def test_extra_in_the_config_file_brings_the_thinking_back(self):
+        p = os.path.join(self.tmp, "c.json")
+        Path(p).write_text(json.dumps({"experts": [{"name": "openrouter", "extra": {}}]}))
+        cfg, _ = pr.load_config(p)
+        pr.review_with(pr.make_experts(cfg)["openrouter"], cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        self.assertNotIn("reasoning", self.net.posts[0]["payload"])
 
 
 if __name__ == "__main__":
