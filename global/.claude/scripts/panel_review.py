@@ -75,7 +75,8 @@ RETRY_NOTE = "Your previous reply was not valid JSON. Reply with ONLY the JSON o
 # thinkingLevel), extra (merged into an openai_compat payload), cmd (cli; "{prompt}" marks where the prompt goes, else it
 # is appended) with model_flag (default --model, used only when `model` is set), and num_ctx and
 # probe_timeout (ollama). A cli expert runs in an empty temp dir with stdin closed and may carry no
-# auto-approve argument (see real_run_cmd and unsafe_cli).
+# auto-approve argument (see real_run_cmd and unsafe_cli). Its environment is only PATH, HOME, LANG and
+# TERM=dumb plus the variable names in its optional `env` list (default none; see cli_env).
 # `enabled: false` switches an expert off (it is then `unavailable` and never launched or sent anything).
 # enabled_if is "which:BINARY", "exists:PATH" or "file:PATH", or a list of them that must all hold; an
 # expert whose condition fails is `unavailable`.
@@ -254,6 +255,21 @@ def error_body(e):
     return obj
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an error, never followed: urllib would re-send the Authorization header to wherever it points."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def build_opener():
+    """No redirects, and ProxyHandler({}) so HTTP(S)_PROXY in the environment is ignored (loopback calls
+    must never be routed through a proxy, and keys must not be either)."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+urllib.request.install_opener(build_opener())   # urlopen below (and in tests) now uses it
+
+
 def real_post_json(url, headers, payload, timeout):
     """POST JSON. `timeout` is a DEADLINE for the whole reply, not only a socket timeout: OpenRouter keeps a
     slow non-streaming call alive with a few bytes every ~3 s, which never trips urllib's per-read timeout
@@ -287,13 +303,25 @@ def real_exists(path):
     return os.path.exists(os.path.expanduser(path))
 
 
-def real_run_cmd(cmd, timeout):
+CLI_ENV_BASE = ("PATH", "HOME", "LANG")
+
+
+def cli_env(extra=()):
+    """A minimal environment for a CLI expert: PATH, HOME, LANG, TERM=dumb and only the variables the
+    expert's spec lists in `env` (default none: copilot_ask.sh fetches its own token, agy needs HOME)."""
+    env = {k: os.environ[k] for k in (*CLI_ENV_BASE, *extra) if k in os.environ}
+    env["TERM"] = "dumb"
+    return env
+
+
+def real_run_cmd(cmd, timeout, env_extra=()):
     """Run a CLI expert. argv list, never a shell. stdin is /dev/null so a permission prompt cannot hang
     it. cwd is a fresh EMPTY temp dir, deleted afterwards, so the tool never sees the repo or worktree.
     It runs in its own session, and a timeout kills the whole process group, not only the child."""
     with tempfile.TemporaryDirectory(prefix="panel-cli-") as cwd:
         p = subprocess.Popen(cmd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, cwd=cwd, text=True, start_new_session=True)
+                             stderr=subprocess.DEVNULL, cwd=cwd, text=True, start_new_session=True,
+                             env=cli_env(env_extra))
         try:
             out, _ = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -320,6 +348,7 @@ class Deps:
     sleep: Callable = time.sleep
     read_key: Callable = read_key
     scanner: Optional[Callable] = None        # gate secret scanner; None = real gitleaks via Docker
+    classes_path: Optional[str] = None        # per-repo class list; None = ~/.config/panel/classes.json
     ledger_path: Optional[str] = None         # usage log; None = ledger_log.DEFAULT_PATH
     errors_dir: Optional[str] = None          # public-class unreadable replies; None = panel-errors/ beside the log
 
@@ -852,11 +881,18 @@ class Expert:
             prompt = prompt + "\n\n" + RETRY_NOTE
         if len(prompt.encode("utf-8")) > MAX_ARGV_BYTES:
             raise ExpertError("PROMPT_TOO_LARGE")
+        # A prompt standing alone as an argument must never start with "-", or the CLI would read it as an
+        # option. None of these CLIs is known to accept `--`, so a leading space is the guard instead.
+        alone = (" " + prompt) if prompt.startswith("-") else prompt
         if any("{prompt}" in c for c in cmd):   # e.g. ["agy", "-p={prompt}"]: -p takes the NEXT argument
-            cmd = [c.replace("{prompt}", prompt) for c in cmd]
+            cmd = [alone if c == "{prompt}" else c.replace("{prompt}", prompt) for c in cmd]
         else:
-            cmd.append(prompt)
-        rc, out = deps.run_cmd(cmd, self.timeout(cfg))
+            cmd.append(alone)
+        extra = tuple(n for n in (s.get("env") or []) if isinstance(n, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", n))
+        if extra:   # a per-expert allowlist of extra environment variables (default: none)
+            rc, out = deps.run_cmd(cmd, self.timeout(cfg), env_extra=extra)
+        else:
+            rc, out = deps.run_cmd(cmd, self.timeout(cfg))
         if rc != 0:
             raise ExpertError(f"EXIT_{rc}")
         return out, None   # a CLI reports no usage; review_with estimates it
@@ -1029,9 +1065,20 @@ def read_text(path):
 def run_panel(a, deps, experts=None):
     t0 = deps.now()
     cfg, cfg_status = load_config(a.config)
+    a.cls = panel_gate.effective_class(a.repo, a.cls, deps.classes_path)   # the stricter of passed and listed
     gate_args = SimpleNamespace(diff=a.diff, cls=a.cls, never_send=a.never_send,
                                 terms_file=a.terms_file, max_redactions=a.max_redactions)
     res = panel_gate.gate_from_args(gate_args, deps.scanner)
+    spec, acceptance = read_text(a.spec), read_text(a.acceptance)
+    if res.gate != "skip" and spec is not None and acceptance is not None:
+        # The spec and acceptance leave the machine too: a secret pasted into either stops every expert.
+        try:
+            status = (deps.scanner or panel_gate.scan_secrets)(spec + "\n" + acceptance)
+        except Exception:
+            status = "unavailable"
+        if status != "clean":
+            res = panel_gate.GateResult("skip", "secret scan found a finding in spec or acceptance"
+                                        if status == "found" else "secret scan unavailable")
     for line in panel_gate.sentinel_lines(res):
         print(line)
     if cfg_status == "invalid":
@@ -1041,7 +1088,6 @@ def run_panel(a, deps, experts=None):
     if res.gate == "skip":
         summary["ms"] = int((deps.now() - t0) * 1000)
         return emit(summary, "none", res.reason)
-    spec, acceptance = read_text(a.spec), read_text(a.acceptance)
     if spec is None or acceptance is None:
         summary["ms"] = int((deps.now() - t0) * 1000)
         return emit(summary, "none", "spec or acceptance unreadable")

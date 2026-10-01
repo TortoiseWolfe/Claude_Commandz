@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jev_precheck as jp  # noqa: E402
 import ledger_log  # noqa: E402
 
-DIFF = '+++ b/app.py\n+owner = "jane.doe@gmail.com"  # SECRET-DIFF-MARKER\n+print("hello")\n'
+DIFF = '+++ b/app.py\n+owner = "jane.doe@planted-mail.org"  # SECRET-DIFF-MARKER\n+print("hello")\n'
 ACCEPT = "- prints hello\n- ACCEPT-MARKER"
 KEY = "ts_SECRETTYPESAFEKEY"
 
@@ -37,15 +37,24 @@ class JevTests(unittest.TestCase):
         self.key = os.path.join(self.tmp, "api-key")
         Path(self.key).write_text(KEY)
         self.ledger = os.path.join(self.tmp, "ledger", "panel.jsonl")
+        self.scanned, self.scan_result = [], "clean"
         self.requests, self.reply = [], {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": 0.97}},
                                          "usage": {"input_tokens": 290, "output_tokens": 20}}
         for p in (mock.patch.object(jp, "KEY_PATH", self.key), mock.patch.object(jp, "urlopen", self.urlopen),
-                  mock.patch.object(ledger_log, "DEFAULT_PATH", self.ledger)):
+                  mock.patch.object(ledger_log, "DEFAULT_PATH", self.ledger),
+                  mock.patch.object(jp, "SCANNER", lambda text: self.scan(text)),
+                  mock.patch.object(jp, "CLASSES_PATH", os.path.join(self.tmp, "classes.json"))):
             p.start()
             self.addCleanup(p.stop)
+        self.terms = os.path.join(self.tmp, "terms.txt")
+        Path(self.terms).write_text("Acme Corp\n")
         Path(os.path.join(self.tmp, "acc.txt")).write_text(ACCEPT)
         Path(os.path.join(self.tmp, "diff.txt")).write_text(DIFF)
         Path(os.path.join(self.tmp, "q.json")).write_text(json.dumps(["Does it print hello?", "Is owner set?"]))
+
+    def scan(self, text):
+        self.scanned.append(text)
+        return self.scan_result
 
     def urlopen(self, req, timeout=None):
         self.requests.append((req, timeout))
@@ -123,6 +132,72 @@ class JevTests(unittest.TestCase):
             self.assertNotIn(text, raw)
         self.assertNotIn(KEY, out + raw)
         self.assertEqual(self.requests[0][0].get_header("Authorization"), "Bearer " + KEY)   # header only
+
+
+class JevGateTests(JevTests):
+    """The 2026-10-01 audit: Jev is gated in-process like codex_review; client repos never reach it."""
+
+    def sent(self):
+        return json.loads(self.requests[0][0].data)["state"]
+
+    def test_client_class_is_skipped_and_sends_nothing(self):
+        Path(jp.CLASSES_PATH).write_text(json.dumps({"repos": {"Acme": "client"}}))
+        rc, out = self.run_jev("--repo", "acme")
+        self.assertEqual((rc, out.strip()), (0, "__JEV_SKIPPED=class__"))
+        self.assertEqual((self.requests, self.lines(), self.scanned), ([], [], []))
+
+    def test_client_class_flag_is_skipped_too(self):
+        _, out = self.run_jev("--class", "client")
+        self.assertEqual(out.strip(), "__JEV_SKIPPED=class__")
+        self.assertEqual(self.requests, [])
+
+    def test_public_and_own_repos_still_run(self):
+        Path(jp.CLASSES_PATH).write_text(json.dumps({"repos": {"pub": "public", "mine": "own"}}))
+        Path(self.terms).write_text("Acme Corp\n")
+        for repo in ("pub", "mine"):
+            _, out = self.run_jev("--repo", repo, "--terms-file", self.terms)
+            self.assertEqual(out.strip(), "__JEV_P=0.970__", repo)
+        _, out = self.run_jev("--repo", "unlisted", "--terms-file", self.terms)   # unlisted = client
+        self.assertEqual(out.strip(), "__JEV_SKIPPED=class__")
+
+    def test_a_secret_stops_the_call(self):
+        self.scan_result = "found"
+        _, out = self.run_jev()
+        self.assertEqual(out.strip(), "__JEV_SKIPPED=gate-skip__")
+        self.assertEqual(self.requests, [])
+
+    def test_scan_covers_acceptance_questions_and_diff(self):
+        self.run_jev("--questions-file", os.path.join(self.tmp, "q.json"))
+        (text,) = self.scanned
+        for part in (ACCEPT, "Does it print hello?", "Is owner set?", "SECRET-DIFF-MARKER"):
+            self.assertIn(part, text)
+
+    def test_never_send_match_is_skipped(self):
+        Path(os.path.join(self.tmp, "diff.txt")).write_text("diff --git a/data/x.csv b/data/x.csv\n+++ b/data/x.csv\n+1\n")
+        _, out = self.run_jev("--never-send", "**/*.csv")
+        self.assertEqual(out.strip(), "__JEV_SKIPPED=gate-local__")
+        self.assertEqual(self.requests, [])
+
+    def test_only_redacted_text_is_sent(self):
+        Path(os.path.join(self.tmp, "acc.txt")).write_text("- mail bob@corp.io")
+        self.run_jev("--questions-file", os.path.join(self.tmp, "q.json"))
+        body = json.dumps([json.loads(r.data) for r, _ in self.requests])
+        for original in ("jane.doe@planted-mail.org", "bob@corp.io"):
+            self.assertNotIn(original, body)
+        self.assertIn("[EMAIL_", body)
+
+    def test_question_text_is_redacted_and_gated(self):
+        Path(os.path.join(self.tmp, "q.json")).write_text(json.dumps(["Is carol@corp.io the owner?"]))
+        self.run_jev("--questions-file", os.path.join(self.tmp, "q.json"))
+        body = json.dumps([json.loads(r.data) for r, _ in self.requests])
+        self.assertNotIn("carol@corp.io", body)
+        self.assertIn("carol@corp.io", self.scanned[0])   # the scan sees the original, the wire does not
+
+    def test_opener_does_not_follow_redirects_or_proxies(self):
+        kinds = {type(h).__name__ for h in jp._OPENER.handlers}
+        self.assertIn("_NoRedirect", kinds)
+        self.assertNotIn("HTTPRedirectHandler", kinds)
+        self.assertFalse([h for h in jp._OPENER.handlers if isinstance(h, urllib.request.ProxyHandler)])
 
 
 if __name__ == "__main__":
