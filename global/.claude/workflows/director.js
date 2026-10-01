@@ -58,7 +58,8 @@ const RULES = `House rules for this task:
 - Work only inside the worktree path given. Never touch the main checkout at ${repo}, never push, never switch branches, never merge.
 - Read <worktree>/CLAUDE.md first and follow it.
 - Edit only the files listed. If the change needs another file, stop and say so.
-- Docker-first: never run npm/pnpm/pip install or sudo on the host.
+- Docker-first: never run npm/pnpm/pip install or sudo on the host.${composeProjects.length ? `
+- Any docker compose you run yourself must name its project, exactly as the checks do: -p ${composeProjects[0]}. Without -p, compose names the project after your worktree folder and leaves a network behind (a worker leaked one on 2026-09-30 by copying a docstring's run line).` : ''}
 - Never put the user's name, email or any personal identifier into files, commits or requests.`
 
 // ---- helpers --------------------------------------------------------------
@@ -97,13 +98,17 @@ async function pruneNetworks(phaseName) {
 }
 
 function sentinel(text, key) {
-  const re = new RegExp('__' + key + '=([^\\s]*?)__', 'g')
+  // Tolerates a missing closing '__': the Haiku proxy sometimes relays "__RC_SETUP=0__" as
+  // "__RC_SETUP=0" (markdown reads __x__ as bold), which once marked two good setups failed.
+  const re = new RegExp('__' + key + '=([^\\s]*?)(?=__|\\s|$)', 'gm')
   let m, last = null
   while ((m = re.exec(text)) !== null) last = m[1]
   return last
 }
 function sentinels(text, key) {
-  const re = new RegExp('__' + key + '=([^\\s]*?)__', 'g')
+  // Tolerates a missing closing '__': the Haiku proxy sometimes relays "__RC_SETUP=0__" as
+  // "__RC_SETUP=0" (markdown reads __x__ as bold), which once marked two good setups failed.
+  const re = new RegExp('__' + key + '=([^\\s]*?)(?=__|\\s|$)', 'gm')
   const out = []
   let m
   while ((m = re.exec(text)) !== null) out.push(m[1])
