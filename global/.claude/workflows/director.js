@@ -16,6 +16,66 @@ export const meta = {
 // Extracted from ~/.claude/skills/game-demo/references/gauntlet-workflow.md and
 // a private weekly-review workflow (kept in the private hub, not this repo).
 
+// ---- pure-JS base64 (the sandbox has no Buffer/btoa/TextEncoder) ----------
+// All free text (goal, plan fields, jev checks, the Codex plan) reaches the shell as base64, never
+// inside a heredoc: a text line equal to a heredoc delimiter (or SCRIPT>>>) would otherwise end the
+// block and run the rest as shell.
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+function utf8Bytes(str) {
+  const out = []
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i)
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+      const d = str.charCodeAt(i + 1)
+      if (d >= 0xDC00 && d <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); i++ }
+    }
+    if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD // unpaired surrogate
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+function b64(str) {
+  const b = utf8Bytes(String(str))
+  let out = ''
+  for (let i = 0; i < b.length; i += 3) {
+    const n = (b[i] << 16) | ((b[i + 1] || 0) << 8) | (b[i + 2] || 0)
+    out += B64_CHARS[(n >> 18) & 63] + B64_CHARS[(n >> 12) & 63]
+      + (i + 1 < b.length ? B64_CHARS[(n >> 6) & 63] : '=')
+      + (i + 2 < b.length ? B64_CHARS[n & 63] : '=')
+  }
+  return out
+}
+function b64decode(s) {
+  const clean = String(s).replace(/=+$/, '')
+  const bytes = []
+  let acc = 0, bits = 0
+  for (const ch of clean) {
+    acc = (acc << 6) | B64_CHARS.indexOf(ch); bits += 6
+    if (bits >= 8) { bits -= 8; bytes.push((acc >> bits) & 255); acc &= (1 << bits) - 1 }
+  }
+  let out = ''
+  for (let i = 0; i < bytes.length;) {
+    const c = bytes[i]
+    let cp, len
+    if (c < 0x80) { cp = c; len = 1 }
+    else if (c < 0xE0) { cp = c & 0x1F; len = 2 }
+    else if (c < 0xF0) { cp = c & 0x0F; len = 3 }
+    else { cp = c & 0x07; len = 4 }
+    for (let k = 1; k < len; k++) cp = (cp << 6) | (bytes[i + k] & 63)
+    i += len
+    if (cp >= 0x10000) { cp -= 0x10000; out += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 1023)) } else out += String.fromCharCode(cp)
+  }
+  return out
+}
+const B64_PROBE = 'h\u00e9llo \u2713 \ud83d\ude00\nX_EOF'
+if (b64decode(b64(B64_PROBE)) !== B64_PROBE || b64('Man') !== 'TWFu' || b64('Ma') !== 'TWE=' || b64('M') !== 'TQ==') {
+  log('ERROR: base64 self-check failed; refusing to build shell scripts.')
+  return { error: 'b64 self-check failed' }
+}
+
 // args may arrive as an object OR a JSON string depending on how it was passed.
 let A = args
 if (typeof A === 'string') {
@@ -26,7 +86,8 @@ const repo = A.repo ? String(A.repo).replace(/\/+$/, '') : null
 const goal = A.goal ? String(A.goal) : null
 const baseRef = A.base ? String(A.base) : 'origin/main'
 const checks = A.checks && typeof A.checks === 'object' ? A.checks : {}
-const logDir = A.logDir ? String(A.logDir) : '/tmp'
+// No logDir given: the Baseline script makes a private `mktemp -d` and reports it back (see logDirP).
+let logDir = A.logDir ? String(A.logDir).replace(/\/+$/, '') : null
 // Free review panel (shadow): ~/.claude/scripts/panel_review.py behind panel_gate.py. The class comes
 // from <repo>/.claude/director.json "panel": {"class": "public"|"own"|"client", "never_send": [...]}.
 // A missing or unknown class is "client": only the on-machine model may see the diff.
@@ -41,6 +102,18 @@ if (!repo || !goal || Object.keys(checks).length === 0) {
   log('ERROR: args need repo (absolute path), goal, and a non-empty checks map.')
   return { error: 'missing args', need: ['repo', 'goal', 'checks'] }
 }
+// ---- input validation: everything below is interpolated into shell, so refuse odd input up front ----
+const PATH_RE = /^\/[A-Za-z0-9._\/-]+$/
+const REF_RE = /^[A-Za-z0-9._\/][A-Za-z0-9._\/-]*$/ // no leading '-'
+const CHECK_NAME_RE = /^[A-Z][A-Z0-9_]*$/
+const GLOB_RE = /^[A-Za-z0-9._*\/?-]+$/
+const ITEM_ID_RE = /^[a-z0-9][a-z0-9-]{1,30}$/
+const badArg = (field) => { log(`ERROR: invalid args: ${field}`); return { error: 'invalid args', field } }
+if (!PATH_RE.test(repo)) return badArg('repo')
+if (!REF_RE.test(baseRef)) return badArg('baseRef')
+if (logDir !== null && !PATH_RE.test(logDir)) return badArg('logDir')
+for (const k of Object.keys(checks)) if (!CHECK_NAME_RE.test(k)) return badArg(`checks.${k}`)
+for (const g of panelNeverSend) if (!GLOB_RE.test(g)) return badArg('panel.never_send')
 const name = repo.slice(repo.lastIndexOf('/') + 1)
 const parent = repo.slice(0, repo.lastIndexOf('/'))
 const wtPath = (id) => `${parent}/${name}-wf-${id}`
@@ -71,21 +144,37 @@ const RULES = `House rules for this task:
 
 // ---- helpers --------------------------------------------------------------
 
-// Custom agent types may not resolve until a session restart; fall back to general-purpose.
+// Custom agent types may not resolve until a session restart. The fallback is general-purpose
+// (ALL tools) unless the caller names a safer opts.fallbackAgentType (planner: 'Plan').
 async function call(prompt, opts) {
+  const { fallbackAgentType, ...agentOpts } = opts
   try {
-    return await agent(prompt, opts)
+    return await agent(prompt, agentOpts)
   } catch (e) {
-    if (opts.agentType && opts.agentType !== 'general-purpose') {
-      log(`agentType ${opts.agentType} failed (${String(e).slice(0, 80)}); retrying as general-purpose with model ${opts.model || 'inherit'}`)
-      return await agent(prompt, { ...opts, agentType: 'general-purpose' })
+    if (agentOpts.agentType && agentOpts.agentType !== 'general-purpose') {
+      const fb = fallbackAgentType || 'general-purpose'
+      log(`agentType ${agentOpts.agentType} failed (${String(e).slice(0, 80)}); retrying as ${fb} with model ${agentOpts.model || 'inherit'}`)
+      return await agent(prompt, { ...agentOpts, agentType: fb })
     }
     throw e
   }
 }
 
+// Diff flags for every diff that feeds the panel, Jev or the reviewer: no colour codes, no external
+// diff or textconv programs from repo config, fixed prefixes.
+const DIFF_FLAGS = '--no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/'
+// Write free text to a file without a heredoc (see b64 above). Base64 has no quotes or newlines.
+const writeFile = (text, file) => `printf '%s' '${b64(text)}' | base64 -d > ${file}`
+
+// Log directory: given, or a private mktemp -d that the Baseline script creates and reports back.
+let resolveLogDir
+const logDirP = new Promise((r) => { resolveLogDir = r })
+if (logDir) resolveLogDir(logDir)
+
 // Shell proxy: a Haiku agent runs the script verbatim; plain JS parses the sentinels.
 async function sh(script, label, phaseName) {
+  if (String(script).includes('SCRIPT>>>')) throw new Error('script contains the SCRIPT>>> delimiter; refusing')
+  script = `umask 077\n${script}`
   const prompt = `You are a shell proxy. Run the script between <<<SCRIPT and SCRIPT>>> with the Bash tool, unchanged, in ONE call with timeout 600000. Run nothing else. Reply with the last 60 lines of its output copied exactly, no commentary. If the Bash call errors, reply with the error and the line __RC=PROXY_ERROR__.
 
 <<<SCRIPT
@@ -102,6 +191,13 @@ async function pruneNetworks(phaseName) {
   const script = composeProjects.map((p) =>
     `docker network prune -f --filter label=com.docker.compose.project=${p} >/dev/null 2>&1; echo "__RC_PRUNE_${p.replace(/[^A-Za-z0-9]/g, '_')}=$?__"`).join('\n')
   await sh(script, 'prune networks', phaseName)
+}
+
+// Delete this run's raw diffs and redacted/spec/plan text; the .log files stay for the main loop.
+async function cleanupLogs(phaseName) {
+  if (!logDir) return
+  const pre = `'${logDir}'/director-${name}-`
+  await sh(`rm -f ${pre}*.diff ${pre}*-jev-*.red ${pre}*-jev-* ${pre}*-jev.diff.red ${pre}*-panel-*.txt ${pre}*-codex.txt; echo "__RC_LOGCLEAN=$?__"`, 'clean logs', phaseName)
 }
 
 function sentinel(text, key) {
@@ -199,7 +295,7 @@ ${checkMenu}
 - acceptance: the plain-language criteria the reviewer will hold it to.
 - jev_checks: 2-6 yes/no questions for a cheap text-matching pre-screen (Jev). Each must quote the EXACT code text the finished diff should contain, for example: "In the change, is plywood-5/8 written as \`actual: 19.0 / 32\`?". Jev compares text and does no arithmetic: "19/32 inch" scored 0.69 on a wrong value, while the exact code text scored 0.03.
 Use short kebab-case ids.`,
-  { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA, effort: 'high', agentType: 'Plan' }
+  { label: 'plan', phase: 'Plan', schema: PLAN_SCHEMA, effort: 'high', agentType: 'planner-readonly', fallbackAgentType: 'Plan' }
 )
 if (!plan || !Array.isArray(plan.items)) {
   log('Planner returned nothing usable; stopping.')
@@ -211,6 +307,8 @@ const deferred = []
 const claimed = new Map()
 const items = []
 for (const it of plan.items) {
+  if (!ITEM_ID_RE.test(String(it.id))) { deferred.push({ id: String(it.id).slice(0, 40), reason: 'invalid item id' }); continue }
+  if (/SCRIPT>>>|<<<SCRIPT/.test(String(it.accept_cmd))) { deferred.push({ id: it.id, reason: 'accept_cmd contains the shell-proxy delimiter' }); continue }
   if (!checks[it.check]) { deferred.push({ id: it.id, reason: `unknown check "${it.check}"` }); continue }
   const clash = it.files.find((f) => claimed.has(f))
   if (clash) { deferred.push({ id: it.id, reason: `shares ${clash} with ${claimed.get(clash)}` }); continue }
@@ -225,15 +323,17 @@ deferred.forEach((d) => log(`deferred ${d.id}: ${d.reason}`))
 // gates and redacts again. Started now and awaited at the end, so it adds no wall time, and its
 // verdict never gates anything. Full critique: the log file.
 const codexPending = (panelClass === 'public' && items.length) ? (async () => {
-  const P = `${logDir}/director-${name}-plan`
+  const ld = await logDirP
+  if (!ld) return { verdict: 'skipped', concerns: 0, reason: 'no log dir' }
+  const P = `${ld}/director-${name}-plan`
   const planText = JSON.stringify({
     items: plan.items.map((i) => ({ id: i.id, tier: i.tier, title: i.title, files: i.files, instructions: i.instructions, accept_cmd: i.accept_cmd, acceptance: i.acceptance })),
     opus_keep: plan.opus_keep,
   }, null, 1)
   try {
     const out = await sh([
-      `cat > ${P}-codex.txt <<'CODEX_PLAN_EOF'\nGOAL:\n${goal}\n\nPLAN:\n${planText}\nCODEX_PLAN_EOF`,
-      `timeout 900 python3 ~/.claude/scripts/codex_review.py --plan ${P}-codex.txt --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${P}-codex.log 2>&1; grep -E '^__CODEX' ${P}-codex.log`,
+      writeFile(`GOAL:\n${goal}\n\nPLAN:\n${planText}\n`, `'${P}-codex.txt'`),
+      `timeout 900 python3 ~/.claude/scripts/codex_review.py --plan '${P}-codex.txt' --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > '${P}-codex.log' 2>&1; grep -E '^__CODEX' '${P}-codex.log'`,
     ].join('\n'), 'codex:plan', 'Plan')
     const res = { verdict: sentinel(out, 'CODEX') || 'error', concerns: Number(sentinel(out, 'CODEX_CONCERNS') || 0), reason: sentinel(out, 'CODEX_REASON'), log: `${P}-codex.log` }
     log(`Codex on the plan (shadow): ${res.verdict}${res.concerns ? `, ${res.concerns} concern(s)` : ''}`)
@@ -249,23 +349,37 @@ const baseWt = wtPath('base')
 const usedChecks = [...new Set(items.map((i) => i.check))]
 const baseScript = [
   'set -u',
-  `cd ${repo} || { echo "__RC=NO_REPO__"; exit 0; }`,
+  `cd '${repo}' || { echo "__RC=NO_REPO__"; exit 0; }`,
+  logDir ? `LD='${logDir}'` : 'LD=$(mktemp -d) || { echo "__RC=NO_LOGDIR__"; exit 0; }',
+  'echo "__LOGDIR=${LD}__"',
   'git fetch --prune origin >/dev/null 2>&1; echo "__RC_FETCH=$?__"',
-  `BASE=$(git rev-parse ${baseRef}); echo "__BASE=\${BASE}__"`,
+  `BASE=$(git rev-parse '${baseRef}'); echo "__BASE=\${BASE}__"`,
   'echo "__PORCELAIN=$(git status --porcelain | sha1sum | cut -c1-12)__"',
-  `if [ -e ${baseWt} ]; then git worktree remove --force ${baseWt} >/dev/null 2>&1; fi`,
-  `git worktree add --detach ${baseWt} "$BASE" >/dev/null 2>&1; echo "__RC_BASEWT=$?__"`,
-  `cd ${baseWt}`,
-  ...usedChecks.map((c) => `( ${checks[c]} ) > ${logDir}/director-${name}-base-${c}.log 2>&1; echo "__RC_BASECHECK_${c}=$?__"`),
+  `if [ -e '${baseWt}' ]; then git worktree remove --force '${baseWt}' >/dev/null 2>&1; fi`,
+  `git worktree add --detach '${baseWt}' "$BASE" >/dev/null 2>&1; echo "__RC_BASEWT=$?__"`,
+  `cd '${baseWt}'`,
+  ...usedChecks.map((c) => `( ${checks[c]} ) > "$LD/director-${name}-base-${c}.log" 2>&1; echo "__RC_BASECHECK_${c}=$?__"`),
   ...items.map((i) => `( ${i.accept_cmd} ) > /dev/null 2>&1; echo "__RC_BASEACCEPT_${i.id.replace(/-/g, '_')}=$?__"`),
 ].join('\n')
 const baseOut = await sh(baseScript, 'baseline', 'Baseline')
+if (!logDir) {
+  const ld = sentinel(baseOut, 'LOGDIR')
+  logDir = ld && PATH_RE.test(ld) ? ld.replace(/\/+$/, '') : null
+  resolveLogDir(logDir)
+  if (!logDir) {
+    log('Baseline could not create a private log dir; stopping.')
+    await pruneNetworks('Baseline')
+    return { error: 'no log dir', output: tailOf(baseOut, 30), codexPlan: await codexPending }
+  }
+}
 const baseSha = sentinel(baseOut, 'BASE')
 const porcelain = sentinel(baseOut, 'PORCELAIN')
 if (!baseSha || !/^[0-9a-f]{40}$/.test(baseSha) || sentinel(baseOut, 'RC_BASEWT') !== '0') {
   log('Baseline setup failed; stopping.')
   await pruneNetworks('Baseline')
-  return { error: 'baseline failed', output: tailOf(baseOut, 30), codexPlan: await codexPending }
+  const codexPlan = await codexPending
+  await cleanupLogs('Baseline')
+  return { error: 'baseline failed', logDir, output: tailOf(baseOut, 30), codexPlan }
 }
 const ready = []
 for (const it of items) {
@@ -299,22 +413,26 @@ async function runCheck(it, wt, round) {
   const L = `${logDir}/director-${name}-${it.id}-r${round}`
   const out = await sh([
     'set -u',
-    `cd ${wt} || { echo "__RC=NO_WT__"; exit 0; }`,
-    `( ${checks[it.check]} ) > ${L}-check.log 2>&1; rc=$?; rcc=$rc; tail -n 15 ${L}-check.log; echo "__RC_CHECK=\${rc}__"`,
-    `( ${it.accept_cmd} ) > ${L}-accept.log 2>&1; rc=$?; tail -n 8 ${L}-accept.log; echo "__RC_ACCEPT=\${rc}__"`,
+    `L='${L}'`,
+    `cd '${wt}' || { echo "__RC=NO_WT__"; exit 0; }`,
+    `( ${checks[it.check]} ) > "$L-check.log" 2>&1; rc=$?; rcc=$rc; tail -n 15 "$L-check.log"; echo "__RC_CHECK=\${rc}__"`,
+    `( ${it.accept_cmd} ) > "$L-accept.log" 2>&1; rc=$?; tail -n 8 "$L-accept.log"; echo "__RC_ACCEPT=\${rc}__"`,
     'echo "__HEAD=$(git rev-parse HEAD)__"',
     'echo "__DIRTY=$(git status --porcelain | wc -l | tr -d \' \')__"',
-    `git diff --name-only ${baseSha}..HEAD | sed 's/^/__FILE=/;s/$/__/'`,
+    `git diff --name-only '${baseSha}'..HEAD | sed 's/^/__FILE=/;s/$/__/'`,
+    // Full diff for the Opus reviewer, who has no shell and reads this file with Read.
+    `git diff ${DIFF_FLAGS} '${baseSha}'..HEAD > "$L-review.diff"`,
     ...(it.jev_checks && it.jev_checks.length ? [
-      `cat > ${L}-jev-acc.txt <<'JEV_ACC_EOF'\n${it.acceptance.join('\n')}\nJEV_ACC_EOF`,
-      `cat > ${L}-jev-q.json <<'JEV_Q_EOF'\n${JSON.stringify(it.jev_checks)}\nJEV_Q_EOF`,
+      writeFile(it.acceptance.join('\n') + '\n', '"$L-jev-acc.txt"'),
+      writeFile(JSON.stringify(it.jev_checks) + '\n', '"$L-jev-q.json"'),
       // Jev is an outside service: it only ever sees gated, redacted text, and never a client repo's.
-      `git diff ${baseSha}..HEAD > ${L}-jev.diff; jg=send; for f in jev.diff jev-acc.txt jev-q.json; do python3 ~/.claude/scripts/panel_gate.py --diff ${L}-$f --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} --out ${L}-$f.red > ${L}-$f.gate 2>&1; grep -q '^__GATE=send__' ${L}-$f.gate || jg=no; done; if [ "$jg" = send ]; then python3 ~/.claude/scripts/jev_precheck.py --acceptance ${L}-jev-acc.txt.red --questions-file ${L}-jev-q.json.red --repo '${name.replace(/'/g, '')}' < ${L}-jev.diff.red; else echo "__JEV_SKIPPED=gate__"; fi`,
+      `git diff ${DIFF_FLAGS} '${baseSha}'..HEAD > "$L-jev.diff"; jg=send; for f in jev.diff jev-acc.txt jev-q.json; do python3 ~/.claude/scripts/panel_gate.py --diff "$L-$f" --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} --out "$L-$f.red" > "$L-$f.gate" 2>&1; grep -q '^__GATE=send__' "$L-$f.gate" || jg=no; done; if [ "$jg" = send ]; then python3 ~/.claude/scripts/jev_precheck.py --acceptance "$L-jev-acc.txt.red" --questions-file "$L-jev-q.json.red" --repo '${name.replace(/'/g, '')}' < "$L-jev.diff.red"; else echo "__JEV_SKIPPED=gate__"; fi`,
     ] : []),
     // Free panel, shadow only: runs once the check is green; its verdict never gates anything.
-    `cat > ${L}-panel-spec.txt <<'PANEL_SPEC_EOF'\n${it.title}\n\n${it.instructions}\nPANEL_SPEC_EOF`,
-    `cat > ${L}-panel-acc.txt <<'PANEL_ACC_EOF'\n${it.acceptance.join('\n')}\nPANEL_ACC_EOF`,
-    `if [ "$rcc" = 0 ]; then git diff ${baseSha}..HEAD > ${L}-panel.diff; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec ${L}-panel-spec.txt --acceptance ${L}-panel-acc.txt --diff ${L}-panel.diff --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${L}-panel.log 2>&1; grep -E '^__(GATE|PANEL_[A-Za-z0-9_]+)=' ${L}-panel.log; fi`,
+    writeFile(`${it.title}\n\n${it.instructions}\n`, '"$L-panel-spec.txt"'),
+    writeFile(it.acceptance.join('\n') + '\n', '"$L-panel-acc.txt"'),
+    `if [ "$rcc" = 0 ]; then git diff ${DIFF_FLAGS} '${baseSha}'..HEAD > "$L-panel.diff"; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec "$L-panel-spec.txt" --acceptance "$L-panel-acc.txt" --diff "$L-panel.diff" --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > "$L-panel.log" 2>&1; grep -E '^__(GATE|PANEL_[A-Za-z0-9_]+)=' "$L-panel.log"; fi`,
+    'chmod 600 "$L"-* 2>/dev/null; true',
   ].join('\n'), `check:${it.id}`, 'Work')
   const reasons = []
   const rcCheck = sentinel(out, 'RC_CHECK'), rcAccept = sentinel(out, 'RC_ACCEPT')
@@ -334,16 +452,16 @@ async function runCheck(it, wt, round) {
     gate: sentinel(out, 'GATE'), majority: panelMajority,
     experts: panelExperts(out),
   }
-  return { pass: reasons.length === 0, reasons, head, jev, panel, tail: tailOf(out, 25) }
+  return { pass: reasons.length === 0, reasons, head, jev, panel, tail: tailOf(out, 25), reviewDiff: `${L}-review.diff` }
 }
 
 const results = await pipeline(ready, async (it) => {
   const wt = wtPath(it.id)
   const setup = await sh([
     'set -u',
-    `cd ${repo}`,
-    `if git show-ref --verify --quiet refs/heads/wf/${it.id} || [ -e ${wt} ]; then echo "__RC_SETUP=EXISTS__"; exit 0; fi`,
-    `git worktree add -b wf/${it.id} ${wt} ${baseSha} >/dev/null 2>&1; echo "__RC_SETUP=$?__"`,
+    `cd '${repo}'`,
+    `if git show-ref --verify --quiet 'refs/heads/wf/${it.id}' || [ -e '${wt}' ]; then echo "__RC_SETUP=EXISTS__"; exit 0; fi`,
+    `git worktree add -b 'wf/${it.id}' '${wt}' '${baseSha}' >/dev/null 2>&1; echo "__RC_SETUP=$?__"`,
   ].join('\n'), `setup:${it.id}`, 'Work')
   const rcSetup = sentinel(setup, 'RC_SETUP')
   if (rcSetup !== '0') return { id: it.id, status: rcSetup === 'EXISTS' ? 'refused-existing-branch' : 'setup-failed', tier: it.tier }
@@ -365,15 +483,20 @@ const results = await pipeline(ready, async (it) => {
       break
     }
     lastVerdict = await call(
-      `Review one change blind. Worktree ${wt}, base commit ${baseSha}. Get the diff yourself with git -C ${wt} diff ${baseSha}..HEAD and read ${wt}/CLAUDE.md. Read-only: never edit, commit, checkout or push.
+      `Review one change blind. Worktree ${wt}, base commit ${baseSha}. Read the full diff (base..HEAD) from the file ${lastCheck.reviewDiff} with the Read tool; inspect files in the worktree with Read, Grep and Glob, and read ${wt}/CLAUDE.md. Do not run commands. Read-only: never edit, commit, checkout or push.
 
 Item: ${it.title}
 Spec given to the worker:
 ${it.instructions}
 Acceptance: ${it.acceptance.join(' | ')}
 
-The regression check and acceptance command already pass. Judge what tests miss: values wrong against the spec, requirements dropped, scope creep, broken repo conventions, misleading docs. pass = you'd merge it as is. revise = at least one concrete blocking item (file, line, wrong, should be).`,
-      { label: `review:${it.id}`, phase: 'Review', agentType: 'reviewer-senior', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA })
+The regression check and acceptance command already pass. Judge what tests miss: values wrong against the spec, requirements dropped, scope creep, broken repo conventions, misleading docs. pass = you'd merge it as is. revise = at least one concrete blocking item (file, line, wrong, should be).
+
+You may only use Read, Grep and Glob.`,
+      // Fallback when the custom agent type does not resolve (needs a session restart): general-purpose
+      // has ALL tools, so it is pinned to Opus and told in the prompt to use only Read/Grep/Glob. That
+      // restriction is advisory, i.e. weaker than reviewer-senior's tool list.
+      { label: `review:${it.id}`, phase: 'Review', agentType: 'reviewer-senior', fallbackAgentType: 'general-purpose', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA })
     reviewRounds++
     if (firstReviewPass === null) { firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'; jevAtFirstReview = lastCheck.jev; panelAtFirstReview = lastCheck.panel }
     if (lastVerdict && lastVerdict.verdict === 'pass') {
@@ -428,9 +551,11 @@ const metrics = {
 log(`Ready ${metrics.ready}, capped ${metrics.capped}, deferred ${deferred.length}, lost ${metrics.lost}`)
 phase('Cleanup')
 await pruneNetworks('Cleanup')
+const codexPlan = await codexPending
+await cleanupLogs('Cleanup')
 return {
-  repo, baseRef, baseSha, porcelainAtStart: porcelain,
+  repo, baseRef, baseSha, porcelainAtStart: porcelain, logDir,
   worktrees: [baseWt, ...done.map((r) => r.worktree).filter(Boolean)],
   results: done, deferred, opusKeep: plan.opus_keep, metrics,
-  codexPlan: await codexPending,
+  codexPlan,
 }

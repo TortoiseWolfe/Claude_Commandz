@@ -245,6 +245,73 @@ class TestAttribution(Base):
             self.assertEqual(u.main(["untag", "sess-ada-0001"], env=self.env, out=io.StringIO()), 1)   # nothing left to remove
 
 
+class TestAuditHardening(Base):
+    """2026-10-01 audit: CSV formula injection, ledger field validation, untag wildcards."""
+
+    def test_csv_cell_prefixes_formula_starters_only(self):
+        for bad in ("=1+1", "+cmd|' /C calc'!A0", "-2+3", "@SUM(A1)", "\t=x", "=HYPERLINK(\"http://x\")"):
+            self.assertEqual(u.csv_cell(bad), "'" + bad, bad)
+        for ok in ("plain", "-1.50", "12", "", "ada client", 7, None):
+            self.assertEqual(u.csv_cell(ok), ok, ok)
+
+    def test_report_csv_escapes_group_and_note(self):
+        self.clients({"clients": [{"client": "=BAD()", "repos": ["gpbp*"], "note": "@evil"}]})
+        cwd = os.path.join(self.env.repos_root, "gpbp")
+        self.write(self.sess(), [user("12:00:00", cwd), asst("m1", "12:00:30", cwd, model="claude-opus-5", i=1, o=1, w5=0, w1=0, r=0)])
+        self.ingest()
+        out = io.StringIO()
+        u.main(["report", "--since", "2026-09-10", "--until", "2026-09-10", "--csv"], env=self.env, out=out)
+        raw = list(csv.reader(io.StringIO(out.getvalue())))
+        self.assertTrue(any(r[0] == "'=BAD()" and r[-1] == "'@evil" for r in raw), raw)
+        self.assertFalse(any(c.startswith(("=", "@")) for r in raw for c in r))
+
+    def test_ledger_free_text_fields_are_validated(self):
+        import ledger_log
+        rec = ledger_log.record("my repo", "e", "=cmd()", 1, 2, 3, "client\nx", "se nd")
+        self.assertEqual((rec["repo"], rec["model"], rec["class"], rec["gate"]), ("?", "?", "?", "?"))
+        rec = ledger_log.record("x" * 101, "e", "m", 1, 2, 3, "public", "send")
+        self.assertEqual(rec["repo"], "?")
+        rec = ledger_log.record("AI_Workflow", "e", "@cf/qwen/qwen2.5-coder-32b-instruct", 1, 2, 3, "public", "send")
+        self.assertEqual((rec["repo"], rec["model"]), ("AI_Workflow", "@cf/qwen/qwen2.5-coder-32b-instruct"))
+        rec = ledger_log.record("poolside/laguna-s-2.1:free", "e", "a+b@c", 1, 2, 3, None, None)
+        self.assertEqual((rec["repo"], rec["model"], rec["class"], rec["gate"]), ("poolside/laguna-s-2.1:free", "a+b@c", None, None))
+        self.assertIsNone(ledger_log.record(None, "e", "m", 0, 0, 0, None, None)["repo"])
+
+    def _tagged(self, *sessions):
+        conn = u.connect(self.env)
+        for s_ in sessions:
+            conn.execute("INSERT OR REPLACE INTO tags VALUES(?,?,?)", (s_, "C", 1))
+        conn.commit()
+        conn.close()
+
+    def _tag_count(self):
+        conn = u.connect(self.env)
+        try:
+            return conn.execute("SELECT count(*) FROM tags").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_untag_wildcard_only_refuses_without_all(self):
+        self._tagged("sess-aaaaaaaa-1", "sess-bbbbbbbb-2")
+        for pat in ("%", "%%%%%%%%%%", "_", "%_%"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = u.main(["untag", pat], env=self.env, out=io.StringIO())
+            self.assertEqual(rc, 2, pat)
+            self.assertEqual(self._tag_count(), 2, pat)
+        self.assertEqual(u.main(["untag", "%%%%%%%%%%", "--all"], env=self.env, out=io.StringIO()), 0)
+        self.assertEqual(self._tag_count(), 0)
+
+    def test_untag_wildcards_inside_a_pattern_are_literal(self):
+        self._tagged("sess-aaaaaaaa-1", "sess-bbbbbbbb-2")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(u.main(["untag", "sess-%%%%%%%%"], env=self.env, out=io.StringIO()), 1)
+            self.assertEqual(u.main(["untag", "sess-a_aaaaaa"], env=self.env, out=io.StringIO()), 1)
+        self.assertEqual(self._tag_count(), 2)
+        self.assertEqual(u.main(["untag", "sess-aaaaaaaa"], env=self.env, out=io.StringIO()), 0)   # a real prefix still works
+        self.assertEqual(self._tag_count(), 1)
+
+
 class TestIncrementalIngest(Base):
     def test_append_only_adds_new_rows_and_untouched_files_are_skipped(self):
         cwd = self.env.repos_root

@@ -24,8 +24,8 @@ CLEAN = lambda diff: "clean"  # noqa: E731
 SPEC = "Add an owner greeting. Contact ops at ops@corp.io."
 ACCEPT = "- prints hello\n- owner is configurable"
 DIFF = ('diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,3 @@\n'
-        '+owner = "jane.doe@gmail.com"  # call (423) 555-0199\n+print("hello")\n')
-ORIGINALS = ["jane.doe@gmail.com", "555-0199", "ops@corp.io"]
+        '+owner = "jane.doe@planted-mail.org"  # call (423) 555-0199\n+print("hello")\n')
+ORIGINALS = ["jane.doe@planted-mail.org", "555-0199", "ops@corp.io"]
 KEYS = {"groq": "gsk_SECRETGROQKEY", "gemini": "AIzaSECRETGEMINIKEY",
         "cloudflare": "cf_SECRETTOKEN", "openrouter": "sk-or-SECRETKEY"}
 ACCOUNT_ID = "ACCT_ID_0123456789"
@@ -142,7 +142,7 @@ def make_deps(net, clock, runner=None, keys=KEYS, installed=("grok", "agy", "cop
     return pr.Deps(post_json=net.post_json, get_json=net.get_json, run_cmd=runner or FakeRunner(),
                    which=lambda n: f"/usr/bin/{n}" if n in installed else None,
                    exists=lambda path: path in existing, now=clock.now, sleep=clock.sleep, read_key=read_key,
-                   scanner=scanner, **kw)
+                   scanner=scanner, **{"classes_path": "/nonexistent/classes.json", **kw})
 
 
 def max_window(events, window=60.0):
@@ -2089,6 +2089,158 @@ class DeadlineTests(Base):
         cfg, _ = pr.load_config(p)
         pr.review_with(pr.make_experts(cfg)["openrouter"], cfg, self.deps(), SPEC, ACCEPT, DIFF)
         self.assertNotIn("reasoning", self.net.posts[0]["payload"])
+
+
+class AuditFlowTests(Base):
+    """2026-10-01 security audit: spec/acceptance scan, class lookup, CLI env, argv and HTTP hardening."""
+    run_panel = FlowTests.run_panel
+    called = FlowTests.called
+
+    def classes(self, repos):
+        path = os.path.join(self.tmp, "classes.json")
+        Path(path).write_text(json.dumps({"repos": repos}), encoding="utf-8")
+        return path
+
+    def test_secret_in_spec_stops_every_expert(self):
+        scan = lambda t: "found" if "AKIAFAKEKEY" in t else "clean"  # noqa: E731
+        r = self.run_panel(spec="deploy with AKIAFAKEKEY", scanner=scan)
+        self.assertEqual(r.lines["GATE"], "skip")
+        self.assertEqual(r.lines["PANEL_MAJORITY"], "none")
+        self.assertEqual(self.called(), [])
+
+    def test_secret_in_acceptance_stops_every_expert(self):
+        seen = []
+
+        def scan(t):
+            seen.append(t)
+            return "found" if ACCEPT in t and len(seen) > 1 else "clean"
+        r = self.run_panel(scanner=scan)
+        self.assertEqual((r.lines["GATE"], self.called()), ("skip", []))
+        self.assertTrue(any(SPEC in t and ACCEPT in t for t in seen))
+
+    def test_unavailable_scanner_on_spec_text_is_skip(self):
+        n = []
+        r = self.run_panel(scanner=lambda t: (n.append(1), "clean" if len(n) == 1 else "unavailable")[1])
+        self.assertEqual((r.lines["GATE"], self.called()), ("skip", []))
+
+    def test_listed_client_overrides_passed_public(self):
+        cp = self.classes({"RepoX": "client"})
+        r = self.run_panel("--repo", "repox", cls="public", classes_path=cp)
+        self.assertEqual(r.json["class"], "client")
+        self.assertEqual(self.called(), ["local"])
+
+    def test_stricter_of_passed_and_listed(self):
+        cp = self.classes({"a": "public", "b": "own"})
+        self.assertEqual(self.run_panel("--repo", "a", cls="own", classes_path=cp).json["class"], "own")
+        self.assertEqual(self.run_panel("--repo", "b", cls="public", classes_path=cp).json["class"], "own")
+        self.assertEqual(self.run_panel("--repo", "b", cls="client", classes_path=cp).json["class"], "client")
+        self.assertEqual(self.run_panel("--repo", "zzz", cls="public", classes_path=cp).json["class"], "client")   # unlisted = client
+
+    def test_unreadable_class_list_fails_closed(self):
+        bad = os.path.join(self.tmp, "classes.json")
+        Path(bad).write_text("{not json")
+        r = self.run_panel("--repo", "a", cls="public", classes_path=bad)
+        self.assertEqual(r.json["class"], "client")
+
+    def test_cli_runs_with_a_minimal_environment(self):
+        code = "import os; print(sorted(os.environ))"
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "x", "AWS_SECRET_ACCESS_KEY": "y", "FOO_KEY": "z",
+                                          "PATH": os.environ["PATH"], "HOME": "/h", "LANG": "C"}):
+            rc, out = pr.real_run_cmd([sys.executable, "-c", code], 20)
+            rc2, out2 = pr.real_run_cmd([sys.executable, "-c", code], 20, env_extra=("FOO_KEY",))
+        names = eval(out)
+        for bad in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "FOO_KEY"):
+            self.assertNotIn(bad, names)
+        for good in ("PATH", "HOME", "LANG", "TERM"):
+            self.assertIn(good, names)
+        self.assertIn("FOO_KEY", eval(out2))
+        self.assertNotIn("GH_TOKEN", eval(out2))
+        rc3, out3 = pr.real_run_cmd([sys.executable, "-c", "import os; print(os.environ['TERM'])"], 20)
+        self.assertEqual(out3.strip(), "dumb")
+
+    def test_spec_env_list_reaches_the_runner_and_default_does_not(self):
+        calls = []
+
+        def runner(cmd, timeout, env_extra=None):
+            calls.append(env_extra)
+            return 0, json.dumps(PASS)
+        self.runner = runner
+        self.spec("grok")["env"] = ["XAI_API_KEY", "bad name"]
+        self.ex("grok").ask("hello", self.cfg, self.deps())
+        self.assertEqual(calls, [("XAI_API_KEY",)])
+
+    def test_prompt_never_starts_with_a_dash(self):
+        self.ex("grok").ask("-rf evil", self.cfg, self.deps())
+        self.assertEqual(self.runner.calls[-1]["cmd"][-1], " -rf evil")
+        self.spec("antigravity")["cmd"] = ["agy", "{prompt}"]
+        self.ex("antigravity").ask("--yolo", self.cfg, self.deps())
+        self.assertEqual(self.runner.calls[-1]["cmd"][-1], " --yolo")
+        self.ex("antigravity").ask("plain", self.cfg, self.deps())
+        self.assertEqual(self.runner.calls[-1]["cmd"][-1], "plain")
+
+
+class HttpHardeningTests(unittest.TestCase):
+    def serve(self, handler_cls):
+        from http.server import HTTPServer
+        srv = HTTPServer(("127.0.0.1", 0), handler_cls)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv
+
+    def test_redirect_is_an_error_not_followed(self):
+        from http.server import BaseHTTPRequestHandler
+        hits = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+            do_GET = do_POST
+
+            def log_message(self, *a):
+                pass
+        target = self.serve(Target)
+
+        class Redir(Target):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/x")
+                self.end_headers()
+            do_GET = do_POST
+        redir = self.serve(Redir)
+        url = f"http://127.0.0.1:{redir.server_port}/v1"
+        status, _ = pr.real_post_json(url, {"Authorization": "Bearer k"}, {}, 5)
+        self.assertEqual(status, 307)
+        self.assertEqual(hits, [])   # the key never reached the redirect target
+        with self.assertRaises(Exception):
+            pr.real_get_json(url, 5)
+
+    def test_proxy_environment_is_ignored(self):
+        from http.server import BaseHTTPRequestHandler
+
+        class Ok(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+        srv = self.serve(Ok)
+        with mock.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
+                                          "no_proxy": ""}):
+            self.assertEqual(pr.real_get_json(f"http://127.0.0.1:{srv.server_port}/", 5), (200, {}))
+
+    def test_opener_has_no_redirect_and_empty_proxy_handlers(self):
+        op = pr.build_opener()
+        kinds = {type(h).__name__ for h in op.handlers}
+        self.assertIn("_NoRedirect", kinds)
+        self.assertNotIn("HTTPRedirectHandler", kinds)
+        # an empty ProxyHandler registers no methods, but it displaces the env-reading default one
+        self.assertFalse([h for h in op.handlers if isinstance(h, pr.urllib.request.ProxyHandler)])
 
 
 if __name__ == "__main__":

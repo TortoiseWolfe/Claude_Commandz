@@ -28,6 +28,8 @@ import ledger_log  # noqa: E402
 import panel_gate  # noqa: E402
 
 AUTH_PATH = "~/.codex/auth.json"   # existence check only
+EFFORTS = ("low", "medium", "high", "xhigh", "ultra", "minimal", "none")
+ENV_KEEP = ("PATH", "HOME", "LANG", "CODEX_HOME")
 REASON_CHARS = 200
 TOKENS_RE = re.compile(r"tokens used\s*:?\s*([\d,]+)", re.IGNORECASE)
 MODEL_RE = re.compile(r"^\s*model:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
@@ -43,11 +45,19 @@ Reply with JSON only, no prose and no code fences:
 """
 
 
+def codex_env():
+    """Minimal environment for the codex subprocess: no tokens or cloud credentials ride along."""
+    env = {k: os.environ[k] for k in ENV_KEEP if k in os.environ}
+    env["TERM"] = "dumb"
+    return env
+
+
 def real_run(argv, prompt, cwd, timeout):
     """Run codex. argv list, never a shell; own session so a timeout kills the whole group.
     -> (returncode, stdout + stderr). Raises subprocess.TimeoutExpired."""
     p = subprocess.Popen(argv, shell=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, cwd=cwd, text=True, start_new_session=True)
+                         stderr=subprocess.STDOUT, cwd=cwd, text=True, start_new_session=True,
+                         env=codex_env())
     try:
         out, _ = p.communicate(prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -69,6 +79,7 @@ class Deps:
     which: Callable = shutil.which
     exists: Callable = lambda p: os.path.exists(os.path.expanduser(p))   # noqa: E731  (never reads)
     scanner: Optional[Callable] = None        # gate secret scanner; None = real gitleaks via Docker
+    classes_path: Optional[str] = None        # per-repo class list; None = ~/.config/panel/classes.json
     ledger_path: Optional[str] = None
     now: Callable = time.monotonic
 
@@ -139,6 +150,9 @@ def log_usage(a, deps, prompt, reply, output, ms):
 
 
 def run_review(a, deps):
+    if a.effort not in EFFORTS:   # the value goes into a `-c` config override: only known words get through
+        return emit_error("bad effort")
+    a.cls = panel_gate.effective_class(a.repo, a.cls, deps.classes_path)   # stricter of passed and listed
     if a.cls != "public":
         print("__CODEX=skipped__")
         print("__CODEX_REASON=class__")

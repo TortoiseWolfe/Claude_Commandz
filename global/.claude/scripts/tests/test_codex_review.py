@@ -51,7 +51,7 @@ class CodexTests(unittest.TestCase):
         self.terms = os.path.join(self.tmp, "no-terms.txt")
 
     def run_main(self, runner=None, cls="public", plan_text=None, extra=(), which=True, auth=True,
-                 scanner=CLEAN):
+                 scanner=CLEAN, classes_path=None, repo="t"):
         if plan_text is not None:
             Path(self.plan).write_text(plan_text)
         self.exists_calls = []
@@ -61,8 +61,9 @@ class CodexTests(unittest.TestCase):
             return auth
 
         deps = cr.Deps(run=runner or Runner(), which=lambda n: "/usr/bin/codex" if which else None,
-                       exists=exists, scanner=scanner, ledger_path=self.ledger)
-        argv = ["--plan", self.plan, "--class", cls, "--repo", "t", "--terms-file", self.terms, *extra]
+                       exists=exists, scanner=scanner, ledger_path=self.ledger,
+                       classes_path=classes_path or os.path.join(self.tmp, "no-classes.json"))
+        argv = ["--plan", self.plan, "--class", cls, "--repo", repo, "--terms-file", self.terms, *extra]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = cr.main(argv, deps)
@@ -216,6 +217,54 @@ class CodexTests(unittest.TestCase):
     def test_skipped_runs_log_nothing(self):
         self.run_main(Runner(), cls="own")
         self.assertEqual(self.ledger_rows(), [])
+
+    def test_unknown_effort_is_an_error_and_runs_nothing(self):
+        for bad in ("high -c sandbox_mode=danger-full-access", "extreme", ""):
+            r = Runner()
+            out = self.run_main(r, extra=["--effort", bad])
+            self.assertIn("__CODEX=error__", out, bad)
+            self.assertIn("bad effort", out)
+            self.assertEqual(r.calls, [])
+
+    def test_every_documented_effort_is_accepted(self):
+        for e in ("low", "medium", "high", "xhigh", "ultra", "minimal", "none"):
+            r = Runner()
+            self.run_main(r, extra=["--effort", e])
+            self.assertIn(f"model_reasoning_effort={e}", r.calls[0]["argv"])
+
+    def test_listed_class_makes_a_public_plan_local_only(self):
+        cp = os.path.join(self.tmp, "classes.json")
+        Path(cp).write_text(json.dumps({"repos": {"T": "client"}}))
+        r = Runner()
+        out = self.run_main(r, classes_path=cp, repo="t")
+        self.assertIn("__CODEX=skipped__", out)
+        self.assertIn("__CODEX_REASON=class__", out)
+        self.assertEqual(r.calls, [])
+        r = Runner()
+        out = self.run_main(r, classes_path=cp, repo="other")   # unlisted = client, as classes.json says
+        self.assertIn("__CODEX=skipped__", out)
+        self.assertEqual(r.calls, [])
+
+    def test_subprocess_gets_a_minimal_environment(self):
+        from unittest import mock
+        seen = {}
+
+        class P:
+            pid = 1
+            returncode = 0
+
+            def communicate(self, prompt=None, timeout=None):
+                return "ok", None
+
+        def popen(argv, **kw):
+            seen.update(kw)
+            return P()
+        env = {"PATH": "/bin", "HOME": "/h", "LANG": "C", "CODEX_HOME": "/c", "OPENAI_API_KEY": "k",
+               "GH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(cr.subprocess, "Popen", popen):
+            cr.real_run(["codex"], "p", self.tmp, 5)
+        self.assertEqual(seen["env"], {"PATH": "/bin", "HOME": "/h", "LANG": "C", "CODEX_HOME": "/c",
+                                       "TERM": "dumb"})
 
 
 if __name__ == "__main__":

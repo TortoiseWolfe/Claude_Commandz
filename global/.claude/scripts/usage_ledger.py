@@ -745,8 +745,28 @@ def render_report_text(rep, since, until):
     return "\n".join(lines)
 
 
+_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+_NUMBER = re.compile(r"[+-]?\d+(?:\.\d+)?")
+
+
+def csv_cell(v):
+    """Spreadsheets run a cell that starts with = + - @ as a formula: prefix a single quote. Plain numbers
+    (a leading minus is legitimate there) pass through untouched."""
+    if isinstance(v, str) and v.startswith(_FORMULA) and not _NUMBER.fullmatch(v):
+        return "'" + v
+    return v
+
+
+class _SafeWriter:
+    def __init__(self, fh):
+        self._w = csv.writer(fh)
+
+    def writerow(self, row):
+        self._w.writerow([csv_cell(c) for c in row])
+
+
 def write_report_csv(rep, fh):
-    w = csv.writer(fh)
+    w = _SafeWriter(fh)
     cols = ["group", "your_hours", "agent_hours", "commits", "opus_equiv_tokens", "api_equiv_usd",
             "panel_input_tokens", "panel_output_tokens"]
     cols += ["%s_%s" % (f, k) for f in FAMILIES for k in ("input", "output", "cache_write", "cache_read")] + ["note"]
@@ -777,11 +797,20 @@ def cmd_tag(env, session, client):
         conn.close()
 
 
-def cmd_untag(env, session):
+def cmd_untag(env, session, all_tags=False):
+    """Remove a tag by exact id or by an 8+ character prefix. LIKE wildcards in SESSION are literal, except
+    that a pattern made only of % and _ means "every tag" and is refused unless --all is given."""
+    wild_only = not session.strip("%_")
+    if wild_only and not all_tags:
+        return "refusing to untag every tag with %r; pass --all if that is really what you want" % session, 2
     conn = connect(env)
     try:
-        n = conn.execute("DELETE FROM tags WHERE session=? OR (length(?)>=8 AND session LIKE ?)",
-                         (session, session, session + "%")).rowcount
+        if wild_only:
+            n = conn.execute("DELETE FROM tags").rowcount
+        else:
+            esc = session.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            n = conn.execute("DELETE FROM tags WHERE session=? OR (length(?)>=8 AND session LIKE ? ESCAPE '\\')",
+                             (session, session, esc + "%")).rowcount
         conn.commit()
         return ("untagged %s" % session, 0) if n else ("no tag matched %s" % session, 1)
     finally:
@@ -844,6 +873,8 @@ def build_parser():
     p.add_argument("--client", required=True)
     p = sub.add_parser("untag", help="remove a session override")
     p.add_argument("session")
+    p.add_argument("--all", action="store_true", dest="all_tags",
+                   help="allow a wildcard-only SESSION (such as %%%%) to remove every tag")
     sub.add_parser("clients", help="repo -> client mapping actually seen, with token totals")
     return ap
 
@@ -877,7 +908,7 @@ def main(argv=None, env=None, out=None):
     if args.cmd == "tag":
         msg, rc = cmd_tag(env, args.session, args.client)
     elif args.cmd == "untag":
-        msg, rc = cmd_untag(env, args.session)
+        msg, rc = cmd_untag(env, args.session, args.all_tags)
     else:
         msg, rc = cmd_clients(env), 0
     print(msg, file=out if rc == 0 else sys.stderr)
