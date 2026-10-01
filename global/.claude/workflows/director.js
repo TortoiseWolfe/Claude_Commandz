@@ -220,6 +220,29 @@ for (const it of plan.items) {
 log(`Planned ${plan.items.length} items: ${items.length} dispatchable, ${deferred.length} deferred, ${plan.opus_keep.length} kept for Opus`)
 deferred.forEach((d) => log(`deferred ${d.id}: ${d.reason}`))
 
+// Codex, shadow, once per run: a high-level second opinion on the PLAN from the owner's ChatGPT
+// plan, used sparingly on purpose. Public repos only (that plan may train on input); the script
+// gates and redacts again. Started now and awaited at the end, so it adds no wall time, and its
+// verdict never gates anything. Full critique: the log file.
+const codexPending = (panelClass === 'public' && items.length) ? (async () => {
+  const P = `${logDir}/director-${name}-plan`
+  const planText = JSON.stringify({
+    items: plan.items.map((i) => ({ id: i.id, tier: i.tier, title: i.title, files: i.files, instructions: i.instructions, accept_cmd: i.accept_cmd, acceptance: i.acceptance })),
+    opus_keep: plan.opus_keep,
+  }, null, 1)
+  try {
+    const out = await sh([
+      `cat > ${P}-codex.txt <<'CODEX_PLAN_EOF'\nGOAL:\n${goal}\n\nPLAN:\n${planText}\nCODEX_PLAN_EOF`,
+      `timeout 900 python3 ~/.claude/scripts/codex_review.py --plan ${P}-codex.txt --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${P}-codex.log 2>&1; grep -E '^__CODEX' ${P}-codex.log`,
+    ].join('\n'), 'codex:plan', 'Plan')
+    const res = { verdict: sentinel(out, 'CODEX') || 'error', concerns: Number(sentinel(out, 'CODEX_CONCERNS') || 0), reason: sentinel(out, 'CODEX_REASON'), log: `${P}-codex.log` }
+    log(`Codex on the plan (shadow): ${res.verdict}${res.concerns ? `, ${res.concerns} concern(s)` : ''}`)
+    return res
+  } catch (e) {
+    return { verdict: 'error', concerns: 0, reason: String(e).slice(0, 80), log: `${P}-codex.log` }
+  }
+})() : Promise.resolve({ verdict: 'skipped', concerns: 0, reason: panelClass === 'public' ? 'no items' : 'class' })
+
 // ---- Phase 2: Baseline (barrier: one image build, one base tree) ----------
 phase('Baseline')
 const baseWt = wtPath('base')
@@ -242,7 +265,7 @@ const porcelain = sentinel(baseOut, 'PORCELAIN')
 if (!baseSha || !/^[0-9a-f]{40}$/.test(baseSha) || sentinel(baseOut, 'RC_BASEWT') !== '0') {
   log('Baseline setup failed; stopping.')
   await pruneNetworks('Baseline')
-  return { error: 'baseline failed', output: tailOf(baseOut, 30) }
+  return { error: 'baseline failed', output: tailOf(baseOut, 30), codexPlan: await codexPending }
 }
 const ready = []
 for (const it of items) {
@@ -409,4 +432,5 @@ return {
   repo, baseRef, baseSha, porcelainAtStart: porcelain,
   worktrees: [baseWt, ...done.map((r) => r.worktree).filter(Boolean)],
   results: done, deferred, opusKeep: plan.opus_keep, metrics,
+  codexPlan: await codexPending,
 }
