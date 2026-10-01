@@ -208,6 +208,15 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/secret-guard.py"
+          }
+        ]
+      },
+      {
         "matcher": "mcp__claude_ai_Gmail__.*|Bash",
         "hooks": [
           {
