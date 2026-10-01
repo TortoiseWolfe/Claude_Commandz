@@ -79,6 +79,8 @@ RETRY_NOTE = "Your previous reply was not valid JSON. Reply with ONLY the JSON o
 # `enabled: false` switches an expert off (it is then `unavailable` and never launched or sent anything).
 # enabled_if is "which:BINARY", "exists:PATH" or "file:PATH", or a list of them that must all hold; an
 # expert whose condition fails is `unavailable`.
+COPILOT_ASK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copilot_ask.sh")
+
 DEFAULT_CONFIG = {
     "timeout": 120,
     "max_chunks": 8,
@@ -143,6 +145,12 @@ DEFAULT_CONFIG = {
          "note": "verify live: :free models rotate; list at openrouter.ai/collections/free-models"},
         {"name": "grok", "kind": "cli", "cmd": ["grok", "-p"], "classes": ["public"],
          "trains": True, "enabled_if": "which:grok", "chunk_chars": 60000},
+        {"name": "copilot", "kind": "cli", "cmd": ["bash", COPILOT_ASK, "{prompt}"], "classes": ["public"],
+         "trains": True, "chunk_chars": 60000, "enabled_if": ["which:copilot", "which:gh"],
+         "note": "GitHub Copilot CLI on Copilot Free, through copilot_ask.sh: it borrows gh's login at call "
+                 "time and denies the shell, write and built-in GitHub MCP tools. Training terms for Free are "
+                 "unverified, so it is public-class only. Free carries a small monthly allowance; once it "
+                 "runs out, calls fail and the expert reads as error, which never gates anything."},
         {"name": "local", "kind": "ollama", "model": "qwen2.5-coder:7b",
          "endpoint": "http://127.0.0.1:11434", "classes": ["public", "own", "client"], "trains": False,
          "num_ctx": 16384, "probe_timeout": 2, "chunk_chars": 30000,
