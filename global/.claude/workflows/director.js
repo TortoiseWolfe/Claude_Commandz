@@ -27,6 +27,14 @@ const goal = A.goal ? String(A.goal) : null
 const baseRef = A.base ? String(A.base) : 'origin/main'
 const checks = A.checks && typeof A.checks === 'object' ? A.checks : {}
 const logDir = A.logDir ? String(A.logDir) : '/tmp'
+// Free review panel (shadow): ~/.claude/scripts/panel_review.py behind panel_gate.py. The class comes
+// from <repo>/.claude/director.json "panel": {"class": "public"|"own"|"client", "never_send": [...]}.
+// A missing or unknown class is "client": only the on-machine model may see the diff.
+const PANEL_CLASSES = ['public', 'own', 'client']
+const panelCfg = A.panel && typeof A.panel === 'object' ? A.panel : {}
+const panelClass = PANEL_CLASSES.includes(panelCfg.class) ? panelCfg.class : 'client'
+const panelNeverSend = Array.isArray(panelCfg.never_send) ? panelCfg.never_send.map(String) : []
+const PANEL_EXPERTS = ['groq', 'gemini', 'grok', 'local']
 const MAX_REVIEW_ROUNDS = 2
 const MAX_WORKER_ROUNDS = 5
 
@@ -259,7 +267,7 @@ async function runCheck(it, wt, round) {
   const out = await sh([
     'set -u',
     `cd ${wt} || { echo "__RC=NO_WT__"; exit 0; }`,
-    `( ${checks[it.check]} ) > ${L}-check.log 2>&1; rc=$?; tail -n 15 ${L}-check.log; echo "__RC_CHECK=\${rc}__"`,
+    `( ${checks[it.check]} ) > ${L}-check.log 2>&1; rc=$?; rcc=$rc; tail -n 15 ${L}-check.log; echo "__RC_CHECK=\${rc}__"`,
     `( ${it.accept_cmd} ) > ${L}-accept.log 2>&1; rc=$?; tail -n 8 ${L}-accept.log; echo "__RC_ACCEPT=\${rc}__"`,
     'echo "__HEAD=$(git rev-parse HEAD)__"',
     'echo "__DIRTY=$(git status --porcelain | wc -l | tr -d \' \')__"',
@@ -269,6 +277,10 @@ async function runCheck(it, wt, round) {
       `cat > ${L}-jev-q.json <<'JEV_Q_EOF'\n${JSON.stringify(it.jev_checks)}\nJEV_Q_EOF`,
       `git diff ${baseSha}..HEAD | python3 ~/.claude/scripts/jev_precheck.py --acceptance ${L}-jev-acc.txt --questions-file ${L}-jev-q.json`,
     ] : []),
+    // Free panel, shadow only: runs once the check is green; its verdict never gates anything.
+    `cat > ${L}-panel-spec.txt <<'PANEL_SPEC_EOF'\n${it.title}\n\n${it.instructions}\nPANEL_SPEC_EOF`,
+    `cat > ${L}-panel-acc.txt <<'PANEL_ACC_EOF'\n${it.acceptance.join('\n')}\nPANEL_ACC_EOF`,
+    `if [ "$rcc" = 0 ]; then git diff ${baseSha}..HEAD > ${L}-panel.diff; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec ${L}-panel-spec.txt --acceptance ${L}-panel-acc.txt --diff ${L}-panel.diff --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${L}-panel.log 2>&1; grep -E '^__(GATE|PANEL_MAJORITY|PANEL_(${PANEL_EXPERTS.join('|')}))=' ${L}-panel.log; fi`,
   ].join('\n'), `check:${it.id}`, 'Work')
   const reasons = []
   const rcCheck = sentinel(out, 'RC_CHECK'), rcAccept = sentinel(out, 'RC_ACCEPT')
@@ -283,7 +295,12 @@ async function runCheck(it, wt, round) {
   if (files.length === 0) reasons.push('diff against base is empty')
   const jevMinRaw = sentinel(out, 'JEV_MIN')
   const jev = jevMinRaw === null ? null : { min: /^[0-9.]+$/.test(jevMinRaw) ? Number(jevMinRaw) : null, raw: jevMinRaw, per: sentinels(out, 'JEV_Q[0-9]+') }
-  return { pass: reasons.length === 0, reasons, head, jev, tail: tailOf(out, 25) }
+  const panelMajority = sentinel(out, 'PANEL_MAJORITY')
+  const panel = panelMajority === null ? null : {
+    gate: sentinel(out, 'GATE'), majority: panelMajority,
+    experts: Object.fromEntries(PANEL_EXPERTS.map((e) => [e, sentinel(out, `PANEL_${e}`)]).filter(([, v]) => v !== null)),
+  }
+  return { pass: reasons.length === 0, reasons, head, jev, panel, tail: tailOf(out, 25) }
 }
 
 const results = await pipeline(ready, async (it) => {
@@ -298,7 +315,7 @@ const results = await pipeline(ready, async (it) => {
   if (rcSetup !== '0') return { id: it.id, status: rcSetup === 'EXISTS' ? 'refused-existing-branch' : 'setup-failed', tier: it.tier }
 
   let tier = it.tier, escalated = false, checkFails = 0, reviewRounds = 0, workerRounds = 0
-  let firstCheckPass = null, firstReviewPass = null, feedback = null, lastCheck = null, lastVerdict = null, jevAtFirstReview = null
+  let firstCheckPass = null, firstReviewPass = null, feedback = null, lastCheck = null, lastVerdict = null, jevAtFirstReview = null, panelAtFirstReview = null
   while (workerRounds < MAX_WORKER_ROUNDS) {
     workerRounds++
     await call(workerPrompt(it, wt, feedback), tier === 'haiku'
@@ -324,14 +341,14 @@ Acceptance: ${it.acceptance.join(' | ')}
 The regression check and acceptance command already pass. Judge what tests miss: values wrong against the spec, requirements dropped, scope creep, broken repo conventions, misleading docs. pass = you'd merge it as is. revise = at least one concrete blocking item (file, line, wrong, should be).`,
       { label: `review:${it.id}`, phase: 'Review', agentType: 'reviewer-senior', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA })
     reviewRounds++
-    if (firstReviewPass === null) { firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'; jevAtFirstReview = lastCheck.jev }
+    if (firstReviewPass === null) { firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'; jevAtFirstReview = lastCheck.jev; panelAtFirstReview = lastCheck.panel }
     if (lastVerdict && lastVerdict.verdict === 'pass') {
-      return { id: it.id, status: 'ready', branch: `wf/${it.id}`, worktree: wt, head: lastCheck.head, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview, notes: lastVerdict.notes || '' }
+      return { id: it.id, status: 'ready', branch: `wf/${it.id}`, worktree: wt, head: lastCheck.head, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview, panelAtFirstReview, notes: lastVerdict.notes || '' }
     }
     if (reviewRounds >= MAX_REVIEW_ROUNDS) break
     feedback = `Reviewer blocking items:\n- ${(lastVerdict ? lastVerdict.blocking : ['reviewer returned nothing']).join('\n- ')}`
   }
-  return { id: it.id, status: 'capped', branch: `wf/${it.id}`, worktree: wt, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview,
+  return { id: it.id, status: 'capped', branch: `wf/${it.id}`, worktree: wt, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview, panelAtFirstReview,
     lastCheckReasons: lastCheck ? lastCheck.reasons : [], lastBlocking: lastVerdict ? lastVerdict.blocking : [] }
 })
 
@@ -357,6 +374,20 @@ const metrics = {
   jevShadow: (() => {
     const scored = done.filter((r) => r.jevAtFirstReview && r.jevAtFirstReview.min !== null && r.firstReviewPass !== null)
     return { scored: scored.length, agreedWithOpus: scored.filter((r) => (r.jevAtFirstReview.min >= 0.5) === r.firstReviewPass).length }
+  })(),
+  // Shadow free panel: per expert and for the majority, how often it matched Opus's first-round
+  // verdict, and how often it said pass where Opus said revise (falsePass: the dangerous direction).
+  panelShadow: (() => {
+    const rows = done.filter((r) => r.panelAtFirstReview && r.firstReviewPass !== null)
+    const score = (get) => {
+      const s = rows.map((r) => ({ v: get(r), opus: r.firstReviewPass })).filter((x) => x.v === 'pass' || x.v === 'revise')
+      return { scored: s.length, agreedWithOpus: s.filter((x) => (x.v === 'pass') === x.opus).length, falsePass: s.filter((x) => x.v === 'pass' && !x.opus).length }
+    }
+    return {
+      class: panelClass,
+      majority: score((r) => r.panelAtFirstReview.majority),
+      ...Object.fromEntries(PANEL_EXPERTS.map((e) => [e, score((r) => r.panelAtFirstReview.experts[e])])),
+    }
   })(),
 }
 log(`Ready ${metrics.ready}, capped ${metrics.capped}, deferred ${deferred.length}, lost ${metrics.lost}`)
