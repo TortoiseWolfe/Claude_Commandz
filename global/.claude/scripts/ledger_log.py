@@ -6,6 +6,7 @@ reply, so text cannot reach the log by accident. Stdlib only."""
 
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 
@@ -19,6 +20,18 @@ def utc_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+SAFE_TEXT = re.compile(r"^[A-Za-z0-9._:/@+-]{1,100}$")
+
+
+def _safe(v):
+    """Free-text fields (repo, model, class, gate) are logged only if they look like names. Anything else,
+    including a spreadsheet formula or a sentence, becomes "?". None stays None (the field is not applicable)."""
+    if v is None:
+        return None
+    v = str(v)
+    return v if SAFE_TEXT.match(v) else "?"
+
+
 def _count(n):
     return n if isinstance(n, int) and not isinstance(n, bool) and n >= 0 else 0
 
@@ -28,10 +41,10 @@ def record(repo, expert, model, input_tokens, output_tokens, ms, cls, gate, esti
     """The exact ledger schema. `estimated` adds `"estimated": true` and is omitted when false.
     `neurons` (Cloudflare Workers AI meters in them; the free budget is 10,000 a day) adds a
     `"neurons": <float>` field and is omitted when the provider reported none."""
-    rec = {"ts": ts or utc_iso(), "repo": (str(repo)[:200] if repo else None),
-           "expert": str(expert), "model": str(model),
+    rec = {"ts": ts or utc_iso(), "repo": (_safe(repo) if repo else None),
+           "expert": str(expert), "model": _safe(model),
            "input_tokens": _count(input_tokens), "output_tokens": _count(output_tokens),
-           "ms": _count(ms), "class": cls, "gate": gate}
+           "ms": _count(ms), "class": _safe(cls), "gate": _safe(gate)}
     if estimated:
         rec["estimated"] = True
     if isinstance(neurons, (int, float)) and not isinstance(neurons, bool) and neurons >= 0:

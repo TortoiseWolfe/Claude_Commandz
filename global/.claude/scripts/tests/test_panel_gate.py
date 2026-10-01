@@ -28,7 +28,7 @@ def gate(diff, cls="public", **kw):
 
 class EmailTests(unittest.TestCase):
     def test_real_addresses_redacted(self):
-        out, r = red("a jane.doe@gmail.com b bob@corp.io c 1234+x@users.noreply.github.com d")
+        out, r = red("a jane.doe@planted-mail.org b bob@corp.io c 1234+x@users.noreply.github.com d")
         self.assertNotIn("gmail.com", out)
         self.assertNotIn("corp.io", out)
         self.assertNotIn("users.noreply.github.com", out)
@@ -77,7 +77,7 @@ class GeoTests(unittest.TestCase):
         self.assertEqual(out, "at [GEO_1] here and [[GEO_1]].")
 
     def test_out_of_range_and_short_decimals_kept(self):
-        for text in ["123.4567, 45.1234", "45.1234, 190.5678", "35.04, -85.30", "35.045, -85.309"]:
+        for text in ["145.1234, 95.5678", "45.1234, 190.5678", "35.04, -85.30", "35.045, -85.309"]:
             out, r = red(text)
             self.assertEqual(out, text, text)
 
@@ -162,11 +162,11 @@ index 111..222 100644
 --- a/src/app.py
 +++ b/src/app.py
 @@ -1,2 +1,4 @@
-+# owner jane.doe@gmail.com phone (423) 555-0199
++# owner jane.doe@planted-mail.org phone (423) 555-0199
 +# site 35.0456, -85.3097 at 123 Main Street, client Acme Corp
 +# docs https://x.io/p?token=SECRETQ
 """
-ORIGINALS = ["jane.doe@gmail.com", "555-0199", "35.0456", "-85.3097", "123 Main Street",
+ORIGINALS = ["jane.doe@planted-mail.org", "555-0199", "35.0456", "-85.3097", "123 Main Street",
              "Acme Corp", "SECRETQ"]
 
 
@@ -257,13 +257,14 @@ class SecretScanTests(unittest.TestCase):
             seen["cmd"], seen["text"] = cmd, text
             return 0, "no leaks found"
         self.assertEqual(g.scan_secrets(SAMPLE, runner), "clean")
-        self.assertEqual(seen["cmd"][:5], ["docker", "run", "--rm", "-i", "zricethezav/gitleaks:latest"])
-        self.assertEqual(seen["cmd"][5:], ["stdin", "--no-banner", "--redact", "--exit-code", "1"])
+        self.assertEqual(seen["cmd"][:4], ["docker", "run", "--rm", "-i"])
+        i = seen["cmd"].index(g.GITLEAKS_IMAGE)
+        self.assertEqual(seen["cmd"][i + 1:], ["stdin", "--no-banner", "--redact", "--exit-code", "1"])
         self.assertEqual(seen["text"], SAMPLE)
 
     def test_exit_code_reading(self):
         scan = lambda rc, out: g.scan_secrets("x", lambda c, t: (rc, out))  # noqa: E731
-        self.assertEqual(scan(0, ""), "clean")
+        self.assertEqual(scan(0, "INF no leaks found"), "clean")
         self.assertEqual(scan(1, "WRN leaks found: 2"), "found")
         # docker's own failures also exit 1; that must not be believed as a finding
         self.assertEqual(scan(1, "Cannot connect to the Docker daemon"), "unavailable")
@@ -348,5 +349,192 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.sentinels(buf.getvalue())["GATE"], "skip")
 
 
+class AuditTermsFileTests(unittest.TestCase):
+    def test_missing_terms_file_forces_local_for_own_and_client(self):
+        for cls in ("own", "client"):
+            res = gate("x = 1\n", cls, terms_missing=True)
+            self.assertEqual(res.gate, "local", cls)
+            self.assertIn("no terms file", res.reason)
+
+    def test_missing_terms_file_lets_public_through(self):
+        self.assertEqual(gate("x = 1\n", "public", terms_missing=True).gate, "send")
+
+    def test_present_but_empty_file_is_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            tf, diff, out = (os.path.join(d, n) for n in ("t.txt", "in.diff", "out"))
+            Path(tf).write_text("", encoding="utf-8")
+            Path(diff).write_text("x = 1\n", encoding="utf-8")
+            a = g.parse_args(["--diff", diff, "--class", "own", "--terms-file", tf, "--out", out])
+            self.assertEqual(g.gate_from_args(a, CLEAN).gate, "send")
+            a = g.parse_args(["--diff", diff, "--class", "own", "--terms-file", os.path.join(d, "no"),
+                              "--out", out])
+            res = g.gate_from_args(a, CLEAN)
+            self.assertEqual((res.gate, res.reason), ("local", "no terms file"))
+
+
+class AuditTermBoundaryTests(unittest.TestCase):
+    def test_identifier_shapes_match(self):
+        for text in ["acme_corp", "AcmeClient", "getAcmeUser()", "x.acme.y", "acme2", "ACME_KEY"]:
+            out, r = red(text, terms=["acme"])
+            self.assertIn("[TERM_1]", out, text)
+
+    def test_letters_either_side_do_not_match(self):
+        for text in ["macmeal", "Acmetron", "pacme", "macmeal acmex"]:
+            out, r = red(text, terms=["acme"])
+            self.assertEqual(out, text, text)
+
+    def test_overlapping_retry_after_a_rejected_hit(self):
+        out, r = red("macmeal acme", terms=["acme"])
+        self.assertEqual(out, "macmeal [TERM_1]")
+
+
+class AuditNeverSendTests(unittest.TestCase):
+    def test_mnemonic_and_no_prefix_headers(self):
+        for hdr in ["diff --git c/.env w/.env", "diff --git i/.env o/.env", "diff --git .env .env"]:
+            self.assertIn(".env", g.diff_paths(hdr + "\n@@ -1 +1 @@\n"), hdr)
+            self.assertEqual(gate(hdr + "\n@@ -1 +1 @@\n", never_send=[".env*"]).gate, "local", hdr)
+
+    def test_quoted_c_style_paths(self):
+        self.assertEqual(g.diff_paths('diff --git "a/s\\303\\251/k.pem" "b/s\\303\\251/k.pem"\n'),
+                         ["s\u00e9/k.pem"])
+        self.assertEqual(g.diff_paths('+++ "b/a\\tb"\n'), ["a\tb"])
+        d = 'diff --git "a/my secrets/x.txt" "b/my secrets/x.txt"\n@@ -1 +1 @@\n'
+        self.assertEqual(gate(d, never_send=["my secrets/"]).gate, "local")
+
+    def test_plus_minus_lines_without_prefix(self):
+        self.assertEqual(g.diff_paths("--- .ENV\t2020\n+++ .ENV\n"), [".ENV"])
+
+    def test_glob_is_case_insensitive(self):
+        self.assertTrue(g.glob_match("Config/.ENV.Local", "**/.env*"))
+        self.assertTrue(g.glob_match("SECRETS/a.txt", "secrets/"))
+        res = gate("diff --git a/Data/X.CSV b/Data/X.CSV\n@@ -1 +1 @@\n", never_send=["**/*.csv"])
+        self.assertEqual(res.gate, "local")
+
+    def test_hunks_without_parsable_path_go_local(self):
+        res = gate("@@ -1,2 +1,2 @@\n-a\n+b\n")
+        self.assertEqual(res.gate, "local")
+        self.assertEqual(res.reason, "unparsed paths")
+        self.assertEqual(gate("just text, no hunks\n").gate, "send")
+
+
+class AuditScannerTests(unittest.TestCase):
+    def test_container_is_hardened_and_pinned(self):
+        cmd = g.GITLEAKS_CMD
+        self.assertIn("@sha256:", g.GITLEAKS_IMAGE)
+        self.assertNotIn(":latest", g.GITLEAKS_IMAGE)
+        self.assertEqual(cmd[cmd.index("--network") + 1], "none")
+        self.assertEqual(cmd[cmd.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(cmd[cmd.index("--security-opt") + 1], "no-new-privileges")
+        self.assertIn("--read-only", cmd)
+
+    def test_allow_marker_is_stripped_before_scanning(self):
+        seen = {}
+        g.scan_secrets("key = 1  # gitleaks:allow\nx # GITLEAKS : Allow",
+                       lambda c, t: (seen.setdefault("t", t), (0, "no leaks found"))[1])
+        self.assertNotIn("allow", seen["t"].lower())
+
+    def test_clean_needs_positive_evidence(self):
+        scan = lambda rc, out: g.scan_secrets("x", lambda c, t: (rc, out))  # noqa: E731
+        self.assertEqual(scan(0, ""), "unavailable")
+        self.assertEqual(scan(0, "garbage"), "unavailable")
+        self.assertEqual(scan(0, "WRN leaks found: 2"), "unavailable")
+        self.assertEqual(scan(0, "INF no leaks found"), "clean")
+        self.assertEqual(scan(1, "INF no leaks found"), "unavailable")
+
+    def test_scans_arbitrary_text(self):
+        self.assertEqual(g.scan_secrets("acceptance: ship it", lambda c, t: (0, "no leaks found")), "clean")
+
+
+class AuditRedactionTests(unittest.TestCase):
+    def test_url_userinfo_without_tld(self):
+        for url in ["postgres://admin:hunter2@db/app", "redis://:pw0rd@cache:6379/0",
+                    "https://bob:pw@localhost:8080/x", "https://tok@host/x"]:
+            out, r = red(f"conn {url} end")
+            for secret in ("hunter2", "pw0rd", "pw@", "tok@", "bob", "admin"):
+                self.assertNotIn(secret, out, url)
+            self.assertIn("[USERINFO]@", out)
+            self.assertGreaterEqual(r.counts["URLQ"], 1)
+
+    def test_percent_encoded_email(self):
+        out, r = red("path /u/jane.doe%40gmail.com/x and a%40example.com")
+        self.assertNotIn("jane", out)
+        self.assertIn("[EMAIL_1]", out)
+        self.assertIn("a%40example.com", out)   # kept domains stay kept
+
+    def test_token_fragments(self):
+        for frag in ["access_token", "id_token", "code"]:
+            out, r = red(f"go https://app.io/cb#{frag}=abc.DEF-1&state=zz now")
+            self.assertEqual(out, "go https://app.io/cb now", frag)
+            self.assertEqual(r.counts["URLQ"], 1)
+        out, _ = red("plain https://app.io/docs#install stays")
+        self.assertIn("#install", out)
+
+    def test_coordinates_in_either_order(self):
+        out, r = red("lng-first [123.4567, 35.0456] and 35.0456,-85.3097")
+        self.assertEqual(out, "lng-first [[GEO_1]] and [GEO_2]")
+
+    def test_coordinate_keys(self):
+        out, r = red('{"lat": 35.0456, "lng": -85.3097} latitude=35.04561 longitude: -85.30971')
+        for n in ("35.04", "85.30"):
+            self.assertNotIn(n, out)
+        self.assertEqual(r.counts["GEO"], 4)
+        out, _ = red('{"lat": 0, "flat": 1.2345, "lng": 12}')
+        self.assertEqual(out, '{"lat": 0, "flat": 1.2345, "lng": 12}')
+
+    def test_bare_ten_digit_phone(self):
+        out, r = red("call 4235550199 now")
+        self.assertEqual(out, "call [PHONE_1] now")
+        same, r = red("423-555-0199 and 4235550199")
+        self.assertEqual(same, "[PHONE_1] and [PHONE_1]")
+
+    def test_timestamps_and_ids_survive(self):
+        text = "ts 1700000000 ms 1700000000123 id 9999999999999 n 0123456789 v 4235550199123"
+        out, _ = red(text)
+        self.assertEqual(out, text)
+
+    def test_international_numbers(self):
+        for p in ["+44 20 7946 0958", "+442079460958", "+49 30 901820", "+33 1 23 45 67 89"]:
+            out, r = red(f"tel {p} end")
+            self.assertEqual(out, "tel [PHONE_1] end", p)
+        text = "version +1.2.3 and +5 items"
+        self.assertEqual(red(text)[0], text)
+
+    def test_uppercase_street_address(self):
+        for a in ["123 MAIN ST", "9 OLD MILL CREEK ROAD", "77 ELM AVE"]:
+            out, r = red(f"ship to {a}.")
+            self.assertEqual(out, "ship to [ADDR_1].", a)
+
+    def test_author_and_coauthor_names(self):
+        text = ("Author: Jane Q. Doe <jane@corp.io>\n+Co-authored-by: Bob Roe <bob@planted-mail.org>\n"
+                "Co-Authored-By: Claude <noreply@anthropic.com>\n")
+        out, r = red(text)
+        for n in ("Jane", "Doe", "Bob", "Roe", "corp.io", "gmail.com"):
+            self.assertNotIn(n, out)
+        self.assertIn("Claude <noreply@anthropic.com>", out)
+        self.assertEqual(r.counts["TERM"], 2)
+        self.assertEqual(r.counts["EMAIL"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnlistedRepoTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile, json
+        self.d = tempfile.mkdtemp()
+        self.path = os.path.join(self.d, "classes.json")
+        with open(self.path, "w") as f:
+            json.dump({"repos": {"PublicRepo": "public", "OwnRepo": "own"}}, f)
+
+    def test_a_repo_the_file_does_not_list_is_client(self):
+        self.assertEqual(g.effective_class("SomeClientRepo", "public", self.path), "client")
+
+    def test_listed_repos_keep_the_stricter_class(self):
+        self.assertEqual(g.effective_class("publicrepo", "public", self.path), "public")
+        self.assertEqual(g.effective_class("OwnRepo", "public", self.path), "own")
+        self.assertEqual(g.effective_class("PublicRepo", "client", self.path), "client")
+
+    def test_no_repo_name_keeps_the_passed_class(self):
+        self.assertEqual(g.effective_class(None, "public", self.path), "public")
+
