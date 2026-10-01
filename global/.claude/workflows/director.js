@@ -34,7 +34,6 @@ const PANEL_CLASSES = ['public', 'own', 'client']
 const panelCfg = A.panel && typeof A.panel === 'object' ? A.panel : {}
 const panelClass = PANEL_CLASSES.includes(panelCfg.class) ? panelCfg.class : 'client'
 const panelNeverSend = Array.isArray(panelCfg.never_send) ? panelCfg.never_send.map(String) : []
-const PANEL_EXPERTS = ['groq', 'gemini', 'grok', 'local']
 const MAX_REVIEW_ROUNDS = 2
 const MAX_WORKER_ROUNDS = 5
 
@@ -121,6 +120,17 @@ function sentinels(text, key) {
   let m
   while ((m = re.exec(text)) !== null) out.push(m[1])
   return out
+}
+// Every __PANEL_<name>=<verdict>__ is an expert verdict except the panel's own status lines, so a new
+// expert in ~/.config/panel/config.json shows up here with no edit. Names may contain '_' (groq_qwen).
+// Same tolerance as sentinel(): the closing '__' may be missing. The last line for a name wins.
+const PANEL_STATUS = ['MAJORITY', 'JSON', 'REASON', 'DRYRUN', 'CONFIG']
+function panelExperts(text) {
+  const re = /__PANEL_([A-Za-z0-9_]+)=([^\s]*?)(?=__|\s|$)/gm
+  const experts = {}
+  let m
+  while ((m = re.exec(text)) !== null) if (!PANEL_STATUS.includes(m[1].toUpperCase())) experts[m[1]] = m[2]
+  return experts
 }
 const tailOf = (text, n) => String(text).split('\n').slice(-n).join('\n')
 
@@ -275,12 +285,13 @@ async function runCheck(it, wt, round) {
     ...(it.jev_checks && it.jev_checks.length ? [
       `cat > ${L}-jev-acc.txt <<'JEV_ACC_EOF'\n${it.acceptance.join('\n')}\nJEV_ACC_EOF`,
       `cat > ${L}-jev-q.json <<'JEV_Q_EOF'\n${JSON.stringify(it.jev_checks)}\nJEV_Q_EOF`,
-      `git diff ${baseSha}..HEAD | python3 ~/.claude/scripts/jev_precheck.py --acceptance ${L}-jev-acc.txt --questions-file ${L}-jev-q.json`,
+      // Jev is an outside service: it only ever sees gated, redacted text, and never a client repo's.
+      `git diff ${baseSha}..HEAD > ${L}-jev.diff; jg=send; for f in jev.diff jev-acc.txt jev-q.json; do python3 ~/.claude/scripts/panel_gate.py --diff ${L}-$f --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} --out ${L}-$f.red > ${L}-$f.gate 2>&1; grep -q '^__GATE=send__' ${L}-$f.gate || jg=no; done; if [ "$jg" = send ]; then python3 ~/.claude/scripts/jev_precheck.py --acceptance ${L}-jev-acc.txt.red --questions-file ${L}-jev-q.json.red --repo '${name.replace(/'/g, '')}' < ${L}-jev.diff.red; else echo "__JEV_SKIPPED=gate__"; fi`,
     ] : []),
     // Free panel, shadow only: runs once the check is green; its verdict never gates anything.
     `cat > ${L}-panel-spec.txt <<'PANEL_SPEC_EOF'\n${it.title}\n\n${it.instructions}\nPANEL_SPEC_EOF`,
     `cat > ${L}-panel-acc.txt <<'PANEL_ACC_EOF'\n${it.acceptance.join('\n')}\nPANEL_ACC_EOF`,
-    `if [ "$rcc" = 0 ]; then git diff ${baseSha}..HEAD > ${L}-panel.diff; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec ${L}-panel-spec.txt --acceptance ${L}-panel-acc.txt --diff ${L}-panel.diff --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${L}-panel.log 2>&1; grep -E '^__(GATE|PANEL_MAJORITY|PANEL_(${PANEL_EXPERTS.join('|')}))=' ${L}-panel.log; fi`,
+    `if [ "$rcc" = 0 ]; then git diff ${baseSha}..HEAD > ${L}-panel.diff; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec ${L}-panel-spec.txt --acceptance ${L}-panel-acc.txt --diff ${L}-panel.diff --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > ${L}-panel.log 2>&1; grep -E '^__(GATE|PANEL_[A-Za-z0-9_]+)=' ${L}-panel.log; fi`,
   ].join('\n'), `check:${it.id}`, 'Work')
   const reasons = []
   const rcCheck = sentinel(out, 'RC_CHECK'), rcAccept = sentinel(out, 'RC_ACCEPT')
@@ -298,7 +309,7 @@ async function runCheck(it, wt, round) {
   const panelMajority = sentinel(out, 'PANEL_MAJORITY')
   const panel = panelMajority === null ? null : {
     gate: sentinel(out, 'GATE'), majority: panelMajority,
-    experts: Object.fromEntries(PANEL_EXPERTS.map((e) => [e, sentinel(out, `PANEL_${e}`)]).filter(([, v]) => v !== null)),
+    experts: panelExperts(out),
   }
   return { pass: reasons.length === 0, reasons, head, jev, panel, tail: tailOf(out, 25) }
 }
@@ -379,6 +390,7 @@ const metrics = {
   // verdict, and how often it said pass where Opus said revise (falsePass: the dangerous direction).
   panelShadow: (() => {
     const rows = done.filter((r) => r.panelAtFirstReview && r.firstReviewPass !== null)
+    const names = [...new Set(rows.flatMap((r) => Object.keys(r.panelAtFirstReview.experts || {})))]
     const score = (get) => {
       const s = rows.map((r) => ({ v: get(r), opus: r.firstReviewPass })).filter((x) => x.v === 'pass' || x.v === 'revise')
       return { scored: s.length, agreedWithOpus: s.filter((x) => (x.v === 'pass') === x.opus).length, falsePass: s.filter((x) => x.v === 'pass' && !x.opus).length }
@@ -386,7 +398,7 @@ const metrics = {
     return {
       class: panelClass,
       majority: score((r) => r.panelAtFirstReview.majority),
-      ...Object.fromEntries(PANEL_EXPERTS.map((e) => [e, score((r) => r.panelAtFirstReview.experts[e])])),
+      ...Object.fromEntries(names.map((e) => [e, score((r) => (r.panelAtFirstReview.experts || {})[e])])),
     }
   })(),
 }

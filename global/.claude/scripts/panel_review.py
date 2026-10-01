@@ -2,67 +2,126 @@
 """Free review panel: ask cheap or free models for a second opinion on a diff, behind a privacy gate.
 
   panel_review.py --spec FILE --acceptance FILE --diff FILE --class public|own|client
-                  [--never-send GLOB ...] [--config ~/.config/panel/config.json] [--dry-run]
+                  [--repo NAME] [--never-send GLOB ...] [--config ~/.config/panel/config.json] [--dry-run]
 The gate (panel_gate.py) runs first; only the REDACTED diff is ever sent. Prints
 __PANEL_<expert>=pass|revise|error|unavailable__, __PANEL_MAJORITY=pass|revise|split|none__ and one
-__PANEL_JSON=...__ line. Shadow tool: always exits 0. Stdlib only. Never prints a key."""
+__PANEL_JSON=...__ line. Shadow tool: always exits 0. Stdlib only. Never prints a key.
+
+Experts are config entries (DEFAULT_CONFIG below; ~/.config/panel/config.json overrides by name):
+  {name, kind: openai_compat|gemini|ollama|cli, model, endpoint, key_file, classes, enabled_if, trains}
+Two class rules live in may_serve() in CODE, not config: only a loopback `ollama` expert may ever serve
+`client`, and an expert that trains (or does not say it doesn't) may serve only `public`.
+Each expert that is called appends one usage line to ~/.local/share/ledger/panel.jsonl (ledger_log.py)."""
 
 import argparse
 import copy
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections import namedtuple
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ledger_log  # noqa: E402
 import panel_gate  # noqa: E402
 
 DEFAULT_CONFIG_PATH = "~/.config/panel/config.json"
 EXAMPLE_CONFIG_PATH = "~/.config/panel/config.example.json"
-ROUTES = {"public": ["groq", "gemini", "grok", "local"], "own": ["groq", "local"], "client": ["local"]}
-ORDER = ["groq", "gemini", "grok", "local"]
+CLASSES = ("public", "own", "client")
+KINDS = ("openai_compat", "gemini", "ollama", "cli")
+RESERVED = {"MAJORITY", "JSON", "REASON", "DRYRUN", "CONFIG"}   # __PANEL_<these>= are not experts
+NAME_RE = re.compile(r"^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$")
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+# A CLI expert may never be told to auto-approve anything: a reviewer has no business running tools unasked.
+UNSAFE_CLI_ARG = re.compile(r"skip-permission|dangerous|auto-?approve|auto-?accept|accept-?edits|yolo|allow-all"
+                            r"|trust-all|bypass|no-confirm|^--?yes$|^-y$", re.IGNORECASE)
+MAX_ARGV_BYTES = 120_000   # Linux caps ONE argv string at 128 KiB (MAX_ARG_STRLEN)
 MAX_SPEC_CHARS = 6000
 MAX_ACCEPT_CHARS = 3000
 USER_AGENT = "panel-review/1.0"   # urllib's default UA gets blocked by some API gateways
 
+# Per-expert fields beyond the core seven: trains (bool), pacer (shared rate-limit group), vars
+# ({placeholder: file}), chunk_tokens | chunk_chars, max_completion_tokens, max_tokens_param, retry_wait,
+# extra (merged into an openai_compat payload), cmd (cli; "{prompt}" marks where the prompt goes, else it
+# is appended) with model_flag (default --model, used only when `model` is set), and num_ctx and
+# probe_timeout (ollama). A cli expert runs in an empty temp dir with stdin closed and may carry no
+# auto-approve argument (see real_run_cmd and unsafe_cli).
+# `enabled: false` switches an expert off (it is then `unavailable` and never launched or sent anything).
+# enabled_if is "which:BINARY", "exists:PATH" or "file:PATH", or a list of them that must all hold; an
+# expert whose condition fails is `unavailable`.
 DEFAULT_CONFIG = {
     "timeout": 120,
     "max_chunks": 8,
-    "groq": {
-        "model": "openai/gpt-oss-120b",   # verify live
-        "endpoint": "https://api.groq.com/openai/v1/chat/completions",
-        "key_file": "~/.config/groq/api-key",
-        "tpm_limit": 7000,                # real limit is 8K tokens/minute; stay under it
-        "chunk_tokens": 5000,
-        "max_completion_tokens": 1500,
-        "retry_wait": 20,
-    },
-    "gemini": {
-        "model": "gemini-2.5-flash",      # verify live: free-tier Flash names change
-        "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        "key_file": "~/.config/gemini/api-key",
-        "chunk_chars": 400000,
-    },
-    "grok": {"cmd": ["grok", "-p"], "stdin": False, "chunk_chars": 60000},
-    "local": {
-        "model": "qwen2.5-coder:7b",      # verify live: must be pulled in Ollama
-        "base_url": "http://127.0.0.1:11434",
-        "num_ctx": 16384,
-        "probe_timeout": 2,
-        "chunk_chars": 30000,
-    },
+    # Groq's real limit is 8K tokens/minute and every Groq expert draws on it: one budget, shared.
+    "pacers": {"groq": {"tpm_limit": 7000}},
+    "experts": [
+        {"name": "groq", "kind": "openai_compat", "model": "openai/gpt-oss-120b",
+         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+         "key_file": "~/.config/groq/api-key", "classes": ["own", "public"], "trains": False,
+         "pacer": "groq", "chunk_tokens": 5000, "max_completion_tokens": 1500,
+         "max_tokens_param": "max_completion_tokens", "retry_wait": 20,
+         "note": "verify live"},
+        {"name": "groq_qwen", "kind": "openai_compat", "model": "qwen/qwen3.8-27b",
+         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+         "key_file": "~/.config/groq/api-key", "classes": ["own", "public"], "trains": False,
+         "pacer": "groq", "chunk_tokens": 5000, "max_completion_tokens": 1500,
+         "max_tokens_param": "max_completion_tokens", "retry_wait": 20,
+         "note": "verify live; shares the Groq 8K tokens/min budget with `groq`"},
+        {"name": "gemini", "kind": "gemini", "model": "gemini-3-flash-preview",
+         "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+         "key_file": "~/.config/gemini/api-key", "classes": ["public"], "trains": True,
+         "chunk_chars": 400000, "note": "verify live: free-tier Flash names change"},
+        {"name": "cloudflare", "kind": "openai_compat", "model": "@cf/qwen/qwen2.5-coder-32b-instruct",
+         "endpoint": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions",
+         "key_file": "~/.config/cloudflare/api-token",
+         "vars": {"account_id": "~/.config/cloudflare/account-id"},
+         "classes": ["own", "public"], "trains": False, "chunk_chars": 60000,
+         "max_completion_tokens": 1500, "retry_wait": 20,
+         "note": "Workers AI OpenAI-compatible endpoint; does not train on API data"},
+        {"name": "antigravity", "kind": "cli", "cmd": ["agy", "--print-timeout", "120s", "-p={prompt}"],
+         "classes": ["public"], "trains": True, "chunk_chars": 60000,
+         # On a signed-out machine every `agy -p` call starts a browser OAuth flow, so agy only runs when
+         # its OAuth token file exists. exists: checks the file is there; it is never opened or read.
+         "enabled_if": ["which:agy", "exists:~/.gemini/antigravity-cli/antigravity-oauth-token"],
+         "note": "needs a one-time interactive `agy` sign-in; unavailable (agy not run) until then. -p takes "
+                 "the NEXT argument as its prompt, so -p goes last with the prompt attached. Add \"model\": "
+                 "\"...\" to pass --model."},
+        {"name": "openrouter", "kind": "openai_compat", "model": "poolside/laguna-s-2.1:free",
+         "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+         "key_file": "~/.config/openrouter/api-key", "classes": ["public"], "trains": True,
+         "chunk_chars": 60000, "max_completion_tokens": 1500, "retry_wait": 20,
+         "note": "verify live: :free models rotate; list at openrouter.ai/collections/free-models"},
+        {"name": "grok", "kind": "cli", "cmd": ["grok", "-p"], "classes": ["public"],
+         "trains": True, "enabled_if": "which:grok", "chunk_chars": 60000},
+        {"name": "local", "kind": "ollama", "model": "qwen2.5-coder:7b",
+         "endpoint": "http://127.0.0.1:11434", "classes": ["public", "own", "client"], "trains": False,
+         "num_ctx": 16384, "probe_timeout": 2, "chunk_chars": 30000,
+         "note": "verify live: the model must be pulled in Ollama"},
+    ],
 }
 
 
+def valid_name(name):
+    return isinstance(name, str) and bool(NAME_RE.match(name)) and name.upper() not in RESERVED
+
+
 def load_config(path):
-    """Defaults, overridden section by section from an optional JSON file. -> (config, status)."""
+    """Defaults, overridden from an optional JSON file. -> (config, status).
+
+    `experts` entries in the file override a default expert BY NAME (field by field) or add a new
+    one. A top-level section named like an expert (the old config shape) is read as an override
+    too. A bad entry is dropped, never half-applied, and the status says `invalid`."""
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     p = os.path.expanduser(path or DEFAULT_CONFIG_PATH)
     if not os.path.exists(p):
@@ -74,12 +133,41 @@ def load_config(path):
             raise ValueError
     except (OSError, ValueError):
         return cfg, "invalid"
+    by_name = {e["name"]: e for e in cfg["experts"]}
+    overrides, ok = [], True
     for k, v in user.items():
-        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-            cfg[k].update(v)
-        else:
+        if k == "experts":
+            if isinstance(v, list):
+                overrides += v
+            else:
+                ok = False
+        elif k == "pacers" and isinstance(v, dict):
+            for group, pv in v.items():
+                if isinstance(pv, dict):
+                    cfg["pacers"].setdefault(group, {}).update(pv)
+        elif k in by_name and isinstance(v, dict):          # old shape: {"groq": {...}, "local": {...}}
+            v = dict(v)
+            if "tpm_limit" in v:
+                cfg["pacers"].setdefault(by_name[k].get("pacer", k), {})["tpm_limit"] = v.pop("tpm_limit")
+            if "base_url" in v:
+                v["endpoint"] = v.pop("base_url")
+            overrides.append({**v, "name": k})
+        elif not k.startswith("_"):
             cfg[k] = v
-    return cfg, "file"
+    for o in overrides:
+        if not isinstance(o, dict) or not valid_name(o.get("name")):
+            ok = False
+        elif o["name"] in by_name:
+            by_name[o["name"]].update(o)
+        elif o.get("kind") in KINDS:
+            by_name[o["name"]] = copy.deepcopy(o)
+            cfg["experts"].append(by_name[o["name"]])
+        else:
+            ok = False
+    good = [e for e in cfg["experts"] if e.get("kind") in KINDS and isinstance(e.get("classes"), list)]
+    ok = ok and len(good) == len(cfg["experts"])
+    cfg["experts"] = good
+    return cfg, "file" if ok else "invalid"
 
 
 def write_example(path=EXAMPLE_CONFIG_PATH):
@@ -117,22 +205,44 @@ def real_get_json(url, timeout):
         return r.status, json.loads(r.read().decode("utf-8", "replace"))
 
 
-def real_run_cmd(cmd, stdin_text, timeout):
-    p = subprocess.run(cmd, input=stdin_text, stdin=None if stdin_text is not None else subprocess.DEVNULL,
-                       capture_output=True, text=True, timeout=timeout)
-    return p.returncode, p.stdout or ""
+def real_exists(path):
+    return os.path.exists(os.path.expanduser(path))
+
+
+def real_run_cmd(cmd, timeout):
+    """Run a CLI expert. argv list, never a shell. stdin is /dev/null so a permission prompt cannot hang
+    it. cwd is a fresh EMPTY temp dir, deleted afterwards, so the tool never sees the repo or worktree.
+    It runs in its own session, and a timeout kills the whole process group, not only the child."""
+    with tempfile.TemporaryDirectory(prefix="panel-cli-") as cwd:
+        p = subprocess.Popen(cmd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, cwd=cwd, text=True, start_new_session=True)
+        try:
+            out, _ = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                p.communicate(timeout=5)   # reap it
+            except Exception:
+                pass
+            raise
+        return p.returncode, out or ""
 
 
 @dataclass
 class Deps:
     post_json: Callable = real_post_json      # (url, headers, payload, timeout) -> (status, obj)
     get_json: Callable = real_get_json        # (url, timeout) -> (status, obj); raises on network error
-    run_cmd: Callable = real_run_cmd          # (cmd, stdin_text|None, timeout) -> (rc, stdout)
+    run_cmd: Callable = real_run_cmd          # (cmd, timeout) -> (rc, stdout); stdin is always /dev/null
     which: Callable = shutil.which
+    exists: Callable = real_exists            # (path) -> bool; only checks, never reads or runs anything
     now: Callable = time.monotonic
     sleep: Callable = time.sleep
     read_key: Callable = read_key
     scanner: Optional[Callable] = None        # gate secret scanner; None = real gitleaks via Docker
+    ledger_path: Optional[str] = None         # usage log; None = ledger_log.DEFAULT_PATH
 
 
 # ---------------------------------------------------------------- prompt and chunking
@@ -271,11 +381,12 @@ def majority(verdicts):
     return "pass" if p > r else "revise" if r > p else "split"
 
 
-# ---------------------------------------------------------------- Groq pacing
+# ---------------------------------------------------------------- rate-limit pacing (Groq)
 
 class Pacer:
     """Rolling-window token budget. acquire(n) sleeps until n more tokens fit under `limit` for any
-    `window` seconds, then records the spend. Clock and sleep are injected (tests use a fake clock)."""
+    `window` seconds, then records the spend. Clock and sleep are injected (tests use a fake clock).
+    One Pacer per `pacer` group in the config: every expert naming the group spends from it."""
 
     def __init__(self, limit, now, sleep, window=60.0):
         self.limit, self.window, self.now, self.sleep = limit, window, now, sleep
@@ -318,134 +429,238 @@ class ExpertError(Exception):
     """Carries a short, content-free note (HTTP_429, EXIT_1). Never a response body."""
 
 
-class Groq:
-    name = "groq"
+def _num(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
-    def __init__(self):
-        self.pacer = None   # created on first call so it uses the injected clock
+
+def _dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+class Usage(namedtuple("Usage", "input output neurons", defaults=(None,))):
+    """Tokens in and out, plus `neurons` when the provider meters in them (Cloudflare Workers AI)."""
+    __slots__ = ()
+
+
+def _amount(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None
+
+
+def usage_pair(a, b, neurons=None):
+    """Usage from a provider's own counters; None when it reported no token count at all."""
+    a, b = _num(a), _num(b)
+    return None if a is None and b is None else Usage(a or 0, b or 0, _amount(neurons))
+
+
+def usage_openai(obj):
+    u = _dict(_dict(obj).get("usage"))
+    return usage_pair(u.get("prompt_tokens"), u.get("completion_tokens"), u.get("neurons"))
+
+
+def content_text(content):
+    """An openai_compat message `content` as text for extract_verdict. Most providers send a string;
+    Cloudflare Workers AI sends an already-parsed JSON object (a dict); some send a list of parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):   # re-serialised so the strict verdict check still applies to it
+        return json.dumps(content)
+    if isinstance(content, list):
+        return "".join(p if isinstance(p, str) else p["text"] if isinstance(p, dict) and isinstance(p.get("text"), str)
+                       else "" for p in content)
+    return ""
+
+
+def usage_gemini(obj):
+    u = _dict(_dict(obj).get("usageMetadata"))
+    return usage_pair(u.get("promptTokenCount"), u.get("candidatesTokenCount"))
+
+
+def usage_ollama(obj):
+    o = _dict(obj)
+    return usage_pair(o.get("prompt_eval_count"), o.get("eval_count"))
+
+
+def unsafe_cli(cmd):
+    """True if a CLI command template carries an auto-approve style argument. The `{prompt}` argument is
+    exempt, because it is replaced by our own text and is never part of the configured template."""
+    return any(UNSAFE_CLI_ARG.search(c) for c in cmd if "{prompt}" not in c)
+
+
+def condition_met(cond, deps):
+    """enabled_if: absent = on; a list = every item must hold; "which:BIN" = BIN is on PATH;
+    "exists:PATH" = PATH exists (nothing is read or run); "file:PATH" = PATH holds something."""
+    if not cond:
+        return True
+    if isinstance(cond, list):
+        return all(condition_met(c, deps) for c in cond)
+    kind, _, arg = str(cond).partition(":")
+    if kind == "which":
+        return bool(deps.which(arg))
+    if kind == "exists":
+        return bool(deps.exists(arg))
+    if kind == "file":
+        return bool(deps.read_key(arg))
+    return False   # a condition we do not understand is not met
+
+
+class Expert:
+    """One panel member, built from a config entry; behaviour follows `kind`. ask() returns
+    (reply text, usage) where usage is (input, output) tokens as the provider reported them, or None."""
+
+    def __init__(self, spec, pacers):
+        self.spec, self.pacers = spec, pacers   # `pacers` is one dict shared by every expert of a run
+        self.name, self.kind = spec["name"], spec["kind"]
+
+    def model(self):
+        cmd = self.spec.get("cmd")
+        return self.spec.get("model") or (cmd[0] if isinstance(cmd, list) and cmd else self.kind)
+
+    def _url(self, deps):
+        """The endpoint with {model} and every `vars` placeholder filled in, or None if one is missing."""
+        url = self.spec["endpoint"].replace("{model}", self.spec.get("model") or "")
+        for k, path in (self.spec.get("vars") or {}).items():
+            val = deps.read_key(path)
+            url = url.replace("{" + k + "}", val) if val else url
+        return None if "{" in url else url
 
     def available(self, cfg, deps, probe=True):
-        return bool(deps.read_key(cfg["groq"]["key_file"]))
-
-    def chunk_chars(self, cfg, overhead):
-        return max(cfg["groq"]["chunk_tokens"] * 4 - overhead, 4000)
-
-    def ask(self, prompt, cfg, deps):
-        g = cfg["groq"]
-        key = deps.read_key(g["key_file"])
-        if self.pacer is None:
-            self.pacer = Pacer(g["tpm_limit"], deps.now, deps.sleep)
-        reserve = est_tokens(prompt) + g["max_completion_tokens"]
-        payload = {"model": g["model"], "temperature": 0,
-                   "max_completion_tokens": g["max_completion_tokens"],
-                   "messages": [{"role": "user", "content": prompt}]}
-        for attempt in (0, 1):
-            ev = self.pacer.acquire(reserve)
-            status, obj = deps.post_json(g["endpoint"], {"Authorization": f"Bearer {key}"},
-                                         payload, cfg["timeout"])
-            if status == 429 and attempt == 0:
-                deps.sleep(g["retry_wait"])
-                continue
-            break
-        if status != 200:
-            raise ExpertError(f"HTTP_{status}")
-        used = (obj.get("usage") or {}).get("total_tokens")
-        if isinstance(used, int) and used > ev[1]:
-            ev[1] = used   # real spend beat our estimate: the next chunk must wait for it
-        return obj["choices"][0]["message"]["content"]
-
-
-class Gemini:
-    name = "gemini"
-
-    def available(self, cfg, deps, probe=True):
-        return bool(deps.read_key(cfg["gemini"]["key_file"]))
-
-    def chunk_chars(self, cfg, overhead):
-        return cfg["gemini"]["chunk_chars"]
-
-    def ask(self, prompt, cfg, deps):
-        g = cfg["gemini"]
-        url = g["endpoint"].replace("{model}", g["model"])
-        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                   "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
-        status, obj = deps.post_json(url, {"x-goog-api-key": deps.read_key(g["key_file"])},
-                                     payload, cfg["timeout"])
-        if status != 200:
-            raise ExpertError(f"HTTP_{status}")
-        parts = obj["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts)
-
-
-class Grok:
-    name = "grok"
-
-    def available(self, cfg, deps, probe=True):
-        cmd = cfg["grok"].get("cmd")
-        return (isinstance(cmd, list) and bool(cmd) and all(isinstance(c, str) for c in cmd)
-                and bool(deps.which(cmd[0])))
-
-    def chunk_chars(self, cfg, overhead):
-        return cfg["grok"]["chunk_chars"]
-
-    def ask(self, prompt, cfg, deps):
-        g = cfg["grok"]
-        cmd, stdin = list(g["cmd"]), None
-        if any("{prompt}" in c for c in cmd):
-            cmd = [c.replace("{prompt}", prompt) for c in cmd]
-        elif g.get("stdin") or len(prompt) > 100_000:   # argv has a ~128K per-argument ceiling
-            stdin = prompt
-        else:
-            cmd.append(prompt)
-        rc, out = deps.run_cmd(cmd, stdin, cfg["timeout"])
-        if rc != 0:
-            raise ExpertError(f"EXIT_{rc}")
-        return out
-
-
-class Local:
-    name = "local"
-
-    def available(self, cfg, deps, probe=True):
-        if not probe:   # a dry run makes no calls, so it cannot ask Ollama
+        s = self.spec
+        if s.get("enabled") is False:   # off until someone turns it on; nothing is launched or sent
+            return False
+        if not condition_met(s.get("enabled_if"), deps):
+            return False
+        if self.kind in ("openai_compat", "gemini"):
+            return bool(deps.read_key(s.get("key_file") or "")) and bool(s.get("endpoint")) \
+                and self._url(deps) is not None
+        if self.kind == "cli":
+            cmd = s.get("cmd")
+            return (isinstance(cmd, list) and bool(cmd) and all(isinstance(c, str) for c in cmd)
+                    and not unsafe_cli(cmd) and bool(deps.which(cmd[0])))
+        if not probe:   # ollama: a dry run makes no calls, so it cannot ask
             return True
-        l = cfg["local"]
         try:
-            status, _ = deps.get_json(l["base_url"].rstrip("/") + "/api/tags", l["probe_timeout"])
+            status, _ = deps.get_json(s["endpoint"].rstrip("/") + "/api/tags", s.get("probe_timeout", 2))
             return status == 200
         except Exception:
             return False
 
-    def chunk_chars(self, cfg, overhead):
-        return cfg["local"]["chunk_chars"]
+    def chunk_chars(self, overhead):
+        s = self.spec
+        if s.get("chunk_tokens"):
+            return max(s["chunk_tokens"] * 4 - overhead, 4000)
+        if self.kind == "cli":   # the prompt travels as one argv string, so it must fit in one
+            return max(min(s.get("chunk_chars", 30000), MAX_ARGV_BYTES // 2 - overhead), 4000)
+        return s.get("chunk_chars", 30000)
+
+    def _pacer(self, cfg, deps):
+        group = self.spec.get("pacer")
+        if not group:
+            return None
+        if group not in self.pacers:   # created on first use so it runs on the injected clock
+            limit = _dict(_dict(cfg.get("pacers")).get(group)).get("tpm_limit", 7000)
+            self.pacers[group] = Pacer(limit, deps.now, deps.sleep)
+        return self.pacers[group]
 
     def ask(self, prompt, cfg, deps):
-        l = cfg["local"]
-        payload = {"model": l["model"], "stream": False, "format": "json",
-                   "options": {"temperature": 0, "num_ctx": l["num_ctx"]},   # default ctx would silently clip
-                   "messages": [{"role": "user", "content": prompt}]}
-        status, obj = deps.post_json(l["base_url"].rstrip("/") + "/api/chat", {}, payload, cfg["timeout"])
+        return getattr(self, "_ask_" + self.kind)(prompt, cfg, deps)
+
+    def _ask_openai_compat(self, prompt, cfg, deps):
+        s = self.spec
+        key, pacer = deps.read_key(s["key_file"]), self._pacer(cfg, deps)
+        maxtok = s.get("max_completion_tokens", 1500)
+        payload = {"model": s["model"], "temperature": 0, s.get("max_tokens_param", "max_tokens"): maxtok,
+                   "messages": [{"role": "user", "content": prompt}], **_dict(s.get("extra"))}
+        for attempt in (0, 1):
+            ev = pacer.acquire(est_tokens(prompt) + maxtok) if pacer else None
+            status, obj = deps.post_json(self._url(deps), {"Authorization": f"Bearer {key}"},
+                                         payload, cfg["timeout"])
+            if status == 429 and attempt == 0:
+                deps.sleep(s.get("retry_wait", 20))
+                continue
+            break
         if status != 200:
             raise ExpertError(f"HTTP_{status}")
-        return obj["message"]["content"]
+        usage = usage_openai(obj)
+        if ev:   # real spend beat our estimate: the next chunk, from ANY expert in the group, must wait
+            used = _num(_dict(obj.get("usage")).get("total_tokens"))
+            used = used if used is not None else (usage.input + usage.output if usage else 0)
+            ev[1] = max(ev[1], used)
+        return content_text(obj["choices"][0]["message"]["content"]), usage
+
+    def _ask_gemini(self, prompt, cfg, deps):
+        s = self.spec
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+        status, obj = deps.post_json(self._url(deps), {"x-goog-api-key": deps.read_key(s["key_file"])},
+                                     payload, cfg["timeout"])
+        if status != 200:
+            raise ExpertError(f"HTTP_{status}")
+        parts = obj["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts), usage_gemini(obj)
+
+    def _ask_ollama(self, prompt, cfg, deps):
+        s = self.spec
+        payload = {"model": s["model"], "stream": False, "format": "json",
+                   "options": {"temperature": 0, "num_ctx": s.get("num_ctx", 16384)},   # default ctx would clip
+                   "messages": [{"role": "user", "content": prompt}]}
+        status, obj = deps.post_json(s["endpoint"].rstrip("/") + "/api/chat", {}, payload, cfg["timeout"])
+        if status != 200:
+            raise ExpertError(f"HTTP_{status}")
+        return obj["message"]["content"], usage_ollama(obj)
+
+    def _ask_cli(self, prompt, cfg, deps):
+        s = self.spec
+        cmd = list(s["cmd"])
+        if unsafe_cli(cmd):
+            raise ExpertError("UNSAFE_FLAG")
+        if s.get("model") and s.get("model_flag", "--model") not in cmd:   # unset by default
+            cmd[1:1] = [s.get("model_flag", "--model"), s["model"]]
+        if len(prompt.encode("utf-8")) > MAX_ARGV_BYTES:
+            raise ExpertError("PROMPT_TOO_LARGE")
+        if any("{prompt}" in c for c in cmd):   # e.g. ["agy", "-p={prompt}"]: -p takes the NEXT argument
+            cmd = [c.replace("{prompt}", prompt) for c in cmd]
+        else:
+            cmd.append(prompt)
+        rc, out = deps.run_cmd(cmd, cfg["timeout"])
+        if rc != 0:
+            raise ExpertError(f"EXIT_{rc}")
+        return out, None   # a CLI reports no usage; review_with estimates it
 
 
-def make_experts():
-    return {e.name: e for e in (Groq(), Gemini(), Grok(), Local())}
+def make_experts(cfg):
+    pacers = {}   # one rate-limit budget per group, shared by every expert that names it
+    return {e["name"]: Expert(e, pacers) for e in cfg["experts"]}
+
+
+def chars4(text):
+    return len(text) // 4 if isinstance(text, str) else 0
 
 
 def review_with(ex, cfg, deps, spec, acceptance, diff):
-    """Chunk the diff for this expert, ask once per chunk, merge. Never raises."""
+    """Chunk the diff for this expert, ask once per chunk, merge. Never raises.
+
+    Also totals token usage over the chunks: the provider's own counts where it reported them, else
+    chars/4 (flagged `estimated`), and `neurons` where the provider meters in them. Only numbers are
+    kept, never the prompt or the reply."""
     t0 = deps.now()
     overhead = len(build_prompt(spec, acceptance, "", " (part 99 of 99)"))
-    chunks = split_diff(diff, ex.chunk_chars(cfg, overhead))
+    chunks = split_diff(diff, ex.chunk_chars(overhead))
     truncated = len(chunks) > cfg["max_chunks"]
     chunks = chunks[:cfg["max_chunks"]]
     results, notes = [], []
+    tin = tout = 0
+    neurons = None
+    estimated = False
     for i, chunk in enumerate(chunks, 1):
         prompt = build_prompt(spec, acceptance, chunk, f" (part {i} of {len(chunks)})" if len(chunks) > 1 else "")
         try:
-            v = extract_verdict(ex.ask(prompt, cfg, deps))
+            text, usage = ex.ask(prompt, cfg, deps)
+            if usage is None:
+                usage, estimated = Usage(chars4(prompt), chars4(text)), True
+            tin, tout = tin + usage.input, tout + usage.output
+            if usage.neurons is not None:
+                neurons = (neurons or 0) + usage.neurons
+            v = extract_verdict(text)
             if v is None:
                 notes.append("unparseable reply")
             results.append(v or ("error", []))
@@ -455,9 +670,16 @@ def review_with(ex, cfg, deps, spec, acceptance, diff):
         except Exception as e:  # network, timeout, malformed provider JSON
             notes.append(type(e).__name__)
             results.append(("error", []))
+            if "timeout" in type(e).__name__.lower() or isinstance(getattr(e, "reason", None), TimeoutError):
+                notes.append("later chunks skipped")   # a hung expert (say, a CLI waiting on sign-in) is
+                break                                  # not asked again for every remaining chunk
     verdict, blocking = merge_chunks(results)
     out = {"verdict": verdict, "blocking": blocking, "chunks": len(chunks), "truncated": truncated,
-           "ms": int((deps.now() - t0) * 1000)}
+           "ms": int((deps.now() - t0) * 1000), "input_tokens": tin, "output_tokens": tout}
+    if estimated:
+        out["estimated"] = True
+    if neurons is not None:
+        out["neurons"] = round(neurons, 4)
     if notes:
         out["note"] = "; ".join(dict.fromkeys(notes))
     return out
@@ -465,10 +687,37 @@ def review_with(ex, cfg, deps, spec, acceptance, diff):
 
 # ---------------------------------------------------------------- the panel
 
-def route(cls, gate):
-    """Experts this class may use; a `local` gate narrows everything to the on-machine model."""
-    allowed = list(ROUTES[cls])
-    return [n for n in allowed if n == "local"] if gate == "local" else allowed
+def is_local(spec):
+    """An Ollama expert whose endpoint is on this machine: the only kind a diff never leaves."""
+    if spec.get("kind") != "ollama":
+        return False
+    try:
+        return urllib.parse.urlparse(spec.get("endpoint") or "").hostname in LOOPBACK
+    except ValueError:
+        return False
+
+
+def may_serve(spec, cls):
+    """The hard class rules. They are code on purpose: no config entry can loosen them.
+
+    - `client` reaches only a loopback `ollama` expert, whatever the entry's `classes` says.
+    - Only a literal `trains: false` makes an expert safe for `own`. `true`, a missing key or any
+      other value serves `public` only, except that a missing key is fine on a local expert (nothing
+      leaves the machine, so training is moot). So `own` never reaches an expert that trains."""
+    classes = {c for c in (spec.get("classes") or []) if c in CLASSES}
+    trains = spec.get("trains")
+    if not (trains is False or (trains is None and is_local(spec))):
+        classes &= {"public"}
+    if not is_local(spec):
+        classes.discard("client")
+    return cls in classes
+
+
+def route(cfg, cls, gate):
+    """Names of the experts this class may use, in config order. A `local` gate (never_send hit, too
+    many redactions, client class) narrows it further to experts on this machine."""
+    return [e["name"] for e in cfg["experts"]
+            if may_serve(e, cls) and (gate != "local" or is_local(e))]
 
 
 def trim_blocking(items):
@@ -515,24 +764,30 @@ def run_panel(a, deps, experts=None):
     spec, acceptance = red.redact(spec), red.redact(acceptance)
     summary["spec_redacted"] = red.total()
 
-    experts = experts or make_experts()
-    allowed = route(a.cls, res.gate)
+    experts = experts or make_experts(cfg)
+    allowed = route(cfg, a.cls, res.gate)
     summary["allowed"] = allowed
     verdicts, would_call = {}, []
+    # flush=True: a run killed by the caller's timeout still leaves the verdicts it reached in its log
     for name in allowed:
         if not experts[name].available(cfg, deps, probe=not a.dry_run):
             verdicts[name] = "unavailable"
-            print(f"__PANEL_{name}=unavailable__")
+            print(f"__PANEL_{name}=unavailable__", flush=True)
             summary["experts"][name] = {"verdict": "unavailable"}
         elif a.dry_run:
             would_call.append(name)
-            print(f"__PANEL_{name}=would_call__")
+            print(f"__PANEL_{name}=would_call__", flush=True)
         else:
-            r = review_with(experts[name], cfg, deps, spec, acceptance, res.text)
+            ex = experts[name]
+            r = review_with(ex, cfg, deps, spec, acceptance, res.text)
+            ledger_log.append(ledger_log.record(
+                repo=a.repo, expert=name, model=ex.model(), input_tokens=r["input_tokens"],
+                output_tokens=r["output_tokens"], ms=r["ms"], cls=a.cls, gate=res.gate,
+                estimated=r.get("estimated", False), neurons=r.get("neurons")), deps.ledger_path)
             verdicts[name] = r["verdict"]
             r["blocking"] = trim_blocking(r["blocking"])
             summary["experts"][name] = r
-            print(f"__PANEL_{name}={r['verdict']}__")
+            print(f"__PANEL_{name}={r['verdict']}__", flush=True)
     summary["ms"] = int((deps.now() - t0) * 1000)
     if a.dry_run:
         print(f"__PANEL_DRYRUN={','.join(would_call) or 'none'}__")
@@ -545,7 +800,8 @@ def build_parser():
     ap.add_argument("--spec", required=True)
     ap.add_argument("--acceptance", required=True)
     ap.add_argument("--diff", required=True)
-    ap.add_argument("--class", dest="cls", required=True, choices=("public", "own", "client"))
+    ap.add_argument("--class", dest="cls", required=True, choices=CLASSES)
+    ap.add_argument("--repo", default=None, metavar="NAME", help="repo name recorded in the usage log")
     ap.add_argument("--never-send", action="append", default=[], metavar="GLOB", nargs="+")
     ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ap.add_argument("--terms-file", default=panel_gate.DEFAULT_TERMS)

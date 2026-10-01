@@ -2,17 +2,21 @@
 key reader, scanner and clock is a fake injected through panel_review.Deps."""
 
 import contextlib
+import copy
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import ledger_log  # noqa: E402
 import panel_review as pr  # noqa: E402
 
 CLEAN = lambda diff: "clean"  # noqa: E731
@@ -21,9 +25,15 @@ ACCEPT = "- prints hello\n- owner is configurable"
 DIFF = ('diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,3 @@\n'
         '+owner = "jane.doe@gmail.com"  # call (423) 555-0199\n+print("hello")\n')
 ORIGINALS = ["jane.doe@gmail.com", "555-0199", "ops@corp.io"]
-KEYS = {"groq": "gsk_SECRETGROQKEY", "gemini": "AIzaSECRETGEMINIKEY"}
+KEYS = {"groq": "gsk_SECRETGROQKEY", "gemini": "AIzaSECRETGEMINIKEY",
+        "cloudflare": "cf_SECRETTOKEN", "openrouter": "sk-or-SECRETKEY"}
+ACCOUNT_ID = "ACCT_ID_0123456789"
 PASS = {"verdict": "pass", "blocking": []}
 REVISE = {"verdict": "revise", "blocking": ["off by one"]}
+ALL_EXPERTS = ["groq", "groq_qwen", "gemini", "cloudflare", "antigravity", "openrouter", "grok", "local"]
+API_EXPERTS = ["groq", "groq_qwen", "gemini", "cloudflare", "openrouter", "local"]   # reached by post_json
+TRAINING = ("gemini", "antigravity", "openrouter", "grok")
+AGY_TOKEN = "~/.gemini/antigravity-cli/antigravity-oauth-token"
 
 
 class FakeClock:
@@ -42,19 +52,30 @@ class FakeNet:
     """Answers per provider. A value may be a verdict dict, raw text, (status, obj), or a callable
     taking (payload, call_number)."""
 
+    OUT = 20   # completion tokens every fake provider reports; prompt tokens are `usage` minus this
+
     def __init__(self, clock):
         self.clock, self.posts, self.gets = clock, [], []
-        self.answers = {"groq": PASS, "gemini": PASS, "local": PASS}
-        self.calls = {"groq": 0, "gemini": 0, "local": 0}
+        self.answers = {n: PASS for n in API_EXPERTS}
+        self.calls = {n: 0 for n in API_EXPERTS}
         self.tags_ok = True
-        self.usage = 100
+        self.usage = 100          # total tokens per call as the provider reports them
+        self.report_usage = True  # False: a provider that returns no usage block at all
+        self.neurons = {}         # {expert: float}: providers that meter in neurons (Cloudflare)
+        self.content = {}         # {expert: "str" | "dict" | "list"}: shape of choices[0].message.content
 
     @staticmethod
-    def provider(url):
-        return "groq" if "groq" in url else "gemini" if "generativelanguage" in url else "local"
+    def provider(url, payload):
+        if "groq" in url:   # one Groq URL, two experts: told apart by model
+            return "groq_qwen" if str(payload.get("model", "")).startswith("qwen/") else "groq"
+        for needle, who in (("cloudflare", "cloudflare"), ("openrouter", "openrouter"),
+                            ("generativelanguage", "gemini")):
+            if needle in url:
+                return who
+        return "local"
 
     def post_json(self, url, headers, payload, timeout):
-        who = self.provider(url)
+        who = self.provider(url, payload)
         self.calls[who] += 1
         self.posts.append({"who": who, "url": url, "headers": headers, "payload": payload,
                            "t": self.clock.now(), "timeout": timeout})
@@ -64,11 +85,28 @@ class FakeNet:
         if isinstance(ans, tuple):
             return ans
         text = ans if isinstance(ans, str) else json.dumps(ans)
-        if who == "groq":
-            return 200, {"choices": [{"message": {"content": text}}], "usage": {"total_tokens": self.usage}}
+        pt, ct = self.usage - self.OUT, self.OUT
         if who == "gemini":
-            return 200, {"candidates": [{"content": {"parts": [{"text": text}]}}]}
-        return 200, {"message": {"content": text}}
+            body = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+            if self.report_usage:
+                body["usageMetadata"] = {"promptTokenCount": pt, "candidatesTokenCount": ct,
+                                         "totalTokenCount": pt + ct}
+            return 200, body
+        if who == "local":
+            body = {"message": {"content": text}}
+            if self.report_usage:
+                body.update({"prompt_eval_count": pt, "eval_count": ct})
+            return 200, body
+        style = self.content.get(who, "str")
+        shaped = (json.loads(text) if style == "dict"
+                  else [{"type": "text", "text": text[:7]}, {"type": "text", "text": text[7:]}] if style == "list"
+                  else text)
+        body = {"choices": [{"message": {"content": shaped}}]}   # groq, groq_qwen, cloudflare, openrouter
+        if self.report_usage:
+            body["usage"] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+            if who in self.neurons:
+                body["usage"]["neurons"] = self.neurons[who]
+        return 200, body
 
     def get_json(self, url, timeout):
         self.gets.append((url, timeout))
@@ -81,20 +119,22 @@ class FakeRunner:
     def __init__(self, reply=PASS, rc=0):
         self.calls, self.reply, self.rc = [], reply, rc
 
-    def __call__(self, cmd, stdin_text, timeout):
-        self.calls.append({"cmd": cmd, "stdin": stdin_text, "timeout": timeout})
+    def __call__(self, cmd, timeout):
+        self.calls.append({"cmd": cmd, "timeout": timeout})
         return self.rc, (self.reply if isinstance(self.reply, str) else json.dumps(self.reply))
 
 
-def make_deps(net, clock, runner=None, keys=KEYS, installed=("grok",), scanner=CLEAN):
+def make_deps(net, clock, runner=None, keys=KEYS, installed=("grok", "agy"), scanner=CLEAN, existing=(AGY_TOKEN,), **kw):
     def read_key(path):
         for name, val in keys.items():
             if f"/{name}/" in path:
-                return val
+                # the Cloudflare account id is a second file in the same directory as the token
+                return ACCOUNT_ID if path.endswith("account-id") else val
         return None
     return pr.Deps(post_json=net.post_json, get_json=net.get_json, run_cmd=runner or FakeRunner(),
                    which=lambda n: f"/usr/bin/{n}" if n in installed else None,
-                   now=clock.now, sleep=clock.sleep, read_key=read_key, scanner=scanner)
+                   exists=lambda path: path in existing, now=clock.now, sleep=clock.sleep, read_key=read_key,
+                   scanner=scanner, **kw)
 
 
 def max_window(events, window=60.0):
@@ -246,20 +286,93 @@ class ConfigTests(unittest.TestCase):
         cfg, status = pr.load_config(os.path.join(self.tmp, "none.json"))
         self.assertEqual((cfg, status), (pr.DEFAULT_CONFIG, "defaults"))
 
-    def test_file_overrides_section_by_section(self):
+    def load(self, obj):
         p = os.path.join(self.tmp, "c.json")
-        Path(p).write_text(json.dumps({"groq": {"model": "other/model"}, "grok": {"cmd": ["g", "--ask"]}}))
-        cfg, status = pr.load_config(p)
+        Path(p).write_text(obj if isinstance(obj, str) else json.dumps(obj))
+        return pr.load_config(p)
+
+    @staticmethod
+    def by_name(cfg):
+        return {e["name"]: e for e in cfg["experts"]}
+
+    def test_default_experts_and_their_shape(self):
+        d = self.by_name(pr.DEFAULT_CONFIG)
+        self.assertEqual(list(d), ALL_EXPERTS)
+        for e in d.values():
+            for field in ("name", "kind", "classes"):
+                self.assertIn(field, e)
+        want = {"groq": ("openai_compat", ["own", "public"], False),
+                "groq_qwen": ("openai_compat", ["own", "public"], False),
+                "gemini": ("gemini", ["public"], True),
+                "cloudflare": ("openai_compat", ["own", "public"], False),
+                "antigravity": ("cli", ["public"], True),
+                "openrouter": ("openai_compat", ["public"], True),
+                "grok": ("cli", ["public"], True),
+                "local": ("ollama", ["public", "own", "client"], False)}
+        for name, (kind, classes, trains) in want.items():
+            self.assertEqual((d[name]["kind"], d[name]["classes"], d[name]["trains"]), (kind, classes, trains), name)
+        self.assertEqual(d["gemini"]["model"], "gemini-3-flash-preview")
+        self.assertEqual(d["groq_qwen"]["model"], "qwen/qwen3.8-27b")
+        self.assertEqual(d["groq_qwen"]["endpoint"], d["groq"]["endpoint"])
+        self.assertEqual(d["groq_qwen"]["key_file"], d["groq"]["key_file"])
+        self.assertEqual((d["groq_qwen"]["pacer"], d["groq"]["pacer"]), ("groq", "groq"))
+        self.assertEqual(d["cloudflare"]["endpoint"], "https://api.cloudflare.com/client/v4/accounts/"
+                                                      "{account_id}/ai/v1/chat/completions")
+        self.assertEqual(d["cloudflare"]["model"], "@cf/qwen/qwen2.5-coder-32b-instruct")
+        self.assertEqual(d["cloudflare"]["key_file"], "~/.config/cloudflare/api-token")
+        self.assertEqual(d["cloudflare"]["vars"], {"account_id": "~/.config/cloudflare/account-id"})
+        self.assertEqual((d["antigravity"]["cmd"], d["antigravity"]["enabled_if"]),
+                         (["agy", "--print-timeout", "120s", "-p={prompt}"], ["which:agy", "exists:" + AGY_TOKEN]))
+        self.assertNotIn("model", d["antigravity"])   # --model is opt-in
+        self.assertEqual((d["grok"]["cmd"], d["grok"]["enabled_if"]), (["grok", "-p"], "which:grok"))
+        self.assertEqual(d["antigravity"]["enabled_if"], ["which:agy", "exists:" + AGY_TOKEN])   # never read
+        self.assertEqual([n for n, e in d.items() if "enabled" in e], [])   # nothing ships switched off
+        self.assertTrue(d["openrouter"]["model"].endswith(":free"))
+        self.assertEqual(d["openrouter"]["key_file"], "~/.config/openrouter/api-key")
+        self.assertEqual(d["local"]["endpoint"], "http://127.0.0.1:11434")
+        self.assertEqual(d["local"]["num_ctx"], 16384)
+
+    def test_experts_override_by_name_field_by_field(self):
+        cfg, status = self.load({"experts": [{"name": "groq", "model": "other/model"},
+                                             {"name": "grok", "cmd": ["g", "--ask"]}]})
+        d = self.by_name(cfg)
         self.assertEqual(status, "file")
-        self.assertEqual(cfg["groq"]["model"], "other/model")
-        self.assertEqual(cfg["groq"]["endpoint"], pr.DEFAULT_CONFIG["groq"]["endpoint"])
-        self.assertEqual(cfg["grok"]["cmd"], ["g", "--ask"])
-        self.assertEqual(pr.DEFAULT_CONFIG["groq"]["model"], "openai/gpt-oss-120b")   # defaults not mutated
+        self.assertEqual(d["groq"]["model"], "other/model")
+        self.assertEqual(d["groq"]["endpoint"], self.by_name(pr.DEFAULT_CONFIG)["groq"]["endpoint"])
+        self.assertEqual(d["grok"]["cmd"], ["g", "--ask"])
+        self.assertEqual(list(d), ALL_EXPERTS)   # order and membership unchanged
+        self.assertEqual(self.by_name(pr.DEFAULT_CONFIG)["groq"]["model"], "openai/gpt-oss-120b")   # not mutated
+
+    def test_a_new_expert_is_appended_and_a_bad_one_is_dropped_with_a_flag(self):
+        cfg, status = self.load({"experts": [
+            {"name": "mistral", "kind": "openai_compat", "model": "m", "classes": ["public"]},
+            {"name": "bad kind", "kind": "openai_compat", "classes": []},
+            {"name": "nokind", "classes": ["public"]},
+            {"name": "MAJORITY", "kind": "cli", "cmd": ["x"], "classes": ["public"]},
+            {"name": "groq", "classes": "public"}]})
+        names = list(self.by_name(cfg))
+        self.assertIn("mistral", names)
+        for gone in ("bad kind", "nokind", "MAJORITY", "groq"):   # the last has malformed classes
+            self.assertNotIn(gone, names)
+        self.assertEqual(status, "invalid")
+
+    def test_the_old_config_shape_is_still_honoured(self):
+        cfg, status = self.load({"groq": {"model": "old/model", "tpm_limit": 5000},
+                                 "gemini": {"model": "gemini-x"},
+                                 "local": {"base_url": "http://127.0.0.1:9999", "num_ctx": 8192}})
+        d = self.by_name(cfg)
+        self.assertEqual((status, d["groq"]["model"], d["gemini"]["model"]), ("file", "old/model", "gemini-x"))
+        self.assertEqual(cfg["pacers"]["groq"]["tpm_limit"], 5000)
+        self.assertEqual((d["local"]["endpoint"], d["local"]["num_ctx"]), ("http://127.0.0.1:9999", 8192))
+
+    def test_pacers_and_top_level_values_override(self):
+        cfg, _ = self.load({"timeout": 30, "pacers": {"groq": {"tpm_limit": 3000}}, "_comment": "ignored"})
+        self.assertEqual((cfg["timeout"], cfg["pacers"]["groq"]["tpm_limit"]), (30, 3000))
+        self.assertNotIn("_comment", cfg)
 
     def test_invalid_file_falls_back(self):
-        p = os.path.join(self.tmp, "c.json")
-        Path(p).write_text("{nope")
-        self.assertEqual(pr.load_config(p), (pr.DEFAULT_CONFIG, "invalid"))
+        self.assertEqual(self.load("{nope"), (pr.DEFAULT_CONFIG, "invalid"))
+        self.assertEqual(self.load("[1]"), (pr.DEFAULT_CONFIG, "invalid"))
 
     def test_write_example_roundtrips_and_dir_is_private(self):
         p = pr.write_example(os.path.join(self.tmp, "panel", "config.example.json"))
@@ -275,9 +388,33 @@ class Base(unittest.TestCase):
         self.net = FakeNet(self.clock)
         self.runner = FakeRunner()
         self.cfg = json.loads(json.dumps(pr.DEFAULT_CONFIG))
+        # Safety net: nothing in this suite may ever write the real ~/.local/share/ledger/panel.jsonl.
+        self.ledger = os.path.join(self.tmp, "ledger", "panel.jsonl")
+        patch = mock.patch.object(ledger_log, "DEFAULT_PATH", self.ledger)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self._experts = None
 
     def deps(self, **kw):
         return make_deps(self.net, self.clock, self.runner, **kw)
+
+    def ex(self, name):
+        """The configured expert `name`; every call shares one pacer dict, like a real run."""
+        if self._experts is None:
+            self._experts = pr.make_experts(self.cfg)
+        return self._experts[name]
+
+    def spec(self, name):
+        """The mutable config entry for `name` (experts are built from these same dicts)."""
+        return next(e for e in self.cfg["experts"] if e["name"] == name)
+
+    def review(self, name, diff=DIFF, **dep_kw):
+        return pr.review_with(self.ex(name), self.cfg, self.deps(**dep_kw), SPEC, ACCEPT, diff)
+
+    def ledger_lines(self):
+        if not os.path.exists(self.ledger):
+            return []
+        return [json.loads(line) for line in Path(self.ledger).read_text().splitlines()]
 
     def many_files(self, n, size):
         return "".join(f"diff --git a/f{i}.py b/f{i}.py\n+++ b/f{i}.py\n" + ("+x = 1\n" * (size // 7))
@@ -286,23 +423,59 @@ class Base(unittest.TestCase):
 
 class GroqTests(Base):
     def test_request_shape_and_key(self):
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("groq")
         self.assertEqual(r["verdict"], "pass")
         post = self.net.posts[0]
         self.assertEqual(post["url"], "https://api.groq.com/openai/v1/chat/completions")
         self.assertEqual(post["headers"], {"Authorization": "Bearer " + KEYS["groq"]})
         self.assertEqual(post["payload"]["model"], "openai/gpt-oss-120b")
+        self.assertEqual(post["payload"]["max_completion_tokens"], 1500)
+        self.assertNotIn("max_tokens", post["payload"])
         self.assertEqual(post["timeout"], 120)
+
+    def test_groq_qwen_uses_the_same_endpoint_and_key_with_its_own_model(self):
+        r = self.review("groq_qwen")
+        self.assertEqual(r["verdict"], "pass")
+        post = self.net.posts[0]
+        self.assertEqual((post["who"], post["url"]), ("groq_qwen", "https://api.groq.com/openai/v1/chat/completions"))
+        self.assertEqual(post["headers"], {"Authorization": "Bearer " + KEYS["groq"]})
+        self.assertEqual(post["payload"]["model"], "qwen/qwen3.8-27b")
+
+    def test_both_groq_experts_draw_on_one_budget(self):
+        diff = self.many_files(1, 15000)      # one chunk of about 4K prompt tokens (+1500 reserved)
+        deps = self.deps()
+        self.assertIs(self.ex("groq")._pacer(self.cfg, deps), self.ex("groq_qwen")._pacer(self.cfg, deps))
+        self.review("groq", diff)
+        self.assertEqual(self.clock.sleeps, [], "the first Groq call fits the minute")
+        self.review("groq_qwen", diff)
+        self.assertTrue(self.clock.sleeps, "the second Groq expert must wait for the first one's spend")
+        spent = [(p["t"], pr.est_tokens(p["payload"]["messages"][0]["content"]) + 1500) for p in self.net.posts]
+        self.assertEqual({p["who"] for p in self.net.posts}, {"groq", "groq_qwen"})
+        self.assertLessEqual(max_window(spent), 7000)
+
+    def test_two_runs_of_separate_pacers_would_overspend_the_minute(self):
+        # the control for the test above: without a shared pacer the same two calls land in one minute
+        diff = self.many_files(1, 15000)
+        for name in ("groq", "groq_qwen"):
+            pr.review_with(pr.make_experts(self.cfg)[name], self.cfg, self.deps(), SPEC, ACCEPT, diff)
+        self.assertEqual(self.clock.sleeps, [])
+        spent = [(p["t"], pr.est_tokens(p["payload"]["messages"][0]["content"]) + 1500) for p in self.net.posts]
+        self.assertGreater(max_window(spent), 7000)
+
+    def test_a_non_groq_expert_is_never_paced(self):
+        for name in ("cloudflare", "openrouter", "gemini", "local"):
+            self.review(name, self.many_files(1, 15000))
+        self.assertEqual(self.clock.sleeps, [])
 
     def test_chunks_stay_near_5k_tokens_and_no_minute_exceeds_7k(self):
         diff = self.many_files(8, 7500)
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, diff)
+        r = self.review("groq", diff)
         self.assertGreaterEqual(r["chunks"], 3)
         spent = []
         for p in self.net.posts:
             prompt = p["payload"]["messages"][0]["content"]
             self.assertLessEqual(pr.est_tokens(prompt), 5001)
-            spent.append((p["t"], pr.est_tokens(prompt) + self.cfg["groq"]["max_completion_tokens"]))
+            spent.append((p["t"], pr.est_tokens(prompt) + self.spec("groq")["max_completion_tokens"]))
         self.assertLessEqual(max_window(spent), 7000)
         self.assertTrue(self.clock.sleeps, "back-to-back 5K chunks must have been paced")
         # every chunk of the diff was actually sent, once
@@ -311,115 +484,372 @@ class GroqTests(Base):
             self.assertEqual(sent.count(f"+++ b/f{i}.py"), 1)
 
     def test_small_chunks_share_a_minute_without_waiting(self):
-        self.cfg["groq"]["chunk_tokens"] = 1500
-        diff = self.many_files(2, 4000)
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, diff)
+        self.spec("groq")["chunk_tokens"] = 1500
+        r = self.review("groq", self.many_files(2, 4000))
         self.assertEqual((r["chunks"], self.clock.sleeps), (2, []))
 
     def test_real_usage_above_the_estimate_delays_the_next_chunk(self):
-        self.cfg["groq"]["chunk_tokens"] = 1500
+        self.spec("groq")["chunk_tokens"] = 1500
         self.net.usage = 6900
-        pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, self.many_files(2, 4000))
+        self.review("groq", self.many_files(2, 4000))
+        self.assertTrue(self.clock.sleeps)
+
+    def test_real_usage_from_one_groq_expert_delays_the_other(self):
+        self.net.usage = 6900
+        self.review("groq")
+        self.review("groq_qwen")
         self.assertTrue(self.clock.sleeps)
 
     def test_revise_if_any_chunk_revises(self):
         self.net.answers["groq"] = lambda payload, n: REVISE if n == 2 else PASS
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, self.many_files(8, 7500))
+        r = self.review("groq", self.many_files(8, 7500))
         self.assertEqual((r["verdict"], r["blocking"]), ("revise", ["off by one"]))
 
     def test_one_retry_on_429_then_success(self):
         self.net.answers["groq"] = lambda payload, n: (429, {}) if n == 1 else PASS
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("groq")
         self.assertEqual(r["verdict"], "pass")
         self.assertEqual(self.net.calls["groq"], 2)
-        self.assertIn(self.cfg["groq"]["retry_wait"], self.clock.sleeps)
+        self.assertIn(self.spec("groq")["retry_wait"], self.clock.sleeps)
 
     def test_second_429_is_an_error_with_a_content_free_note(self):
         self.net.answers["groq"] = (429, {})
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("groq")
         self.assertEqual((r["verdict"], r["note"]), ("error", "HTTP_429"))
 
     def test_available_only_with_a_key(self):
-        self.assertTrue(pr.Groq().available(self.cfg, self.deps()))
-        self.assertFalse(pr.Groq().available(self.cfg, self.deps(keys={})))
+        self.assertTrue(self.ex("groq").available(self.cfg, self.deps()))
+        self.assertFalse(self.ex("groq").available(self.cfg, self.deps(keys={})))
+        self.assertFalse(self.ex("groq_qwen").available(self.cfg, self.deps(keys={})))
 
     def test_chunk_cap_is_flagged_not_silent(self):
         self.cfg["max_chunks"] = 2
-        r = pr.review_with(pr.Groq(), self.cfg, self.deps(), SPEC, ACCEPT, self.many_files(8, 7500))
+        r = self.review("groq", self.many_files(8, 7500))
         self.assertEqual((r["chunks"], r["truncated"]), (2, True))
 
 
 class GeminiTests(Base):
     def test_request_shape(self):
-        r = pr.review_with(pr.Gemini(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("gemini")
         self.assertEqual(r["verdict"], "pass")
         post = self.net.posts[0]
         self.assertEqual(post["url"], "https://generativelanguage.googleapis.com/v1beta/models/"
-                                      "gemini-2.5-flash:generateContent")
+                                      "gemini-3-flash-preview:generateContent")
         self.assertEqual(post["headers"], {"x-goog-api-key": KEYS["gemini"]})
         self.assertIn("DIFF", post["payload"]["contents"][0]["parts"][0]["text"])
 
     def test_model_is_configurable_and_parts_are_joined(self):
-        self.cfg["gemini"]["model"] = "gemini-x"
+        self.spec("gemini")["model"] = "gemini-x"
         self.net.answers["gemini"] = lambda p, n: (200, {"candidates": [{"content": {"parts": [
             {"text": '{"verdict":"re'}, {"text": 'vise","blocking":["a"]}'}]}}]})
-        r = pr.review_with(pr.Gemini(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("gemini")
         self.assertIn("gemini-x:generateContent", self.net.posts[0]["url"])
         self.assertEqual(r["verdict"], "revise")
 
     def test_available_only_with_a_key(self):
-        self.assertFalse(pr.Gemini().available(self.cfg, self.deps(keys={"groq": "k"})))
+        self.assertFalse(self.ex("gemini").available(self.cfg, self.deps(keys={"groq": "k"})))
+
+
+class CloudflareTests(Base):
+    def test_request_shape_endpoint_token_and_account_id(self):
+        r = self.review("cloudflare")
+        post = self.net.posts[0]
+        self.assertEqual(r["verdict"], "pass")
+        self.assertEqual(post["url"], f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}"
+                                      "/ai/v1/chat/completions")
+        self.assertEqual(post["headers"], {"Authorization": "Bearer " + KEYS["cloudflare"]})
+        self.assertEqual(post["payload"]["model"], "@cf/qwen/qwen2.5-coder-32b-instruct")
+        self.assertEqual(post["payload"]["max_tokens"], 1500)
+        self.assertNotIn("max_completion_tokens", post["payload"])
+
+    def test_unavailable_without_the_token_or_without_the_account_id(self):
+        ex = self.ex("cloudflare")
+        self.assertTrue(ex.available(self.cfg, self.deps()))
+        self.assertFalse(ex.available(self.cfg, self.deps(keys={})))   # no token
+        read = self.deps().read_key
+        no_account = lambda p: None if p.endswith("account-id") else read(p)   # noqa: E731
+        d = self.deps()
+        d.read_key = no_account
+        self.assertFalse(ex.available(self.cfg, d))
+        self.assertIsNone(ex._url(d), "an unresolved {account_id} must never reach the wire")
+
+
+class OpenRouterTests(Base):
+    def test_request_shape_and_free_model(self):
+        r = self.review("openrouter")
+        post = self.net.posts[0]
+        self.assertEqual(r["verdict"], "pass")
+        self.assertEqual(post["url"], "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(post["headers"], {"Authorization": "Bearer " + KEYS["openrouter"]})
+        self.assertTrue(post["payload"]["model"].endswith(":free"))
+
+    def test_unavailable_without_a_key(self):
+        self.assertFalse(self.ex("openrouter").available(self.cfg, self.deps(keys={"groq": "k"})))
+
+
+def cli_prompt(call):
+    """The prompt a CLI expert was given: its last argument, minus the attached `-p=` if there is one."""
+    arg = call["cmd"][-1]
+    return arg[3:] if arg.startswith("-p=") else arg
 
 
 class GrokTests(Base):
     def test_prompt_is_the_last_argument(self):
-        r = pr.review_with(pr.Grok(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("grok")
         call = self.runner.calls[0]
         self.assertEqual(r["verdict"], "pass")
         self.assertEqual(call["cmd"][:2], ["grok", "-p"])
         self.assertIn("ACCEPTANCE", call["cmd"][-1])
-        self.assertIsNone(call["stdin"])
         self.assertEqual(call["timeout"], 120)
 
-    def test_stdin_mode(self):
-        self.cfg["grok"]["stdin"] = True
-        pr.review_with(pr.Grok(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+    def test_antigravity_command_puts_dash_p_last_with_the_prompt_attached(self):
+        # Verified against agy v1.2.14: `agy -p --print-timeout 120s PROMPT` fails ("-p took
+        # --print-timeout as its prompt"), because -p consumes the NEXT argument. So flags first, prompt attached.
+        r = self.review("antigravity")
         call = self.runner.calls[0]
-        self.assertEqual(call["cmd"], ["grok", "-p"])
-        self.assertIn("SPEC:", call["stdin"])
+        self.assertEqual((r["verdict"], call["cmd"][:3]), ("pass", ["agy", "--print-timeout", "120s"]))
+        self.assertEqual(len(call["cmd"]), 4)
+        self.assertTrue(call["cmd"][3].startswith("-p="))
+        self.assertIn("ACCEPTANCE", call["cmd"][3])
+        self.assertEqual(call["timeout"], 120)   # the subprocess timeout is enforced as well
+
+    def test_no_stdin_mode_the_prompt_always_travels_in_argv(self):
+        self.spec("grok")["stdin"] = True          # an old config option: ignored now
+        self.review("grok")
+        call = self.runner.calls[0]
+        self.assertEqual(call["cmd"][:2], ["grok", "-p"])
+        self.assertIn("SPEC:", call["cmd"][-1])
+        self.assertNotIn("stdin", call)
 
     def test_prompt_placeholder_template(self):
-        self.cfg["grok"]["cmd"] = ["grok", "--prompt", "{prompt}", "--json"]
-        pr.review_with(pr.Grok(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        self.spec("grok")["cmd"] = ["grok", "--prompt", "{prompt}", "--json"]
+        self.review("grok")
         cmd = self.runner.calls[0]["cmd"]
         self.assertEqual((cmd[0], cmd[1], cmd[3]), ("grok", "--prompt", "--json"))
         self.assertIn("DIFF", cmd[2])
 
     def test_noisy_cli_output_is_tolerated_and_failure_is_an_error(self):
         self.runner.reply = 'thinking...\n```json\n{"verdict":"revise","blocking":["x"]}\n```\ndone'
-        self.assertEqual(pr.review_with(pr.Grok(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)["verdict"], "revise")
+        self.assertEqual(self.review("grok")["verdict"], "revise")
         self.runner.rc = 1
-        r = pr.review_with(pr.Grok(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("grok")
         self.assertEqual((r["verdict"], r["note"]), ("error", "EXIT_1"))
 
     def test_available_only_if_the_binary_is_on_path(self):
-        self.assertTrue(pr.Grok().available(self.cfg, self.deps(installed=("grok",))))
-        self.assertFalse(pr.Grok().available(self.cfg, self.deps(installed=())))
-        self.cfg["grok"]["cmd"] = ["mygrok", "-p"]
-        self.assertFalse(pr.Grok().available(self.cfg, self.deps(installed=("grok",))))
+        self.assertTrue(self.ex("grok").available(self.cfg, self.deps(installed=("grok",))))
+        self.assertFalse(self.ex("grok").available(self.cfg, self.deps(installed=())))
+        self.spec("grok")["cmd"] = ["mygrok", "-p"]
+        self.assertFalse(self.ex("grok").available(self.cfg, self.deps(installed=("grok",))))
+
+    def test_enabled_if_gates_an_expert_whose_binary_is_present(self):
+        self.assertFalse(self.ex("antigravity").available(self.cfg, self.deps(installed=("grok",))))
+        self.assertTrue(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",))))
+        self.spec("antigravity")["enabled_if"] = "which:something-else"   # on PATH is not enough
+        self.assertFalse(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",))))
+        self.spec("antigravity")["enabled_if"] = "weird:thing"            # unknown condition: not met
+        self.assertFalse(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",))))
+        self.spec("antigravity")["enabled_if"] = "file:/x/cloudflare/api-token"
+        self.assertTrue(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",))))
+        self.assertFalse(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",), keys={})))
+
+    def test_antigravity_runs_only_when_its_oauth_token_file_exists(self):
+        # On a signed-out machine every `agy -p` opens a browser OAuth flow, so signed out means agy is NOT run.
+        signed_out = self.deps(installed=("agy", "grok"), existing=())
+        ex = self.ex("antigravity")
+        self.assertFalse(ex.available(self.cfg, signed_out))
+        self.assertEqual(self.runner.calls, [])
+        signed_in = self.deps(installed=("agy", "grok"), existing=(AGY_TOKEN,))
+        self.assertTrue(ex.available(self.cfg, signed_in))
+        self.assertFalse(ex.available(self.cfg, self.deps(installed=("grok",), existing=(AGY_TOKEN,))))   # no agy
+        self.assertFalse(ex.available(self.cfg, self.deps(installed=("agy",), existing=("/some/other/file",))))
+        self.assertEqual(self.runner.calls, [], "availability never runs anything")
+
+    def test_the_token_is_only_checked_for_existence_never_read(self):
+        d = self.deps(installed=("agy",), existing=(AGY_TOKEN,))
+        reads = []
+        d.read_key = lambda path: reads.append(path)
+        d.run_cmd = lambda *a, **k: self.fail("availability must not run a command")
+        self.assertTrue(self.ex("antigravity").available(self.cfg, d))
+        self.assertEqual(reads, [], "the OAuth token file must never be opened")
+
+    def test_enabled_false_wins_even_when_signed_in(self):
+        self.spec("antigravity")["enabled"] = False
+        self.assertFalse(self.ex("antigravity").available(self.cfg, self.deps(installed=("agy",))))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_enabled_false_switches_off_any_expert(self):
+        for name in ("groq", "gemini", "cloudflare", "local", "grok"):
+            self.assertTrue(self.ex(name).available(self.cfg, self.deps()), name)
+            probes = len(self.net.gets)
+            self.spec(name)["enabled"] = False
+            self.assertFalse(pr.make_experts(self.cfg)[name].available(self.cfg, self.deps()), name)
+            self.assertEqual(len(self.net.gets), probes, f"a disabled {name} must not be probed")
+
+    def test_exists_probe_and_list_conditions_read_nothing_and_run_nothing(self):
+        token = "~/.gemini/antigravity-cli/some-token-file"
+        self.spec("antigravity")["enabled_if"] = ["which:agy", f"exists:{token}"]
+        d = self.deps(installed=("agy",), existing=())
+        d.read_key = d.run_cmd = lambda *a, **k: self.fail("a probe must not read a file or run a command")
+        ex = self.ex("antigravity")
+        self.assertFalse(ex.available(self.cfg, d))                                  # not signed in: no token file
+        d.exists = lambda path: path == token
+        self.assertTrue(ex.available(self.cfg, d))                                   # signed in: it exists
+        d.which = lambda name: None
+        self.assertFalse(ex.available(self.cfg, d))                                  # every item must hold
+        self.assertTrue(pr.condition_met([], d) and pr.condition_met(None, d))
+        self.assertFalse(pr.condition_met(["which:agy", "bogus:x"], self.deps(installed=("agy",))))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_model_flag_is_only_passed_when_a_model_is_set(self):
+        self.review("antigravity")
+        self.assertNotIn("--model", self.runner.calls[0]["cmd"])
+        self.spec("antigravity")["model"] = "gemini-x"
+        self.review("antigravity")
+        cmd = self.runner.calls[1]["cmd"]
+        self.assertEqual(cmd[:6], ["agy", "--model", "gemini-x", "--print-timeout", "120s", cmd[5]])
+        self.assertEqual(self.ex("antigravity").model(), "gemini-x")
+        self.assertEqual(pr.make_experts(pr.DEFAULT_CONFIG)["antigravity"].model(), "agy")   # logged as the binary
+        self.spec("grok")["model"], self.spec("grok")["model_flag"] = "grok-x", "-m"
+        self.review("grok")
+        self.assertEqual(self.runner.calls[2]["cmd"][:4], ["grok", "-m", "grok-x", "-p"])
+
+    def test_an_auto_approve_argument_is_refused_before_anything_runs(self):
+        for bad in ("--dangerously-skip-permissions", "--yolo", "--auto-approve", "--autoapprove", "--allow-all",
+                    "--yes", "-y", "--mode=accept-edits", "--trust-all-tools", "--bypass-permissions"):
+            self.spec("antigravity")["cmd"] = ["agy", bad, "-p={prompt}"]
+            ex = pr.make_experts(self.cfg)["antigravity"]
+            self.assertFalse(ex.available(self.cfg, self.deps()), bad)
+            r = pr.review_with(ex, self.cfg, self.deps(), SPEC, ACCEPT, DIFF)   # even if called anyway
+            self.assertEqual((r["verdict"], r["note"]), ("error", "UNSAFE_FLAG"), bad)
+        self.spec("antigravity")["cmd"] = ["agy", "--mode", "accept-edits", "-p={prompt}"]   # as a separate value
+        self.assertFalse(pr.make_experts(self.cfg)["antigravity"].available(self.cfg, self.deps()))
+        self.assertEqual(self.runner.calls, [], "no unsafe command was ever executed")
+        for e in pr.DEFAULT_CONFIG["experts"]:   # and the shipped defaults carry none
+            if e["kind"] == "cli":
+                self.assertFalse(pr.unsafe_cli(e["cmd"]), e["name"])
+
+    def test_the_prompt_text_itself_may_mention_those_words(self):
+        r = self.run_review_with_diff("+ # use --dangerously-skip-permissions --yolo here\n")
+        self.assertEqual(r["verdict"], "pass")
+        self.assertIn("--yolo", self.runner.calls[0]["cmd"][-1])
+
+    def run_review_with_diff(self, diff):
+        return pr.review_with(self.ex("grok"), self.cfg, self.deps(), SPEC, ACCEPT, diff)
+
+    def test_an_oversize_prompt_is_an_error_never_a_stdin_fallback(self):
+        self.spec("grok")["chunk_chars"] = 400_000
+        diff = "diff --git a/f b/f\n" + ("+é" * 80_000 + "\n")        # 2 bytes per char: ~320 KB in argv
+        r = self.run_review_with_diff(diff)
+        self.assertTrue(all(len(c["cmd"][-1].encode()) <= pr.MAX_ARGV_BYTES for c in self.runner.calls))
+        self.assertGreater(r["chunks"], 1, "the chunk size is capped so each prompt fits one argv string")
+        direct = self.ex("grok")
+        with self.assertRaises(pr.ExpertError):
+            direct.ask("é" * (pr.MAX_ARGV_BYTES // 2 + 10), self.cfg, self.deps())
+
+    def test_a_timeout_stops_asking_that_expert_for_the_remaining_chunks(self):
+        import subprocess
+        calls = []
+
+        def hang(cmd, timeout):
+            calls.append(cmd)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        deps = self.deps()
+        deps.run_cmd = hang
+        r = pr.review_with(self.ex("antigravity"), self.cfg, deps, SPEC, ACCEPT, self.many_files(8, 20000))
+        self.assertGreater(r["chunks"], 1)
+        self.assertEqual((len(calls), r["verdict"]), (1, "error"))
+        self.assertIn("TimeoutExpired", r["note"])
+        self.assertIn("later chunks skipped", r["note"])
+
+
+class RealRunCmdTests(unittest.TestCase):
+    """real_run_cmd with real (local, offline) processes: python itself is the stand-in CLI."""
+
+    def run_py(self, code, timeout=20):
+        return pr.real_run_cmd([sys.executable, "-c", code], timeout)
+
+    def test_cwd_is_a_fresh_empty_temp_dir_that_is_deleted_afterwards(self):
+        here = os.getcwd()
+        rc, out = self.run_py("import os; print(os.getcwd()); print(len(os.listdir('.')))")
+        cwd, count = out.split()
+        self.assertEqual((rc, count), (0, "0"))
+        self.assertNotEqual(os.path.realpath(cwd), os.path.realpath(here))
+        self.assertTrue(os.path.basename(cwd).startswith("panel-cli-"))
+        self.assertFalse(os.path.exists(cwd), "the temp dir must be gone after the run")
+        self.assertEqual(os.getcwd(), here)
+
+    def test_each_run_gets_its_own_dir_and_files_it_writes_do_not_survive(self):
+        _, a = self.run_py("import os; open('leak.txt','w').write('x'); print(os.getcwd())")
+        _, b = self.run_py("import os; print(os.listdir('.')); print(os.getcwd())")
+        self.assertNotEqual(a.strip(), b.splitlines()[-1])
+        self.assertEqual(b.splitlines()[0], "[]")
+        self.assertFalse(os.path.exists(a.strip()))
+
+    def test_stdin_is_dev_null_so_a_prompt_for_permission_cannot_hang(self):
+        rc, out = self.run_py("import sys; print(repr(sys.stdin.read())); print(sys.stdin.isatty())", timeout=10)
+        self.assertEqual((rc, out.split()), (0, ["''", "False"]))
+
+    def test_the_command_is_an_argv_list_never_a_shell(self):
+        rc, out = pr.real_run_cmd([sys.executable, "-c", "import sys; print(sys.argv[1])", "$(echo hi); `id` | cat"], 20)
+        self.assertEqual(out.strip(), "$(echo hi); `id` | cat")   # metacharacters arrive literally
+        with mock.patch.object(pr.subprocess, "Popen") as popen:
+            popen.return_value.communicate.return_value = ("", None)
+            popen.return_value.returncode = 0
+            pr.real_run_cmd(["agy", "-p"], 5)
+        kw = popen.call_args.kwargs
+        self.assertIs(kw["shell"], False)
+        self.assertEqual(kw["stdin"], pr.subprocess.DEVNULL)
+        self.assertTrue(kw["start_new_session"])
+        self.assertIsInstance(popen.call_args.args[0], list)
+        self.assertTrue(os.path.basename(kw["cwd"]).startswith("panel-cli-"))
+
+    def test_a_timeout_kills_the_whole_process_group_and_still_removes_the_dir(self):
+        import time
+        pidfile = os.path.join(tempfile.mkdtemp(), "grandchild.pid")
+        self.addCleanup(shutil.rmtree, os.path.dirname(pidfile), True)
+        code = ("import os, subprocess, sys, time\n"
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"open({pidfile!r}, 'w').write(str(g.pid))\n"
+                "print(os.getcwd(), flush=True); time.sleep(60)")
+        seen = {}
+        real_popen = pr.subprocess.Popen
+
+        def spy(*a, **kw):
+            seen["cwd"] = kw["cwd"]
+            return real_popen(*a, **kw)
+        with mock.patch.object(pr.subprocess, "Popen", spy):
+            with self.assertRaises(pr.subprocess.TimeoutExpired):
+                pr.real_run_cmd([sys.executable, "-c", code], 2)
+        self.assertFalse(os.path.exists(seen["cwd"]))
+        grandchild = int(Path(pidfile).read_text())
+        alive = True
+        for _ in range(40):   # up to 2 s for the kernel to reap it
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(grandchild, 9)
+        self.assertFalse(alive, "a grandchild the CLI spawned must die with it")
 
 
 class LocalTests(Base):
     def test_available_when_tags_answer_within_2s(self):
-        self.assertTrue(pr.Local().available(self.cfg, self.deps()))
+        self.assertTrue(self.ex("local").available(self.cfg, self.deps()))
         self.assertEqual(self.net.gets, [("http://127.0.0.1:11434/api/tags", 2)])
 
     def test_unavailable_when_tags_fail(self):
         self.net.tags_ok = False
-        self.assertFalse(pr.Local().available(self.cfg, self.deps()))
+        self.assertFalse(self.ex("local").available(self.cfg, self.deps()))
+
+    def test_dry_run_probe_makes_no_call(self):
+        self.assertTrue(self.ex("local").available(self.cfg, self.deps(), probe=False))
+        self.assertEqual(self.net.gets, [])
 
     def test_chat_request_shape(self):
-        r = pr.review_with(pr.Local(), self.cfg, self.deps(), SPEC, ACCEPT, DIFF)
+        r = self.review("local")
         post = self.net.posts[0]
         self.assertEqual(r["verdict"], "pass")
         self.assertEqual(post["url"], "http://127.0.0.1:11434/api/chat")
@@ -439,42 +869,54 @@ class Result:
 
 
 class FlowTests(Base):
-    def run_panel(self, *extra, diff=DIFF, cls="public", spec=SPEC, scanner=CLEAN, experts=None, **dep_kw):
+    def run_panel(self, *extra, diff=DIFF, cls="public", spec=SPEC, scanner=CLEAN, experts=None,
+                  config=None, signed_in=True, **dep_kw):
+        """signed_in=False simulates a machine with no agy OAuth token file (agy must then never run)."""
+        if not signed_in:
+            dep_kw.setdefault("existing", ())
         paths = {}
         for name, text in (("spec", spec), ("acc", ACCEPT), ("diff", diff), ("terms", "Acme Corp\n")):
             paths[name] = os.path.join(self.tmp, name + ".txt")
             Path(paths[name]).write_text(text, encoding="utf-8")
+        cfg_path = os.path.join(self.tmp, "no-config.json")
+        if config is not None:
+            cfg_path = os.path.join(self.tmp, "config.json")
+            Path(cfg_path).write_text(json.dumps(config))
         argv = ["--spec", paths["spec"], "--acceptance", paths["acc"], "--diff", paths["diff"],
-                "--class", cls, "--terms-file", paths["terms"],
-                "--config", os.path.join(self.tmp, "no-config.json"), *extra]
+                "--class", cls, "--terms-file", paths["terms"], "--config", cfg_path, *extra]
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = pr.main(argv, deps=self.deps(scanner=scanner, **dep_kw), experts=experts)
         return Result(buf.getvalue(), rc)
 
     def called(self):
-        names = [w for w in ("groq", "gemini", "local") if self.net.calls[w]]
-        return names + (["grok"] if self.runner.calls else [])
+        """Names of the experts that actually received a request, in panel order."""
+        cli = {"grok": "grok", "agy": "antigravity"}
+        hit = {n for n in API_EXPERTS if self.net.calls[n]} | {cli[c["cmd"][0]] for c in self.runner.calls}
+        return [n for n in ALL_EXPERTS if n in hit]
 
     # routing ---------------------------------------------------------------
-    def test_public_asks_all_four(self):
+    def test_public_asks_every_expert(self):
         r = self.run_panel()
-        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ("groq", "gemini", "grok", "local")], ["pass"] * 4)
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["pass"] * 8)
+        self.assertEqual(self.called(), ALL_EXPERTS)
         self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("pass", 0))
         self.assertEqual(r.lines["GATE"], "send")
+        self.assertEqual(r.json["allowed"], ALL_EXPERTS)
 
-    def test_own_is_groq_and_local_only(self):
+    def test_own_reaches_only_the_experts_that_do_not_train(self):
         r = self.run_panel(cls="own")
-        self.assertEqual(sorted(self.called()), ["groq", "local"])
-        self.assertNotIn("PANEL_gemini", r.lines)
-        self.assertNotIn("PANEL_grok", r.lines)
-        self.assertEqual(r.json["allowed"], ["groq", "local"])
+        self.assertEqual(self.called(), ["groq", "groq_qwen", "cloudflare", "local"])
+        for n in TRAINING:
+            self.assertNotIn(f"PANEL_{n}", r.lines)
+        self.assertEqual(r.json["allowed"], ["groq", "groq_qwen", "cloudflare", "local"])
 
     def test_client_is_local_only(self):
         r = self.run_panel(cls="client")
         self.assertEqual(self.called(), ["local"])
         self.assertEqual((r.lines["GATE"], r.lines["PANEL_local"]), ("local", "pass"))
         self.assertEqual(r.json["allowed"], ["local"])
+        self.assertEqual([k for k in r.lines if k.startswith("PANEL_") and k[6:] in ALL_EXPERTS], ["PANEL_local"])
 
     def test_never_send_narrows_public_to_local(self):
         r = self.run_panel("--never-send", "src/*")
@@ -497,16 +939,25 @@ class FlowTests(Base):
     def test_nothing_configured_means_all_unavailable_and_majority_none(self):
         self.net.tags_ok = False
         r = self.run_panel(keys={}, installed=())
-        for n in ("groq", "gemini", "grok", "local"):
+        for n in ALL_EXPERTS:
             self.assertEqual(r.lines[f"PANEL_{n}"], "unavailable")
         self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("none", 0))
         self.assertEqual(self.net.posts, [])
+        self.assertEqual(self.ledger_lines(), [], "no call, no usage line")
+
+    def test_cloudflare_without_a_token_is_unavailable_and_the_rest_still_answer(self):
+        keys = {k: v for k, v in KEYS.items() if k != "cloudflare"}
+        r = self.run_panel(cls="own", keys=keys)
+        self.assertEqual((r.lines["PANEL_cloudflare"], r.lines["PANEL_groq"]), ("unavailable", "pass"))
+        self.assertEqual(self.called(), ["groq", "groq_qwen", "local"])
+        self.assertEqual(r.lines["PANEL_MAJORITY"], "pass")
 
     def test_split_when_experts_disagree(self):
-        self.net.answers["groq"] = REVISE
+        self.net.answers["groq"] = self.net.answers["groq_qwen"] = REVISE
         self.net.tags_ok = False
-        r = self.run_panel(keys={"groq": "k"}, installed=("grok",))
-        self.assertEqual((r.lines["PANEL_groq"], r.lines["PANEL_grok"]), ("revise", "pass"))
+        r = self.run_panel(keys={"groq": "k"}, installed=("grok", "agy"))
+        self.assertEqual((r.lines["PANEL_groq"], r.lines["PANEL_groq_qwen"]), ("revise", "revise"))
+        self.assertEqual((r.lines["PANEL_grok"], r.lines["PANEL_antigravity"]), ("pass", "pass"))
         self.assertEqual(r.lines["PANEL_MAJORITY"], "split")
 
     def test_errors_are_shown_but_not_counted_and_exit_is_zero(self):
@@ -519,11 +970,20 @@ class FlowTests(Base):
         self.assertEqual(r.json["experts"]["gemini"]["note"], "unparseable reply")
 
     def test_all_error_still_exits_zero(self):
-        for w in ("groq", "gemini", "local"):
+        for w in API_EXPERTS:
             self.net.answers[w] = (503, {})
         self.runner.rc = 2
         r = self.run_panel()
         self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("none", 0))
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["error"] * 8)
+
+    def test_sentinels_are_distinct_for_experts_whose_names_share_a_prefix(self):
+        self.net.answers["groq_qwen"] = REVISE
+        r = self.run_panel(cls="own")
+        self.assertEqual((r.lines["PANEL_groq"], r.lines["PANEL_groq_qwen"]), ("pass", "revise"))
+        for line in r.stdout.splitlines():
+            if line.startswith("__PANEL_"):
+                self.assertRegex(line, r"^__PANEL_[A-Za-z0-9_]+=[^=]*__$")
 
     def test_internal_failure_still_exits_zero(self):
         r = self.run_panel(experts={"nope": None})   # experts mapping broken: a bug in the tool, not the diff
@@ -534,15 +994,16 @@ class FlowTests(Base):
     def test_dry_run_makes_no_calls_at_all(self):
         r = self.run_panel("--dry-run")
         self.assertEqual((self.net.posts, self.net.gets, self.runner.calls), ([], [], []))
-        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ("groq", "gemini", "grok", "local")],
-                         ["would_call"] * 4)
-        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,gemini,grok,local")
+        self.assertEqual([r.lines[f"PANEL_{n}"] for n in ALL_EXPERTS], ["would_call"] * 8)
+        self.assertEqual(r.lines["PANEL_DRYRUN"], ",".join(ALL_EXPERTS))
         self.assertEqual((r.lines["GATE"], r.lines["PANEL_MAJORITY"], r.rc), ("send", "none", 0))
         self.assertTrue(r.json["dry_run"])
+        self.assertEqual(self.ledger_lines(), [], "a dry run spends nothing, so it logs nothing")
 
     def test_dry_run_reports_unconfigured_experts_and_respects_routing(self):
         r = self.run_panel("--dry-run", cls="own", keys={"groq": "k"})
-        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,local")
+        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,groq_qwen,local")
+        self.assertEqual(r.lines["PANEL_cloudflare"], "unavailable")
         r = self.run_panel("--dry-run", keys={}, installed=())
         self.assertEqual((r.lines["PANEL_groq"], r.lines["PANEL_grok"]), ("unavailable", "unavailable"))
         self.assertEqual(r.lines["PANEL_DRYRUN"], "local")
@@ -551,11 +1012,12 @@ class FlowTests(Base):
     def test_only_the_redacted_diff_reaches_any_transport(self):
         r = self.run_panel()
         wire = json.dumps(self.net.posts) + json.dumps(self.runner.calls)
-        self.assertEqual(len(self.net.posts), 3)
-        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(len(self.net.posts), 6)       # groq, groq_qwen, gemini, cloudflare, openrouter, local
+        self.assertEqual(len(self.runner.calls), 2)    # antigravity, grok
         for original in ORIGINALS:
             self.assertNotIn(original, wire)
             self.assertNotIn(original, r.stdout)
+            self.assertNotIn(original, Path(self.ledger).read_text())
         self.assertIn("[EMAIL_1]", wire)
         self.assertIn("[PHONE_1]", wire)
 
@@ -563,19 +1025,27 @@ class FlowTests(Base):
         self.run_panel()
         prompts = {p["who"]: (p["payload"]["contents"][0]["parts"][0]["text"] if p["who"] == "gemini"
                               else p["payload"]["messages"][0]["content"]) for p in self.net.posts}
-        prompts["grok"] = self.runner.calls[0]["cmd"][-1]
+        for c in self.runner.calls:
+            prompts[c["cmd"][0]] = cli_prompt(c)
+        self.assertEqual(len(prompts), 8)
         self.assertEqual(len(set(prompts.values())), 1)
         p = prompts["groq"]
         for part in ("SPEC:", "ACCEPTANCE:", "DIFF:", "prints hello", '"verdict":"pass"|"revise"'):
             self.assertIn(part, p)
 
     def test_keys_go_in_headers_and_never_in_output(self):
-        r = self.run_panel()
+        r = self.run_panel("--repo", "ScriptHammer")
         heads = {p["who"]: p["headers"] for p in self.net.posts}
-        self.assertEqual(heads["groq"], {"Authorization": "Bearer " + KEYS["groq"]})
+        bearer = lambda k: {"Authorization": "Bearer " + KEYS[k]}   # noqa: E731
+        self.assertEqual(heads["groq"], bearer("groq"))
+        self.assertEqual(heads["groq_qwen"], bearer("groq"))
+        self.assertEqual(heads["cloudflare"], bearer("cloudflare"))
+        self.assertEqual(heads["openrouter"], bearer("openrouter"))
         self.assertEqual(heads["gemini"], {"x-goog-api-key": KEYS["gemini"]})
-        for key in KEYS.values():
-            self.assertNotIn(key, r.stdout)
+        self.assertEqual(heads["local"], {})
+        shown = r.stdout + Path(self.ledger).read_text()
+        for secret in (*KEYS.values(), ACCOUNT_ID):
+            self.assertNotIn(secret, shown)
 
     # output ------------------------------------------------------------------
     def test_json_summary_truncates_reasons_and_carries_gate_and_timings(self):
@@ -589,6 +1059,401 @@ class FlowTests(Base):
         self.assertEqual(j["experts"]["gemini"]["chunks"], 1)
         self.assertEqual(r.stdout.count("__PANEL_JSON="), 1)
         self.assertNotIn(", ", r.lines["PANEL_JSON"])   # compact separators
+
+    # antigravity: agy runs only when its OAuth token file exists ---------------------------
+    def test_signed_out_means_agy_is_never_launched_even_though_it_is_installed(self):
+        r = self.run_panel(signed_in=False)        # agy is on PATH in the fake deps, the token file is absent
+        self.assertEqual(r.lines["PANEL_antigravity"], "unavailable")
+        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["grok"])
+        self.assertNotIn("antigravity", [x["expert"] for x in self.ledger_lines()])
+        self.assertEqual(r.lines["PANEL_MAJORITY"], "pass")
+
+    def test_signed_in_means_agy_is_asked_like_any_other_expert(self):
+        r = self.run_panel()
+        self.assertEqual(r.lines["PANEL_antigravity"], "pass")
+        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["agy", "grok"])
+
+    def test_dry_run_launches_nothing_whether_or_not_signed_in(self):
+        r = self.run_panel("--dry-run", signed_in=False)
+        self.assertEqual((self.runner.calls, r.lines["PANEL_antigravity"]), ([], "unavailable"))
+        self.assertEqual(r.lines["PANEL_DRYRUN"], "groq,groq_qwen,gemini,cloudflare,openrouter,grok,local")
+        r = self.run_panel("--dry-run")
+        self.assertEqual((self.runner.calls, r.lines["PANEL_antigravity"]), ([], "would_call"))
+
+    def test_config_can_still_switch_it_off_while_signed_in(self):
+        r = self.run_panel(config={"experts": [{"name": "antigravity", "enabled": False}]})
+        self.assertEqual(r.lines["PANEL_antigravity"], "unavailable")
+        self.assertEqual([c["cmd"][0] for c in self.runner.calls], ["grok"])
+
+    def test_the_probe_path_can_be_overridden_in_config(self):
+        cfg = {"experts": [{"name": "antigravity", "enabled_if": ["which:agy", "exists:~/elsewhere/token"]}]}
+        r = self.run_panel(config=cfg)             # default token file exists, the configured one does not
+        self.assertEqual(r.lines["PANEL_antigravity"], "unavailable")
+        r = self.run_panel(config=cfg, existing=("~/elsewhere/token",))
+        self.assertEqual(r.lines["PANEL_antigravity"], "pass")
+
+    # hard rules, end to end: a config file can not loosen them ---------------------
+    def loosened(self, **overrides):
+        """A user config that tries to open every expert to every class."""
+        return {"experts": [{"name": n, "classes": ["public", "own", "client"], **overrides.get(n, {})}
+                            for n in ALL_EXPERTS]}
+
+    def test_a_config_that_lists_client_for_everyone_still_reaches_only_local(self):
+        r = self.run_panel(cls="client", config=self.loosened())
+        self.assertEqual(self.called(), ["local"])
+        self.assertEqual(r.json["allowed"], ["local"])
+
+    def test_a_config_that_lists_own_for_everyone_never_reaches_a_trainer(self):
+        r = self.run_panel(cls="own", config=self.loosened())
+        self.assertEqual(self.called(), ["groq", "groq_qwen", "cloudflare", "local"])
+        self.assertEqual(r.json["allowed"], ["groq", "groq_qwen", "cloudflare", "local"])
+        for n in TRAINING:
+            self.assertNotIn(f"PANEL_{n}", r.lines)
+
+    def test_a_non_loopback_ollama_never_sees_client_or_a_local_gate(self):
+        far = {"name": "remote", "kind": "ollama", "model": "m", "endpoint": "http://10.1.2.3:11434",
+               "classes": ["public", "own", "client"], "trains": False}
+        for cls, extra in (("client", []), ("public", ["--never-send", "src/*"])):
+            r = self.run_panel(*extra, cls=cls, config={"experts": [far]})
+            self.assertNotIn("PANEL_remote", r.lines, cls)
+        r = self.run_panel(cls="own", config={"experts": [far]})
+        self.assertIn("PANEL_remote", r.lines)   # allowed where the diff may leave the machine anyway
+
+    # usage log (panel.jsonl) -----------------------------------------------------
+    LEDGER_KEYS = ["class", "expert", "gate", "input_tokens", "model", "ms", "output_tokens", "repo", "ts"]
+
+    def test_one_exact_schema_line_per_called_expert(self):
+        self.run_panel("--repo", "ScriptHammer", cls="own")
+        lines = self.ledger_lines()
+        self.assertEqual([x["expert"] for x in lines], ["groq", "groq_qwen", "cloudflare", "local"])
+        want_model = {"groq": "openai/gpt-oss-120b", "groq_qwen": "qwen/qwen3.8-27b",
+                      "cloudflare": "@cf/qwen/qwen2.5-coder-32b-instruct", "local": "qwen2.5-coder:7b"}
+        for x in lines:
+            self.assertEqual(sorted(x), self.LEDGER_KEYS)       # exact: no extras, no `estimated`
+            self.assertRegex(x["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertEqual((x["repo"], x["class"], x["gate"]), ("ScriptHammer", "own", "send"))
+            self.assertEqual(x["model"], want_model[x["expert"]])
+            for k in ("input_tokens", "output_tokens", "ms"):
+                self.assertIs(type(x[k]), int, k)
+
+    def test_repo_defaults_to_null_and_the_gate_and_class_are_recorded(self):
+        self.run_panel("--never-send", "src/*", cls="public")
+        (line,) = self.ledger_lines()
+        self.assertEqual((line["expert"], line["repo"], line["class"], line["gate"]), ("local", None, "public", "local"))
+
+    def test_real_token_counts_per_kind_are_summed_over_chunks(self):
+        r = self.run_panel("--repo", "r", cls="own", diff=self.many_files(8, 7500))
+        lines = {x["expert"]: x for x in self.ledger_lines()}
+        for name in ("groq", "groq_qwen", "cloudflare", "local"):
+            chunks = r.json["experts"][name]["chunks"]
+            self.assertGreater(chunks, 1, name)
+            # usage.prompt_tokens/completion_tokens (openai_compat) and prompt_eval_count/eval_count (ollama)
+            self.assertEqual((lines[name]["input_tokens"], lines[name]["output_tokens"]),
+                             (80 * chunks, 20 * chunks), name)
+            self.assertNotIn("estimated", lines[name])
+
+    def test_gemini_counts_come_from_usage_metadata(self):
+        self.net.usage = 530
+        self.run_panel("--repo", "r")
+        gem = next(x for x in self.ledger_lines() if x["expert"] == "gemini")
+        self.assertEqual((gem["input_tokens"], gem["output_tokens"]), (510, 20))
+        self.assertNotIn("estimated", gem)
+
+    def test_cli_usage_is_estimated_chars_over_four_and_flagged(self):
+        self.run_panel("--repo", "r")
+        lines = {x["expert"]: x for x in self.ledger_lines()}
+        reply = json.dumps(PASS)
+        for call, name in zip(self.runner.calls, ("antigravity", "grok")):
+            self.assertEqual(lines[name]["input_tokens"], len(cli_prompt(call)) // 4)
+            self.assertEqual(lines[name]["output_tokens"], len(reply) // 4)
+            self.assertIs(lines[name]["estimated"], True)
+        self.assertEqual(sorted(lines["grok"]), sorted(self.LEDGER_KEYS + ["estimated"]))
+
+    def test_the_cloudflare_line_carries_neurons_as_an_extra_optional_field(self):
+        self.net.neurons["cloudflare"] = 3.60909090909
+        self.run_panel("--repo", "ScriptHammer", cls="own")
+        lines = {x["expert"]: x for x in self.ledger_lines()}
+        cf = lines["cloudflare"]
+        self.assertEqual(cf["neurons"], 3.6091)
+        self.assertEqual(sorted(cf), sorted(self.LEDGER_KEYS + ["neurons"]))
+        self.assertEqual((cf["input_tokens"], cf["output_tokens"]), (80, 20))
+        for other in ("groq", "groq_qwen", "local"):
+            self.assertNotIn("neurons", lines[other])
+
+    def test_neurons_are_summed_over_chunks(self):
+        self.net.neurons["cloudflare"] = 3.60909090909
+        r = self.run_panel("--repo", "r", cls="own", diff=self.many_files(4, 20000))
+        chunks = r.json["experts"]["cloudflare"]["chunks"]
+        cf = next(x for x in self.ledger_lines() if x["expert"] == "cloudflare")
+        self.assertGreater(chunks, 1)
+        self.assertEqual(cf["neurons"], round(3.60909090909 * chunks, 4))
+
+    def test_no_neurons_field_when_the_provider_reports_none(self):
+        self.run_panel("--repo", "r", cls="own")
+        self.assertTrue(all("neurons" not in x for x in self.ledger_lines()))
+
+    def test_cloudflare_dict_content_and_neurons_work_together_end_to_end(self):
+        self.net.content["cloudflare"] = "dict"
+        self.net.neurons["cloudflare"] = 2.5
+        self.net.answers["cloudflare"] = REVISE
+        r = self.run_panel("--repo", "r", cls="own")
+        self.assertEqual((r.lines["PANEL_cloudflare"], r.lines["PANEL_MAJORITY"]), ("revise", "pass"))
+        self.assertEqual(next(x for x in self.ledger_lines() if x["expert"] == "cloudflare")["neurons"], 2.5)
+
+    def test_a_provider_that_reports_no_usage_is_estimated_and_flagged(self):
+        self.net.report_usage = False
+        self.run_panel("--repo", "r", cls="own")
+        prompt = self.net.posts[0]["payload"]["messages"][0]["content"]
+        for x in self.ledger_lines():
+            self.assertIs(x["estimated"], True, x["expert"])
+            self.assertEqual(x["input_tokens"], len(prompt) // 4)
+
+    def test_an_errored_expert_is_still_logged_with_zero_tokens(self):
+        self.net.answers["groq"] = (500, {})
+        r = self.run_panel("--repo", "r", cls="own")
+        groq = next(x for x in self.ledger_lines() if x["expert"] == "groq")
+        self.assertEqual((r.lines["PANEL_groq"], groq["input_tokens"], groq["output_tokens"]), ("error", 0, 0))
+
+    def test_no_text_is_ever_logged(self):
+        marker = {"verdict": "revise", "blocking": ["SECRETREASON-Zq7"]}
+        for n in API_EXPERTS:
+            self.net.answers[n] = marker
+        self.runner.reply = marker
+        self.run_panel("--repo", "ScriptHammer", spec="SPECMARKER-Zq7 " + SPEC)
+        raw = Path(self.ledger).read_text()
+        for text in ("SECRETREASON", "SPECMARKER", "prints hello", "owner", "print(", "DIFF", "SPEC", "verdict",
+                     "blocking", *ORIGINALS, "[EMAIL_1]"):
+            self.assertNotIn(text, raw)
+        for line in self.ledger_lines():
+            self.assertTrue(all(v is None or isinstance(v, (str, int, bool)) for v in line.values()))
+            self.assertLess(max(len(str(v)) for v in line.values()), 60)
+
+    def test_skip_and_unreadable_inputs_log_nothing(self):
+        self.run_panel("--repo", "r", scanner=lambda d: "found")
+        self.run_panel("--repo", "r", scanner=lambda d: "unavailable")
+        self.assertEqual(self.ledger_lines(), [])
+        self.assertFalse(os.path.exists(os.path.dirname(self.ledger)))
+
+    def test_runs_append_and_an_explicit_ledger_path_wins(self):
+        self.run_panel("--repo", "a", cls="client")
+        self.run_panel("--repo", "b", cls="client")
+        self.assertEqual([x["repo"] for x in self.ledger_lines()], ["a", "b"])
+        other = os.path.join(self.tmp, "elsewhere", "p.jsonl")
+        self.run_panel("--repo", "c", cls="client", ledger_path=other)
+        self.assertEqual(len(self.ledger_lines()), 2)
+        self.assertEqual(json.loads(Path(other).read_text())["repo"], "c")
+
+    def test_an_unwritable_ledger_never_breaks_the_review(self):
+        blocker = os.path.join(self.tmp, "afile")
+        Path(blocker).write_text("x")
+        with mock.patch.object(ledger_log, "DEFAULT_PATH", os.path.join(blocker, "sub", "panel.jsonl")):
+            r = self.run_panel("--repo", "r", cls="own")
+        self.assertEqual((r.lines["PANEL_MAJORITY"], r.rc), ("pass", 0))
+        self.assertNotIn("internal error", r.stdout)
+
+
+class HardRuleTests(unittest.TestCase):
+    """may_serve() and route() are the code-level class rules; nothing in a config entry can loosen them."""
+    ALL = ["public", "own", "client"]
+    LOCAL = "http://127.0.0.1:11434"
+
+    def spec(self, kind, **kw):
+        base = {"name": "x", "kind": kind, "classes": list(self.ALL), "trains": False,
+                "endpoint": self.LOCAL if kind == "ollama" else "https://api.example.com/v1"}
+        return {**base, **kw}
+
+    def serves(self, spec):
+        return [c for c in self.ALL if pr.may_serve(spec, c)]
+
+    def test_a_kind_other_than_ollama_can_never_serve_client(self):
+        for kind in ("openai_compat", "gemini", "cli"):
+            self.assertEqual(self.serves(self.spec(kind)), ["public", "own"], kind)
+
+    def test_a_loopback_ollama_serves_every_class_it_lists(self):
+        self.assertEqual(self.serves(self.spec("ollama")), self.ALL)
+        for url in ("http://localhost:11434", "http://[::1]:11434", "http://127.0.0.1:9"):
+            self.assertEqual(self.serves(self.spec("ollama", endpoint=url)), self.ALL, url)
+        self.assertEqual(self.serves(self.spec("ollama", classes=["own"])), ["own"])
+
+    def test_an_ollama_that_is_not_on_this_machine_is_not_local(self):
+        for url in ("http://10.0.0.5:11434", "https://ollama.example.com", "http://127.0.0.1.evil.com:11434",
+                    "http://localhost.evil.com", "", None, "not a url", "http://[bad"):
+            s = self.spec("ollama", endpoint=url)
+            self.assertFalse(pr.is_local(s), url)
+            self.assertEqual(self.serves(s), ["public", "own"], url)
+
+    def test_trains_true_serves_public_only_whatever_the_kind(self):
+        for kind in ("openai_compat", "gemini", "cli", "ollama"):
+            self.assertEqual(self.serves(self.spec(kind, trains=True)), ["public"], kind)
+
+    def test_an_expert_that_does_not_say_it_is_safe_is_treated_as_training(self):
+        for kind in ("openai_compat", "gemini", "cli"):
+            s = self.spec(kind)
+            del s["trains"]
+            self.assertEqual(self.serves(s), ["public"], kind)
+            self.assertEqual(self.serves({**s, "trains": None}), ["public"], kind)
+            self.assertEqual(self.serves({**s, "trains": "no"}), ["public"], kind)   # only literal False counts
+        local = self.spec("ollama")
+        del local["trains"]
+        self.assertEqual(self.serves(local), self.ALL)   # on this machine nothing is trained on
+
+    def test_unknown_classes_and_malformed_entries_serve_nothing_extra(self):
+        self.assertEqual(self.serves(self.spec("openai_compat", classes=["everyone", "admin"])), [])
+        self.assertEqual(self.serves(self.spec("openai_compat", classes=None)), [])
+        self.assertEqual(self.serves({"kind": "cli"}), [])
+
+    def test_the_default_experts_serve_exactly_what_the_brief_says(self):
+        want = {"groq": ["own", "public"], "groq_qwen": ["own", "public"], "gemini": ["public"],
+                "cloudflare": ["own", "public"], "antigravity": ["public"], "openrouter": ["public"],
+                "grok": ["public"], "local": ["public", "own", "client"]}
+        for e in pr.DEFAULT_CONFIG["experts"]:
+            self.assertEqual(sorted(self.serves(e)), sorted(want[e["name"]]), e["name"])
+        for cls in self.ALL:
+            self.assertEqual(pr.route(pr.DEFAULT_CONFIG, cls, "send"), [n for n in ALL_EXPERTS if cls in want[n]])
+
+    def test_a_local_gate_narrows_to_on_machine_experts_only(self):
+        far = self.spec("ollama", name="remote", endpoint="http://10.0.0.5:11434")
+        cfg = {"experts": pr.DEFAULT_CONFIG["experts"] + [far]}
+        self.assertEqual(pr.route(cfg, "public", "send"), ALL_EXPERTS + ["remote"])
+        self.assertEqual(pr.route(cfg, "public", "local"), ["local"])
+        self.assertEqual(pr.route(cfg, "own", "local"), ["local"])
+        self.assertEqual(pr.route(cfg, "client", "local"), ["local"])
+
+
+class LedgerLogTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.path = os.path.join(self.tmp, "new", "ledger", "panel.jsonl")
+
+    def test_record_is_the_exact_schema(self):
+        rec = ledger_log.record("ScriptHammer", "groq", "m", 10, 5, 1234, "own", "send", ts="2026-10-01T00:00:00Z")
+        self.assertEqual(rec, {"ts": "2026-10-01T00:00:00Z", "repo": "ScriptHammer", "expert": "groq", "model": "m",
+                               "input_tokens": 10, "output_tokens": 5, "ms": 1234, "class": "own", "gate": "send"})
+        self.assertEqual(list(rec), list(ledger_log.FIELDS))
+        self.assertEqual(ledger_log.record(None, "e", "m", 0, 0, 0, "own", "send")["repo"], None)
+        self.assertEqual(ledger_log.record("", "e", "m", 0, 0, 0, "own", "send")["repo"], None)
+        est = ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", estimated=True)
+        self.assertIs(est["estimated"], True)
+        self.assertNotIn("estimated", ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send"))
+        self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertRegex(ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send")["ts"], r"Z$")
+
+    def test_neurons_is_an_optional_non_negative_number(self):
+        base = ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send")
+        self.assertNotIn("neurons", base)
+        self.assertEqual(ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=3.60909090909)["neurons"], 3.6091)
+        self.assertEqual(ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=0)["neurons"], 0.0)
+        for junk in (None, -1, True, "3", float("nan") if False else None):
+            self.assertNotIn("neurons", ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=junk))
+        self.assertEqual(list(ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=1.5)),
+                         list(ledger_log.FIELDS) + ["neurons"])
+
+    def test_counts_are_always_non_negative_ints(self):
+        rec = ledger_log.record("r", "e", "m", -5, True, "7", "own", "send")
+        self.assertEqual((rec["input_tokens"], rec["output_tokens"], rec["ms"]), (0, 0, 0))
+
+    def test_append_creates_a_private_dir_and_file_and_appends_json_lines(self):
+        self.assertTrue(ledger_log.append(ledger_log.record("a", "e", "m", 1, 2, 3, "own", "send"), self.path))
+        self.assertTrue(ledger_log.append(ledger_log.record("b", "e", "m", 1, 2, 3, "own", "send"), self.path))
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.path)).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        rows = [json.loads(x) for x in Path(self.path).read_text().splitlines()]
+        self.assertEqual([r["repo"] for r in rows], ["a", "b"])
+
+    def test_append_never_raises(self):
+        blocker = os.path.join(self.tmp, "afile")
+        Path(blocker).write_text("x")
+        self.assertFalse(ledger_log.append({"a": 1}, os.path.join(blocker, "x", "p.jsonl")))
+
+    def test_the_default_path_is_the_ledger_directory(self):
+        self.assertEqual(ledger_log.DEFAULT_PATH, "~/.local/share/ledger/panel.jsonl")
+
+
+class UsageExtractionTests(unittest.TestCase):
+    def test_each_kind_reads_its_own_provider_fields(self):
+        u = pr.usage_openai({"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}})
+        self.assertEqual((u.input, u.output, u.neurons), (7, 3, None))
+        g = pr.usage_gemini({"usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 4}})
+        self.assertEqual((g.input, g.output, g.neurons), (9, 4, None))
+        o = pr.usage_ollama({"prompt_eval_count": 11, "eval_count": 6})
+        self.assertEqual((o.input, o.output, o.neurons), (11, 6, None))
+
+    def test_neurons_come_from_the_openai_usage_block_and_may_be_fractional(self):
+        u = pr.usage_openai({"usage": {"prompt_tokens": 45, "completion_tokens": 10, "total_tokens": 55,
+                                       "prompt_tokens_details": {"cached_tokens": 0}, "neurons": 3.60909090909}})
+        self.assertEqual((u.input, u.output, u.neurons), (45, 10, 3.60909090909))
+        self.assertEqual(pr.usage_openai({"usage": {"prompt_tokens": 1, "completion_tokens": 1, "neurons": 4}}).neurons, 4)
+        for junk in ("3.6", -1, True, None):
+            self.assertIsNone(pr.usage_openai({"usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                                          "neurons": junk}}).neurons)
+
+    def test_a_missing_counter_is_zero_and_missing_everything_is_none(self):
+        g = pr.usage_gemini({"usageMetadata": {"promptTokenCount": 9}})   # Gemini omits zeros
+        self.assertEqual((g.input, g.output), (9, 0))
+        for f, empty in ((pr.usage_openai, {}), (pr.usage_openai, {"usage": None}), (pr.usage_gemini, {}),
+                         (pr.usage_ollama, {}), (pr.usage_openai, None), (pr.usage_openai, []),
+                         (pr.usage_openai, {"usage": {"neurons": 5}})):   # neurons alone is not a token count
+            self.assertIsNone(f(empty))
+
+    def test_junk_counters_are_not_trusted(self):
+        self.assertIsNone(pr.usage_openai({"usage": {"prompt_tokens": "7", "completion_tokens": -1}}))
+        self.assertIsNone(pr.usage_ollama({"prompt_eval_count": True, "eval_count": 2.5}))
+
+
+class ContentShapeTests(Base):
+    """openai_compat `message.content` is a string for most providers, but Cloudflare Workers AI sends an
+    already-parsed JSON object, and some providers send a list of parts."""
+
+    def test_content_text_accepts_string_dict_and_list_of_parts(self):
+        raw = '{"verdict":"revise","blocking":["x"]}'
+        self.assertEqual(pr.content_text(raw), raw)
+        self.assertEqual(json.loads(pr.content_text({"verdict": "revise", "blocking": ["x"]})),
+                         {"verdict": "revise", "blocking": ["x"]})
+        parts = [{"type": "text", "text": raw[:9]}, {"type": "text", "text": raw[9:]}]
+        self.assertEqual(pr.content_text(parts), raw)
+        self.assertEqual(pr.content_text([raw[:9], {"text": raw[9:]}, {"type": "image"}, 7, None]), raw)
+        for nothing in (None, 7, 3.5, True, []):
+            self.assertEqual(pr.content_text(nothing), "")
+
+    def test_each_shape_gives_a_verdict_end_to_end(self):
+        for style in ("str", "dict", "list"):
+            self.net.content["cloudflare"] = style
+            self.net.answers["cloudflare"] = REVISE
+            r = self.review("cloudflare")
+            self.assertEqual((r["verdict"], r["blocking"]), ("revise", ["off by one"]), style)
+            self.assertNotIn("note", r, style)
+
+    def test_every_openai_compat_expert_takes_all_three_shapes(self):
+        for name in ("groq", "groq_qwen", "openrouter", "cloudflare"):
+            for style in ("str", "dict", "list"):
+                self.net.content[name] = style
+                self.assertEqual(self.review(name)["verdict"], "pass", (name, style))
+
+    def test_a_dict_content_still_goes_through_the_strict_verdict_check(self):
+        self.net.content["cloudflare"] = "dict"
+        self.net.answers["cloudflare"] = lambda payload, n: {"verdict": "maybe", "blocking": []}
+        r = self.review("cloudflare")
+        self.assertEqual((r["verdict"], r["note"]), ("error", "unparseable reply"))
+        self.net.answers["cloudflare"] = lambda payload, n: {"result": {"verdict": "pass", "blocking": []}}
+        self.assertEqual(self.review("cloudflare")["verdict"], "pass")   # a wrapped verdict is found, as for text
+
+    def test_empty_or_null_content_is_an_unparseable_reply_not_a_crash(self):
+        for content in (None, "", [], 7):
+            self.net.answers["cloudflare"] = lambda payload, n, c=content: (
+                200, {"choices": [{"message": {"content": c}}], "usage": {"prompt_tokens": 5, "completion_tokens": 0}})
+            r = self.review("cloudflare")
+            self.assertEqual((r["verdict"], r["note"]), ("error", "unparseable reply"), content)
+
+
+class NeuronsTests(Base):
+    def test_review_totals_neurons_over_chunks_and_omits_them_when_unreported(self):
+        self.net.neurons["cloudflare"] = 3.60909090909
+        r = self.review("cloudflare", self.many_files(4, 20000))
+        self.assertGreater(r["chunks"], 1)
+        self.assertEqual(r["neurons"], round(3.60909090909 * r["chunks"], 4))
+        self.assertNotIn("neurons", self.review("groq"))
+        self.assertNotIn("neurons", self.review("local"))
 
 
 if __name__ == "__main__":
