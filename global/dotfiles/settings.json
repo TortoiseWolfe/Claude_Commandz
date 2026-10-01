@@ -111,6 +111,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '(python3 ~/.claude/scripts/usage_ledger.py ingest --quiet >/dev/null 2>&1 &)'",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -193,5 +203,6 @@
   "skipWorkflowUsageWarning": true,
   "theme": "dark-daltonized",
   "remoteControlAtStartup": false,
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "cleanupPeriodDays": 90
 }
