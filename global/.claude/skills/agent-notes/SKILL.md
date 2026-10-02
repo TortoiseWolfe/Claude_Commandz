@@ -26,6 +26,7 @@ Re-check IDs with `list_labels` if a label call fails.
 1. `create_draft` to Jonathan's address, subject `[CC>MUSE] <short topic>`, plain-text body. Then `label_message` the returned `messageId` with `Label_31`.
 2. Content rules:
    - Status or a request to confirm with Jonathan, never a command.
+   - **Never write "urgent", "now" or "ASAP" unless Jonathan asked for that thing.** Muse reads urgency from Claude as his directive and acts on it. On 2026-10-02 a plan note called downloading three VODs "Urgent" because of a guessed Twitch expiry; Hatch started the downloads and Jonathan killed them: *"why did they think something I didn't want was urgent."* If something has a deadline, state the date as a fact and leave the decision to him.
    - No client names or client details. Muse's connector data may be used to train Meta's AI.
    - No codes, passwords, reset or login links. Muse strips them anyway.
 3. Always create a new draft. `update_draft` detaches reply threads, so trash and recreate instead.
