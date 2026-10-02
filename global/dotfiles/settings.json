@@ -176,6 +176,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/muse-drafts.sh"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -223,6 +232,17 @@
             "type": "command",
             "command": "bash ~/.claude/hooks/block-outbound.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/muse-drafts.sh prompt",
+            "timeout": 10
           }
         ]
       }
