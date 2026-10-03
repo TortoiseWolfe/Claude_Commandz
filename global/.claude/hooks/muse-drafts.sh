@@ -5,9 +5,18 @@
 #             hearing from Hatch, who polls our drafts on the same ~20-minute beat.
 # Hooks can't call the Gmail connector, so this tells the session to run the agent-notes read,
 # which skips draft IDs already listed in the state file and appends each one it processes.
-# The stamp is shared by every session, so several open sessions don't all check at once.
+# The stamp is PER SESSION (keyed by the hook input's session_id). A shared stamp let one
+# session's nudge silence every other open session, and on 2026-10-03 two of Hatch's notes
+# (00:51Z, 01:04Z) sat unhandled for about 12 hours. Double handling is prevented by the
+# state file and the cc-processed label instead.
 STATE="$HOME/.claude/state/agent-notes-processed.txt"
-STAMP="$HOME/.claude/state/agent-notes-last-nudge"
+INPUT=$(timeout 1 cat 2>/dev/null || true)
+SID=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("session_id",""))
+except Exception: print("")' 2>/dev/null)
+SID=${SID//[^A-Za-z0-9-]/}
+STAMP="$HOME/.claude/state/agent-notes-last-nudge${SID:+.$SID}"
+find "$HOME/.claude/state" -maxdepth 1 -name 'agent-notes-last-nudge.*' -mtime +2 -delete 2>/dev/null
 INTERVAL=1200
 [ -f "$STATE" ] || exit 0
 now=$(date +%s)
