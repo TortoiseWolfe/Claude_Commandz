@@ -18,6 +18,9 @@ SID=${SID//[^A-Za-z0-9-]/}
 STAMP="$HOME/.claude/state/agent-notes-last-nudge${SID:+.$SID}"
 find "$HOME/.claude/state" -maxdepth 1 -name 'agent-notes-last-nudge.*' -mtime +2 -delete 2>/dev/null
 INTERVAL=1200
+# Jonathan is at the keyboard: the notes poller (scripts/muse_poll.sh) keeps running after 22:00 while
+# this is fresh. Its own `claude -p` runs set MUSE_POLL and don't count.
+[ -n "${MUSE_POLL:-}" ] || touch "$HOME/.claude/state/user-active.stamp"
 [ -f "$STATE" ] || exit 0
 now=$(date +%s)
 if [ "${1:-}" = prompt ]; then
