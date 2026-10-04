@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # The always-on half of the Claude <-> Hatch (Muse) notes channel.
 #
-# Windows Task Scheduler runs this every 10 minutes ("\AFA\MuseNotesPoll"). It acts only between
-# 08:00 and 22:00 local, the same window Hatch's own watcher uses. Before this existed, Claude
+# Windows Task Scheduler runs this every minute ("\AFA\MuseNotesPoll"). It acts only between 08:00
+# and 22:00 local, the same window Hatch's own watcher uses. How often it actually checks scales with
+# use (Jonathan, 2026-10-03: "the more we use it the tighter it gets, the less we use it the more it
+# backs off"): right after a note either way it checks every minute; as the exchange goes quiet it
+# waits a quarter of the quiet time between checks, up to every 30 minutes. The clock is
+# muse-active.stamp, touched by `muse_poll_record.sh active` whenever a session writes Hatch a note,
+# and here whenever a Hatch note arrives. A tick that isn't due exits before any model runs. Before this existed, Claude
 # looked for Hatch's notes only when an interactive session started or the user typed, so
 # questions sat for hours and Jonathan ended up relaying between the two agents (2026-10-03).
 #
@@ -23,6 +28,17 @@ H=$(date +%-H)
 exec 9>/tmp/muse-poll.lock
 flock -n 9 || exit 0
 
+STATE=/home/TurtleWolfe/.claude/state
+ACTIVE=$STATE/muse-active.stamp
+LAST=$STATE/muse-poll-last-check.stamp
+now=$(date +%s)
+age() { if [[ -e "$1" ]]; then echo $((now - $(stat -c %Y "$1"))); else echo 999999; fi; }
+quiet=$(age "$ACTIVE")
+want=$((quiet / 4)); ((want < 60)) && want=60; ((want > 1800)) && want=1800
+(($(age "$LAST") < want - 15)) && exit 0      # not due yet (15 s allows for scheduler jitter)
+mode="quiet $((quiet / 60))m, every $((want / 60))m"
+touch "$LAST"
+
 CLAUDE=/home/TurtleWolfe/.local/bin/claude
 S=/home/TurtleWolfe/.claude/scripts
 LOG=/home/TurtleWolfe/.claude/state/muse-poll.log
@@ -37,8 +53,9 @@ Write,Edit,NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 8 \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
-echo "$(ts) check: ${check:-<no output>}" >>"$LOG"
+echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
 [[ "$check" == NEW* ]] || exit 0
+touch "$ACTIVE"                                # a Hatch note arrived: the exchange is live
 
 ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
