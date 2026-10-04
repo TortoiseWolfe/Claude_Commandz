@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # The always-on half of the Claude <-> Hatch (Muse) notes channel.
 #
-# Windows Task Scheduler runs this every minute ("\AFA\MuseNotesPoll"). It acts only between 08:00
-# and 22:00 local, the same window Hatch's own watcher uses. How often it actually checks scales with
+# Windows Task Scheduler runs this every minute ("\AFA\MuseNotesPoll"). Between 08:00 and 22:00 local
+# (Hatch's own watcher window) it always runs; after hours only while Jonathan is working: he typed in
+# a Claude session within the hour (user-active.stamp, from hooks/muse-drafts.sh) or a note moved
+# either way within two hours. How often it actually checks scales with
 # use (Jonathan, 2026-10-03: "the more we use it the tighter it gets, the less we use it the more it
 # backs off"): right after a note either way it checks every minute; as the exchange goes quiet it
 # waits a quarter of the quiet time between checks, up to every 30 minutes. The clock is
@@ -24,7 +26,6 @@
 # say so, and print mode denies anything else.
 set -u
 H=$(date +%-H)
-((H >= 8 && H < 22)) || exit 0
 exec 9>/tmp/muse-poll.lock
 flock -n 9 || exit 0
 
@@ -33,10 +34,16 @@ ACTIVE=$STATE/muse-active.stamp
 LAST=$STATE/muse-poll-last-check.stamp
 now=$(date +%s)
 age() { if [[ -e "$1" ]]; then echo $((now - $(stat -c %Y "$1"))); else echo 999999; fi; }
+night=""
+if ! ((H >= 8 && H < 22)); then
+  (($(age "$STATE/user-active.stamp") <= 3600 || $(age "$ACTIVE") <= 7200)) || exit 0
+  night="after hours, "
+fi
 quiet=$(age "$ACTIVE")
 want=$((quiet / 4)); ((want < 60)) && want=60; ((want > 1800)) && want=1800
 (($(age "$LAST") < want - 15)) && exit 0      # not due yet (15 s allows for scheduler jitter)
-mode="quiet $((quiet / 60))m, every $((want / 60))m"
+mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
+export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
 
 CLAUDE=/home/TurtleWolfe/.local/bin/claude
