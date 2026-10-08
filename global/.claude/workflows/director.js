@@ -116,7 +116,8 @@ for (const k of Object.keys(checks)) if (!CHECK_NAME_RE.test(k)) return badArg(`
 for (const g of panelNeverSend) if (!GLOB_RE.test(g)) return badArg('panel.never_send')
 const name = repo.slice(repo.lastIndexOf('/') + 1)
 const parent = repo.slice(0, repo.lastIndexOf('/'))
-const wtPath = (id) => `${parent}/${name}-wf-${id}`
+// Worktrees live in <parent>/.worktrees/, never as top-level siblings of the repos (2026-10-08 tidy).
+const wtPath = (id) => `${parent}/.worktrees/${name}-wf-${id}`
 
 // Every `docker compose` in a check must name its project. Without -p, compose names the
 // project after the directory, so each worktree creates its own <dir>_default network and

@@ -187,6 +187,30 @@ class TestAttribution(Base):
         self.ingest()
         self.assertEqual(self.q("SELECT repo FROM tokens"), [("proj",)])
 
+    def test_container_folders_resolve_one_level_down(self):
+        # ~/repos/.worktrees holds worktrees; CD/ and _vendor/ group repos. None of them is a repo.
+        main = self.repo("proj")
+        wt = os.path.join(self.env.repos_root, ".worktrees", "proj-wf-abc")
+        git("worktree", "add", "-q", "-b", "feat", wt, cwd=main)
+        res = u.Resolver(self.env)
+        self.assertEqual(res.for_cwd(os.path.join(wt, "src"))[0], "proj")
+        os.makedirs(os.path.join(self.env.repos_root, "CD"))
+        self.repo(os.path.join("CD", "cd-hub"))
+        self.assertEqual(res.for_cwd(os.path.join(self.env.repos_root, "CD", "cd-hub", "x"))[0], "cd-hub")
+        # worktree folder already deleted: fold its name back to the repo, whichever naming was used
+        for gone in ("proj--fix-thing", "proj-wf-zzz"):
+            self.assertEqual(res.for_cwd(os.path.join(self.env.repos_root, ".worktrees", gone, "a"))[0], "proj", gone)
+
+    def test_container_slugs_decode_one_level_down(self):
+        self.repo("proj")
+        os.makedirs(os.path.join(self.env.repos_root, "CD"))
+        self.repo(os.path.join("CD", "cd-hub"))
+        os.makedirs(os.path.join(self.env.repos_root, ".worktrees"))
+        res = u.Resolver(self.env)
+        self.assertEqual(res.for_slug("%s--worktrees-proj-wf-abc" % self.slug)[0], "proj")
+        self.assertEqual(res.for_slug("%s--worktrees-proj--fix-thing" % self.slug)[0], "proj")
+        self.assertEqual(res.for_slug("%s-CD-cd-hub" % self.slug)[0], "cd-hub")
+
     def test_plain_folder_inside_hub_repo_is_not_folded_into_hub(self):
         git("init", "-q", "-b", "main", self.env.repos_root)           # ~/repos is itself a repo
         os.makedirs(os.path.join(self.env.repos_root, "scratchdir"))
