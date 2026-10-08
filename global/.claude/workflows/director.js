@@ -1,7 +1,7 @@
 export const meta = {
   name: 'director',
   description: 'Opus plans and reviews; Haiku/Sonnet workers edit in sibling git worktrees behind deterministic checks',
-  whenToUse: 'A batch of well-specified, mostly mechanical changes in one repo. Args: {repo, goal, base?, checks, logDir?}. Read <repo>/.claude/director.json for checks.',
+  whenToUse: 'A batch of well-specified, mostly mechanical changes in one repo. Args: {repo, goal, base?, checks, panel?, logDir?}. Read <repo>/.claude/director.json and pass its checks AND its panel (without panel every repo counts as client: local-only reviewers).',
   phases: [
     { title: 'Plan', detail: 'Opus splits the goal into tiered items with checks' },
     { title: 'Baseline', detail: 'pin base, build once, checks green and acceptance red at base' },
