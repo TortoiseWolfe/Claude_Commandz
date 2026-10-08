@@ -145,7 +145,8 @@ parse_stamp() {  # stdin: body ; echoes "sha<TAB>branch<TAB>generated"
   python3 -c '
 import re, sys
 m = None
-for line in sys.stdin.read().split("\\n"):
+# lines split on the encoded "\\n" from gh_find_issue, or on a real newline: the stamp is its own line
+for line in re.split(r"\\n|\n", sys.stdin.read()):
     if "roadmap-stamp" in line:
         m = line
 if not m: sys.exit(1)
@@ -282,7 +283,10 @@ if [ "$need_refresh" -eq 1 ]; then
       quiet_exit
     fi
     ISSUE="${RES%%$'\t'*}"; BODY="${RES#*$'\t'}"
-    if STAMP="$(printf '%b' "$BODY" | parse_stamp)"; then
+    # The body as gh_find_issue encoded it, never through printf '%b': that decodes every backslash in
+    # it, so a Windows path (C:\Users\...) printed "missing unicode digit for \U", and the decoded
+    # newlines left parse_stamp one line, where a "sha=" after the stamp won (2026-10-08, measured).
+    if STAMP="$(printf '%s' "$BODY" | parse_stamp)"; then
       STAMP_SHA="${STAMP%%$'\t'*}"; rest="${STAMP#*$'\t'}"
       BRANCH="${rest%%$'\t'*}"; GENERATED="${rest#*$'\t'}"
     else
