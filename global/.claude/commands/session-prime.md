@@ -112,6 +112,7 @@ The issue already exists. You're doing two things: (1) rewriting the body to ref
    - `git log --oneline --since="<that-timestamp>"` — commits since then
    - Recently closed/opened issues in the same window
    - Anything new on the user-stated agenda
+   - **Workspace hub only** (`TortoiseWolfe/workspace`): run `~/repos/hub/scripts/tidy-report.sh`. If it prints anything, add one backlog line, "**Tidy ~/repos**", summarising each section with its count. Drop that line when the report comes back empty.
 
 3. Update the roadmap in the body:
    - **Active arc** → if the user signaled the arc is done or changed direction, swap it. Else, update its "remaining tasks" list to remove what was completed and add what was discovered.

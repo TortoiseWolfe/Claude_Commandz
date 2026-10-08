@@ -56,6 +56,8 @@ def default_author_emails():
     return [r.stdout.strip()] if r.stdout.strip() else []
 HUMAN_GAP, HUMAN_FLOOR, AGENT_GAP = 15 * 60, 5 * 60, 10 * 60   # seconds
 HUB, HOME_LABEL = "repos (hub)", "~ (home)"
+# Folders under ~/repos that hold repos rather than being one: worktrees, and the group folders.
+CONTAINERS = (".worktrees", "CD", "_vendor", "_loose")
 # Suffixes stripped when git cannot answer (directory deleted). Extend via clients.json "fold" or --fold.
 DEFAULT_FOLD = [r"-wf-.*", r"-director", r"-integrate", r"-graphify", r"-seo", r"-tmux-.*", r"-pin-.*",
                 r"-sitecheck", r"-blog-.*", r"-owned-parts", r"-ai-kitchen"]
@@ -134,7 +136,10 @@ class Resolver:
         if parent:
             out = (os.path.basename(parent), parent)
         else:
-            name = self.fold_name(top)
+            base = top.split(os.sep)[-1]
+            if top.startswith(".worktrees" + os.sep):
+                base = base.split("--")[0]        # <repo>--<topic> naming
+            name = self.fold_name(base)
             p = os.path.join(self.env.repos_root, name)
             out = (name, p if os.path.isdir(os.path.join(p, ".git")) else None)
         self._top[top] = out
@@ -146,7 +151,11 @@ class Resolver:
         if cwd == root:
             return HUB, root
         if cwd.startswith(root + os.sep):
-            return self.resolve_top(cwd[len(root) + 1:].split(os.sep)[0])
+            parts = cwd[len(root) + 1:].split(os.sep)
+            top = parts[0]
+            if top in CONTAINERS and len(parts) > 1:
+                top = os.path.join(top, parts[1])
+            return self.resolve_top(top)
         if cwd == os.path.normpath(self.env.home):
             return HOME_LABEL, None
         parent = self.git_parent(cwd)
@@ -164,6 +173,8 @@ class Resolver:
         if not slug.startswith(root + "-"):
             return "other:" + slug, None
         rest = slug[len(root) + 1:]
+        if rest.startswith(slugify(".worktrees") + "-"):            # ~/repos/.worktrees/<name>
+            return self.resolve_top(os.path.join(".worktrees", rest[len(slugify(".worktrees")) + 1:]))
         if self._slugs is None:
             try:
                 names = os.listdir(self.env.repos_root)
@@ -172,6 +183,15 @@ class Resolver:
             self._slugs = sorted(((slugify(n), n) for n in names), key=lambda t: -len(t[0]))
         for s, n in self._slugs:
             if rest == s or rest.startswith(s + "-"):
+                if n in CONTAINERS and rest != s:                       # CD-cd-hubzilla -> CD/cd-hubzilla
+                    sub = rest[len(s) + 1:]
+                    try:
+                        kids = os.listdir(os.path.join(self.env.repos_root, n))
+                    except OSError:
+                        kids = []
+                    for ks, k in sorted(((slugify(k), k) for k in kids), key=lambda t: -len(t[0])):
+                        if sub == ks or sub.startswith(ks + "-"):
+                            return self.resolve_top(os.path.join(n, k))
                 return self.resolve_top(n)
         return self.fold_name(rest.split("--")[0]), None   # "--" is "/." (hidden dir, e.g. .claude/worktrees)
 
