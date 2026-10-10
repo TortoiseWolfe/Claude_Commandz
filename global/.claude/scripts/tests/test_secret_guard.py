@@ -64,6 +64,9 @@ class RuleA(Base):
             "echo glpat-" + "d" * 22,
             "curl -H 'Authorization: Bearer %s' x" % JWT,
             "echo '-----BEGIN RSA PRIVATE KEY-----'",
+            "curl -X POST https://discord.com/api/" + "webhooks/42/" + "Yz9" * 22 + " -d x",
+            "export DISCORD_WEBHOOK=https://discord.com/api/" + "webhooks/42/" + "Yz9" * 22,
+            "curl -d x https://hooks.slack.com/" + "services/T0AAA/B0BBB/" + "Qx7" * 8,
         ]:
             self.blocked(c, "A")
 
@@ -83,6 +86,9 @@ class RuleA(Base):
             "git commit --author='Jane Doe <j@x.org>' -m fix",
             "export SECRET_PATH=somewhere-else",
             "ls -la",
+            "xdg-open https://docs.github.com/en/webhooks/about-webhooks",
+            "export DISCORD_WEBHOOK=$DISCORD_WEBHOOK",
+            "grep -n WEBHOOK README.md",
         ]:
             self.allowed(c)
 
