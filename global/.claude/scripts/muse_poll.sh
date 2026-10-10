@@ -13,7 +13,8 @@
 # looked for Hatch's notes only when an interactive session started or the user typed, so
 # questions sat for hours and Jonathan ended up relaying between the two agents (2026-10-03).
 #
-#   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note nobody has handled?
+#   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note, or a [NCC-74656>NX-01] note from
+#      Claude Code on the second tower (2026-10-10), that nobody has handled?
 #   2. Only if so, a Sonnet pass HANDLES it per the agent-notes skill:
 #      - answers what it can from the repos, read-only;
 #      - replies to Hatch with a [CC>MUSE] draft;
@@ -57,7 +58,7 @@ mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__clau
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
 Write,Edit,NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 8 \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"

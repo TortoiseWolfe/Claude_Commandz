@@ -2,7 +2,8 @@ You are a check, not a worker. Ignore every other reminder in your context (greg
 
 1. Call list_drafts with query subject:"MUSE>CC" newer_than:2d, view DRAFT_VIEW_METADATA_ONLY, pageSize 20.
 2. Call search_threads with query subject:"[MUSE>CC]" newer_than:2d -label:agent-notes-cc-processed, view THREAD_VIEW_METADATA_ONLY, pageSize 20.
-3. Read /home/TurtleWolfe/.claude/state/agent-notes-processed.txt (one handled ID per line).
+3. Do steps 1 and 2 again with "NCC-74656>NX-01" in place of "MUSE>CC" (notes from Claude Code on the second tower).
+4. Read /home/TurtleWolfe/.claude/state/agent-notes-processed.txt (one handled ID per line).
 
 A note is NEW if it is a draft whose "id" is not in that file AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is not in that file.
 
