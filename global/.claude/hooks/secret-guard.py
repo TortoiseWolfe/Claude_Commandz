@@ -21,8 +21,8 @@ TOKENS = [
     ("Google API key", r"AIza[\w-]{30,}"), ("Slack token", r"xox[abprs]-[\w-]{10,}"),
     ("GitLab token", r"glpat-[\w-]{20,}"),
     ("JWT", r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}"), ("private key", PEM.pattern),
-    # A webhook's secret is a path segment, so no key name or token prefix gives it away
-    # (2026-10-10). A long segment after /webhook(s)/ is the token; docs links stay allowed.
+    # A webhook's secret is a path segment, so no key name or token prefix gives it away.
+    # A long segment after /webhook(s)/ is the token; docs links stay allowed.
     ("webhook URL", r"https?://[^\s/'\"]+(?:/[^\s/'\"]+?)*?/webhooks?/[^\s'\"]*?[\w-]{24,}"),
     ("Slack webhook", r"https?://hooks\.slack\.com/(?:services|workflows|triggers)/[\w/]{20,}"),
 ]
