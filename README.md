@@ -15,7 +15,7 @@ Claude_Commandz/
 │   ├── .claude/workflows/        # saved Workflow scripts: director.js (tiered Opus/Haiku/Sonnet); client-specific workflows are kept out of this public repo
 │   ├── .claude/agents/           # tiered subagents: shell-proxy, worker-mechanical, worker-builder, reviewer-senior; Explore.md overrides the built-in Explore to run on Sonnet
 │   ├── .claude/skills/agent-notes/  # Muse <-> Claude Code note protocol over Gmail
-│   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); openclaw_tray.py (4-tool client for the OpenClaw tray MCP)
+│   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); muse_jev.py (Jev second opinion on the Muse poller's iffy answers); openclaw_tray.py (4-tool client for the OpenClaw tray MCP)
 │   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (picks up Muse's notes in the ~/repos session only; state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; client-specific hooks are kept out of this public repo
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
@@ -116,7 +116,7 @@ cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 cp ~/.claude/workflows/director.js global/.claude/workflows/   # client-specific workflows stay out (public repo)
 cp -a ~/.claude/agents/. global/.claude/agents/
 cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
-cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
+cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/muse_jev.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
 cp ~/.claude/hooks/roadmap-drift.sh ~/.claude/hooks/muse-drafts.sh ~/.claude/hooks/secret-guard.py ~/.claude/hooks/explore-override-drift.sh ~/.claude/hooks/explore-override-drift.ref global/.claude/hooks/
 
 # Per-repo — only loops over dirs already tracked here
