@@ -12,7 +12,7 @@ import re
 import sys
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
-        r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer)")
+        r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer|webhook)")
 KEY_RE = re.compile(WORD, re.I)
 SAFE_KEY = re.compile(r"(?:(?:max|min)[_-]?\w*tokens|tokens?[_-](?:limit|count|used))$", re.I)
 
@@ -23,6 +23,17 @@ TOKENS = re.compile("|".join([
     r"AIza[\w-]{30,}", r"xox[abprs]-[\w-]{10,}", r"glpat-[\w-]{20,}",
     r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}",
 ]))
+# Credentials carried inside a URL, whatever its key is called. A webhook's token is a path
+# segment, so neither the key name nor a token shape gives it away. The host and the path up to the secret stay visible, so you can still tell
+# what the URL is for.
+URL_SECRETS = [
+    # scheme://user:password@host (database URLs, basic auth)
+    re.compile(r"(?P<pre>\b[a-z][\w+.-]*://[^\s:/@'\"<>]*:)(?P<secret>[^\s@/'\"<>]+)(?=@)", re.I),
+    # everything after /webhook/ or /webhooks/ (Discord, Teams and most others)
+    re.compile(r"(?P<pre>\bhttps?://[^\s/'\"<>]+(?:/[^\s/'\"<>]+?)*?/webhooks?/)(?P<secret>[^\s'\"<>]+)", re.I),
+    # hooks.<service>/<kind>/... (Slack, Zapier)
+    re.compile(r"(?P<pre>\bhttps?://hooks\.[^\s/'\"<>]+/[^\s/'\"<>]+/)(?P<secret>[^\s'\"<>]+)", re.I),
+]
 VAL = r"""(?:"[^"]*"|'[^']*'|[^\s"';&|,\]})]+)"""
 ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<val>" + VAL + ")", re.I)
 FLAGWORD = r"--?(?:password|passwd|pass|pwd|token|api-?key|secret|auth-token|access-token|client-secret)"
@@ -54,6 +65,8 @@ def scrub(s):
     """Mask token shapes and NAME=literal / --flag literal fragments in a string."""
     s = PEM.sub(lambda m: red(len(m.group(0))), s)
     s = TOKENS.sub(lambda m: "%s…[%d]" % (m.group(0)[:4], len(m.group(0))), s)
+    for rx in URL_SECRETS:
+        s = rx.sub(lambda m: m.group("pre") + red(len(m.group("secret"))), s)
 
     def a(m):
         if SAFE_KEY.search(m.group("name")) or not is_literal(m.group("val")):
