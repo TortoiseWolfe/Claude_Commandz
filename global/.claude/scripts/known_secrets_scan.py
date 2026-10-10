@@ -44,10 +44,8 @@ def env_files(root, depth=5):
                 yield os.path.join(d, f)
 
 
-def collect(root, ignore):
-    """value -> (env file relative to root, KEY). Values themselves never leave this function's callers."""
-    found = {}
-    for p in env_files(root):
+def _pairs(root, files=None):
+    for p in (files if files is not None else env_files(root)):
         rel = os.path.relpath(p, root)
         try:
             lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
@@ -55,20 +53,28 @@ def collect(root, ignore):
             continue
         for line in lines:
             m = re.match(r"\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*)$", line)
-            if not m:
-                continue
-            key, val = m.group(1), m.group(2).strip()
-            val = val.split(" #")[0].strip().strip('"').strip("'")
-            if (rel, key) in ignore:
-                continue
-            for rx in (URL_PW, HOOK):
-                for hit in rx.finditer(val):
-                    s = next(g for g in hit.groups() if g)
-                    if len(s) >= 8 and s.lower() not in TRIVIAL:
-                        found.setdefault(s, (rel, key))
-            if (WORD.search(key) and not SAFE_KEY.search(key) and len(val) >= 12
-                    and val[0] not in "$`<" and not LOCAL.search(val)):
-                found.setdefault(val, (rel, key))
+            if m:
+                yield rel, m.group(1), m.group(2).strip().split(" #")[0].strip().strip('"').strip("'")
+
+
+def collect(root, ignore, files=None):
+    """value -> (env file relative to root, KEY). Values themselves never leave this function's callers.
+    An ignored (file, KEY) pair ignores its VALUE everywhere: published fixtures recur in other env files.
+    `files` lets a caller pass a cached env-file list instead of walking root (the walk takes ~1 s)."""
+    pairs = list(_pairs(root, files))
+    ignored = {val for rel, key, val in pairs if (rel, key) in ignore}
+    found = {}
+    for rel, key, val in pairs:
+        if val in ignored:
+            continue
+        for rx in (URL_PW, HOOK):
+            for hit in rx.finditer(val):
+                s = next(g for g in hit.groups() if g)
+                if len(s) >= 8 and s.lower() not in TRIVIAL:
+                    found.setdefault(s, (rel, key))
+        if (WORD.search(key) and not SAFE_KEY.search(key) and len(val) >= 12
+                and val[0] not in "$`<" and not LOCAL.search(val)):
+            found.setdefault(val, (rel, key))
     return found
 
 
