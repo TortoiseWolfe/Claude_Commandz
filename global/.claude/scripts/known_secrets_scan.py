@@ -40,6 +40,9 @@ PUBLIC_KEY = re.compile(r"^(?:NEXT_PUBLIC_|VITE_|EXPO_PUBLIC_|PUBLIC_|REACT_APP_
                         r"|anon[_-]?key|site[_-]?key|client[_-]?id", re.I)
 IDENT_KEY = re.compile(r"(?:_|^)(?:id|ids|ref|name|email|user|username|domain|bucket|repo|url|uri|host"
                        r"|port|region|path|dir|file|env|mode|level|version|account|zone|org)$", re.I)
+DEMO_JWT_ISSUERS = {"supabase-demo"}
+# Words that make a key secret even under a public prefix (a NEXT_PUBLIC_*_SECRET is a mistake, not a public value).
+STRONG_SECRET_KEY = re.compile(r"secret|pass(?:word|wd|phrase)?|pwd|private|service[_-]?role|signing", re.I)
 # A key that holds the NAME of a secret (a Docker swarm secret, a vault path), not the secret itself.
 SECRET_NAME_KEY = re.compile(r"swarm[_-]?secret|secret[_-]?(?:name|id|ref|arn|path)$", re.I)
 NOT_SECRET_KEY = re.compile(r"(?:max|min)[_-]?\w*tokens|tokens?[_-](?:limit|count|used)|_ttl$|enabled$", re.I)
@@ -153,28 +156,54 @@ def looks_secret(v):
         and not NON_SECRET_SHAPE.match(v)
 
 
+def demo_jwt(v):
+    """True for a JWT issued by a published local-dev issuer (the Supabase CLI's demo keys, the
+    same in every project's docker-compose). Only the issuer claim is read."""
+    parts = v.split(".")
+    if len(parts) != 3 or not parts[0].startswith("eyJ"):
+        return False
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(claims, dict) and claims.get("iss") in DEMO_JWT_ISSUERS
+
+
 def secret_parts(key, val):
-    """The secret substrings of one env assignment (possibly none)."""
-    out = set()
+    """The secret substrings of one env assignment (possibly none). Errs toward collecting: a value
+    that is wrongly collected costs a blocked read; one wrongly skipped is never checked at all."""
+    out, creds = set(), set()
     for rx in (URL_PW, HOOK, URL_QUERY):
         for hit in rx.finditer(val):
             s = next((g for g in hit.groups() if g), "")
-            if len(s) >= 8 and s.lower() not in TRIVIAL:
-                out.add(urllib.parse.unquote(s))
-                out.add(s)
-    if PUBLIC_KEY.search(key) or NOT_SECRET_KEY.search(key):
+            if s and s.lower() not in TRIVIAL:
+                creds.add(s)
+                if len(s) >= 8:
+                    out.add(urllib.parse.unquote(s))
+                    out.add(s)
+    if NOT_SECRET_KEY.search(key):
         return out
-    bare = val.strip().strip("'\"")                  # shape tests see the value without quotes
-    if not bare or bare[0] in "$`<" or bare.lower() in TRIVIAL or NON_SECRET_SHAPE.match(bare):
+    if PUBLIC_KEY.search(key) and not STRONG_SECRET_KEY.search(key):
+        return out    # shipped to browsers by design (a misnamed NEXT_PUBLIC_*_SECRET still counts)
+    bare = val.strip().strip("'\"")
+    if not bare or bare[0] in "$`<" or bare.lower() in TRIVIAL or demo_jwt(bare):
         return out
-    if URL_SCHEME.match(bare) and not URL_IS_SECRET_KEY.search(key):
-        return out    # the secret of an ordinary URL is its credential, collected above
+    if URL_SCHEME.match(bare):
+        # An ordinary URL's secret is its credential (collected above). The whole URL counts too when
+        # the URL is itself a secret, or carries a real credential under a secret-named key, so a
+        # credential shorter than 8 characters is still covered.
+        if URL_IS_SECRET_KEY.search(key) or (SECRET_KEY.search(key) and creds):
+            out.add(val)
+        return out
     if SECRET_NAME_KEY.search(key) and re.fullmatch(r"[a-z0-9_.-]+", bare):
         return out    # the name of a secret, not the secret
-    if SECRET_KEY.search(key) and len(val) >= 8:
-        out.add(val)
-    elif not IDENT_KEY.search(key) and looks_secret(val):
-        out.add(val)
+    if SECRET_KEY.search(key) and not IDENT_KEY.search(key):
+        if len(bare) >= 8:
+            out.add(val)    # any shape: a password can look like a date, a path or a host name
+        return out
+    if SECRET_KEY.search(key) or not IDENT_KEY.search(key):
+        if looks_secret(bare):
+            out.add(val)    # e.g. a COOKIE_DOMAIN is judged by its value; an unnamed token by its shape
     return out
 
 
