@@ -17,7 +17,7 @@ The prime prompt that users paste into a fresh Claude session tells the new mode
 
 ### 0. Identify the machine (before anything else)
 
-Two PCs run this command against the same issues: **NX-01** (the main PC) and **NCC-74656** (the second tower). Since 2026-10-10 the tower's Windows hostname has read `NX01`, a near-match for NX-01, and a session there once believed it was NX-01. **Never use the hostname.**
+Two PCs run this command against the same issues: **NX-01** (the main PC) and **NCC-74656** (the second tower). The machine's identity comes from a file, not its hostname, because hostnames get renamed and a tower session once misidentified itself from one.
 
 ```bash
 MACHINE="$(cat ~/.config/afa/machine 2>/dev/null)"
