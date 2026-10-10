@@ -138,8 +138,7 @@ class TextFormats(Fixture):
 
     def test_credentials_inside_urls(self):
         # A webhook's token is a path segment, so neither the key name nor a token shape gives it
-        # away. Fixtures are built at runtime so
-        # gitleaks doesn't flag this file.
+        # away. Fixtures are built at runtime so gitleaks doesn't flag this file.
         tok = "Yz9" * 22
         hook = "https://discord.com/api/" + "webhooks/1555929930645110804/" + tok
         slack = "https://hooks.slack.com/services/" + "T0AAA/B0BBB/" + "Qx7" * 8

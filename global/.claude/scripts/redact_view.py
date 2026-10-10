@@ -24,8 +24,8 @@ TOKENS = re.compile("|".join([
     r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}",
 ]))
 # Credentials carried inside a URL, whatever its key is called. A webhook's token is a path
-# segment, so neither the key name nor a token shape gives it away. The host and the path up to the secret stay visible, so you can still tell
-# what the URL is for.
+# segment, so neither the key name nor a token shape gives it away. The host and the path up to
+# the secret stay visible, so you can still tell what the URL is for.
 URL_SECRETS = [
     # scheme://user:password@host (database URLs, basic auth)
     re.compile(r"(?P<pre>\b[a-z][\w+.-]*://[^\s:/@'\"<>]*:)(?P<secret>[^\s@/'\"<>]+)(?=@)", re.I),
