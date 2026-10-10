@@ -142,6 +142,28 @@ class Scan(unittest.TestCase):
                   "postgresql://postgres:postgres@localhost:5432/x", "Lc6Lc6Lc6Lc6Lc6Lc6"):
             self.assertNotIn(v, found)
 
+    def test_no_regressions_on_odd_shaped_short_or_misnamed_secrets(self):
+        # Under a secret-named key, any shape counts; a short URL credential is covered by the whole URL;
+        # a secret misnamed with a public prefix still counts.
+        short_url = "postgresql://app:Ab3x9@db.example.org:5432/x"
+        self.write("g/" + ENV, "DB_PASSWORD=2024-01-01T09\nADMIN_PASSWORD=/var/opt/Kd7kd7\n"
+                               "DATABASE_URL=%s\nNEXT_PUBLIC_STRIPE_SECRET_KEY=Vy6Vy6Vy6Vy6\n"
+                               "NEXT_PUBLIC_MAPBOX_TOKEN=Mb5Mb5Mb5Mb5Mb5Mb5Mb5Mb5\n" % short_url)
+        found = ks.collect(self.repos, set())
+        for v in ("2024-01-01T09", "/var/opt/Kd7kd7", short_url, "Vy6Vy6Vy6Vy6"):
+            self.assertIn(v, found)
+        self.assertNotIn("Mb5Mb5Mb5Mb5Mb5Mb5Mb5Mb5", found)   # a public-prefixed token is public by design
+
+    def test_a_published_demo_jwt_is_public_and_a_real_project_jwt_is_not(self):
+        def jwt(claims):
+            seg = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+            return "%s.%s.%s" % (seg({"alg": "HS256", "typ": "JWT"}), seg(claims), "Sg1" * 14)
+        demo, real = jwt({"iss": "supabase-demo", "role": "service_role"}), jwt({"iss": "supabase", "ref": "abc"})
+        self.write("j/" + ENV, "SUPABASE_SERVICE_ROLE_KEY=%s\nPROD_SERVICE_ROLE_KEY=%s\n" % (demo, real))
+        found = ks.collect(self.repos, set())
+        self.assertNotIn(demo, found)
+        self.assertIn(real, found)
+
     def test_encoded_forms_and_non_utf8_bytes_are_found(self):
         pw = "Pw5!Pw5@Pw5#Pw5"
         self.write("e/" + ENV, "SMTP_PASSWORD='%s'\n" % pw)
