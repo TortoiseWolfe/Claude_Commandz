@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Hub pre-push: scan the tracked tree for secrets. Fails closed (no Docker, no scanner, or any finding = no push).
+# Installed into .git/hooks/pre-push by the hub's bootstrap.sh; this tracked copy is the source.
+#   1. gitleaks finds secrets by shape (key prefixes, high-entropy strings).
+#   2. known_secrets_scan.py compares against the real values in this machine's env files, which
+#      catches what has no shape: on 2026-10-10 a Portainer password sat in a synced memory note
+#      through 121 commits that all passed gitleaks.
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"; T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+git -C "$ROOT" checkout-index -a --prefix="$T/"
+cp "$ROOT/.gitleaksignore" "$T/" 2>/dev/null || true
+docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" -v "$T":/scan:ro -w /scan zricethezav/gitleaks:latest dir . --no-banner --redact >/dev/null 2>&1 \
+  || { echo "pre-push: gitleaks found something (or could not run). Push refused." >&2; exit 1; }
+echo "pre-push: gitleaks clean"
+KS="$HOME/.claude/scripts/known_secrets_scan.py"
+[ -f "$KS" ] || { echo "pre-push: $KS missing. Push refused." >&2; exit 1; }
+python3 -I "$KS" "$T" | sed "s|$T/||" >&2 \
+  || { echo "pre-push: a real secret value is in the tree (names above), or the check could not run. Push refused." >&2; exit 1; }
+echo "pre-push: known secrets clean"
