@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Pre-push secret scan. Fails closed: no Docker, no scanner, an unreadable file, or any finding = no push.
+# Pre-push secret scan. Fails closed: no Docker, no scanner, anything unreadable, or any finding = no push.
 # Installed into .git/hooks/pre-push by hub/bootstrap.sh; this tracked copy is the source (the public
 # repos Claude_Commandz and AI_Workflow carry the same file as git-hooks/pre-push).
 #
-# It scans what is being PUSHED, not the working tree or the index:
-#   1. the tree of each pushed tip, extracted with git archive: gitleaks (by shape) and
-#      known_secrets_scan.py --strict (against the real values in this machine's env files);
-#   2. every commit in the pushed range: gitleaks over its patches, and the added lines plus
-#      commit messages against the real values, so a secret added and removed again inside the
-#      range is still caught. Removed lines are not checked, so a scrub commit can go out.
+# It scans what is being PUSHED, exactly as git stores it:
+#   1. each pushed tip's tree, every blob written out byte for byte from git's object store (no
+#      git archive, so export-ignore and export-subst can't hide or alter a file; no checkout, so
+#      no smudge or eol filters), checked by gitleaks and by known_secrets_scan.py --strict
+#      (the real values in this machine's env files);
+#   2. every commit in the pushed range: its message, the added lines of its patches (binary files
+#      as text, merges against each parent, renames as delete + add, with colour, external diff
+#      drivers and textconv off so user config can't reshape the text), and for a tag push the tag
+#      message. Removed lines are not checked, so a scrub commit can still go out. gitleaks also
+#      runs over the range in git mode.
+# "Already pushed" means reachable from THIS remote's refs only: a commit sitting on some other
+# remote (a fork, say) is checked again before it goes here.
 set -euo pipefail
+REMOTE="${1:-}"
 ROOT="$(git rev-parse --show-toplevel)"
 KS="$HOME/.claude/scripts/known_secrets_scan.py"
 GL="zricethezav/gitleaks:latest"
@@ -23,24 +30,72 @@ KSARGS=(--strict)
 [ -n "${KNOWN_SECRETS_IGNORE:-}" ] && KSARGS+=(--ignore "$KNOWN_SECRETS_IGNORE")
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 gl() { docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" "$@" >/dev/null 2>&1; }
+G=(git -C "$ROOT" -c color.ui=false -c core.quotepath=false -c diff.noprefix=false)
+
+extract_tree() {  # extract_tree <rev> <dir>: every blob of the rev's tree, raw bytes, nothing filtered
+  python3 -I - "$ROOT" "$1" "$2" <<'PY'
+import os, subprocess, sys
+root, rev, out = sys.argv[1], sys.argv[2], sys.argv[3]
+ls = subprocess.run(["git", "-C", root, "ls-tree", "-r", "-z", "--full-tree", rev + "^{tree}"],
+                    capture_output=True, check=True).stdout
+entries = []
+for e in ls.split(b"\0"):
+    if not e:
+        continue
+    meta, path = e.split(b"\t", 1)
+    mode, typ, sha = meta.split()
+    if typ == b"blob":                       # gitlinks (submodules) carry no content in this push
+        entries.append((sha, path))
+cat = subprocess.Popen(["git", "-C", root, "cat-file", "--batch"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+for sha, path in entries:
+    cat.stdin.write(sha + b"\n"); cat.stdin.flush()
+    head = cat.stdout.readline().split()
+    if len(head) != 3 or head[1] != b"blob":
+        sys.exit("cannot read blob %s" % sha.decode())
+    data = cat.stdout.read(int(head[2])); cat.stdout.read(1)
+    rel = os.path.normpath(os.fsdecode(path))
+    if rel.startswith("..") or os.path.isabs(rel):
+        sys.exit("refusing odd path in tree")
+    dest = os.path.join(out, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(data)
+cat.stdin.close(); cat.wait()
+PY
+}
+
 n=0
 while read -r lref lsha rref rsha; do
   [ "$lsha" = "$ZERO" ] && continue    # a ref deletion pushes no content
-  n=$((n + 1)); T="$W/tree$n"; mkdir -p "$T"
-  git -C "$ROOT" archive "$lsha" | tar -x -C "$T"
-  if [ "$rsha" = "$ZERO" ] || ! git -C "$ROOT" cat-file -e "$rsha^{commit}" 2>/dev/null; then
-    RANGE=("$lsha" --not --remotes)    # new branch, or a remote tip we don't have: everything not yet on any remote
-  else
+  n=$((n + 1)); T="$W/tree$n"; A="$W/added$n.txt"; mkdir -p "$T"
+  extract_tree "$lsha" "$T" || refuse "could not extract the tree of $lref"
+  [ -f "$ROOT/.gitleaksignore" ] && cp "$ROOT/.gitleaksignore" "$T/" 2>/dev/null || true
+  if [ "$rsha" != "$ZERO" ] && "${G[@]}" cat-file -e "$rsha^{commit}" 2>/dev/null; then
     RANGE=("$rsha..$lsha")
+  elif [ -n "$REMOTE" ] && "${G[@]}" remote | grep -qxF -- "$REMOTE"; then
+    RANGE=("$lsha" --not "--remotes=$REMOTE")    # new ref: everything not already on THIS remote
+  else
+    RANGE=("$lsha")                              # pushing to a bare URL: check the whole history
   fi
   # 1. the pushed tree
   gl -v "$T":/scan:ro -w /scan "$GL" dir . --no-banner --redact || refuse "gitleaks found something in the tree of $lref (or could not run)"
-  # 2. the pushed commits: added lines and messages
-  git -C "$ROOT" log --format='%B' "${RANGE[@]}" > "$W/added$n.txt"
-  git -C "$ROOT" log -p --format= "${RANGE[@]}" | grep '^+' | grep -v '^+++ ' >> "$W/added$n.txt" || true
+  # 2. the pushed commits: messages, added lines, tag message
+  P="$W/patch$n.txt"
+  "${G[@]}" log --format='%B' "${RANGE[@]}" > "$A" || refuse "could not read the commit messages being pushed"
+  "${G[@]}" log -p --text -m --no-renames --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ \
+    --format= "${RANGE[@]}" > "$P" || refuse "could not read the commits being pushed"
+  # grep -a: a patch with NUL bytes would otherwise print "binary file matches" instead of the lines.
+  # Exit 1 only means "no added lines"; anything else is an error and refuses.
+  set +o pipefail
+  grep -aE '^\+' "$P" | grep -avE '^\+\+\+ (b/|/dev/null)' >> "$A"
+  rc=("${PIPESTATUS[@]}"); set -o pipefail
+  [ "${rc[0]}" -le 1 ] && [ "${rc[1]}" -le 1 ] || refuse "could not filter the patches being pushed"
+  if [ "$("${G[@]}" cat-file -t "$lsha")" = tag ]; then
+    "${G[@]}" cat-file tag "$lsha" >> "$A" || refuse "could not read the tag being pushed"
+  fi
   gl -v "$ROOT":/repo:ro "$GL" git /repo --no-banner --redact --log-opts="${RANGE[*]}" \
     || refuse "gitleaks found something in the commits being pushed to $rref (or could not run)"
-  python3 -I "$KS" "${KSARGS[@]}" "$T" "$W/added$n.txt" | sed "s|$W/||" >&2 \
+  python3 -I "$KS" "${KSARGS[@]}" "$T" "$A" | sed "s|$W/||" >&2 \
     || refuse "a real secret value is in what's being pushed to $rref (names above), or the check could not run"
 done
 echo "pre-push: gitleaks clean"

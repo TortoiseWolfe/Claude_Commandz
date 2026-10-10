@@ -44,17 +44,67 @@ def env_files(root, depth=5):
                 yield os.path.join(d, f)
 
 
+ASSIGN_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*)$")
+
+
+def env_values(text):
+    """(KEY, value) for every reading of each assignment that a dotenv parser might take.
+    Readers disagree (docker compose, python-dotenv and node differ on inline '#' comments and
+    quotes), so where they could differ every plausible value is yielded: a missed reading would
+    let that secret through the checks."""
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = ASSIGN_LINE.match(lines[i])
+        i += 1
+        if not m:
+            continue
+        key, raw = m.group(1), m.group(2)
+        vals = set()
+        if raw[:1] in ("'", '"'):
+            q, body, j = raw[0], raw[1:], i
+            end = _closing(body, q)
+            while end < 0 and j < len(lines):        # a quoted value may span lines
+                body += "\n" + lines[j]
+                j += 1
+                end = _closing(body, q)
+            if end >= 0:
+                i = j
+                inner = body[:end]
+                vals.add(inner)
+                if q == '"':
+                    vals.add(inner.replace('\\"', '"').replace("\\n", "\n"))
+            vals.add(raw.strip())                    # a reader that keeps the quotes
+            vals.add(raw.strip().strip("'\""))
+        else:
+            vals.add(raw.strip())                    # '#' is literal to some readers
+            vals.add(re.split(r"\s#", raw, maxsplit=1)[0].strip())   # and starts a comment to others
+        for v in vals:
+            if v:
+                yield key, v
+
+
+def _closing(body, q):
+    k = 0
+    while k < len(body):
+        if body[k] == "\\" and q == '"':
+            k += 2
+            continue
+        if body[k] == q:
+            return k
+        k += 1
+    return -1
+
+
 def _pairs(root, files=None):
     for p in (files if files is not None else env_files(root)):
         rel = os.path.relpath(p, root)
         try:
-            lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
+            text = open(p, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
-        for line in lines:
-            m = re.match(r"\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*)$", line)
-            if m:
-                yield rel, m.group(1), m.group(2).strip().split(" #")[0].strip().strip('"').strip("'")
+        for key, val in env_values(text):
+            yield rel, key, val
 
 
 def collect(root, ignore, files=None):

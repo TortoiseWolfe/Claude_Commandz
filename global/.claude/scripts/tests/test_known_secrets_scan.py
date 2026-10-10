@@ -94,6 +94,15 @@ class Scan(unittest.TestCase):
         r = self.run_cli(self.out)
         self.assertIn("SMTP_PASSWORD", r.stdout)
 
+    def test_every_dotenv_reading_is_collected(self):
+        # Readers disagree on inline '#', quotes and multi-line values; each plausible reading counts.
+        vals = {v for _, v in ks.env_values('A="Hx5 #Kq8Kq8Kq8Kq8"\nB=Jt3Jt3Jt3 #Wm6Wm6Wm6\n'
+                                              'C="Rv2Rv2\nRv2Rv2Rv2"\n')}
+        self.assertIn("Hx5 #Kq8Kq8Kq8Kq8", vals)
+        self.assertIn("Jt3Jt3Jt3 #Wm6Wm6Wm6", vals)
+        self.assertIn("Jt3Jt3Jt3", vals)
+        self.assertIn("Rv2Rv2\nRv2Rv2Rv2", vals)
+
     def test_collect_units(self):
         found = ks.collect(self.repos, ks.load_ignore(self.ignore))
         self.assertIn(PW, found)
