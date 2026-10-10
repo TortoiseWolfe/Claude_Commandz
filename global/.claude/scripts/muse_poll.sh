@@ -62,7 +62,6 @@ JEV_REQ=/home/TurtleWolfe/.local/state/muse-jev/request.json
 mkdir -p -m 700 "${JEV_REQ%/*}"
 DENY="Bash(git push:*),Bash(git commit:*),Bash(rm:*),Bash(docker:*),Bash(curl:*),Bash(gh:*),\
 Edit(//home/TurtleWolfe/repos/**),Edit(//home/TurtleWolfe/.claude/**),\
-Write(//home/TurtleWolfe/repos/**),Write(//home/TurtleWolfe/.claude/**),\
 mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__claude_ai_Gmail__trash_thread,\
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
