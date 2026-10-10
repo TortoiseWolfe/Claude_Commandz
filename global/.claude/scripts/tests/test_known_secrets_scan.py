@@ -69,6 +69,11 @@ class Scan(unittest.TestCase):
         r = subprocess.run([sys.executable, SCRIPT, "--repos", empty, self.out], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
+    def test_an_ignored_value_is_ignored_in_every_env_file(self):
+        self.write("other/" + ENV, "SEED_USER_PASSWORD=%s\n" % FIXTURE)
+        found = ks.collect(self.repos, ks.load_ignore(self.ignore))
+        self.assertNotIn(FIXTURE, found)
+
     def test_collect_units(self):
         found = ks.collect(self.repos, ks.load_ignore(self.ignore))
         self.assertIn(PW, found)

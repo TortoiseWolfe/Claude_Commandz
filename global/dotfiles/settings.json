@@ -233,6 +233,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/scrub-session-log.sh",
+            "timeout": 90
+          }
+        ]
+      }
     ]
   },
   "statusLine": {

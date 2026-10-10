@@ -5,9 +5,12 @@ stdin: {"tool_name": ..., "tool_input": {...}}
 block: reason on stderr, exit 2.  allow: exit 0.  internal error: allow + log.
 The reason never echoes a matched secret.
 """
+import importlib.util
 import json
 import os
 import re
+import shlex
+import stat
 import sys
 import time
 
@@ -66,6 +69,100 @@ GREP_QUIET = re.compile(r"(?<!\S)(?:-[a-zA-Z]*[clq]|-[a-zA-Z]*L[a-zA-Z]*|--count
                         r"|--files-without-match|--quiet)(?!\S)")
 HINT = ("Inspect it with: python3 ~/.claude/scripts/redact_view.py <file>. Never put secrets inline "
         "in commands; read them from a file or env var inside a script.")
+
+# Rule E: a file that holds a REAL secret value (one of the values in the env files under ~/repos)
+# is never read to the screen, whatever its name. The name-based rules miss a password pasted into
+# a note, and redact_view only masks values under secret-looking keys, so a password in a note's
+# plain text gets through both. The env-file list is cached for an hour because walking ~/repos
+# takes about a second; the values themselves are read fresh on each check.
+KS_REPOS = os.environ.get("KNOWN_SECRETS_REPOS") or os.path.expanduser("~/repos")
+KS_IGNORE = os.environ.get("KNOWN_SECRETS_IGNORE") or os.path.expanduser("~/.config/known-secrets/ignore.txt")
+KS_CACHE = os.environ.get("KNOWN_SECRETS_CACHE") or os.path.expanduser("~/.claude/state/known-secrets-envfiles.json")
+KS_TTL, KS_MAX = 3600, 5 * 1024 * 1024
+_ks_values = None
+
+
+def known_secrets():
+    """value -> 'envfile KEY'. Empty if the scanner is missing (rule E then allows)."""
+    global _ks_values
+    if _ks_values is not None:
+        return _ks_values
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "known_secrets_scan.py")
+    if not os.path.exists(src):
+        _ks_values = {}
+        return _ks_values
+    spec = importlib.util.spec_from_file_location("known_secrets_scan", src)
+    ks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ks)
+    files = None
+    try:
+        c = json.load(open(KS_CACHE))
+        if c.get("root") == KS_REPOS and time.time() - c.get("generated", 0) < KS_TTL:
+            files = c["files"]
+    except (OSError, ValueError, KeyError):
+        pass
+    if files is None:
+        files = list(ks.env_files(KS_REPOS))
+        try:
+            os.makedirs(os.path.dirname(KS_CACHE), exist_ok=True)
+            fd = os.open(KS_CACHE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"root": KS_REPOS, "generated": time.time(), "files": files}, fh)
+            os.replace(KS_CACHE + ".tmp", KS_CACHE)
+        except OSError:
+            pass
+    found = ks.collect(KS_REPOS, ks.load_ignore(KS_IGNORE), files=files)
+    _ks_values = {v: "%s %s" % meta for v, meta in found.items()}
+    return _ks_values
+
+
+def secret_in_file(path):
+    """'envfile KEY' of the first real secret value inside path, else None. Env files themselves
+    are left to rules B/C (they hold secrets by definition and redact_view masks them)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > KS_MAX or ENV_RE.search(os.path.basename(path)):
+        return None
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    for v, where in known_secrets().items():
+        if v.encode() in data:
+            return where
+    return None
+
+
+def reader_targets(cmd, cwd):
+    """Existing files that a reader command (cat, sed, grep, ..., or redact_view.py) would print."""
+    out = []
+    for seg in split_segments(cmd):
+        scan = blank_quotes(seg)
+        verbs = set(VERB.findall(scan))
+        if "redact_view.py" in seg:
+            verbs.add("redact_view")
+        if not verbs or (verbs <= {"grep", "rg"} and GREP_QUIET.search(scan)):
+            continue
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        for t in toks:
+            if t.startswith("-") or t in READERS or t.endswith("redact_view.py"):
+                continue
+            p = os.path.expanduser(t)
+            if not os.path.isabs(p):
+                p = os.path.join(cwd or os.getcwd(), p)
+            if os.path.isfile(p):
+                out.append(p)
+    return out
+
+
+RULE_E = ("secret-guard: rule E, %s holds a real secret value (%s). Don't print it. Count or test it "
+          "inside a script that prints names only. If the value doesn't belong there, remove it: "
+          "python3 ~/.claude/scripts/scrub_known_secrets.py --min-age 0 <file>")
 
 
 def log_error(msg):
@@ -178,15 +275,26 @@ def evaluate(payload):
         p = prints_sensitive(cmd)
         if p:
             return "B", ("secret-guard: this would print a credential-bearing file (%s). %s" % (p, HINT))
+        for f in reader_targets(cmd, payload.get("cwd")):
+            where = secret_in_file(f)
+            if where:
+                return "E", RULE_E % (f, where)
     elif tool == "Read" and isinstance(ti.get("file_path"), str):
         p = sensitive_in(ti["file_path"])
         if p:
             return "C", ("secret-guard: Read of a credential-bearing file (%s) is blocked. %s" % (p, HINT))
+        where = secret_in_file(ti["file_path"])
+        if where:
+            return "E", RULE_E % (ti["file_path"], where)
     elif tool == "Grep":
         p = sensitive_in("%s %s" % (ti.get("path") or "", ti.get("glob") or ""))
         if p and ti.get("output_mode") == "content":
             return "D", ("secret-guard: Grep content output on a credential-bearing file (%s) is "
                          "blocked (use output_mode files_with_matches or count). %s" % (p, HINT))
+        if ti.get("output_mode") == "content" and isinstance(ti.get("path"), str):
+            where = secret_in_file(ti["path"])
+            if where:
+                return "E", RULE_E % (ti["path"], where)
     return None
 
 
