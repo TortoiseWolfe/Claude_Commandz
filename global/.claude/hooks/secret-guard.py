@@ -12,7 +12,7 @@ import sys
 import time
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
-        r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer)")
+        r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer|webhook)")
 PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKENS = [
     ("GitHub token", r"gh[opsu]_\w{20,}"), ("GitHub PAT", r"github_pat_\w{20,}"),
@@ -21,6 +21,10 @@ TOKENS = [
     ("Google API key", r"AIza[\w-]{30,}"), ("Slack token", r"xox[abprs]-[\w-]{10,}"),
     ("GitLab token", r"glpat-[\w-]{20,}"),
     ("JWT", r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}"), ("private key", PEM.pattern),
+    # A webhook's secret is a path segment, so no key name or token prefix gives it away
+    # (2026-10-10). A long segment after /webhook(s)/ is the token; docs links stay allowed.
+    ("webhook URL", r"https?://[^\s/'\"]+(?:/[^\s/'\"]+?)*?/webhooks?/[^\s'\"]*?[\w-]{24,}"),
+    ("Slack webhook", r"https?://hooks\.slack\.com/(?:services|workflows|triggers)/[\w/]{20,}"),
 ]
 VAL = r"""(?:"[^"]*"|'[^']*'|[^\s"';&|)]+)"""
 ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<val>" + VAL + ")", re.I)

@@ -136,6 +136,25 @@ class TextFormats(Fixture):
         self.assertNotIn(PW, out)
         self.assertIn("A_TOKEN=<value len %d>" % len(PW), out)
 
+    def test_credentials_inside_urls(self):
+        # A webhook's token is a path segment, so neither the key name nor a token shape gives it
+        # away. Fixtures are built at runtime so
+        # gitleaks doesn't flag this file.
+        tok = "Yz9" * 22
+        hook = "https://discord.com/api/" + "webhooks/1555929930645110804/" + tok
+        slack = "https://hooks.slack.com/services/" + "T0AAA/B0BBB/" + "Qx7" * 8
+        p = self.write(".env", "DISCORD_ANNOUNCE_WEBHOOK=%s\nNOTIFY=%s\nSLACK=%s\n"
+                       "DATABASE_URL=postgresql://app:%s@db.example.com:5432/x\n"
+                       "SITE=https://example.com/page\n" % (hook, hook, slack, PW))
+        out = self.run_cli(p).stdout
+        for leak in [tok, "Qx7Qx7", PW]:
+            self.assertNotIn(leak, out)
+        self.assertIn("DISCORD_ANNOUNCE_WEBHOOK=<redacted:%d>" % len(hook), out)
+        self.assertIn("NOTIFY=https://discord.com/api/webhooks/<redacted:", out)
+        self.assertIn("SLACK=https://hooks.slack.com/services/<redacted:", out)
+        self.assertIn("DATABASE_URL=postgresql://app:<redacted:%d>@db.example.com:5432/x" % len(PW), out)
+        self.assertIn("SITE=https://example.com/page", out)
+
     def test_multiline_private_key(self):
         p = self.write("k.txt", "key:\n-----BEGIN RSA PRIVATE KEY-----\nAAAABBBB\n-----END RSA PRIVATE KEY-----\nok\n")
         out = self.run_cli(p).stdout
@@ -159,6 +178,13 @@ class Misc(Fixture):
         self.assertEqual(rv.scrub("X_TOKEN=$X_TOKEN"), "X_TOKEN=$X_TOKEN")
         self.assertEqual(rv.scrub("PASSWORD=" + PW), "PASSWORD=<redacted:%d>" % len(PW))
         self.assertEqual(rv.walk({"max_output_tokens": "32000", "k": "v"}), {"max_output_tokens": "32000", "k": "v"})
+        tok = "Yz9" * 22
+        self.assertEqual(rv.scrub("curl -X POST https://discordapp.com/api/" + "webhooks/42/" + tok + " -d x"),
+                         "curl -X POST https://discordapp.com/api/webhooks/<redacted:%d> -d x" % len("42/" + tok))
+        self.assertEqual(rv.walk({"url": "https://outlook.office.com/" + "webhook/" + tok}),
+                         {"url": "https://outlook.office.com/webhook/<redacted:%d>" % len(tok)})
+        self.assertEqual(rv.scrub("ssh://git@github.com:22/x.git"), "ssh://git@github.com:22/x.git")
+        self.assertEqual(rv.scrub("see https://example.com/docs/webhooks/"), "see https://example.com/docs/webhooks/")
 
 
 if __name__ == "__main__":
