@@ -1,44 +1,74 @@
 #!/usr/bin/env python3
 """Fail if any real secret from this machine's env files appears in the given files or folders.
 
-usage: known_secrets_scan.py [--repos DIR] [--ignore FILE] PATH...
+usage: known_secrets_scan.py [--strict] [--repos DIR] [--ignore FILE] PATH...
 
-gitleaks finds secrets by shape, so a bare password or a webhook token with no prefix gets past
-it, for example a password pasted into a synced note. This check compares against the actual
-values instead: it reads every
-env file under --repos (default ~/repos), keeps the values that are secrets, and looks for them
-byte for byte under each PATH.
+gitleaks finds secrets by shape, so a bare password or a prefix-less token gets past it. This check
+compares against the actual values instead: it reads every env file under --repos (default
+~/repos), keeps the values that are secrets, and looks for each one under PATH in every form it is
+likely to be written in: raw, JSON-escaped, URL-encoded and base64.
+
+Collection fails closed, because a value it doesn't collect is a value no check will ever see:
+  - env files by any common name: .env, .env.*, .env-*, *.env, .envrc, .secrets.env;
+  - every reading a dotenv parser might take (inline '#', quotes, escapes, multi-line);
+  - a value is a secret if its key names a secret (password, token, key, secret, auth, webhook,
+    service role, ...), if a URL in it carries a password, webhook token or secret query
+    parameter, or if it simply looks like one (long, high entropy, no spaces) under a key that
+    isn't an identifier;
+  - keys that ship to browsers (NEXT_PUBLIC_, VITE_, EXPO_PUBLIC_, publishable, anon, site key,
+    client id) are public by design and skipped, except for credentials inside a URL.
 
 It prints "<env file> <KEY>: <path>" only, never a value. Exit codes: 0 clean, 1 found, 2 error.
---ignore lists "<env file> <KEY>" pairs (names, not values) that are committed on purpose, such as
-shared test fixtures. The default is ~/.config/known-secrets/ignore.txt.
+--ignore lists "<env file> <KEY>" pairs (names, not values) whose values are committed on purpose,
+such as shared test fixtures; an ignored value is ignored wherever it appears.
 """
 import argparse
+import base64
 import json
+import math
 import os
 import re
 import sys
+import urllib.parse
+from collections import Counter
 
-WORD = re.compile(r"pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))|credential"
-                  r"|private[_-]?key|session|cookie|bearer|webhook|dsn|database_url|db_url", re.I)
-SAFE_KEY = re.compile(r"(?:max|min)[_-]?\w*tokens|tokens?[_-](?:limit|count|used)|_ttl$|_path$|_file$"
-                      r"|enabled$|client_?id|publishable|anon_key|site_key", re.I)
-LOCAL = re.compile(r"localhost|127\.0\.0\.1|host\.docker\.internal|0\.0\.0\.0")
+SECRET_KEY = re.compile(
+    r"pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))|credential|private"
+    r"|session|cookie|bearer|webhook|dsn|database_url|db_url|connection|conn_str|signing|salt"
+    r"|service[_-]?role|access[_-]?key|(?:^|_)(?:key|pat|sid|pin)(?:$|_)", re.I)
+PUBLIC_KEY = re.compile(r"^(?:NEXT_PUBLIC_|VITE_|EXPO_PUBLIC_|PUBLIC_|REACT_APP_|GATSBY_)|publishable"
+                        r"|anon[_-]?key|site[_-]?key|client[_-]?id", re.I)
+IDENT_KEY = re.compile(r"(?:_|^)(?:id|ids|ref|name|email|user|username|domain|bucket|repo|url|uri|host"
+                       r"|port|region|path|dir|file|env|mode|level|version|account|zone|org)$", re.I)
+# A key that holds the NAME of a secret (a Docker swarm secret, a vault path), not the secret itself.
+SECRET_NAME_KEY = re.compile(r"swarm[_-]?secret|secret[_-]?(?:name|id|ref|arn|path)$", re.I)
+NOT_SECRET_KEY = re.compile(r"(?:max|min)[_-]?\w*tokens|tokens?[_-](?:limit|count|used)|_ttl$|enabled$", re.I)
 TRIVIAL = {"postgres", "password", "changeme", "localhost", "example", "secret", "true", "false",
-           "admin", "root", "supabase"}
+           "admin", "root", "supabase", "none", "null"}
 URL_PW = re.compile(r"[a-z][\w+.-]*://[^\s:/@'\"]*:([^\s@/'\"]+)@", re.I)
-HOOK = re.compile(r"/webhooks?/\d+/([\w-]{20,})|hooks\.slack\.com/services/([\w/]{20,})", re.I)
-SKIP_DIRS = {"node_modules", ".git", "vendor", ".venv", "venv", "__pycache__", ".next", "dist", "build"}
-ENV_NAME = re.compile(r"^\.env(?:\.[\w.-]+)?$")
-ENV_SKIP = re.compile(r"example|sample|template|\.bak|defaults$")
+HOOK = re.compile(r"/webhooks?/\d+/([\w-]{20,})|hooks\.[\w.-]+/[\w-]+/([\w/-]{20,})", re.I)
+URL_QUERY = re.compile(r"[?&](?:token|key|api_key|apikey|secret|sig|signature|password|pass|"
+                       r"access_token|auth|code)=([^&\s#'\"]{8,})", re.I)
+URL_SCHEME = re.compile(r"^[a-z][\w+.-]*://", re.I)
+URL_IS_SECRET_KEY = re.compile(r"webhook|hook_url|callback|dsn", re.I)   # URLs that are secrets whole
+NON_SECRET_SHAPE = re.compile(
+    r"^(?:https?://[^\s@?]*|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|~?/[^\s]*|\./[^\s]*|\.?[a-z0-9-]+(?:\.[a-z0-9-]+)+"
+    r"|-?\d+(?:\.\d+)?|\d{4}-\d{2}-\d{2}[T ]?[\d:.Z+-]*)$", re.I)
+WALK_SKIP = {"node_modules", ".git", ".venv", "venv", "__pycache__"}
+LOCAL_ONLY_DIR = re.compile(r"/supabase/\.temp(?:/|$)")   # the Supabase CLI's per-machine local-stack keys
+SCAN_SKIP = WALK_SKIP | {"vendor", ".next", "dist", "build"}
+ENV_NAME = re.compile(r"^(?:\.env(?:[._-][\w.-]+)?|[\w.-]+\.env|\.envrc)$")
+ENV_SKIP = re.compile(r"example|sample|template|defaults$|\.dist$", re.I)
 
 
-def env_files(root, depth=5):
+def env_files(root, depth=8):
     base = root.rstrip(os.sep).count(os.sep)
     for d, dirs, files in os.walk(root):
-        dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
-        if d.count(os.sep) - base >= depth:
+        dirs[:] = [x for x in dirs if x not in WALK_SKIP]
+        if d.count(os.sep) - base >= depth or LOCAL_ONLY_DIR.search(d):
             dirs[:] = []
+            if LOCAL_ONLY_DIR.search(d):
+                continue
         for f in files:
             if ENV_NAME.match(f) and not ENV_SKIP.search(f):
                 yield os.path.join(d, f)
@@ -50,8 +80,7 @@ ASSIGN_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*)$")
 def env_values(text):
     """(KEY, value) for every reading of each assignment that a dotenv parser might take.
     Readers disagree (docker compose, python-dotenv and node differ on inline '#' comments and
-    quotes), so where they could differ every plausible value is yielded: a missed reading would
-    let that secret through the checks."""
+    quotes), so where they could differ every plausible value is yielded."""
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -96,15 +125,57 @@ def _closing(body, q):
     return -1
 
 
+def _read(path):
+    # surrogateescape keeps every byte, so a value with non-UTF-8 bytes still matches byte for byte
+    with open(path, "rb") as fh:
+        return fh.read().decode("utf-8", "surrogateescape")
+
+
 def _pairs(root, files=None):
     for p in (files if files is not None else env_files(root)):
         rel = os.path.relpath(p, root)
         try:
-            text = open(p, encoding="utf-8", errors="replace").read()
+            text = _read(p)
         except OSError:
             continue
         for key, val in env_values(text):
             yield rel, key, val
+
+
+def entropy(v):
+    n = len(v)
+    return -sum(c / n * math.log2(c / n) for c in Counter(v).values()) if n else 0.0
+
+
+def looks_secret(v):
+    classes = sum(bool(re.search(p, v)) for p in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"))
+    return len(v) >= 24 and not re.search(r"\s", v) and entropy(v) >= 3.5 and classes >= 2 \
+        and not NON_SECRET_SHAPE.match(v)
+
+
+def secret_parts(key, val):
+    """The secret substrings of one env assignment (possibly none)."""
+    out = set()
+    for rx in (URL_PW, HOOK, URL_QUERY):
+        for hit in rx.finditer(val):
+            s = next((g for g in hit.groups() if g), "")
+            if len(s) >= 8 and s.lower() not in TRIVIAL:
+                out.add(urllib.parse.unquote(s))
+                out.add(s)
+    if PUBLIC_KEY.search(key) or NOT_SECRET_KEY.search(key):
+        return out
+    bare = val.strip().strip("'\"")                  # shape tests see the value without quotes
+    if not bare or bare[0] in "$`<" or bare.lower() in TRIVIAL or NON_SECRET_SHAPE.match(bare):
+        return out
+    if URL_SCHEME.match(bare) and not URL_IS_SECRET_KEY.search(key):
+        return out    # the secret of an ordinary URL is its credential, collected above
+    if SECRET_NAME_KEY.search(key) and re.fullmatch(r"[a-z0-9_.-]+", bare):
+        return out    # the name of a secret, not the secret
+    if SECRET_KEY.search(key) and len(val) >= 8:
+        out.add(val)
+    elif not IDENT_KEY.search(key) and looks_secret(val):
+        out.add(val)
+    return out
 
 
 def collect(root, ignore, files=None):
@@ -117,15 +188,33 @@ def collect(root, ignore, files=None):
     for rel, key, val in pairs:
         if val in ignored:
             continue
-        for rx in (URL_PW, HOOK):
-            for hit in rx.finditer(val):
-                s = next(g for g in hit.groups() if g)
-                if len(s) >= 8 and s.lower() not in TRIVIAL:
-                    found.setdefault(s, (rel, key))
-        if (WORD.search(key) and not SAFE_KEY.search(key) and len(val) >= 12
-                and val[0] not in "$`<" and not LOCAL.search(val)):
-            found.setdefault(val, (rel, key))
+        for s in secret_parts(key, val):
+            if s not in ignored:
+                found.setdefault(s, (rel, key))
     return found
+
+
+def forms(value):
+    """The byte strings a value is likely to be written as: raw, JSON-escaped, URL-encoded and,
+    for longer values, the stable middle of its base64 encoding at each of the three alignments."""
+    raw = value.encode("utf-8", "surrogateescape")
+    out = {raw, json.dumps(value)[1:-1].encode("utf-8", "surrogateescape")}
+    out.add(urllib.parse.quote(raw, safe="").encode())
+    out.add(urllib.parse.quote_plus(raw).encode())
+    if len(raw) >= 12:
+        for k in range(3):
+            for enc in (base64.b64encode, base64.urlsafe_b64encode):
+                b = enc(b"\0" * k + raw).rstrip(b"=")
+                start = -(-4 * k // 3)                   # chars touched by the k prefix bytes
+                stable = b[start:len(b) - 3]             # drop the tail that depends on what follows
+                if len(stable) >= 12:
+                    out.add(stable)
+    return out
+
+
+def needles_for(secrets):
+    """[(bytes, (env file, KEY))] for every form of every collected value."""
+    return [(f, meta) for v, meta in secrets.items() for f in forms(v)]
 
 
 def files_under(paths, skip_dirs=True):
@@ -135,7 +224,7 @@ def files_under(paths, skip_dirs=True):
             continue
         for d, dirs, files in os.walk(p):
             if skip_dirs:
-                dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+                dirs[:] = [x for x in dirs if x not in SCAN_SKIP]
             for f in files:
                 yield os.path.join(d, f)
 
@@ -179,13 +268,11 @@ def main(argv=None):
     if not secrets:
         print("known-secrets: no secret values found under %s; nothing to check against" % a.repos, file=sys.stderr)
         return 2
-    needles = []
-    for s_, meta in secrets.items():
-        for form in {s_.encode(), json.dumps(s_)[1:-1].encode()}:
-            needles.append((form, meta))
+    needles = needles_for(secrets)
+    repos_real = os.path.realpath(a.repos) + os.sep
     hits = 0
     for f in files_under(a.paths, skip_dirs=not a.strict):
-        if os.path.realpath(f).startswith(os.path.realpath(a.repos) + os.sep) and ENV_NAME.match(os.path.basename(f)):
+        if os.path.realpath(f).startswith(repos_real) and ENV_NAME.match(os.path.basename(f)):
             continue  # the env files themselves
         if os.path.islink(f) or not os.path.isfile(f):
             continue

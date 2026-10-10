@@ -30,9 +30,8 @@ def needles(secrets):
     out = []
     for v, (rel, key) in secrets.items():
         rep = ("<redacted:%s>" % key).encode()
-        forms = {v.encode(), json.dumps(v)[1:-1].encode()}
-        out += [(f, rep, key) for f in forms]
-    return out
+        out += [(f, rep, key) for f in ks.forms(v)]   # raw, JSON-escaped, URL-encoded, base64
+    return sorted(out, key=lambda n: -len(n[0]))
 
 
 def shortlist(paths, values, scratch):
@@ -40,8 +39,8 @@ def shortlist(paths, values, scratch):
     fd, pat = tempfile.mkstemp(dir=scratch, prefix=".scrub-patterns-")
     try:
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w") as fh:
-            fh.write("\n".join(values) + "\n")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(b"\n".join(values) + b"\n")
         r = subprocess.run(["/usr/bin/grep", "-rlaF", "-f", pat, *paths], capture_output=True, text=True)
         return [f for f in r.stdout.splitlines() if f]
     finally:
@@ -87,7 +86,7 @@ def main(argv=None):
     nds = needles(secrets)
     cutoff = time.time() - a.min_age
     total, files, skipped = Counter(), 0, 0
-    for f in shortlist(paths, sorted({n.decode() for n, _, _ in nds}), a.scratch):
+    for f in shortlist(paths, sorted({n for n, _, _ in nds}), a.scratch):
         try:
             st = os.stat(f)
         except OSError:
