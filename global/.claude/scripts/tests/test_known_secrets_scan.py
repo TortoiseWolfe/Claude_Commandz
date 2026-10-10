@@ -1,4 +1,7 @@
+import base64
+import hashlib
 import importlib.util
+import urllib.parse
 import json
 import os
 import subprocess
@@ -102,6 +105,59 @@ class Scan(unittest.TestCase):
         self.assertIn("Jt3Jt3Jt3 #Wm6Wm6Wm6", vals)
         self.assertIn("Jt3Jt3Jt3", vals)
         self.assertIn("Rv2Rv2\nRv2Rv2Rv2", vals)
+
+    def test_env_files_by_any_common_name_and_depth(self):
+        for rel in ("d/stack.env", "d/api.env", "d/.env-prod", "d/.envrc", "a/b/c/d/e/f/.env.prod"):
+            self.write(rel, "X=1\n")
+        self.write("d/.env.example", "X=1\n")
+        names = {os.path.relpath(p, self.repos) for p in ks.env_files(self.repos)}
+        for rel in ("d/stack.env", "d/api.env", "d/.env-prod", "d/.envrc", "a/b/c/d/e/f/.env.prod"):
+            self.assertIn(rel, names)
+        self.assertNotIn("d/.env.example", names)
+
+    def test_which_values_count_as_secrets(self):
+        hi = base64.urlsafe_b64encode(hashlib.sha256(b"fixture").digest()).decode().rstrip("=")  # token-like
+        sr = "eyJ" + "sR4" * 10                         # a service-role-shaped key
+        self.write("k/" + ENV,
+                   "SUPABASE_SERVICE_ROLE_KEY=%s\nNEXT_PUBLIC_SUPABASE_ANON_KEY=%s\nDB_PASSWORD=Gk2Gk2Gk\n"
+                   "BLOB=%s\nJAZZ_WORKER_ACCOUNT=%s\nSITE_URL=https://example.org/page\n"
+                   "CALLBACK_URL=https://x.example.org/cb?token=Tq4Tq4Tq4Tq4\n"
+                   "PROJECT_NAME=my-project\n" % (sr, sr + "pub", hi, hi + "acct"))
+        found = ks.collect(self.repos, set())
+        for v in (sr, "Gk2Gk2Gk", hi, "Tq4Tq4Tq4Tq4"):
+            self.assertIn(v, found)
+        for v in (sr + "pub", hi + "acct", "https://example.org/page", "my-project"):
+            self.assertNotIn(v, found)
+
+    def test_names_domains_quoted_local_urls_and_cli_temp_keys_are_not_secrets(self):
+        name = "mail_smtp_" + "password_v1"
+        self.write("f/" + ENV, 'MAIL_SWARM_SECRET=%s\nAPP_COOKIE_DOMAIN=.example.org\n'
+                               'DATABASE_URL="postgresql://postgres:postgres@localhost:5432/x"\n'
+                               'SMTP_PASSWORD=%s\n' % (name, name))
+        self.write("r/supabase/.temp/env/docker" + ENV, "INTERNAL_SECRET_KEY=Lc6Lc6Lc6Lc6Lc6Lc6\n")
+        found = ks.collect(self.repos, set())
+        self.assertIn(name, found)                              # under a password key it IS a secret
+        self.assertEqual(found[name][1], "SMTP_PASSWORD")
+        for v in (".example.org", '"postgresql://postgres:postgres@localhost:5432/x"',
+                  "postgresql://postgres:postgres@localhost:5432/x", "Lc6Lc6Lc6Lc6Lc6Lc6"):
+            self.assertNotIn(v, found)
+
+    def test_encoded_forms_and_non_utf8_bytes_are_found(self):
+        pw = "Pw5!Pw5@Pw5#Pw5"
+        self.write("e/" + ENV, "SMTP_PASSWORD='%s'\n" % pw)
+        b64 = base64.b64encode(("user:" + pw).encode()).decode()
+        self.put("docker-config.json", '{"auths": {"r.io": {"auth": "%s"}}}\n' % b64)
+        self.put("doc.md", "postgresql://u:%s@db/x\n" % urllib.parse.quote(pw, safe=""))
+        r = self.run_cli(self.out)
+        self.assertEqual(r.stdout.count("SMTP_PASSWORD"), 2, r.stdout)
+        raw = b"Nb8\xffNb8Nb8Nb8"
+        with open(os.path.join(self.repos, "n", ENV) if os.path.isdir(os.path.join(self.repos, "n"))
+                  else self.write("n/" + ENV, ""), "ab") as fh:
+            fh.write(b"API_TOKEN=" + raw + b"\n")
+        with open(os.path.join(self.out, "bin.dat"), "wb") as fh:
+            fh.write(b"xx" + raw + b"yy")
+        r = self.run_cli(os.path.join(self.out, "bin.dat"))
+        self.assertIn("API_TOKEN", r.stdout)
 
     def test_collect_units(self):
         found = ks.collect(self.repos, ks.load_ignore(self.ignore))
