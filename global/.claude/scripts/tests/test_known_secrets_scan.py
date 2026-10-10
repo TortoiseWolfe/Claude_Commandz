@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -73,6 +74,25 @@ class Scan(unittest.TestCase):
         self.write("other/" + ENV, "SEED_USER_PASSWORD=%s\n" % FIXTURE)
         found = ks.collect(self.repos, ks.load_ignore(self.ignore))
         self.assertNotIn(FIXTURE, found)
+
+    def test_strict_walks_skipped_folders_that_the_default_mode_skips(self):
+        self.put("build/out.js", "var k = '%s';\n" % PW)
+        self.assertEqual(self.run_cli(self.out).returncode, 0)
+        r = subprocess.run([sys.executable, SCRIPT, "--strict", "--repos", self.repos, "--ignore", self.ignore,
+                            self.out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ADMIN_PASSWORD", r.stdout)
+        self.assertNotIn(PW, r.stdout + r.stderr)
+
+    def test_chunked_read_finds_a_value_across_a_chunk_boundary_and_json_escaped(self):
+        p = self.put("big.bin", "x" * 13 + PW + "y" * 50)
+        found = ks.contains(p, [(PW.encode(), ("app/" + ENV, "ADMIN_PASSWORD"))], chunk=16)
+        self.assertEqual(found, [("app/" + ENV, "ADMIN_PASSWORD")])
+        with open(os.path.join(self.repos, "app", ENV), "a") as fh:
+            fh.write("SMTP_PASSWORD='Ab1\"Cd2Cd2Cd2Cd2'\n")
+        self.put("log.jsonl", json.dumps({"out": 'Ab1"Cd2Cd2Cd2Cd2'}) + "\n")
+        r = self.run_cli(self.out)
+        self.assertIn("SMTP_PASSWORD", r.stdout)
 
     def test_collect_units(self):
         found = ks.collect(self.repos, ks.load_ignore(self.ignore))
