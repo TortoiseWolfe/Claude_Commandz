@@ -14,6 +14,7 @@ It prints "<env file> <KEY>: <path>" only, never a value. Exit codes: 0 clean, 1
 shared test fixtures. The default is ~/.config/known-secrets/ignore.txt.
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -30,7 +31,6 @@ HOOK = re.compile(r"/webhooks?/\d+/([\w-]{20,})|hooks\.slack\.com/services/([\w/
 SKIP_DIRS = {"node_modules", ".git", "vendor", ".venv", "venv", "__pycache__", ".next", "dist", "build"}
 ENV_NAME = re.compile(r"^\.env(?:\.[\w.-]+)?$")
 ENV_SKIP = re.compile(r"example|sample|template|\.bak|defaults$")
-MAX_BYTES = 50 * 1024 * 1024
 
 
 def env_files(root, depth=5):
@@ -78,15 +78,33 @@ def collect(root, ignore, files=None):
     return found
 
 
-def files_under(paths):
+def files_under(paths, skip_dirs=True):
     for p in paths:
         if os.path.isfile(p):
             yield p
             continue
         for d, dirs, files in os.walk(p):
-            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            if skip_dirs:
+                dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
             for f in files:
                 yield os.path.join(d, f)
+
+
+def contains(path, needles, chunk=8 * 1024 * 1024):
+    """Return the metas of needles found in path, reading in overlapping chunks (no size limit)."""
+    overlap = max(len(n) for n, _ in needles)
+    found, tail = {}, b""
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            buf = tail + block
+            for needle, meta in needles:
+                if meta not in found and needle in buf:
+                    found[meta] = True
+            tail = buf[-overlap:]
+    return list(found)
 
 
 def load_ignore(path):
@@ -104,28 +122,35 @@ def main(argv=None):
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--repos", default=os.path.expanduser("~/repos"))
     ap.add_argument("--ignore", default=os.path.expanduser("~/.config/known-secrets/ignore.txt"))
+    ap.add_argument("--strict", action="store_true",
+                    help="for push checks: walk every folder, and treat an unreadable file as a finding")
     a = ap.parse_args(argv)
     secrets = collect(a.repos, load_ignore(a.ignore))
     if not secrets:
         print("known-secrets: no secret values found under %s; nothing to check against" % a.repos, file=sys.stderr)
         return 2
-    needles = [(s.encode(), meta) for s, meta in secrets.items()]
+    needles = []
+    for s_, meta in secrets.items():
+        for form in {s_.encode(), json.dumps(s_)[1:-1].encode()}:
+            needles.append((form, meta))
     hits = 0
-    for f in files_under(a.paths):
+    for f in files_under(a.paths, skip_dirs=not a.strict):
         if os.path.realpath(f).startswith(os.path.realpath(a.repos) + os.sep) and ENV_NAME.match(os.path.basename(f)):
             continue  # the env files themselves
-        try:
-            if os.path.getsize(f) > MAX_BYTES:
-                continue
-            data = open(f, "rb").read()
-        except OSError:
+        if os.path.islink(f) or not os.path.isfile(f):
             continue
-        for needle, (rel, key) in needles:
-            if needle in data:
-                print("%s %s: %s" % (rel, key, f))
+        try:
+            metas = contains(f, needles)
+        except OSError:
+            if a.strict:
+                print("unreadable (counted as a finding in --strict): %s" % f)
                 hits += 1
+            continue
+        for rel, key in metas:
+            print("%s %s: %s" % (rel, key, f))
+            hits += 1
     if hits:
-        print("known-secrets: %d real secret value(s) found (names above, values never printed)" % hits, file=sys.stderr)
+        print("known-secrets: %d finding(s) (names above, values never printed)" % hits, file=sys.stderr)
         return 1
     return 0
 
