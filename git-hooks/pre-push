@@ -85,10 +85,11 @@ while read -r lref lsha rref rsha; do
   "${G[@]}" log -p --text -m --no-renames --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ \
     --format= "${RANGE[@]}" > "$P" || refuse "could not read the commits being pushed"
   # grep -a: a patch with NUL bytes would otherwise print "binary file matches" instead of the lines.
-  # Exit 1 only means "no added lines"; anything else is an error and refuses.
-  set +o pipefail
+  # Exit 1 only means "no added lines"; anything else is an error and refuses. errexit is off for
+  # the pipeline, or a removal-only push would stop here silently before rc is read.
+  set +e +o pipefail
   grep -aE '^\+' "$P" | grep -avE '^\+\+\+ (b/|/dev/null)' >> "$A"
-  rc=("${PIPESTATUS[@]}"); set -o pipefail
+  rc=("${PIPESTATUS[@]}"); set -e -o pipefail
   [ "${rc[0]}" -le 1 ] && [ "${rc[1]}" -le 1 ] || refuse "could not filter the patches being pushed"
   if [ "$("${G[@]}" cat-file -t "$lsha")" = tag ]; then
     "${G[@]}" cat-file tag "$lsha" >> "$A" || refuse "could not read the tag being pushed"
