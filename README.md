@@ -16,7 +16,7 @@ Claude_Commandz/
 │   ├── .claude/agents/           # tiered subagents: shell-proxy, worker-mechanical, worker-builder, reviewer-senior; Explore.md overrides the built-in Explore to run on Sonnet
 │   ├── .claude/skills/agent-notes/  # Muse <-> Claude Code note protocol over Gmail
 │   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); openclaw_tray.py (4-tool client for the OpenClaw tray MCP)
-│   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (SessionStart: picks up Muse's notes, state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; client-specific hooks are kept out of this public repo
+│   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (picks up Muse's notes in the ~/repos session only; state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; client-specific hooks are kept out of this public repo
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
     ├── ScriptHammer/.claude/commands/                         (23 files)
