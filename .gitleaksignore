@@ -4,3 +4,6 @@ global/.claude/commands/secrets-scan.md:generic-api-key:207
 global/.claude/scripts/tests/test_redact_view.py:private-key:85
 global/.claude/scripts/tests/test_secret_guard.py:generic-api-key:53
 global/.claude/scripts/tests/test_secret_guard.py:generic-api-key:54
+# Reviewed 2026-10-10: the same teaching example as above, at the path it had before the move to
+# global/.claude/commands/. History scans (gitleaks detect) still reach it in commit 20deb74.
+20deb74bbaebe91d04520f911e27a177953781a0:secrets-scan.md:generic-api-key:207
