@@ -1,19 +1,47 @@
 #!/usr/bin/env bash
-# Hub pre-push: scan the tracked tree for secrets. Fails closed (no Docker, no scanner, or any finding = no push).
-# Installed into .git/hooks/pre-push by the hub's bootstrap.sh; this tracked copy is the source.
-#   1. gitleaks finds secrets by shape (key prefixes, high-entropy strings).
-#   2. known_secrets_scan.py compares against the real values in this machine's env files, which
-#      catches what has no shape: on 2026-10-10 a Portainer password sat in a synced memory note
-#      through 121 commits that all passed gitleaks.
+# Pre-push secret scan. Fails closed: no Docker, no scanner, an unreadable file, or any finding = no push.
+# Installed into .git/hooks/pre-push by hub/bootstrap.sh; this tracked copy is the source (the public
+# repos Claude_Commandz and AI_Workflow carry the same file as git-hooks/pre-push).
+#
+# It scans what is being PUSHED, not the working tree or the index:
+#   1. the tree of each pushed tip, extracted with git archive: gitleaks (by shape) and
+#      known_secrets_scan.py --strict (against the real values in this machine's env files);
+#   2. every commit in the pushed range: gitleaks over its patches, and the added lines plus
+#      commit messages against the real values, so a secret added and removed again inside the
+#      range is still caught. Removed lines are not checked, so a scrub commit can go out.
 set -euo pipefail
-ROOT="$(git rev-parse --show-toplevel)"; T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-git -C "$ROOT" checkout-index -a --prefix="$T/"
-cp "$ROOT/.gitleaksignore" "$T/" 2>/dev/null || true
-docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" -v "$T":/scan:ro -w /scan zricethezav/gitleaks:latest dir . --no-banner --redact >/dev/null 2>&1 \
-  || { echo "pre-push: gitleaks found something (or could not run). Push refused." >&2; exit 1; }
-echo "pre-push: gitleaks clean"
+ROOT="$(git rev-parse --show-toplevel)"
 KS="$HOME/.claude/scripts/known_secrets_scan.py"
-[ -f "$KS" ] || { echo "pre-push: $KS missing. Push refused." >&2; exit 1; }
-python3 -I "$KS" "$T" | sed "s|$T/||" >&2 \
-  || { echo "pre-push: a real secret value is in the tree (names above), or the check could not run. Push refused." >&2; exit 1; }
-echo "pre-push: known secrets clean"
+GL="zricethezav/gitleaks:latest"
+ZERO=0000000000000000000000000000000000000000
+refuse() { echo "pre-push: $1. Push refused." >&2; exit 1; }
+[ -f "$KS" ] || refuse "$KS is missing"
+command -v docker >/dev/null || refuse "docker is missing"
+docker image inspect "$GL" >/dev/null 2>&1 || refuse "the gitleaks image is missing (docker pull $GL)"
+KSARGS=(--strict)
+[ -n "${KNOWN_SECRETS_REPOS:-}" ] && KSARGS+=(--repos "$KNOWN_SECRETS_REPOS")
+[ -n "${KNOWN_SECRETS_IGNORE:-}" ] && KSARGS+=(--ignore "$KNOWN_SECRETS_IGNORE")
+W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+gl() { docker run --rm --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" "$@" >/dev/null 2>&1; }
+n=0
+while read -r lref lsha rref rsha; do
+  [ "$lsha" = "$ZERO" ] && continue    # a ref deletion pushes no content
+  n=$((n + 1)); T="$W/tree$n"; mkdir -p "$T"
+  git -C "$ROOT" archive "$lsha" | tar -x -C "$T"
+  if [ "$rsha" = "$ZERO" ] || ! git -C "$ROOT" cat-file -e "$rsha^{commit}" 2>/dev/null; then
+    RANGE=("$lsha" --not --remotes)    # new branch, or a remote tip we don't have: everything not yet on any remote
+  else
+    RANGE=("$rsha..$lsha")
+  fi
+  # 1. the pushed tree
+  gl -v "$T":/scan:ro -w /scan "$GL" dir . --no-banner --redact || refuse "gitleaks found something in the tree of $lref (or could not run)"
+  # 2. the pushed commits: added lines and messages
+  git -C "$ROOT" log --format='%B' "${RANGE[@]}" > "$W/added$n.txt"
+  git -C "$ROOT" log -p --format= "${RANGE[@]}" | grep '^+' | grep -v '^+++ ' >> "$W/added$n.txt" || true
+  gl -v "$ROOT":/repo:ro "$GL" git /repo --no-banner --redact --log-opts="${RANGE[*]}" \
+    || refuse "gitleaks found something in the commits being pushed to $rref (or could not run)"
+  python3 -I "$KS" "${KSARGS[@]}" "$T" "$W/added$n.txt" | sed "s|$W/||" >&2 \
+    || refuse "a real secret value is in what's being pushed to $rref (names above), or the check could not run"
+done
+echo "pre-push: gitleaks clean"
+echo "pre-push: known secrets clean ($n ref(s), trees and commit ranges)"
