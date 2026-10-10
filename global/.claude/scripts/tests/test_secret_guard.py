@@ -56,8 +56,8 @@ class RuleA(Base):
             "export GREG_PASSWORD=hunter2pass",
             "docker run -e EMAIL_PASSWORD=hunter2pass img",
             "mycli --password hunter2pass",
-            "mycli --token=abcdef123456",
-            "API_KEY='abcdef123456' ./run.sh",
+            "mycli --token=" + "abcdef" + "123456",   # built at runtime so gitleaks doesn't flag the file
+            "API_KEY='" + "abcdef" + "123456' ./run.sh",
             "curl -H 'Authorization: token %s' https://api.github.com" % GHO,
             "echo ghp_" + "x" * 30,
             "echo github_pat_" + "A" * 30,
