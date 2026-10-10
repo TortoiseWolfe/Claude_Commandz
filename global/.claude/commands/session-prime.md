@@ -15,6 +15,25 @@ The prime prompt that users paste into a fresh Claude session tells the new mode
 
 ## What to do
 
+### 0. Identify the machine (before anything else)
+
+Two PCs run this command against the same issues: **NX-01** (the main PC) and **NCC-74656** (the second tower). Since 2026-10-10 the tower's Windows hostname has read `NX01`, a near-match for NX-01, and a session there once believed it was NX-01. **Never use the hostname.**
+
+```bash
+MACHINE="$(cat ~/.config/afa/machine 2>/dev/null)"
+if [ -z "$MACHINE" ]; then
+  case "$(powershell.exe -NoProfile -Command '(Get-CimInstance Win32_BaseBoard).Product' 2>/dev/null | tr -d '\r')" in
+    *"PRO Z690-A"*)      MACHINE=NX-01 ;;
+    *"PRIME Z790M-PLUS"*) MACHINE=NCC-74656 ;;
+  esac
+fi
+echo "machine: ${MACHINE:-UNKNOWN}"
+```
+
+- `~/.config/afa/machine` holds one line, the fleet name. If it's missing and the motherboard is one of the two above, write the name into it.
+- **UNKNOWN** → STOP and ask the user which machine this is. Don't guess.
+- Carry `MACHINE` through every step: every comment's heading names it (Appendix B), and the hub has extra rules in 3b.
+
 ### 1. Detect the current repo
 
 ```bash
@@ -102,19 +121,28 @@ Either way:
 
 The issue already exists. You're doing two things: (1) rewriting the body to reflect what's changed in the roadmap, and (2) appending a comment that audit-trails what changed.
 
-1. Fetch the current body:
+1. Fetch the current body, and note when it was last updated:
    ```bash
    gh issue view <issue-number> --repo <owner>/<repo> --json body --jq .body > /tmp/old-body.md
+   gh issue view <issue-number> --repo <owner>/<repo> --json updatedAt --jq .updatedAt   # keep this as READ_AT
    ```
+   The other machine may edit the same issue between your read and your write. Step 4 checks for that.
 
 2. Gather state since the last comment was posted:
    - `gh issue view <issue-number> --repo <owner>/<repo> --json comments --jq '.comments[-1].createdAt'` — timestamp of last comment
    - `git log --oneline --since="<that-timestamp>"` — commits since then
    - Recently closed/opened issues in the same window
    - Anything new on the user-stated agenda
-   - **Workspace hub only** (`TortoiseWolfe/workspace`): run `~/repos/hub/scripts/tidy-report.sh`. If it prints anything, add one backlog line, "**Tidy ~/repos**", summarising each section with its count. Drop that line when the report comes back empty.
+   - **Workspace hub only** (`TortoiseWolfe/workspace`): run `~/repos/hub/scripts/tidy-report.sh`. Its findings are about THIS machine's `~/repos` only. If it prints anything, add or replace one backlog line, "**Tidy ~/repos (<MACHINE>)**", summarising each section with its count. Drop only your own machine's line when the report comes back empty. A tidy line without a machine name was written by NX-01.
 
-3. Update the roadmap in the body:
+3. Update the roadmap in the body.
+
+   **Workspace hub on any machine other than NX-01:** NX-01 owns the hub roadmap's priorities. From the tower:
+   - Edit only lines about this machine's work (its tower follow-ups, items it finished, its own tidy line), plus new backlog items it found. Write the machine name into anything you add, e.g. "(tower)".
+   - Don't re-prioritize the active arc, reorder "Next 3 sessions", or rewrite "Next session should" unless the user explicitly asks. If an item there is now done or stale because of this machine's work, edit just that phrase.
+   - Everything else in the body stays exactly as NX-01 wrote it.
+
+   Otherwise (any other repo, or the hub on NX-01):
    - **Active arc** → if the user signaled the arc is done or changed direction, swap it. Else, update its "remaining tasks" list to remove what was completed and add what was discovered.
    - **Next 3 sessions** → re-prioritize. Promote items from backlog if relevant. Demote items the user de-prioritized.
    - **Backlog** → add anything new captured this session. Remove anything that got built or de-scoped.
@@ -133,10 +161,12 @@ The issue already exists. You're doing two things: (1) rewriting the body to ref
 
    If the old body had no stamp (pre-existing issue), add one — that is the upgrade from approximate drift to exact, and it needs no migration.
 
-4. Write the updated body back:
+4. Confirm nobody edited the issue since step 1, then write the updated body back:
    ```bash
+   gh issue view <issue-number> --repo <owner>/<repo> --json updatedAt --jq .updatedAt   # must equal READ_AT
    gh issue edit <issue-number> --repo <owner>/<repo> --body-file /tmp/new-body.md
    ```
+   If `updatedAt` moved, someone (usually the other machine) changed the issue in between. Re-fetch, redo your edits on the new body, and check again. Never write over a newer body.
 
 5. Append a comment using the "session work" template from **Appendix B**. The comment is the audit trail — it explains what changed in the body and why.
 
@@ -274,7 +304,7 @@ Two templates depending on the case. **Drop sections that have nothing real to r
 ### B-1. Session work template (real work happened)
 
 ```markdown
-## Session ended YYYY-MM-DD HH:MM <TZ>
+## Session ended YYYY-MM-DD HH:MM <TZ> (<MACHINE>, <repo dir> session <id>)
 
 **Shipped (<N> commits, all on `origin/<branch>`):**
 - [`<sha>`](https://github.com/<owner>/<repo>/commit/<sha>) — <one-line summary>
@@ -300,7 +330,7 @@ Two templates depending on the case. **Drop sections that have nothing real to r
 ### B-2. Seeded baseline template (no work this session — just establishing the issue)
 
 ```markdown
-## Issue seeded YYYY-MM-DD HH:MM <TZ> — baseline snapshot, not a session log
+## Issue seeded YYYY-MM-DD HH:MM <TZ> (<MACHINE>) — baseline snapshot, not a session log
 
 The rolling-prime issue was created via `/session-prime` from a different repo's session (or just to bootstrap this repo's roadmap). **No work happened on this repo this session.** Use this comment as the starting snapshot; future `/session-prime` runs will add real session-end audit-trail entries on top.
 
@@ -331,6 +361,9 @@ The rolling-prime issue was created via `/session-prime` from a different repo's
 
 - **Not in a git repo / no GitHub remote** — fail loudly, abort.
 - **`gh` not authenticated** — print `gh auth status`, abort.
+- **`gh` not installed** (a fresh machine) — the GitHub MCP connector can't see the private hub repo, so it's no substitute. Install `gh` into `~/.local/bin` from the cli/cli release, check it against the release's checksums file, then have the user run `! gh auth login`.
+- **Machine unknown** (step 0) — ask the user. Never infer it from the hostname.
+- **The other machine's comment is the newest one** — fine. Your comment adds this machine's side; don't restate or contradict theirs. Correct a stale item only by editing that phrase in the body.
 - **Multiple open `next-session` issues** — ask the user which is canonical. Never auto-pick.
 - **Repo has no `~/.claude/projects/.../memory/` dir** — drop that bullet from the prime-prompt block; rely on `git log` + open issues only.
 - **No commits since last comment, but the user wants to update the roadmap anyway** — that's fine. The "Shipped" section in the comment becomes brief or omitted; the "Roadmap changes" section captures the actual update.
