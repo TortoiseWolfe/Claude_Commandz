@@ -166,6 +166,12 @@ async function call(prompt, opts) {
 const DIFF_FLAGS = '--no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/'
 // Write free text to a file without a heredoc (see b64 above). Base64 has no quotes or newlines.
 const writeFile = (text, file) => `printf '%s' '${b64(text)}' | base64 -d > ${file}`
+// Cap for free text inlined only for an ADVISORY consumer (the shadow panel). See the checker script.
+const PANEL_SPEC_MAX = 6000
+const clipForPanel = (text) =>
+  text.length <= PANEL_SPEC_MAX
+    ? text
+    : `${text.slice(0, PANEL_SPEC_MAX)}\n[spec clipped at ${PANEL_SPEC_MAX} of ${text.length} chars to keep the checker script inside the shell-proxy's output limit]\n`
 
 // Log directory: given, or a private mktemp -d that the Baseline script creates and reports back.
 let resolveLogDir
@@ -351,7 +357,9 @@ const usedChecks = [...new Set(items.map((i) => i.check))]
 const baseScript = [
   'set -u',
   `cd '${repo}' || { echo "__RC=NO_REPO__"; exit 0; }`,
-  logDir ? `LD='${logDir}'` : 'LD=$(mktemp -d) || { echo "__RC=NO_LOGDIR__"; exit 0; }',
+  // A given logDir is created here: on 2026-10-09 a run pointed at a dir that did not exist yet, every
+  // check's `> "$L-…log"` redirect failed with rc 1, and Baseline reported healthy checks as red at base.
+  logDir ? `LD='${logDir}'; mkdir -p "$LD" || { echo "__RC=NO_LOGDIR__"; exit 0; }` : 'LD=$(mktemp -d) || { echo "__RC=NO_LOGDIR__"; exit 0; }',
   'echo "__LOGDIR=${LD}__"',
   'git fetch --prune origin >/dev/null 2>&1; echo "__RC_FETCH=$?__"',
   `BASE=$(git rev-parse '${baseRef}'); echo "__BASE=\${BASE}__"`,
@@ -430,7 +438,12 @@ async function runCheck(it, wt, round) {
       `git diff ${DIFF_FLAGS} '${baseSha}'..HEAD > "$L-jev.diff"; jg=send; for f in jev.diff jev-acc.txt jev-q.json; do python3 ~/.claude/scripts/panel_gate.py --diff "$L-$f" --class ${panelClass}${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} --out "$L-$f.red" > "$L-$f.gate" 2>&1; grep -q '^__GATE=send__' "$L-$f.gate" || jg=no; done; if [ "$jg" = send ]; then python3 ~/.claude/scripts/jev_precheck.py --acceptance "$L-jev-acc.txt.red" --questions-file "$L-jev-q.json.red" --repo '${name.replace(/'/g, '')}' < "$L-jev.diff.red"; else echo "__JEV_SKIPPED=gate__"; fi`,
     ] : []),
     // Free panel, shadow only: runs once the check is green; its verdict never gates anything.
-    writeFile(`${it.title}\n\n${it.instructions}\n`, '"$L-panel-spec.txt"'),
+    // The spec is CLIPPED for it. This whole script is something the shell-proxy agent must
+    // write out in one tool call, and an inlined base64 of a long spec pushed that past its
+    // 32k output tokens on 2026-10-09: the checker crashed before running a single check, and a
+    // finished, committed item came back "capped" with "no commit on the branch". A gating
+    // check must never fail for the sake of an advisory one.
+    writeFile(clipForPanel(`${it.title}\n\n${it.instructions}\n`), '"$L-panel-spec.txt"'),
     writeFile(it.acceptance.join('\n') + '\n', '"$L-panel-acc.txt"'),
     `if [ "$rcc" = 0 ]; then git diff ${DIFF_FLAGS} '${baseSha}'..HEAD > "$L-panel.diff"; timeout 900 python3 ~/.claude/scripts/panel_review.py --spec "$L-panel-spec.txt" --acceptance "$L-panel-acc.txt" --diff "$L-panel.diff" --class ${panelClass} --repo '${name.replace(/'/g, '')}'${panelNeverSend.map((g) => ` --never-send '${g.replace(/'/g, '')}'`).join('')} > "$L-panel.log" 2>&1; grep -E '^__(GATE|PANEL_[A-Za-z0-9_]+)=' "$L-panel.log"; fi`,
     'chmod 600 "$L"-* 2>/dev/null; true',

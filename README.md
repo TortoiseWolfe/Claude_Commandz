@@ -11,11 +11,15 @@ Claude_Commandz/
 ├── README.md                     # this file
 ├── CLAUDE.md                     # instructions for Claude Code working in this repo
 ├── global/
-│   ├── .claude/commands/         # 65 files — mirror of ~/.claude/commands/
+│   ├── .claude/commands/         # 71 files — mirror of ~/.claude/commands/, minus email-voice-check.md and weekly-review.md (they name clients: private half)
 │   ├── .claude/workflows/        # saved Workflow scripts: director.js (tiered Opus/Haiku/Sonnet); client-specific workflows are kept out of this public repo
 │   ├── .claude/agents/           # tiered subagents: shell-proxy, worker-mechanical, worker-builder, reviewer-senior; Explore.md overrides the built-in Explore to run on Sonnet
 │   ├── .claude/skills/agent-notes/  # Muse <-> Claude Code note protocol over Gmail
-│   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); muse_jev.py (Jev second opinion on the Muse poller's iffy answers); openclaw_tray.py (4-tool client for the OpenClaw tray MCP)
+│   ├── .claude/skills/council/      # independent advisors stress-test a decision or diff
+│   ├── .claude/skills/game-demo/    # scaffold a playable 3D demo inside a ScriptHammer app
+│   ├── .claude/skills/scroll-world/ # scroll-driven 3D world pipeline (see #9)
+│   │   # not here: skills/site-model (private half); skills/synced (Anthropic re-syncs it); skills/graphify (reinstall, see Restore)
+│   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); muse_jev.py (Jev second opinion on the Muse poller's iffy answers); openclaw_tray.py (4-tool client for the OpenClaw tray MCP); api-quiet.sh; gated_post.sh; portainer_status.py; email_voice_check.py is in the private half
 │   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (picks up Muse's notes in the ~/repos session only; state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; client-specific hooks are kept out of this public repo
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
@@ -50,6 +54,7 @@ cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
 mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key; openclaw_tray.py reads the tray token at run time (neither backed up)
 mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
+uv tool install graphifyy==0.9.23 && graphify install --platform claude   # graphify is third-party: reinstall it, don't back it up
 
 # All project commands (assumes ~/repos/<name>/ already exists — clone those first)
 for d in repos/*/; do
@@ -75,6 +80,7 @@ cp -a global/.claude/agents/. ~/.claude/agents/
 cp -a global/.claude/skills/. ~/.claude/skills/
 mkdir -p ~/.claude/scripts && cp -a global/.claude/scripts/. ~/.claude/scripts/   # jev_precheck.py reads its key from ~/.config/typesafe/api-key; openclaw_tray.py reads the tray token at run time (neither backed up)
 mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
+uv tool install graphifyy==0.9.23 && graphify install --platform claude   # graphify is third-party: reinstall it, don't back it up
 ```
 
 ### Scenario C — Single repo only
@@ -110,13 +116,13 @@ When global or project commands evolve, re-sync into this repo and commit:
 
 ```bash
 # Global
-cp -a ~/.claude/commands/. global/.claude/commands/
+for f in ~/.claude/commands/*.md; do case "$(basename "$f")" in email-voice-check.md|weekly-review.md) ;; *) cp -p "$f" global/.claude/commands/ ;; esac; done   # those two name clients: hub/claude-private
 cp ~/.claude/settings.json global/dotfiles/settings.json
 cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 cp ~/.claude/workflows/director.js global/.claude/workflows/   # client-specific workflows stay out (public repo)
 cp -a ~/.claude/agents/. global/.claude/agents/
-cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
-cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/muse_jev.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
+for s in agent-notes council game-demo scroll-world; do cp -a ~/.claude/skills/$s/. global/.claude/skills/$s/; done   # site-model is private
+cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/muse_jev.py ~/.claude/scripts/openclaw_tray.py ~/.claude/scripts/api-quiet.sh ~/.claude/scripts/gated_post.sh ~/.claude/scripts/portainer_status.py global/.claude/scripts/
 cp ~/.claude/hooks/roadmap-drift.sh ~/.claude/hooks/muse-drafts.sh ~/.claude/hooks/secret-guard.py ~/.claude/hooks/explore-override-drift.sh ~/.claude/hooks/explore-override-drift.ref global/.claude/hooks/
 
 # Per-repo — only loops over dirs already tracked here
