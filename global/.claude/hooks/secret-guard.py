@@ -83,13 +83,13 @@ _ks_values = None
 
 
 def known_secrets():
-    """value -> 'envfile KEY'. Empty if the scanner is missing (rule E then allows)."""
+    """[(bytes, 'envfile KEY')] for every form of every real value. Empty if the scanner is missing."""
     global _ks_values
     if _ks_values is not None:
         return _ks_values
     src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "known_secrets_scan.py")
     if not os.path.exists(src):
-        _ks_values = {}
+        _ks_values = []
         return _ks_values
     spec = importlib.util.spec_from_file_location("known_secrets_scan", src)
     ks = importlib.util.module_from_spec(spec)
@@ -112,7 +112,7 @@ def known_secrets():
         except OSError:
             pass
     found = ks.collect(KS_REPOS, ks.load_ignore(KS_IGNORE), files=files)
-    _ks_values = {v: "%s %s" % meta for v, meta in found.items()}
+    _ks_values = [(n, "%s %s" % meta) for n, meta in ks.needles_for(found)]   # every written form
     return _ks_values
 
 
@@ -129,8 +129,8 @@ def secret_in_file(path):
         data = open(path, "rb").read()
     except OSError:
         return None
-    for v, where in known_secrets().items():
-        if v.encode() in data:
+    for needle, where in known_secrets():
+        if needle in data:
             return where
     return None
 
