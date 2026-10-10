@@ -4,7 +4,8 @@
 usage: known_secrets_scan.py [--repos DIR] [--ignore FILE] PATH...
 
 gitleaks finds secrets by shape, so a bare password or a webhook token with no prefix gets past
-it, for example a password pasted into a synced note. This check compares against the actual values instead: it reads every
+it, for example a password pasted into a synced note. This check compares against the actual
+values instead: it reads every
 env file under --repos (default ~/repos), keeps the values that are secrets, and looks for them
 byte for byte under each PATH.
 
