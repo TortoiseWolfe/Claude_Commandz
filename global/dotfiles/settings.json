@@ -200,6 +200,14 @@
             "command": "bash ~/.claude/hooks/naked-instruction.sh stop"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/unverified-pending.sh"
+          }
+        ]
       }
     ],
     "PreToolUse": [
