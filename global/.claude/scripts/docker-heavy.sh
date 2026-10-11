@@ -18,7 +18,10 @@
 # - Runs at low CPU priority (nice 10) under a hard timeout (default 30 min).
 # - Stops its container however it ends. A container outlives its docker client: on 2026-10-11 an
 #   outer `timeout` killed this script mid-run, its container ran on, and the slot's holder file
-#   was gone while it did. `docker run` gets a --name (unless it has one) and is killed on exit.
+#   was gone while it did. `docker run` gets a label of its own (docker-heavy=<this run>), and on
+#   exit whatever carries that label is killed. A label, not a name: nothing is parsed out of the
+#   command (a `--name` after the image belongs to the container's own program), and no other
+#   container can match it.
 set -euo pipefail
 MEM=12g CPUS=8 TIMEOUT=1800
 while [ $# -gt 0 ]; do
@@ -38,17 +41,10 @@ if ! timeout 10 docker version --format '{{.Server.Version}}' >/dev/null 2>&1; t
 fi
 
 cmd=("$@")
-name=""
+tag=""
 if [ "${cmd[1]:-}" = run ]; then
-  for ((i = 2; i < ${#cmd[@]}; i++)); do
-    case "${cmd[i]}" in
-      --name) name="${cmd[i+1]:-}" ;;
-      --name=*) name="${cmd[i]#--name=}" ;;
-    esac
-  done
-  named=()
-  [ -n "$name" ] || { name="heavy-$$-$(date +%s)"; named=(--name "$name"); }
-  cmd=(docker run "${named[@]}" --memory "$MEM" --memory-swap "$MEM" --cpus "$CPUS" --cpu-shares 256 "${cmd[@]:2}")
+  tag="$$-$(date +%s%N)"
+  cmd=(docker run --label "docker-heavy=$tag" --memory "$MEM" --memory-swap "$MEM" --cpus "$CPUS" --cpu-shares 256 "${cmd[@]:2}")
 fi
 
 LOCK="$HOME/.cache/docker-heavy.lock"
@@ -60,7 +56,13 @@ if ! flock -n 9; then
 fi
 printf '%s pid %s in %s: %s\n' "$(date '+%F %H:%M')" "$$" "$PWD" "${*:0:6}" > "$LOCK.holder"
 cleanup() {
-  if [ -n "$name" ]; then timeout 20 docker kill "$name" >/dev/null 2>&1 || true; fi
+  if [ -n "$tag" ]; then
+    ids=$(timeout 10 docker ps -q --filter "label=docker-heavy=$tag" 2>/dev/null || true)
+    if [ -n "$ids" ]; then
+      # shellcheck disable=SC2086  # one id a word
+      timeout 20 docker kill $ids >/dev/null 2>&1 || true
+    fi
+  fi
   rm -f "$LOCK.holder"
 }
 trap cleanup EXIT
