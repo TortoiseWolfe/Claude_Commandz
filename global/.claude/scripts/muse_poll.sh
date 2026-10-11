@@ -21,8 +21,11 @@
 #        and Jev passes two narrow checks at 0.90+, else queued (Jonathan, 2026-10-10: "run it through JEV if iffy");
 #      - replies to Hatch with a [CC>MUSE] draft;
 #      - labels the note and records its ID;
+#      - before queuing it looks for an answer already on record (the tower's latest notes, and the hub
+#        roadmap through muse_poll_roadmap.sh); a question only the second tower can check is forwarded to it;
 #      - anything that needs real work or Jonathan's approval goes to
-#        ~/.claude/state/muse-inbox.md, plus a desktop ping. The ~/repos session surfaces
+#        ~/.claude/state/muse-inbox.md. Only a decision or approval from Jonathan also gets a desktop ping
+#        ("Needs your OK"); work a Claude session can do waits silently. The ~/repos session surfaces
 #        that file (hooks/muse-drafts.sh).
 #
 # It cannot send mail, push, deploy, delete, or change settings: the allow and deny lists below
@@ -77,7 +80,7 @@ ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
-Bash($S/muse_poll_record.sh:*),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Write(/$JEV_REQ),Edit(/$JEV_REQ)"
+Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Write(/$JEV_REQ),Edit(/$JEV_REQ)"
 timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
