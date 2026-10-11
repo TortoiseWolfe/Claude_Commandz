@@ -244,6 +244,17 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/precompact-keep.sh",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
@@ -269,7 +280,7 @@
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
-  "autoCompactWindow": 200000,
+  "autoCompactWindow": 400000,
   "modelSettings": {
     "claude-opus-5": {
       "effortLevel": "xhigh"
