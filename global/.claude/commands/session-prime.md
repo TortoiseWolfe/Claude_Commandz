@@ -148,6 +148,13 @@ The issue already exists. You're doing two things: (1) rewriting the body to ref
    - **Backlog** → add anything new captured this session. Remove anything that got built or de-scoped.
    - **What's the "next session should"** sentence at the bottom of the roadmap section → rewrite to reflect the new top priority.
 
+   **Workspace hub on NX-01 only: it is the director of directors.** The hub did lane work in its own context on 2026-10-11 (production logs, client drafts) instead of dispatching it. Two rules, so the roadmap keeps the hub in its lane:
+   - **The prime-prompt block carries this paragraph**, word for word. Add it if missing, never paraphrase it:
+
+     > This terminal (~/repos on NX-01) is the director of directors. It answers Hatch and the tower, keeps this roadmap and the board, takes Jonathan's decisions, and dispatches. It does no lane work: anything that reads a repo's code, production, logs or a client thread, or writes a draft, goes to a lane, a tmux window in that repo's folder started with ~/.claude/scripts/lane.sh <name> <dir> <model> <prompt-file>, with a self-contained hand-off prompt and a report file. Pick each lane's model by the work (feedback_model_tiers). Read only lane reports. Send searches to subagents. Past about 60% context, hand off what's open and end.
+
+   - **"Next 3 sessions" items are written as lanes**: folder, model, and the hand-off's first action. Never as work for the hub itself. Lane prompts and reports live in `~/.claude/state/lanes/<date>-<name>/`.
+
 3.5. **Refresh the stamp** on the trailing `roadmap-stamp` line — replace the existing one, never append a second. Same values as 3a:
 
    ```bash
