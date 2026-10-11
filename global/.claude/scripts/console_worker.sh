@@ -13,7 +13,8 @@
 # The key is ~/.config/anthropic/worker-key (mode 600): a key Jonathan created in one
 # capped Console workspace. Never the personal org key. It goes into the environment of
 # this one process only, never onto a command line where ps could show it.
-# claude.ai connectors (Gmail, Calendar) may not load under API-key auth.
+# claude.ai connectors (Gmail, Calendar) may not load under API-key auth, so email lanes
+# stay on the subscription. lane.sh --console starts a hub lane through --inner.
 set -euo pipefail
 KEY="$HOME/.config/anthropic/worker-key"
 
