@@ -16,6 +16,9 @@
 #   --cpu-shares, so interactive work in other sessions keeps priority. For `docker compose run`,
 #   limits must live in the compose file (mem_limit / cpus); the lock and timeout still apply.
 # - Runs at low CPU priority (nice 10) under a hard timeout (default 30 min).
+# - Stops its container however it ends. A container outlives its docker client: on 2026-10-11 an
+#   outer `timeout` killed this script mid-run, its container ran on, and the slot's holder file
+#   was gone while it did. `docker run` gets a --name (unless it has one) and is killed on exit.
 set -euo pipefail
 MEM=12g CPUS=8 TIMEOUT=1800
 while [ $# -gt 0 ]; do
@@ -35,8 +38,17 @@ if ! timeout 10 docker version --format '{{.Server.Version}}' >/dev/null 2>&1; t
 fi
 
 cmd=("$@")
+name=""
 if [ "${cmd[1]:-}" = run ]; then
-  cmd=(docker run --memory "$MEM" --memory-swap "$MEM" --cpus "$CPUS" --cpu-shares 256 "${cmd[@]:2}")
+  for ((i = 2; i < ${#cmd[@]}; i++)); do
+    case "${cmd[i]}" in
+      --name) name="${cmd[i+1]:-}" ;;
+      --name=*) name="${cmd[i]#--name=}" ;;
+    esac
+  done
+  named=()
+  [ -n "$name" ] || { name="heavy-$$-$(date +%s)"; named=(--name "$name"); }
+  cmd=(docker run "${named[@]}" --memory "$MEM" --memory-swap "$MEM" --cpus "$CPUS" --cpu-shares 256 "${cmd[@]:2}")
 fi
 
 LOCK="$HOME/.cache/docker-heavy.lock"
@@ -47,5 +59,16 @@ if ! flock -n 9; then
   flock -w 3600 9 || { echo "docker-heavy.sh: gave up after an hour waiting for the slot" >&2; exit 75; }
 fi
 printf '%s pid %s in %s: %s\n' "$(date '+%F %H:%M')" "$$" "$PWD" "${*:0:6}" > "$LOCK.holder"
-trap 'rm -f "$LOCK.holder"' EXIT
-nice -n 10 timeout --kill-after=30 "$TIMEOUT" "${cmd[@]}"
+cleanup() {
+  if [ -n "$name" ]; then timeout 20 docker kill "$name" >/dev/null 2>&1 || true; fi
+  rm -f "$LOCK.holder"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# in the background and waited on, so a signal to this script runs cleanup at once (bash holds a
+# trap until a foreground child ends); stdin passed on explicitly (a background job gets /dev/null)
+exec 3<&0
+nice -n 10 timeout --kill-after=30 "$TIMEOUT" "${cmd[@]}" <&3 &
+wait $!
