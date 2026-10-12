@@ -13,6 +13,10 @@
 # looked for Hatch's notes only when an interactive session started or the user typed, so
 # questions sat for hours and Jonathan ended up relaying between the two agents (2026-10-03).
 #
+#   0. Client mail (2026-10-12): muse_poll_client_check.sh lists new messages from the senders in the
+#      private hub/client-senders.tsv (metadata only; IDs in client-mail-seen.txt are dropped), and a Sonnet
+#      pass queues one "Client mail:" or "Client alert:" line per client in muse-inbox.md through
+#      muse_poll_record.sh (which never queues an ID twice). /prep then starts an absorb lane for each.
 #   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note, or a [NCC-74656>NX-01] note from
 #      Claude Code on the second tower (2026-10-10), that nobody has handled?
 #   2. Only if so, a Sonnet pass HANDLES it per the agent-notes skill:
@@ -73,6 +77,16 @@ check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model ha
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
+
+# Client mail: its own check and queue step, so it runs whether or not a Hatch note is waiting.
+cnew=$("$S/muse_poll_client_check.sh" 2>>"$LOG")
+echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
+if [[ -n "$cnew" ]]; then
+  CALLOW="Read,Bash($S/muse_poll_record.sh:*)"
+  timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.client-handle.prompt")"$'\n\n'"$cnew" --model sonnet --max-turns 12 \
+    --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
+  echo "$(ts) client handler finished (exit $?)" >>"$LOG"
+fi
 [[ "$check" == NEW* ]] || exit 0
 touch "$ACTIVE"                                # a Hatch note arrived: the exchange is live
 
