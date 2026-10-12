@@ -8,13 +8,16 @@
 # Only mail a client actually sent counts: the check prints each message's labels, and anything labelled
 # DRAFT or SENT (our own drafts and replies, which ride along inside a matched thread) is dropped, as is any
 # line with no labels field (fail closed).
+# A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
+# handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Names live only in the TSV and Gmail; this script and its prompt
-# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN (point at copies),
+# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
 S=$HOME/.claude/scripts
 TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
 SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
+INBOX=${MUSE_CLIENT_INBOX:-$HOME/.claude/state/muse-inbox.md}
 LOG=$HOME/.claude/state/muse-poll.log
 CLAUDE=$HOME/.local/bin/claude
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}
@@ -44,5 +47,7 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{8,20} \|' | while IFS= read -r lin
   [[ "$from" == *no-reply@* || "$from" == *noreply@* ]] && continue
   ok=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
-  grep -qxF "$id" "$SEEN" || printf 'NEW %s\n' "$(printf '%s' "${line#MSG }" | cut -d'|' -f1-4)"
+  grep -qxF "$id" "$SEEN" && continue
+  grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
+  printf 'NEW %s\n' "$(printf '%s' "${line#MSG }" | cut -d'|' -f1-4)"
 done
