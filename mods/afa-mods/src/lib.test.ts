@@ -65,6 +65,9 @@ describe('blast radius classifier', () => {
     expect(kinds('git push -f')).toEqual(['git push --force'])
     expect(kinds('vercel deploy --prod')).toEqual(['production deploy'])
     expect(kinds('app redeploy production')).toEqual(['production deploy'])
+    expect(kinds('echo hi & git push origin +main')).toEqual(['git push --force'])
+    expect(kinds('bash -c "cd x && rm -rf y"')).toEqual(['rm -rf'])
+    expect(kinds('\\rm -rf y')).toEqual(['rm -rf'])
   })
   test('lets ordinary commands through', async () => {
     expect(kinds('rm -r build')).toEqual([])

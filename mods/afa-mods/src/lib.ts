@@ -68,13 +68,16 @@ const strip = (s: string) =>
     .replace(/^(?:\w+=\S*\s+)+/, '')
     .replace(/^(?:sudo|command|time)\s+/, '')
 
-// Which dangerous patterns a Bash command holds. `hard` ones (force push,
+// Which dangerous patterns a Bash command holds. Best effort, a net and not a
+// parser: it splits on shell separators and looks inside sh -c. `hard` ones (force push,
 // production deploy) are refused outright where nobody can be asked.
-export function classify(command: string): Hold[] {
+export function classify(command: string, depth = 0): Hold[] {
   const holds: Hold[] = []
-  for (const raw of command.split(/&&|\|\||;|\||\n/)) {
-    const seg = strip(raw)
+  for (const raw of command.split(/&|\||;|\n|\$\(|`|\(|\)/)) {
+    const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
+    const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
+    if (wrapped && depth < 3) holds.push(...classify(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1))
     const t = seg.split(/\s+/)
     const flags = t.filter(x => x.startsWith('-'))
     const add = (kind: string, hard: boolean) => holds.push({ kind, hard, segment: seg })
@@ -92,7 +95,7 @@ export function classify(command: string): Hold[] {
     }
     if (/^git\b/.test(seg) && t.includes('push')) {
       const after = t.slice(t.indexOf('push'))
-      if (after.some(x => x === '-f' || x.startsWith('--force'))) add('git push --force', true)
+      if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
     if (/--prod(uction)?\b/.test(seg) || (/redeploy/i.test(seg) && /\bprod/i.test(seg))) {
       add('production deploy', true)
