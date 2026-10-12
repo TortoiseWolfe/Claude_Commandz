@@ -1,3 +1,7 @@
 # Python bytecode, written whenever the scripts or their tests run from this checkout
 __pycache__/
 *.pyc
+
+# graphify: local and regenerable. Rebuild with /graphify-init, or run `graphify update .` (AST-only, free).
+# NOT committed: graph.json, the cache and the wiki run to megabytes and delta-compress poorly.
+graphify-out/
