@@ -148,12 +148,13 @@ The issue already exists. You're doing two things: (1) rewriting the body to ref
    - **Backlog** → add anything new captured this session. Remove anything that got built or de-scoped.
    - **What's the "next session should"** sentence at the bottom of the roadmap section → rewrite to reflect the new top priority.
 
-   **Workspace hub on NX-01 only: it is the director of directors.** The hub did lane work in its own context on 2026-10-11 (production logs, client drafts) instead of dispatching it. Two rules, so the roadmap keeps the hub in its lane:
+   **Workspace hub on NX-01 only: it is the director of directors.** The hub did lane work in its own context on 2026-10-11 (production logs, client drafts) instead of dispatching it. Three rules, so the roadmap keeps the hub in its lane:
    - **The prime-prompt block carries this paragraph**, word for word. Add it if missing, never paraphrase it:
 
      > This terminal (~/repos on NX-01) is the director of directors. It answers Hatch and the tower, keeps this roadmap and the board, takes Jonathan's decisions, and dispatches. It does no lane work: anything that reads a repo's code, production, logs or a client thread, or writes a draft, goes to a lane, a tmux window in that repo's folder started with ~/.claude/scripts/lane.sh <name> <dir> <model> <prompt-file>, with a self-contained hand-off prompt and a report file. Pick each lane's model by the work (feedback_model_tiers). Read only lane reports. Send searches to subagents. Past about 60% context, hand off what's open and end.
 
-   - **"Next 3 sessions" items are written as lanes**: folder, model, and the hand-off's first action. Never as work for the hub itself. Lane prompts and reports live in `~/.claude/state/lanes/<date>-<name>/`.
+   - **"Next 3 sessions" items are written as lanes**: tmux window name, folder, model, the hand-off's first action, and the report path. Never as work for the hub itself. Lane prompts and reports live in `~/.claude/state/lanes/<date>-<name>/`.
+   - **The hub's first action in a new session is the lane check.** Closing the hub terminal does not stop the lanes (they are windows in the detached tmux session `lanes`); only WSL shutting down does. So the prime-prompt block says, before anything else: *run `~/.claude/scripts/lane.sh --status`, read every report.md it lists, and resume or close lanes before anything else.* `--status` prints each window's name, whether its report is written, working / idle / error (a "Credit balance too low" or "API Error" in the pane is error), its last pane line, and its folder, model and Claude session id from `~/.claude/state/lanes/index.tsv`; lanes from the last 3 days with no window and no report show as dead. A dead or crashed lane is restarted with `lane.sh --resume <name>` (`claude --resume <session-id> --model <m>` in a fresh window), and a message goes in with `lane.sh --send <name> <text>`, which retries Enter once and says whether it took.
 
 3.5. **Refresh the stamp** on the trailing `roadmap-stamp` line — replace the existing one, never append a second. Same values as 3a:
 
