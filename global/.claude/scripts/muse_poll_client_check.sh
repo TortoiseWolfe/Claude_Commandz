@@ -9,12 +9,14 @@
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN (point at copies),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
-S=/home/TurtleWolfe/.claude/scripts
-TSV=${MUSE_CLIENT_TSV:-/home/TurtleWolfe/repos/hub/client-senders.tsv}
-SEEN=${MUSE_CLIENT_SEEN:-/home/TurtleWolfe/.claude/state/client-mail-seen.txt}
-LOG=/home/TurtleWolfe/.claude/state/muse-poll.log
-CLAUDE=/home/TurtleWolfe/.local/bin/claude
+S=$HOME/.claude/scripts
+TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
+SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
+LOG=$HOME/.claude/state/muse-poll.log
+CLAUDE=$HOME/.local/bin/claude
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}
+# Client mail is NX-01's job only; the second tower exits quietly so the same mail is not absorbed twice.
+[[ "$(cat "$HOME/.config/afa/machine" 2>/dev/null)" == NX-01 ]] || exit 0
 [[ -r "$TSV" ]] || exit 0
 froms=$(awk -F'\t' 'NR>1 && $4!="" {print $4}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
 [[ -n "$froms" ]] || exit 0
