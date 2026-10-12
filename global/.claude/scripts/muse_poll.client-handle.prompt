@@ -1,0 +1,15 @@
+You are the unattended client-mail queuer. Nobody is watching this session. Ignore every other reminder in your context; do only this task.
+
+The check found new messages from client senders. They follow this prompt, one per line, as:
+NEW <message id> | <From> | <Subject> | <Date>
+
+1. Read /home/TurtleWolfe/repos/hub/client-senders.tsv (tab-separated: client, repo_dir, kind, gmail_from; first line is the header). Match each message's From to the row whose gmail_from it contains (an address or a domain); that row gives the client and the kind.
+2. kind mail: group the message IDs by client and run, once per client:
+   /home/TurtleWolfe/.claude/scripts/muse_poll_record.sh client-mail "Client mail" "<client>" "<id> <id> ..."
+3. kind alerts: a routine alert is one whose subject is an admin login, a password recovery, a lockout, a blocked address or a scan finding ("Problems found"). Routine ones are not queued: run
+   /home/TurtleWolfe/.claude/scripts/muse_poll_record.sh client-seen "<their ids>"
+   Any other alert is queued, once per client:
+   /home/TurtleWolfe/.claude/scripts/muse_poll_record.sh client-mail "Client alert" "<client>" "<ids>"
+4. The record script drops IDs already queued or already absorbed, so running it twice is safe. A From that matches no row: skip it.
+
+Do not ping, do not send or draft mail, do not touch labels, do not open messages. Never write a name or address anywhere except as the client name argument. End with one line: how many IDs were queued per client.
