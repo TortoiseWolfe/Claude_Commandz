@@ -232,6 +232,13 @@ else
   [ "$prompt" = "$hprompt" ] || cp "$prompt" "$hprompt"
 fi
 
+# A repo gets its graphify graph when sustained work starts there; code-only extraction is free.
+# Repos skipped on purpose are listed, one top-level path per line, in ~/.config/afa/graphify-skip.
+if top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [ ! -d "$top/graphify-out" ] \
+   && ! grep -qxF -- "$top" "$HOME/.config/afa/graphify-skip" 2>/dev/null; then
+  echo "note: no graphify graph in this repo; for sprint work run /graphify-init (code-only, free) first" >&2
+fi
+
 if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
   tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
 elif [ "$dry" = 1 ]; then
