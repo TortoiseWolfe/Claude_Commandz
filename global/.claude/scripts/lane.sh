@@ -2,7 +2,7 @@
 # Start a lane: a Claude Code session in its own tmux window, billed to the subscription
 # (or, with --console, to Console credits).
 #
-#   lane.sh [--dry-run] [--console] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--console [--headless]] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -16,6 +16,14 @@
 # environment (CONSOLE_WORKER=1 is set there too). Without --console nothing changes.
 # claude.ai connectors (Gmail, Calendar) may not load under API-key auth, so email lanes
 # stay on the subscription.
+#
+# --headless (only with --console): no interactive session; interactive Claude Code on Console
+# credits gets a 400, but claude -p works. The window runs
+#   console_worker.sh --inner <dir> -p --model <model> "<prompt>"
+# with stdout and stderr going to out.log in the hand-off folder (beside report.md), and
+# "exit <code>" appended there when the process ends. The index row says billing "console".
+# --status shows such a lane as working while out.log has no exit line, then done / exit <code>.
+# --resume refuses headless lanes (there is no interactive session to resume).
 #
 # Hand-off across hub sessions (lanes outlive the hub terminal; only WSL shutting down stops them):
 #   lane.sh --status                    one line per window in "lanes" (report yes/no, working/idle/error,
@@ -41,17 +49,21 @@ INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
 TAB=$'\t'
 
-dry=0; console=0; mode=start
+dry=0; console=0; headless=0; mode=start
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
     --console) console=1; shift ;;
+    --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
     --send) mode=send; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
   esac
 done
+
+[ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
+[ "$headless" = 0 ] || [ "$mode" = start ] || { echo "--headless only applies when starting a lane" >&2; exit 1; }
 
 # Run a tmux command, or just print it under --dry-run.
 t() { if [ "$dry" = 1 ]; then printf 'tmux'; printf ' %q' "$@"; echo; else tmux "$@"; fi; }
@@ -114,7 +126,16 @@ if [ "$mode" = status ]; then
         extra="(not in index)"
       else extra=""; fi
       if [ -n "${rep:-}" ] && [ -s "$rep" ]; then wrote=yes; else wrote=no; fi
-      if command grep -aqE 'Credit balance too low|API Error' <<<"$pane"; then state=error
+      outlog=""
+      [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ] && outlog="$(dirname "$rep")/out.log"
+      if [ -n "$outlog" ]; then
+        # Headless lane: the process writes "exit <code>" to out.log when it ends.
+        code="$(tail -n 1 "$outlog" | sed -n 's/^exit \([0-9][0-9]*\)$/\1/p')"
+        if [ -z "$code" ]; then state=working
+        elif [ "$code" = 0 ]; then state=done
+        else state="exit$code"; fi
+        pane="$(tail -n 5 "$outlog")"
+      elif command grep -aqE 'Credit balance too low|API Error' <<<"$pane"; then state=error
       elif pane_spinner "$pane"; then state=working
       else state=idle; fi
       last="$(command grep -av '^[[:space:]]*$' <<<"$pane" | command grep -avE '^[[:space:]]*[─━═]+[[:space:]]*$|⏵|🐢|^[[:space:]]*❯|esc to|Enter to confirm|Not now|Don.t show again|Teach auto mode|Auto mode works' | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-80)"
@@ -175,6 +196,9 @@ if [ "$mode" = resume ]; then
   IFS="$TAB" read -r d n dir m b p rep id st <<<"$row"
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "no session id recorded for $name; find it under $PROJ and add it to $INDEX" >&2; exit 1; }
   [ -d "$dir" ] || { echo "no such folder: $dir" >&2; exit 1; }
+  if [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
+    echo "$name is a headless lane (out.log beside its report); there is no interactive session to resume. Read $(dirname "$rep")/out.log" >&2; exit 1
+  fi
   [ "$b" = console ] && console=1
   if [ "$dry" = 0 ]; then
     command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
@@ -198,7 +222,7 @@ if [ "$mode" = resume ]; then
   exit 0
 fi
 
-[ $# -eq 4 ] || { echo "usage: lane.sh [--dry-run] [--console] <name> <dir> <model> <prompt-file>
+[ $# -eq 4 ] || { echo "usage: lane.sh [--dry-run] [--console [--headless]] <name> <dir> <model> <prompt-file>
        lane.sh --status | --send <name> <text> | [--dry-run] [--console] --resume <name>" >&2; exit 1; }
 name="$1"; dir="$2"; model="$3"; prompt="$4"
 
@@ -252,14 +276,20 @@ fi
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
-if [ "$console" = 1 ]; then
+if [ "$headless" = 1 ]; then
+  out="$hand/out.log"
+  [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
+  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+elif [ "$console" = 1 ]; then
   cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\""
 else
   cmd="claude --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\""
 fi
 t send-keys -t "$target" "$cmd" Enter
 
-if [ "$dry" = 1 ]; then
+if [ "$headless" = 1 ]; then
+  echo "# headless: no dialogs to answer; progress in $hand/out.log"
+elif [ "$dry" = 1 ]; then
   if [ "$under_repos" = 1 ]; then
     echo "# then poll capture-pane up to ~10 s; on \"Yes, I trust this folder\":"
     t send-keys -t "$target" Down Enter
@@ -328,4 +358,5 @@ fi
 echo "lane:   $name  ($model, $dir)"
 echo "prompt: $hprompt"
 echo "report: $report"
+[ "$headless" = 1 ] && echo "log:    $hand/out.log"
 echo "watch:  tmux attach -t $SESSION   (Ctrl-b n / p to switch windows, Ctrl-b d to detach)"
