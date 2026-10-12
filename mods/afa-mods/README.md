@@ -22,7 +22,7 @@ Shown on the same line above the prompt.
 touch and asks `1 - Run it` / `2 - Refuse`. In a non-interactive session (`claude -p`, the Console
 lanes) it never waits: force pushes and production deploys are denied with a reason, the rest are
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.
-If the guard itself throws, the command is denied. Existing hooks and permission rules still apply.
+If the guard itself throws, the command is denied. The match is best effort (a net, not a shell parser). Existing hooks and permission rules still apply.
 
 ## Install
 

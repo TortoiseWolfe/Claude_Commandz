@@ -59,10 +59,12 @@ const run = async ($: Engine, argv: string[]) => {
 // What one hold would touch, in a few lines. Read-only probes only; a remote
 // URL is never printed (it can carry a token).
 async function touches($: Engine, home: string, hold: Hold): Promise<string> {
-  const head = `${hold.kind}: ${hold.segment.slice(0, 160)}`
+  const head = `${hold.kind}: ${hold.segment.slice(0, 300)}${hold.segment.length > 300 ? ' ... (cut, full command is longer)' : ''}`
   if (hold.kind === 'rm -rf') {
     const out: string[] = []
-    for (const raw of targetsOf(hold.segment).slice(0, 5)) {
+    const all = targetsOf(hold.segment)
+    if (all.length > 8) out.push(`  ... ${all.length - 8} more targets not listed`)
+    for (const raw of all.slice(0, 8)) {
       const path = raw.replace(/^~(?=\/|$)/, home).replace(/^["']|["']$/g, '')
       if (/[*?[]/.test(path)) {
         out.push(`  ${path} (pattern, expands when it runs)`)
@@ -84,7 +86,7 @@ async function touches($: Engine, home: string, hold: Hold): Promise<string> {
     return `${head}\n${firstLines(await run($, ['docker', 'system', 'df']), 6)}`
   }
   if (hold.kind.startsWith('docker volume') || hold.kind === 'docker compose down -v') {
-    const named = hold.kind === 'docker volume rm' ? targetsOf(hold.segment).slice(3) : []
+    const named = hold.kind === 'docker volume rm' ? targetsOf(hold.segment).slice(2) : []
     const vols =
       named.length > 0
         ? named.join('\n')
