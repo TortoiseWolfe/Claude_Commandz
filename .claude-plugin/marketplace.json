@@ -1,0 +1,5 @@
+{
+  "name": "afa-mods",
+  "owner": { "name": "TortoiseWolfe" },
+  "plugins": [{ "name": "afa-mods", "source": "./mods/afa-mods" }]
+}
