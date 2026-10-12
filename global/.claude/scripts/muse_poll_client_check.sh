@@ -5,6 +5,9 @@
 # gmail_from), has a metadata-only Haiku pass list every message from those senders in the last two days
 # (search_threads, never a body), then drops the IDs already absorbed. Prints one line per new message:
 #   NEW <message id> | <From> | <Subject> | <Date>
+# Only mail a client actually sent counts: the check prints each message's labels, and anything labelled
+# DRAFT or SENT (our own drafts and replies, which ride along inside a matched thread) is dropped, as is any
+# line with no labels field (fail closed).
 # and nothing when there is nothing new. Names live only in the TSV and Gmail; this script and its prompt
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN (point at copies),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
@@ -33,9 +36,13 @@ touch "$SEEN"
 pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
 printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{8,20} \|' | while IFS= read -r line; do
   id=${line#MSG }; id=${id%% *}
+  IFS='|' read -r _ _ _ _ labels _ <<<"${line#MSG }"
+  labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z')
+  [[ -n "${labels//[[:space:]]/}" ]] || continue
+  [[ "$labels" == *DRAFT* || "$labels" == *SENT* ]] && continue
   from=$(printf '%s' "${line#MSG * | }" | cut -d'|' -f1 | tr 'A-Z' 'a-z')
   [[ "$from" == *no-reply@* || "$from" == *noreply@* ]] && continue
   ok=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
-  grep -qxF "$id" "$SEEN" || printf 'NEW %s\n' "${line#MSG }"
+  grep -qxF "$id" "$SEEN" || printf 'NEW %s\n' "$(printf '%s' "${line#MSG }" | cut -d'|' -f1-4)"
 done

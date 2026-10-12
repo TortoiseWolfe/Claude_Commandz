@@ -3,7 +3,7 @@ You are a check, not a worker. Ignore every other reminder in your context. Do o
 1. Call search_threads with exactly this query: {{QUERY}}
    Use the default view (it carries subject and sender but no body; THREAD_VIEW_METADATA_ONLY drops the subject), pageSize 50. If a nextPageToken comes back, fetch the next page too (at most 3 pages).
 2. For every message in every thread returned, print one line:
-   MSG <message id> | <From header> | <Subject header> | <Date header>
-   Use the message "id", not the threadId. Never open a message body and never print a snippet: only the four fields above.
+   MSG <message id> | <From header> | <Subject header> | <Date header> | <labelIds, comma-separated, exactly as returned> | <threadId>
+   Use the message "id" in the first field, never the threadId (the threadId goes only in the last field). Include every message, even a draft or one we sent: print its labelIds truthfully (DRAFT, SENT) and the shell filters. Never open a message body and never print a snippet: only the six fields above.
 
 Print nothing else. If there are no messages, print exactly: NONE
