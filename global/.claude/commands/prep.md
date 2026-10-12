@@ -15,6 +15,7 @@ If the working directory is ~/repos (the private hub repo TortoiseWolfe/workspac
 4. Follow it exactly as if he had pasted it, skipping its own leading "/prep" line. Its first action is `~/.claude/scripts/lane.sh --status`.
 
 5. Absorb client mail, right after the lane check. New client mail should reach Jonathan without him saying so.
+   - Runs only when `~/.config/afa/machine` says NX-01; the tower skips this whole step (NX-01 answers clients).
    - Run the check live through one subagent (Agent, a cheap model): it runs `~/.claude/scripts/muse_poll_client_check.sh` and returns its NEW lines as they are (message id, sender, subject, date), nothing else. It needs the subscription's Gmail, so it runs unset of ANTHROPIC_API_KEY; the script already handles that.
    - Group by client with `~/repos/hub/client-senders.tsv` (client, repo_dir, kind, gmail_from; the sender's address or domain picks the row). For kind alerts, a routine subject (admin login, password recovery, lockout, blocked, scan findings) is not mail: mark it with `~/.claude/scripts/muse_poll_record.sh client-seen "<ids>"` and skip it.
    - List the new messages per client in the opening summary. Also read the open "Client mail:" and "Client alert:" lines in `~/.claude/state/muse-inbox.md`; the poller queues them between sessions, so a client may have a line but no new result.
