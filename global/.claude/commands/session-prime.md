@@ -209,7 +209,7 @@ Substitute as noted. Inner backticks are literal — they form fenced code block
 
 ---
 
-## Prime prompt (copy from here into a fresh Claude session)
+## Prime prompt (copy from here into a fresh Claude session) In the hub (~/repos), typing /prep loads this block, so nothing needs pasting.
 
 \`\`\`
 /prep
