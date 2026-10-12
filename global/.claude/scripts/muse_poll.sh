@@ -39,7 +39,7 @@ H=$(date +%-H)
 exec 9>/tmp/muse-poll.lock
 flock -n 9 || exit 0
 
-STATE=/home/TurtleWolfe/.claude/state
+STATE=$HOME/.claude/state
 ACTIVE=$STATE/muse-active.stamp
 LAST=$STATE/muse-poll-last-check.stamp
 now=$(date +%s)
@@ -56,19 +56,19 @@ mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
 export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
 
-CLAUDE=/home/TurtleWolfe/.local/bin/claude
-S=/home/TurtleWolfe/.claude/scripts
-LOG=/home/TurtleWolfe/.claude/state/muse-poll.log
+CLAUDE=$HOME/.local/bin/claude
+S=$HOME/.claude/scripts
+LOG=$HOME/.claude/state/muse-poll.log
 ts() { date '+%F %T'; }
-cd /home/TurtleWolfe/repos || exit 1
+cd $HOME/repos || exit 1
 
 # No Write or Edit in general: print mode denies any path not allowed below, and these keep the repos and this
 # config unwritable even if a global allow rule appears. The one writable file is muse_jev.py's request
 # (~/.local/state/muse-jev/request.json), because a bare `Write` deny would cover it too (tested 2026-10-10).
-JEV_REQ=/home/TurtleWolfe/.local/state/muse-jev/request.json
+JEV_REQ=$HOME/.local/state/muse-jev/request.json
 mkdir -p -m 700 "${JEV_REQ%/*}"
 DENY="Bash(git push:*),Bash(git commit:*),Bash(rm:*),Bash(docker:*),Bash(curl:*),Bash(gh:*),\
-Edit(//home/TurtleWolfe/repos/**),Edit(//home/TurtleWolfe/.claude/**),\
+Edit(/$HOME/repos/**),Edit(/$HOME/.claude/**),\
 mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__claude_ai_Gmail__trash_thread,\
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
@@ -83,7 +83,8 @@ cnew=$("$S/muse_poll_client_check.sh" 2>>"$LOG")
 echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
 if [[ -n "$cnew" ]]; then
   CALLOW="Read,Bash($S/muse_poll_record.sh:*)"
-  timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.client-handle.prompt")"$'\n\n'"$cnew" --model sonnet --max-turns 12 \
+  hprompt=$(cat "$S/muse_poll.client-handle.prompt"); hprompt=${hprompt//\{\{HOME\}\}/$HOME}
+  timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 \
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
 fi

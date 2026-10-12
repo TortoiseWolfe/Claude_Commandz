@@ -15,7 +15,7 @@
 #                                                ticks the open "Client mail:" / "Client alert:" lines whose
 #                                                IDs are now all absorbed. Also used for routine alerts.
 set -euo pipefail
-STATE=${MUSE_STATE:-/home/TurtleWolfe/.claude/state}
+STATE=${MUSE_STATE:-$HOME/.claude/state}
 case "${1:-}" in
   processed)
     id="${2:?note id}"
