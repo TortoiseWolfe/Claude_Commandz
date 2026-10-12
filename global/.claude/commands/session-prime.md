@@ -214,6 +214,8 @@ Substitute as noted. Inner backticks are literal — they form fenced code block
 \`\`\`
 /prep
 
+In the hub, /prep also absorbs client mail (step 5 of its hub section): it checks for new client messages and starts an absorb lane per client. Keep that step in the orientation.
+
 Then check this issue (<owner>/<repo>#NNN) — its BODY is the current roadmap. Read everything below the prime prompt: active arc, next 3 sessions queued, backlog. The most recent COMMENT on this issue is the audit trail of what changed since the previous session.
 
 Supplementary context (read if the body's roadmap references them or if the user's first message takes us off-roadmap):
