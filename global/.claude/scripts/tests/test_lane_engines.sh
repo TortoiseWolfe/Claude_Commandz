@@ -9,11 +9,28 @@ BIN="$TMP/bin"
 HOME_TEST="$TMP/home"
 REPO="$TMP/project repo"
 PROMPT="$TMP/prompt.md"
+PROTECTED_REPO="$HOME_TEST/repos/protected-worktree-repo"
+PROTECTED_WORKTREE="$TMP/worktrees/protected-topic"
+UNPROTECTED_REPO="$TMP/unprotected-worktree-repo"
+UNPROTECTED_WORKTREE="$TMP/worktrees/unprotected-topic"
 mkdir -p "$BIN" "$HOME_TEST/repos/hub" "$HOME_TEST/repos/sample-client-repo" \
   "$HOME_TEST/repos/listed-only-repo/nested" "$HOME_TEST/repos/commented-client-repo" \
-  "$HOME_TEST/repos/CD/nested" "$REPO" "$TMP/repo_dir"
+  "$HOME_TEST/repos/CD/nested" "$REPO" "$TMP/repo_dir" "$PROTECTED_REPO" \
+  "$UNPROTECTED_REPO" "$TMP/worktrees"
 printf 'id\trepo_dir\n# ignored\t~/repos/commented-client-repo\nblank\t\nexample\t~/repos/sample-client-repo\n' >"$HOME_TEST/repos/hub/client-senders.tsv"
 printf '# Client repositories\n~/repos/listed-only-repo\n\n# ~/repos/commented-client-repo\n' >"$HOME_TEST/repos/hub/client-repos.txt"
+
+init_test_repo() {
+  local repo="$1"
+  git -C "$repo" init -q
+  git -C "$repo" -c user.name=lane-test -c user.email=lane-test commit --allow-empty -qm initial
+}
+init_test_repo "$PROTECTED_REPO"
+git -C "$PROTECTED_REPO" worktree add -q -b protected-topic "$PROTECTED_WORKTREE"
+init_test_repo "$UNPROTECTED_REPO"
+git -C "$UNPROTECTED_REPO" worktree add -q -b unprotected-topic "$UNPROTECTED_WORKTREE"
+printf '%s\n' "$PROTECTED_REPO" >>"$HOME_TEST/repos/hub/client-repos.txt"
+
 printf '%s\n' 'Review this safely.' '$(touch injected); "quoted"; `backticks`' >"$PROMPT"
 
 cat >"$BIN/tmux" <<'STUB'
@@ -173,6 +190,18 @@ assert_exit 0 "$LAST_STATUS" 'client-senders.tsv header is not treated as a repo
 run_lane --engine copilot --allow-client allowed-client "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" '--allow-client bypasses the repository guard'
 assert_contains "$LAST_COMMAND" 'copilot -p ' '--allow-client starts the selected engine'
+
+# A protected main checkout also protects linked worktrees outside its path.
+run_lane --engine codex blocked-protected-worktree "$PROTECTED_WORKTREE" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'worktree of a protected repository is refused'
+assert_contains "$LAST_OUTPUT" 'protected client repository' 'worktree refusal explains the repository guard'
+mkdir "$PROTECTED_WORKTREE/nested"
+run_lane --engine codex blocked-protected-worktree-child "$PROTECTED_WORKTREE/nested" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'subfolder of a protected worktree is refused'
+run_lane --engine codex allowed-unprotected-worktree "$UNPROTECTED_WORKTREE" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'worktree of an unprotected repository is allowed'
+run_lane --engine codex --allow-client allowed-protected-worktree "$PROTECTED_WORKTREE" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" '--allow-client overrides the protected worktree check'
 
 run_lane --engine codex blocked-cd "$HOME_TEST/repos/CD/nested" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'the protected CD tree is refused'
