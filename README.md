@@ -110,6 +110,20 @@ cp -a repos/ScriptHammer/.claude/commands/. ~/repos/ScriptHammer/.claude/command
 
 - **`mercor-*` commands** in `good_prompt_bad_prompt` are intentionally dropped. They are ephemeral evaluation tooling tied to a specific contractor workflow and not worth preserving across machines.
 
+## Lane dispatcher
+
+`global/.claude/scripts/lane.sh` starts work in a named tmux window and keeps a hand-off folder under `~/.claude/state/lanes/` for the prompt, report, and logs.
+
+```bash
+lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <repo-dir> <model> <prompt-file>
+lane.sh --status | --send <name> <text> | [--dry-run] [--console] --resume <name>
+lane.sh --help
+```
+
+Claude is the default, so existing calls continue to use Claude Code. `--console` keeps Claude on Console credits, and `--headless` runs Claude without an interactive session. Codex and Copilot run headless and save their output in `out.log`; `--status` reports whether each log is still running or has an exit code. `--send` types a message into a live window, and `--resume` resumes a Claude session. Claude lanes keep the existing `console` or `subscription` value in the index. Codex and Copilot use that same index column for `codex` and `copilot`.
+
+For Codex and Copilot, the dispatcher checks repository roots in column 2 of `~/repos/hub/client-senders.tsv`, paths listed in `~/repos/hub/client-repos.txt`, and everything under `~/repos/CD/`. The text file has one path per line; blank lines and lines starting with `#` are ignored. Both list files must be readable or those engines are refused. `--allow-client` bypasses this check. The model argument is forwarded to Codex or Copilot only when it is not a Claude model name (`opus`, `sonnet`, `haiku`, or `fable`).
+
 ## Refresh (back up from live system)
 
 When global or project commands evolve, re-sync into this repo and commit:
