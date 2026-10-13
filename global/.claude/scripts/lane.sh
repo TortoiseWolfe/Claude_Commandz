@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Start a lane: a Claude Code session in its own tmux window, billed to the subscription
-# (or, with --console, to Console credits).
+# Start a lane in its own tmux window. Claude Code is the default engine; Codex and
+# GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--console [--headless]] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
 # their reports, it does not do lane work itself. Each lane is a window in the detached
-# tmux session "lanes", started in <dir>, running: claude --model <model> "<prompt>".
+# tmux session "lanes", started in <dir>. Claude runs interactively; Codex and Copilot
+# run headless and write output to out.log in the hand-off folder.
 # Hand-off folder: ~/.claude/state/lanes/<YYYY-MM-DD>-<name>/ holds prompt.md and report.md
 # (the lane writes report.md; the hub reads it).
 #
@@ -24,16 +25,22 @@
 # "exit <code>" appended there when the process ends. The index row says billing "console".
 # --status shows such a lane as working while out.log has no exit line, then done / exit <code>.
 # --resume refuses headless lanes (there is no interactive session to resume).
+# --engine codex runs codex exec with workspace-write access to <dir> and the lane folder.
+# --engine copilot runs copilot -p with all tools allowed. Both engines are client-guarded:
+# lane.sh checks repo roots in ~/repos/hub/client-senders.tsv and paths in
+# ~/repos/hub/client-repos.txt, as well as ~/repos/CD. If either list is missing,
+# unreadable, or not a regular file, either external engine is refused. --allow-client bypasses the guard.
+# The model argument is passed through to Codex/Copilot only when it is not a Claude model.
 #
 # Hand-off across hub sessions (lanes outlive the hub terminal; only WSL shutting down stops them):
 #   lane.sh --status                    one line per window in "lanes" (report yes/no, working/idle/error,
-#                                       last pane line, dir, model, session id) plus lanes with no window
+#                                       last pane line, dir, model, engine/billing, session id) plus lanes with no window
 #                                       and no report from the last 3 days
 #   lane.sh --send <name> <text>        type <text> into the window, Enter, confirm it was submitted
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription)  prompt  report  session-id  start-epoch
+#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
 #
@@ -49,10 +56,33 @@ INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
 TAB=$'\t'
 
-dry=0; console=0; headless=0; mode=start
+usage() {
+  cat <<'USAGE'
+Usage:
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+  lane.sh --status
+  lane.sh --send <name> <text>
+  lane.sh [--dry-run] [--console] --resume <name>
+
+Claude is the default engine. Codex and Copilot run headless and write to out.log.
+Their model flag is used only when <model> is not a Claude name.
+Codex and Copilot refuse repositories listed in client-senders.tsv or client-repos.txt,
+and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
+and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
+--headless is only for Claude with --console.
+USAGE
+}
+
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --engine)
+      [ $# -ge 2 ] || { echo "--engine requires claude, codex, or copilot" >&2; exit 1; }
+      engine="$2"; shift 2 ;;
+    --engine=*) engine="${1#*=}"; shift ;;
+    --allow-client) allow_client=1; shift ;;
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
@@ -61,6 +91,11 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+
+case "$engine" in
+  claude|codex|copilot) ;;
+  *) echo "unknown engine: $engine (choose claude, codex, or copilot)" >&2; exit 1 ;;
+esac
 
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$mode" = start ] || { echo "--headless only applies when starting a lane" >&2; exit 1; }
@@ -101,6 +136,95 @@ fill_ids() {
 # Latest index row for a lane name (tab-separated line), or nothing.
 index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)print r}' "$INDEX" || true; }
 
+# Expand only the current user's ~ forms; never eval data from the repository lists.
+# Match the literal ~/ prefix from list data.
+# shellcheck disable=SC2088
+expand_home_path() {
+  case "$1" in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s/%s\n' "$HOME" "${1#\~/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+canonical_dir() { [ -d "$1" ] && (cd -- "$1" && pwd -P); }
+
+# Match a path equal to, or nested under, a protected repository root.
+path_within() {
+  if [ "$2" = / ]; then
+    case "$1" in /*) return 0 ;; *) return 1 ;; esac
+  fi
+  case "$1" in "$2"|"$2/"*) return 0 ;; *) return 1 ;; esac
+}
+
+guard_external_engine() {
+  local client_file="$HOME/repos/hub/client-senders.tsv"
+  local repos_file="$HOME/repos/hub/client-repos.txt" protected root
+  local sender_rows sender_paths repo_paths
+  [ "$engine" = claude ] && return 0
+  [ "$allow_client" = 1 ] && return 0
+  if [ ! -f "$client_file" ] || [ ! -r "$client_file" ]; then
+    echo "refusing engine $engine: cannot check client repositories because client-senders.tsv is missing or unreadable, or is not a regular file; pass --allow-client to continue" >&2
+    return 1
+  fi
+  if [ ! -f "$repos_file" ] || [ ! -r "$repos_file" ]; then
+    echo "refusing engine $engine: cannot check client repositories because client-repos.txt is missing or unreadable, or is not a regular file; pass --allow-client to continue" >&2
+    return 1
+  fi
+
+  if ! sender_rows="$(cat -- "$client_file" 2>/dev/null)"; then
+    echo "refusing engine $engine: cannot read client-senders.tsv; pass --allow-client to continue" >&2
+    return 1
+  fi
+  if ! repo_paths="$(cat -- "$repos_file" 2>/dev/null)"; then
+    echo "refusing engine $engine: cannot read client-repos.txt; pass --allow-client to continue" >&2
+    return 1
+  fi
+  if ! sender_paths="$(awk -F '\t' '$1 !~ /^#/ && $2 != "" && !($1 == "id" && $2 == "repo_dir") {print $2}' <<<"$sender_rows")"; then
+    echo "refusing engine $engine: cannot read client-senders.tsv; pass --allow-client to continue" >&2
+    return 1
+  fi
+
+  root="$(canonical_dir "$HOME/repos/CD" 2>/dev/null || true)"
+  if [ -n "$root" ] && path_within "$dir" "$root"; then
+    echo "refusing engine $engine: target is under the protected ~/repos/CD tree; pass --allow-client to continue" >&2
+    return 1
+  fi
+
+  while IFS= read -r protected || [ -n "$protected" ]; do
+    [ -n "$protected" ] || continue
+    protected="$(expand_home_path "$protected")"
+    root="$(canonical_dir "$protected" 2>/dev/null || true)"
+    if [ -n "$root" ] && path_within "$dir" "$root"; then
+      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
+      return 1
+    fi
+  done <<<"$sender_paths"
+
+  while IFS= read -r protected || [ -n "$protected" ]; do
+    case "$protected" in
+      ''|'#'*) continue ;;
+    esac
+    protected="$(expand_home_path "$protected")"
+    root="$(canonical_dir "$protected" 2>/dev/null || true)"
+    if [ -n "$root" ] && path_within "$dir" "$root"; then
+      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
+      return 1
+    fi
+  done <<<"$repo_paths"
+}
+
+is_claude_model() {
+  case "$1" in
+    opus|sonnet|haiku|fable|claude-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_headless_billing() {
+  case "$1" in codex|copilot) return 0 ;; *) return 1 ;; esac
+}
+
 # True when the lane's input line (last line starting with the prompt arrow) holds no text.
 pane_input_empty() {
   local line
@@ -138,9 +262,9 @@ if [ "$mode" = status ]; then
       elif command grep -aqE 'Credit balance too low|API Error' <<<"$pane"; then state=error
       elif pane_spinner "$pane"; then state=working
       else state=idle; fi
-      last="$(command grep -av '^[[:space:]]*$' <<<"$pane" | command grep -avE '^[[:space:]]*[─━═]+[[:space:]]*$|⏵|🐢|^[[:space:]]*❯|esc to|Enter to confirm|Not now|Don.t show again|Teach auto mode|Auto mode works' | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-80)"
+      last="$(command grep -av '^[[:space:]]*$' <<<"$pane" | command grep -avE '^[[:space:]]*[─━═]+[[:space:]]*$|⏵|🐢|^[[:space:]]*❯|esc to|Enter to confirm|Not now|Don.t show again|Teach auto mode|Auto mode works' | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-80 || true)"
       printf '%-18s report:%-3s %-7s %s\n' "$w" "$wrote" "$state" "$last"
-      printf '    dir:%s model:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      printf '    dir:%s model:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
   else
     echo "(no tmux session \"$SESSION\")"
@@ -152,7 +276,7 @@ if [ "$mode" = status ]; then
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
-      printf '%-18s dead, resume with: lane.sh --resume %s   (%s, %s, session %s)\n' "$n" "$n" "$dir" "$m" "$([ "${id:--}" = - ] && echo unknown || echo "$id")"
+      printf '%-18s dead, resume with: lane.sh --resume %s   (%s, %s, engine/billing %s, session %s)\n' "$n" "$n" "$dir" "$m" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")"
     done < <(awk -F'\t' '{r[$2]=$0; if(!($2 in o)){o[$2]=++c; k[c]=$2}} END{for(i=1;i<=c;i++)print r[k[i]]}' "$INDEX")
   fi
   exit 0
@@ -161,6 +285,14 @@ fi
 if [ "$mode" = send ]; then
   [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; exit 1; }
   name="$1"; shift; text="$*"
+  row="$(index_row "$name")"
+  if [ -n "$row" ]; then
+    IFS="$TAB" read -r d n dir m b p rep id st <<<"$row"
+    if is_headless_billing "${b:-}"; then
+      echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
+      exit 1
+    fi
+  fi
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
     || { echo "no window named $name in $SESSION" >&2; exit 1; }
   target="$SESSION:$name"
@@ -194,6 +326,11 @@ if [ "$mode" = resume ]; then
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
   IFS="$TAB" read -r d n dir m b p rep id st <<<"$row"
+  if is_headless_billing "${b:-}"; then
+    echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
+    exit 1
+  fi
+  [ "$engine" = claude ] || { echo "--engine only applies when starting a lane; lane resume uses Claude Code" >&2; exit 1; }
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "no session id recorded for $name; find it under $PROJ and add it to $INDEX" >&2; exit 1; }
   [ -d "$dir" ] || { echo "no such folder: $dir" >&2; exit 1; }
   if [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
@@ -222,8 +359,7 @@ if [ "$mode" = resume ]; then
   exit 0
 fi
 
-[ $# -eq 4 ] || { echo "usage: lane.sh [--dry-run] [--console [--headless]] <name> <dir> <model> <prompt-file>
-       lane.sh --status | --send <name> <text> | [--dry-run] [--console] --resume <name>" >&2; exit 1; }
+[ $# -eq 4 ] || { usage >&2; exit 1; }
 name="$1"; dir="$2"; model="$3"; prompt="$4"
 
 [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "name must be letters, digits, . _ - only: $name" >&2; exit 1; }
@@ -231,6 +367,16 @@ name="$1"; dir="$2"; model="$3"; prompt="$4"
 [ -r "$prompt" ] || { echo "no such prompt file: $prompt" >&2; exit 1; }
 dir="$(cd "$dir" && pwd -P)"
 prompt="$(cd "$(dirname "$prompt")" && pwd -P)/$(basename "$prompt")"
+
+if [ "$engine" != claude ] && [ "$console" = 1 ]; then
+  echo "--console applies only to the Claude engine" >&2
+  exit 1
+fi
+if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
+  echo "--headless applies only to Claude with --console; Codex and Copilot are already headless" >&2
+  exit 1
+fi
+guard_external_engine || exit 1
 
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"
 hprompt="$hand/prompt.md"
@@ -276,7 +422,22 @@ fi
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
-if [ "$headless" = 1 ]; then
+if [ "$engine" != claude ]; then
+  out="$hand/out.log"
+  [ "$dry" = 1 ] || : >"$out"
+  prompt_cmd="\$(cat -- $(printf %q "$hprompt"))"
+  out_cmd="$(printf %q "$out")"
+  if [ "$engine" = codex ]; then
+    cmd="codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand")"
+    if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
+    cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
+  else
+    cmd="cd $(printf %q "$dir") && copilot -p \"$prompt_cmd\" --allow-all-tools --log-dir $(printf %q "$hand") --add-dir $(printf %q "$hand")"
+    if ! is_claude_model "$model"; then cmd+=" --model $(printf %q "$model")"; fi
+    cmd+=" >$out_cmd 2>&1"
+  fi
+  cmd+="; lane_rc=\$?; printf 'exit %s\\n' \"\$lane_rc\" >>$out_cmd; exit \"\$lane_rc\""
+elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
   cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
@@ -287,7 +448,7 @@ else
 fi
 t send-keys -t "$target" "$cmd" Enter
 
-if [ "$headless" = 1 ]; then
+if [ "$engine" != claude ] || [ "$headless" = 1 ]; then
   echo "# headless: no dialogs to answer; progress in $hand/out.log"
 elif [ "$dry" = 1 ]; then
   if [ "$under_repos" = 1 ]; then
@@ -349,8 +510,11 @@ if [ "$dry" = 0 ]; then
     sid="$(find_session "$dir" "$start_epoch" "$( [ -s "$INDEX" ] && cut -f8 "$INDEX" | tr '\n' ' ' || true)")"
     [ -n "$sid" ] && break; sleep 1
   done
+  if [ "$engine" != claude ]; then lane_billing="$engine"
+  elif [ "$console" = 1 ]; then lane_billing=console
+  else lane_billing=subscription; fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$([ "$console" = 1 ] && echo console || echo subscription)" "$hprompt" "$report" "${sid:--}" "$start_epoch" >>"$INDEX"
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
 fi
@@ -358,5 +522,5 @@ fi
 echo "lane:   $name  ($model, $dir)"
 echo "prompt: $hprompt"
 echo "report: $report"
-[ "$headless" = 1 ] && echo "log:    $hand/out.log"
+if [ "$headless" = 1 ] || [ "$engine" != claude ]; then echo "log:    $hand/out.log"; fi
 echo "watch:  tmux attach -t $SESSION   (Ctrl-b n / p to switch windows, Ctrl-b d to detach)"
