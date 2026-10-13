@@ -157,10 +157,42 @@ path_within() {
   case "$1" in "$2"|"$2/"*) return 0 ;; *) return 1 ;; esac
 }
 
+check_external_target_path() {
+  local candidate="$1" sender_paths="$2" repo_paths="$3" protected root
+
+  root="$(canonical_dir "$HOME/repos/CD" 2>/dev/null || true)"
+  if [ -n "$root" ] && path_within "$candidate" "$root"; then
+    echo "refusing engine $engine: target is under the protected ~/repos/CD tree; pass --allow-client to continue" >&2
+    return 1
+  fi
+
+  while IFS= read -r protected || [ -n "$protected" ]; do
+    [ -n "$protected" ] || continue
+    protected="$(expand_home_path "$protected")"
+    root="$(canonical_dir "$protected" 2>/dev/null || true)"
+    if [ -n "$root" ] && path_within "$candidate" "$root"; then
+      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
+      return 1
+    fi
+  done <<<"$sender_paths"
+
+  while IFS= read -r protected || [ -n "$protected" ]; do
+    case "$protected" in
+      ''|'#'*) continue ;;
+    esac
+    protected="$(expand_home_path "$protected")"
+    root="$(canonical_dir "$protected" 2>/dev/null || true)"
+    if [ -n "$root" ] && path_within "$candidate" "$root"; then
+      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
+      return 1
+    fi
+  done <<<"$repo_paths"
+}
+
 guard_external_engine() {
   local client_file="$HOME/repos/hub/client-senders.tsv"
-  local repos_file="$HOME/repos/hub/client-repos.txt" protected root
-  local sender_rows sender_paths repo_paths
+  local repos_file="$HOME/repos/hub/client-repos.txt"
+  local sender_rows sender_paths repo_paths in_worktree common_dir checkout_path checkout_root
   [ "$engine" = claude ] && return 0
   [ "$allow_client" = 1 ] && return 0
   if [ ! -f "$client_file" ] || [ ! -r "$client_file" ]; then
@@ -185,33 +217,37 @@ guard_external_engine() {
     return 1
   fi
 
-  root="$(canonical_dir "$HOME/repos/CD" 2>/dev/null || true)"
-  if [ -n "$root" ] && path_within "$dir" "$root"; then
-    echo "refusing engine $engine: target is under the protected ~/repos/CD tree; pass --allow-client to continue" >&2
+  check_external_target_path "$dir" "$sender_paths" "$repo_paths" || return 1
+
+  # A worktree may live outside the protected checkout, so also check its common
+  # Git directory's parent when Git identifies the usual <checkout>/.git layout.
+  command -v git >/dev/null 2>&1 || return 0
+  if ! in_worktree="$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" \
+     || [ "$in_worktree" != true ]; then
+    return 0
+  fi
+  if ! common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+     || [ -z "$common_dir" ]; then
+    echo "refusing engine $engine: cannot resolve the repository checkout for target; pass --allow-client to continue" >&2
     return 1
   fi
 
-  while IFS= read -r protected || [ -n "$protected" ]; do
-    [ -n "$protected" ] || continue
-    protected="$(expand_home_path "$protected")"
-    root="$(canonical_dir "$protected" 2>/dev/null || true)"
-    if [ -n "$root" ] && path_within "$dir" "$root"; then
-      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
-      return 1
-    fi
-  done <<<"$sender_paths"
-
-  while IFS= read -r protected || [ -n "$protected" ]; do
-    case "$protected" in
-      ''|'#'*) continue ;;
-    esac
-    protected="$(expand_home_path "$protected")"
-    root="$(canonical_dir "$protected" 2>/dev/null || true)"
-    if [ -n "$root" ] && path_within "$dir" "$root"; then
-      echo "refusing engine $engine: target is a protected client repository; pass --allow-client to continue" >&2
-      return 1
-    fi
-  done <<<"$repo_paths"
+  while [ "$common_dir" != / ] && [ "${common_dir%/}" != "$common_dir" ]; do
+    common_dir="${common_dir%/}"
+  done
+  case "$common_dir" in
+    */.git)
+      checkout_path="${common_dir%/.git}"
+      [ -n "$checkout_path" ] || checkout_path=/
+      checkout_root="$(canonical_dir "$checkout_path" 2>/dev/null || true)"
+      if [ -z "$checkout_root" ]; then
+        echo "refusing engine $engine: cannot resolve the repository checkout for target; pass --allow-client to continue" >&2
+        return 1
+      fi
+      check_external_target_path "$checkout_root" "$sender_paths" "$repo_paths" || return 1
+      ;;
+  esac
+  return 0
 }
 
 is_claude_model() {
