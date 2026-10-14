@@ -1,7 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, Register } from 'claude-code'
 
-import { bandText, classify, countInbox, hasExitLine, recentLanes, targetsOf, weather } from './lib'
+import {
+  bandText,
+  classify,
+  countInbox,
+  hasExitLine,
+  ownScratchTargets,
+  recentLanes,
+  targetsOf,
+  weather,
+} from './lib'
 import type { Hold } from './lib'
 
 const isHub = atom({ plugin: 'afa-mods', key: 'isHub' } as const, false)
@@ -166,9 +175,24 @@ export const register: Register = on => {
 
   // Blast Radius
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const holds = classify(e.command)
-    if (holds.length === 0) return next(e)
     const home = (await $.env.get('HOME')) ?? ''
+    const tmpdir = (await $.env.get('TMPDIR')) ?? undefined
+    const scratchEnv = { home, tmpdir }
+    const ownScratch = ownScratchTargets(e.command, scratchEnv)
+    const holds = classify(e.command, 0, scratchEnv)
+    const noteScratch = async () => {
+      for (const { targets } of ownScratch) {
+        await note($, home, 'allowed (own scratch)', {
+          kind: 'rm -rf',
+          hard: false,
+          segment: targets.join(' '),
+        })
+      }
+    }
+    if (holds.length === 0) {
+      await noteScratch()
+      return next(e)
+    }
     const isInteractive = (await $.session.surfaces()).length > 0
 
     if (!isInteractive) {
@@ -180,6 +204,7 @@ export const register: Register = on => {
         }
       }
       for (const h of holds) await note($, home, 'allowed', h)
+      await noteScratch()
       return next(e)
     }
 
@@ -189,7 +214,9 @@ export const register: Register = on => {
       `Blast Radius holds this command. It would touch:\n${lines.join('\n')}\nRun it?`,
       ['1 - Run it', '2 - Refuse'],
     )
-    return choice.startsWith('1') ? next(e) : { deny: 'Blast Radius: refused at the prompt.' }
+    if (!choice.startsWith('1')) return { deny: 'Blast Radius: refused at the prompt.' }
+    await noteScratch()
+    return next(e)
   }).catch(($, e, next) =>
     next.called ? next(e) : { deny: 'Blast Radius: its guard failed, so the command is held.' },
   )
