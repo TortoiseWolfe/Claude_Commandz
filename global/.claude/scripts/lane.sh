@@ -468,7 +468,10 @@ if [ "$engine" != claude ]; then
   if [ "$engine" = codex ]; then
     # GIT_SSH_COMMAND: inside the sandbox's user namespace root-owned system files look
     # wrongly owned, so ssh rejects /etc/ssh/ssh_config.d/*; -F points it at the user config only.
-    cmd="GIT_SSH_COMMAND=\"ssh -F \$HOME/.ssh/config\" codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand")"
+    # --add-dir ~/.cache/docker-heavy: the shared docker-heavy.sh lock lives there, so Codex lanes
+    # take the same lock as Claude/Copilot lanes. User-owned and not a git repo, so bwrap's .git guard is harmless.
+    mkdir -p "$HOME/.cache/docker-heavy"
+    cmd="GIT_SSH_COMMAND=\"ssh -F \$HOME/.ssh/config\" codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand") --add-dir $(printf %q "$HOME/.cache/docker-heavy")"
     cmd+=" -c sandbox_workspace_write.network_access=true"
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
