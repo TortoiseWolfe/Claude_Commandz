@@ -113,4 +113,10 @@ describe('blast radius classifier', () => {
     expect(kinds('X=/tmp/job*; rm -rf $X')).toEqual(['rm -rf'])
     expect(kinds('X=$HOME/job; rm -rf $X')).toEqual(['rm -rf'])
   })
+  test('a cache name directly in home is user state, not scratch', async () => {
+    expect(kinds('rm -rf ~/.expo')).toEqual(['rm -rf'])
+    expect(classify('rm -rf /home/u/.expo', 0, { home: '/home/u' }).map(h => h.kind)).toEqual(['rm -rf'])
+    expect(classify('rm -rf /home/u/app/.expo', 0, { home: '/home/u' })).toEqual([])
+    expect(kinds('rm -rf ~/repos/app/.expo')).toEqual([])
+  })
 })

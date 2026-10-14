@@ -194,8 +194,11 @@ function isOwnScratch(
     '.turbo',
   ])
   const parts = normalized.split('/').filter(Boolean)
+  // A cache name directly in home is user state, not scratch (~/.expo holds the Expo login).
+  const parent = `${normalized.startsWith('/') ? '/' : ''}${parts.slice(0, -1).join('/')}`
+  const homeLevel = parent === '~' || (env.home !== undefined && parent === normalizePath(env.home))
   if (
-    cacheNames.has(parts.at(-1) ?? '') ||
+    (!homeLevel && cacheNames.has(parts.at(-1) ?? '')) ||
     (parts.at(-2) === 'node_modules' && parts.at(-1) === '.cache')
   ) return true
 
