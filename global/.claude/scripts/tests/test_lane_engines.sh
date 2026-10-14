@@ -114,6 +114,8 @@ run_lane --engine codex codex-lane "$REPO" opus "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'Codex lane starts'
 assert_contains "$LAST_COMMAND" 'codex exec -C ' 'Codex uses exec and the working directory'
 assert_contains "$LAST_COMMAND" '-s workspace-write --add-dir ' 'Codex gets workspace-write and lane access'
+assert_contains "$LAST_COMMAND" '--add-dir /var/run' 'Codex gets access to the Docker socket directory'
+assert_contains "$LAST_COMMAND" '-c sandbox_workspace_write.network_access=true' 'Codex gets network access'
 assert_not_contains "$LAST_COMMAND" ' -m ' 'Codex omits Claude model names'
 assert_contains "$LAST_COMMAND" '$(cat -- ' 'Codex reads the prompt file'
 assert_not_contains "$LAST_COMMAND" 'touch injected' 'Codex prompt is not interpolated into the shell command'
