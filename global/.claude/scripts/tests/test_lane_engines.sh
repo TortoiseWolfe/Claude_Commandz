@@ -45,7 +45,7 @@ case "$1" in
       printf '%s\n' "$4" >"$TMUX_SENT"
       if [ "${5:-}" = Enter ] && [ "${RUN_LANE_COMMANDS:-0}" = 1 ]; then
         case "$4" in
-          'codex exec '*|'cd '* ) (cd "$TEST_CWD" && bash -c "$4") ;;
+          'codex exec '*|'GIT_SSH_COMMAND='*'codex exec '*|'cd '* ) (cd "$TEST_CWD" && bash -c "$4") ;;
         esac
       fi
     fi
@@ -114,7 +114,8 @@ run_lane --engine codex codex-lane "$REPO" opus "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'Codex lane starts'
 assert_contains "$LAST_COMMAND" 'codex exec -C ' 'Codex uses exec and the working directory'
 assert_contains "$LAST_COMMAND" '-s workspace-write --add-dir ' 'Codex gets workspace-write and lane access'
-assert_contains "$LAST_COMMAND" '--add-dir /var/run' 'Codex gets access to the Docker socket directory'
+assert_not_contains "$LAST_COMMAND" '--add-dir /var/run' 'Codex does not mount /var/run (bwrap cannot mkdir /run/.git)'
+assert_contains "$LAST_COMMAND" 'GIT_SSH_COMMAND="ssh -F $HOME/.ssh/config"' 'Codex git ssh skips the system ssh config'
 assert_contains "$LAST_COMMAND" '-c sandbox_workspace_write.network_access=true' 'Codex gets network access'
 assert_not_contains "$LAST_COMMAND" ' -m ' 'Codex omits Claude model names'
 assert_contains "$LAST_COMMAND" '$(cat -- ' 'Codex reads the prompt file'
