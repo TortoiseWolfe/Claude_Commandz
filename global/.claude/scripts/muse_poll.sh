@@ -62,6 +62,7 @@ queue_weekly_transcripts() {
 
     local rendered marker line
     rendered=${title//\{date\}/$pretty}
+    rendered=${rendered//|//}           # "|" separates inbox fields
     marker="weekly-${slug}-${day}"
     [[ -f "$inbox" ]] && grep -Fq -- "$marker" "$inbox" && continue
     line="- [ ] $moment | Weekly transcript: fetch \"$rendered\" from YouTube | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
@@ -147,7 +148,7 @@ ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
-Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Write(/$JEV_REQ),Edit(/$JEV_REQ)"
+Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
 timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
