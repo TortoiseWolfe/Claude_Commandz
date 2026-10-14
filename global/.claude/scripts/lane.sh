@@ -26,7 +26,7 @@
 # --status shows such a lane as working while out.log has no exit line, then done / exit <code>.
 # --resume refuses headless lanes (there is no interactive session to resume).
 # --engine codex runs codex exec with workspace-write access to <dir> and the lane folder,
-# plus network access. Codex lanes are refused for client repositories unless --allow-client
+# plus network access (curl, docker ps and git over ssh all proven in the sandbox). Codex lanes are refused for client repositories unless --allow-client
 # is passed; the guard prevents the broader sandbox access from being used there.
 # --engine copilot runs copilot -p with all tools allowed. Both engines are client-guarded:
 # lane.sh checks repo roots in ~/repos/hub/client-senders.tsv and paths in
@@ -466,7 +466,9 @@ if [ "$engine" != claude ]; then
   prompt_cmd="\$(cat -- $(printf %q "$hprompt"))"
   out_cmd="$(printf %q "$out")"
   if [ "$engine" = codex ]; then
-    cmd="codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand")"
+    # GIT_SSH_COMMAND: inside the sandbox's user namespace root-owned system files look
+    # wrongly owned, so ssh rejects /etc/ssh/ssh_config.d/*; -F points it at the user config only.
+    cmd="GIT_SSH_COMMAND=\"ssh -F \$HOME/.ssh/config\" codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand")"
     cmd+=" -c sandbox_workspace_write.network_access=true"
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
