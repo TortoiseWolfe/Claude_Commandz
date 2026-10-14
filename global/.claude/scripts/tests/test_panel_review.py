@@ -1233,6 +1233,7 @@ class FlowTests(Base):
         r = self.run_panel("--repo", "r", cls="own")
         groq = next(x for x in self.ledger_lines() if x["expert"] == "groq")
         self.assertEqual((r.lines["PANEL_groq"], groq["input_tokens"], groq["output_tokens"]), ("error", 0, 0))
+        self.assertEqual(groq["status"], "HTTP_500")
 
     def test_no_text_is_ever_logged(self):
         marker = {"verdict": "revise", "blocking": ["SECRETREASON-Zq7"]}
@@ -1368,6 +1369,15 @@ class LedgerLogTests(unittest.TestCase):
             self.assertNotIn("neurons", ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=junk))
         self.assertEqual(list(ledger_log.record("r", "e", "m", 1, 1, 1, "own", "send", neurons=1.5)),
                          list(ledger_log.FIELDS) + ["neurons"])
+
+    def test_only_safe_error_status_is_logged(self):
+        failed = ledger_log.record("r", "e", "m", 0, 0, 12, "own", "send", status="error")
+        self.assertEqual(failed["status"], "error")
+        http_failed = ledger_log.record("r", "e", "m", 0, 0, 12, "own", "send", status="HTTP_401")
+        self.assertEqual(http_failed["status"], "HTTP_401")
+        self.assertNotIn("status", ledger_log.record("r", "e", "m", 0, 0, 12, "own", "send"))
+        self.assertNotIn("status", ledger_log.record("r", "e", "m", 0, 0, 12, "own", "send",
+                                                      status="HTTP_500 with private response text"))
 
     def test_counts_are_always_non_negative_ints(self):
         rec = ledger_log.record("r", "e", "m", -5, True, "7", "own", "send")
