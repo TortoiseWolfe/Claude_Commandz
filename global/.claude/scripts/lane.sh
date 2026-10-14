@@ -25,8 +25,9 @@
 # "exit <code>" appended there when the process ends. The index row says billing "console".
 # --status shows such a lane as working while out.log has no exit line, then done / exit <code>.
 # --resume refuses headless lanes (there is no interactive session to resume).
-# --engine codex runs codex exec with workspace-write access to <dir>, the lane folder,
-# and /var/run, plus network access.
+# --engine codex runs codex exec with workspace-write access to <dir> and the lane folder,
+# plus network access. Codex lanes are refused for client repositories unless --allow-client
+# is passed; the guard prevents the broader sandbox access from being used there.
 # --engine copilot runs copilot -p with all tools allowed. Both engines are client-guarded:
 # lane.sh checks repo roots in ~/repos/hub/client-senders.tsv and paths in
 # ~/repos/hub/client-repos.txt, as well as ~/repos/CD. If either list is missing,
@@ -466,7 +467,7 @@ if [ "$engine" != claude ]; then
   out_cmd="$(printf %q "$out")"
   if [ "$engine" = codex ]; then
     cmd="codex exec -C $(printf %q "$dir") -s workspace-write --add-dir $(printf %q "$hand")"
-    cmd+=" --add-dir /var/run -c sandbox_workspace_write.network_access=true"
+    cmd+=" -c sandbox_workspace_write.network_access=true"
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
   else
