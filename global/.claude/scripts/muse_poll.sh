@@ -35,6 +35,58 @@
 # It cannot send mail, push, deploy, delete, or change settings: the allow and deny lists below
 # say so, and print mode denies anything else.
 set -u
+
+queue_weekly_transcripts() {
+  local mode=$1 moment=${2:-} config inbox log day weekday clock pretty
+  config=${WEEKLY_TRANSCRIPTS_TSV:-$HOME/.config/afa/weekly-transcripts.tsv}
+  inbox=${MUSE_INBOX:-$HOME/.claude/state/muse-inbox.md}
+  log=$HOME/.claude/state/muse-poll.log
+  [[ -f "$config" ]] || return 0
+
+  [[ -n "$moment" ]] || moment=$(date '+%F %H:%M')
+  day=${moment%% *}
+  clock=${moment#* }
+  if [[ ! "$moment" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]] ||
+      ! date -d "$moment" '+%F %H:%M' >/dev/null 2>&1; then
+    echo "Invalid weekly dry-run time: $moment" >&2
+    return 2
+  fi
+  weekday=$(date -d "$moment" +%u) || return 1
+  pretty=$(date -d "$day" '+%b %-d') || return 1
+
+  while IFS=$'\t' read -r row_day after title slug || [[ -n "${row_day:-}${after:-}${title:-}${slug:-}" ]]; do
+    [[ -n "${row_day:-}" && "$row_day" != \#* ]] || continue
+    [[ "$row_day" == "$weekday" && "$after" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || continue
+    [[ "$clock" > "$after" || "$clock" == "$after" ]] || continue
+    [[ -n "$title" && -n "$slug" ]] || continue
+
+    local rendered marker line
+    rendered=${title//\{date\}/$pretty}
+    rendered=${rendered//|//}           # "|" separates inbox fields
+    marker="weekly-${slug}-${day}"
+    [[ -f "$inbox" ]] && grep -Fq -- "$marker" "$inbox" && continue
+    line="- [ ] $moment | Weekly transcript: fetch \"$rendered\" from YouTube | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
+    if [[ "$mode" == print ]]; then
+      printf '%s\n' "$line"
+    else
+      printf '%s\n' "$line" >>"$inbox"
+      printf '%s queued weekly transcript %s\n' "$(date '+%F %T')" "$marker" >>"$log"
+    fi
+  done <"$config"
+}
+
+if [[ "${1:-}" == --weekly-dry-run ]]; then
+  if (( $# == 1 )); then
+    queue_weekly_transcripts print
+  elif (( $# == 3 )); then
+    queue_weekly_transcripts print "$2 $3"
+  else
+    echo "Usage: $0 --weekly-dry-run [YYYY-MM-DD HH:MM]" >&2
+    exit 2
+  fi
+  exit $?
+fi
+
 H=$(date +%-H)
 exec 9>/tmp/muse-poll.lock
 flock -n 9 || exit 0
@@ -55,6 +107,7 @@ want=$((quiet / 4)); ((want < 60)) && want=60; ((want > 1800)) && want=1800
 mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
 export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
+queue_weekly_transcripts queue
 
 CLAUDE=$HOME/.local/bin/claude
 S=$HOME/.claude/scripts
@@ -95,7 +148,7 @@ ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
-Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Write(/$JEV_REQ),Edit(/$JEV_REQ)"
+Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
 timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
