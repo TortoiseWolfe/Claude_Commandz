@@ -31,6 +31,12 @@ actual=$(HOME="$HOME_TEST" WEEKLY_TRANSCRIPTS_TSV="$CONFIG" MUSE_INBOX="$INBOX" 
   "$SCRIPT" --weekly-dry-run '2026-10-13' '16:59')
 expect_eq 'nothing before the configured time' '' "$actual"
 
+PIPE_CONFIG="$TMP/pipe.tsv"
+printf '2\t17:00\tWeekly | Notes {date}\tnotes\n' >"$PIPE_CONFIG"
+actual=$(HOME="$HOME_TEST" WEEKLY_TRANSCRIPTS_TSV="$PIPE_CONFIG" MUSE_INBOX="$INBOX" \
+  "$SCRIPT" --weekly-dry-run '2026-10-13' '17:20')
+expect_eq 'a "|" in the title cannot add an inbox field' 3 "$(grep -o '|' <<<"$actual" | wc -l)"
+
 actual=$(HOME="$HOME_TEST" WEEKLY_TRANSCRIPTS_TSV="$CONFIG" MUSE_INBOX="$INBOX" \
   "$SCRIPT" --weekly-dry-run '2026-10-14' '17:20')
 expect_eq 'nothing on another weekday' '' "$actual"
