@@ -10,7 +10,7 @@
 # What it does:
 # - Checks the Docker engine answers within 10 s first, so a dead engine fails fast instead of
 #   freezing the session (2026-10-11: the engine died at 11:22 and every session hung on it).
-# - One heavy job at a time across ALL sessions (flock on ~/.cache/docker-heavy.lock). Others wait
+# - One heavy job at a time across ALL sessions (flock on ~/.cache/docker-heavy/lock). Others wait
 #   up to an hour and print who holds the lock.
 # - For `docker run`: adds --memory/--memory-swap (no swap past the cap), --cpus and a low
 #   --cpu-shares, so interactive work in other sessions keeps priority. For `docker compose run`,
@@ -47,7 +47,8 @@ if [ "${cmd[1]:-}" = run ]; then
   cmd=(docker run --label "docker-heavy=$tag" --memory "$MEM" --memory-swap "$MEM" --cpus "$CPUS" --cpu-shares 256 "${cmd[@]:2}")
 fi
 
-LOCK="$HOME/.cache/docker-heavy.lock"
+# Own user-owned directory so lane.sh can --add-dir just this (Codex lanes cannot write ~/.cache).
+LOCK="$HOME/.cache/docker-heavy/lock"
 mkdir -p "${LOCK%/*}"
 exec 9>>"$LOCK"
 if ! flock -n 9; then
