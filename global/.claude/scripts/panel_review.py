@@ -1142,6 +1142,14 @@ def errors_dir_for(deps):
     return os.path.join(os.path.dirname(log), "panel-errors")
 
 
+def ledger_status(result):
+    """Keep failure rows distinguishable without copying provider response text into the ledger."""
+    if result.get("verdict") != "error":
+        return None
+    match = re.search(r"\b(HTTP_[1-5][0-9]{2})\b", str(result.get("note", "")))
+    return match.group(1) if match else "error"
+
+
 def ask_one(name, ex, cfg, deps, spec, acceptance, res, a, keep_raw):
     """One expert's whole review plus its usage line. Runs on a worker thread."""
     save_raw = (lambda text: save_raw_reply(errors_dir_for(deps), name, text)) if keep_raw else None
@@ -1149,7 +1157,7 @@ def ask_one(name, ex, cfg, deps, spec, acceptance, res, a, keep_raw):
     ledger_log.append(ledger_log.record(   # one locked write per line (ledger_log.append)
         repo=a.repo, expert=name, model=ex.model(), input_tokens=r["input_tokens"],
         output_tokens=r["output_tokens"], ms=r["ms"], cls=a.cls, gate=res.gate,
-        estimated=r.get("estimated", False), neurons=r.get("neurons")), deps.ledger_path)
+        estimated=r.get("estimated", False), neurons=r.get("neurons"), status=ledger_status(r)), deps.ledger_path)
     r["blocking"] = trim_blocking(r["blocking"])
     return r
 
