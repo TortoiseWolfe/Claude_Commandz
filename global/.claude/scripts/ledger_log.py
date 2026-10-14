@@ -1,8 +1,9 @@
 """Append-only usage log shared by panel_review.py and jev_precheck.py.
 
 One JSON line per expert per run in ~/.local/share/ledger/panel.jsonl, for the usage ledger to ingest.
-`record()` accepts numbers and short names only. It has no parameter that could carry a prompt or a
-reply, so text cannot reach the log by accident. Stdlib only."""
+`record()` accepts numbers and short names only. Failed expert calls get a fixed status marker or HTTP code,
+so a zero-token failure cannot look like a successful zero-token call. It has no parameter that could carry
+a prompt or a reply, so text cannot reach the log by accident. Stdlib only."""
 
 import json
 import os
@@ -12,7 +13,8 @@ from datetime import datetime, timezone
 
 DEFAULT_PATH = "~/.local/share/ledger/panel.jsonl"   # read at call time so tests can point it elsewhere
 FIELDS = ("ts", "repo", "expert", "model", "input_tokens", "output_tokens", "ms", "class", "gate")
-OPTIONAL = ("estimated", "neurons")   # present only when true / reported
+OPTIONAL = ("estimated", "neurons", "status")   # only true/reported fields and safe failure status
+STATUS_RE = re.compile(r"^(?:error|HTTP_[1-5][0-9]{2})$")  # fixed marker or HTTP code; never provider text
 _APPEND_LOCK = threading.Lock()   # the panel asks its experts on threads; one line per write, never interleaved
 
 
@@ -37,10 +39,11 @@ def _count(n):
 
 
 def record(repo, expert, model, input_tokens, output_tokens, ms, cls, gate, estimated=False, ts=None,
-           neurons=None):
+           neurons=None, status=None):
     """The exact ledger schema. `estimated` adds `"estimated": true` and is omitted when false.
     `neurons` (Cloudflare Workers AI meters in them; the free budget is 10,000 a day) adds a
-    `"neurons": <float>` field and is omitted when the provider reported none."""
+    `"neurons": <float>` field and is omitted when the provider reported none. A failed call adds only
+    a whitelisted `"status": "error"` or `"status": "HTTP_###"` marker; provider error text is never stored."""
     rec = {"ts": ts or utc_iso(), "repo": (_safe(repo) if repo else None),
            "expert": str(expert), "model": _safe(model),
            "input_tokens": _count(input_tokens), "output_tokens": _count(output_tokens),
@@ -49,6 +52,8 @@ def record(repo, expert, model, input_tokens, output_tokens, ms, cls, gate, esti
         rec["estimated"] = True
     if isinstance(neurons, (int, float)) and not isinstance(neurons, bool) and neurons >= 0:
         rec["neurons"] = round(float(neurons), 4)
+    if isinstance(status, str) and STATUS_RE.fullmatch(status):
+        rec["status"] = status
     return rec
 
 
