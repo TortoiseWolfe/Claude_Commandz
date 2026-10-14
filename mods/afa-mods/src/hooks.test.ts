@@ -90,8 +90,8 @@ describe('blast radius', () => {
       asked = JSON.stringify(e)
       return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
     })
-    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /tmp/afa-mods-test' })
-    expect(asked).toContain('/tmp/afa-mods-test')
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
+    expect(asked).toContain('/home/t/afa-mods-test')
     expect(asked).toContain('2 entries')
     expect(r.deny).toContain('Blast Radius')
   })
@@ -116,8 +116,20 @@ describe('blast radius', () => {
       return { value: undefined }
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
-    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /tmp/afa-mods-test' })
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(r.deny).toBeUndefined()
     expect(log).toContain('allowed | rm -rf')
+  })
+  test('allows own scratch without prompting and logs its targets', async ($, on) => {
+    setup(on)
+    let log = ''
+    on('fs.write', ($: any, e: any) => {
+      log += e.text
+      return { value: undefined }
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /tmp/afa-mods-test' })
+    expect(r.deny).toBeUndefined()
+    expect(log).toContain('allowed (own scratch) | rm -rf | /tmp/afa-mods-test')
   })
 })
