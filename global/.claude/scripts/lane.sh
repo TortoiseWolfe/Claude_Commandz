@@ -290,13 +290,13 @@ default_effort() {
 lane_effort() {  # <model> [recorded]
   case "$1" in *haiku*) return 0 ;; esac
   if [ -n "$effort_opt" ]; then echo "$effort_opt"
-  elif [ -n "${2:-}" ] && [ "$2" != - ] && [ "$2" != "?" ]; then echo "$2"
+  elif case "${2:-}" in low|medium|high|xhigh|max) true ;; *) false ;; esac; then echo "$2"
   else default_effort "$1"; fi
 }
 
 # Flags every Claude lane gets: effort (when the model takes one) and in-place compaction at 200K.
 claude_lane_flags() {  # <effort or empty>
-  [ -z "$1" ] || printf -- '--effort %s ' "$1"
+  [ -z "$1" ] || printf -- '--effort %q ' "$1"
   printf -- '--settings %q' '{"autoCompactWindow":200000}'
 }
 
