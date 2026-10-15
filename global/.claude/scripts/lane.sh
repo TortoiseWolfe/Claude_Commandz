@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex and
 # GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -42,9 +42,16 @@
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch
+#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
+#
+# Effort and compaction (Claude lanes only, including --console, --headless and --resume):
+# every Claude lane gets --effort <level> and --settings '{"autoCompactWindow":200000}', so a
+# lane compacts in place instead of growing to 300K. Default effort by model: sonnet high,
+# opus and fable xhigh, haiku no flag (it takes no effort setting). --effort <level> overrides
+# it (low, medium, high, xhigh, max); on --resume the level the lane started with is reused.
+# The level is recorded in column 10 of the index; --status shows it with the lane's context size.
 #
 # Folder trust: a new folder makes Claude Code ask "Yes, I trust this folder". For a folder
 # under ~/repos this script answers it. Anywhere else the window waits for the user.
@@ -61,10 +68,10 @@ TAB=$'\t'
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
-  lane.sh [--dry-run] [--console] --resume <name>
+  lane.sh [--dry-run] [--console] [--effort <level>] --resume <name>
 
 Claude is the default engine. Codex and Copilot run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -72,10 +79,12 @@ Codex and Copilot refuse repositories listed in client-senders.tsv or client-rep
 and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
+Claude lanes default to --effort high on sonnet, xhigh on opus and fable, none on haiku;
+they also compact in place at 200K tokens.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -84,6 +93,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--engine requires claude, codex, or copilot" >&2; exit 1; }
       engine="$2"; shift 2 ;;
     --engine=*) engine="${1#*=}"; shift ;;
+    --effort)
+      [ $# -ge 2 ] || { echo "--effort requires low, medium, high, xhigh, or max" >&2; exit 1; }
+      effort_opt="$2"; shift 2 ;;
+    --effort=*) effort_opt="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
@@ -97,6 +110,11 @@ done
 case "$engine" in
   claude|codex|copilot) ;;
   *) echo "unknown engine: $engine (choose claude, codex, or copilot)" >&2; exit 1 ;;
+esac
+
+case "$effort_opt" in
+  ''|low|medium|high|xhigh|max) ;;
+  *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
 esac
 
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
@@ -122,15 +140,15 @@ find_session() {
 # Fill blank session ids in the index (column 8) where a transcript can be found.
 fill_ids() {
   [ -s "$INDEX" ] || return 0
-  local tmp claimed d n dir m b p r id st
+  local tmp claimed d n dir m b p r id st eff
   tmp="$(mktemp)"
   claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
-  while IFS="$TAB" read -r d n dir m b p r id st; do
+  while IFS="$TAB" read -r d n dir m b p r id st eff; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(find_session "$dir" "$st" "$claimed")"
       [ -n "$id" ] && claimed="$claimed $id"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" >>"$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" >>"$tmp"
   done <"$INDEX"
   cat "$tmp" >"$INDEX"; rm -f "$tmp"
 }
@@ -259,6 +277,55 @@ is_claude_model() {
   esac
 }
 
+# Default effort for a Claude model: sonnet high, opus/fable xhigh, haiku none (prints nothing).
+default_effort() {
+  case "$1" in
+    *haiku*) ;;
+    *sonnet*) echo high ;;
+    *) echo xhigh ;;
+  esac
+}
+
+# Effort for a lane: haiku never takes one; else the override, else the recorded level, else the model default.
+lane_effort() {  # <model> [recorded]
+  case "$1" in *haiku*) return 0 ;; esac
+  if [ -n "$effort_opt" ]; then echo "$effort_opt"
+  elif [ -n "${2:-}" ] && [ "$2" != - ] && [ "$2" != "?" ]; then echo "$2"
+  else default_effort "$1"; fi
+}
+
+# Flags every Claude lane gets: effort (when the model takes one) and in-place compaction at 200K.
+claude_lane_flags() {  # <effort or empty>
+  [ -z "$1" ] || printf -- '--effort %s ' "$1"
+  printf -- '--settings %q' '{"autoCompactWindow":200000}'
+}
+
+# Context size in K tokens from the last assistant usage in a lane's transcript.
+ctx_k() {  # <dir> <session-id>
+  local f slug
+  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")"
+  f="$PROJ/$slug/$2.jsonl"
+  [ -r "$f" ] || { echo "?"; return 0; }
+  tail -n 400 "$f" | python3 -I -c '
+import sys, json
+last = None
+for line in sys.stdin:
+    try:
+        o = json.loads(line)
+    except ValueError:
+        continue
+    m = o.get("message")
+    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" else None
+    if u:
+        last = u
+if last is None:
+    print("?")
+else:
+    n = sum(last.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    print("%dK" % round(n / 1000))
+' 2>/dev/null || echo "?"
+}
+
 is_headless_billing() {
   case "$1" in codex|copilot) return 0 ;; *) return 1 ;; esac
 }
@@ -281,7 +348,7 @@ if [ "$mode" = status ]; then
       live="$live$w "
       pane="$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null || true)"
       row="$(index_row "$w")"
-      IFS="$TAB" read -r d n dir m b p rep id st <<<"${row:-}"
+      IFS="$TAB" read -r d n dir m b p rep id st eff <<<"${row:-}"
       if [ -z "$row" ]; then
         rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
@@ -302,7 +369,9 @@ if [ "$mode" = status ]; then
       else state=idle; fi
       last="$(command grep -av '^[[:space:]]*$' <<<"$pane" | command grep -avE '^[[:space:]]*[─━═]+[[:space:]]*$|⏵|🐢|^[[:space:]]*❯|esc to|Enter to confirm|Not now|Don.t show again|Teach auto mode|Auto mode works' | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-80 || true)"
       printf '%-18s report:%-3s %-7s %s\n' "$w" "$wrote" "$state" "$last"
-      printf '    dir:%s model:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      ctx="?"
+      case "${b:-subscription}" in codex|copilot) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
+      printf '    dir:%s model:%s effort:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
   else
     echo "(no tmux session \"$SESSION\")"
@@ -310,7 +379,7 @@ if [ "$mode" = status ]; then
   # Index lanes from the last 3 days with no window and no report.
   if [ -s "$INDEX" ]; then
     cutoff="$(date -d '3 days ago' +%F)"
-    while IFS="$TAB" read -r d n dir m b p rep id st; do
+    while IFS="$TAB" read -r d n dir m b p rep id st eff; do
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
@@ -325,7 +394,7 @@ if [ "$mode" = send ]; then
   name="$1"; shift; text="$*"
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
-    IFS="$TAB" read -r d n dir m b p rep id st <<<"$row"
+    IFS="$TAB" read -r d n dir m b p rep id st eff <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
       exit 1
@@ -363,7 +432,7 @@ if [ "$mode" = resume ]; then
   fill_ids
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff <<<"$row"
   if is_headless_billing "${b:-}"; then
     echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
     exit 1
@@ -382,10 +451,12 @@ if [ "$mode" = resume ]; then
       echo "a window named $name already exists in $SESSION" >&2; exit 1
     fi
   fi
+  eff="$(lane_effort "$m" "${eff:-}")"
+  flags="$(claude_lane_flags "$eff")"
   if [ "$console" = 1 ]; then
-    cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m")"
+    cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   else
-    cmd="claude --resume $(printf %q "$id") --model $(printf %q "$m")"
+    cmd="claude --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   fi
   if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
@@ -393,7 +464,7 @@ if [ "$mode" = resume ]; then
     t new-window -t "$SESSION:" -n "$name" -c "$dir"
   fi
   t send-keys -t "$SESSION:$name" "$cmd" Enter
-  echo "resumed: $name  ($m, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
+  echo "resumed: $name  ($m, effort ${eff:--}, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
   exit 0
 fi
 
@@ -460,6 +531,10 @@ fi
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
+eff="-"; flags=""
+if [ "$engine" = claude ]; then
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff")"; eff="${eff:--}"
+fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"
@@ -484,11 +559,11 @@ if [ "$engine" != claude ]; then
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
 else
-  cmd="claude --model $(printf %q "$model") \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="claude --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
 fi
 t send-keys -t "$target" "$cmd" Enter
 
@@ -557,13 +632,13 @@ if [ "$dry" = 0 ]; then
   if [ "$engine" != claude ]; then lane_billing="$engine"
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" >>"$INDEX"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
 fi
 
-echo "lane:   $name  ($model, $dir)"
+echo "lane:   $name  ($model, effort $eff, $dir)"
 echo "prompt: $hprompt"
 echo "report: $report"
 if [ "$headless" = 1 ] || [ "$engine" != claude ]; then echo "log:    $hand/out.log"; fi
