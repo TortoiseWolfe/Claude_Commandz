@@ -7,6 +7,10 @@
 #   openclaw_harden.sh verify     the read-back and proofs only, changes nothing
 #   openclaw_harden.sh rollback [BACKUP]   restore BACKUP, or the newest backup of the config
 #
+# The free chain defaults to the three models proved to answer on 16 Oct 2026 with the gateway's key
+# (gemini-2.5-flash, -lite and 2.5-pro now answer 404 "no longer available to new users", which cools the
+# whole provider). Override with OPENCLAW_HARDEN_CHAIN="provider/model,provider/model,provider/model".
+#
 # Runs INSIDE the OpenClawGateway distro as user openclaw. It works on whichever state directory the
 # environment names (OPENCLAW_STATE_DIR), which is how it is tested on a staged copy first. It prints
 # no key, no token and no config value that could hold one: only key names, counts and PASS/FAIL lines.
@@ -29,8 +33,11 @@ cfg_py() { python3 -c "$1" "$CFG"; }
 init() {
   cd "$HOME" || exit 1
   EXPECT_VERSION="${OPENCLAW_HARDEN_VERSION:-2026.9.9}"
-  PRIMARY="google/gemini-3-flash-preview"
-  FALLBACKS=("google/gemini-2.5-flash" "google/gemini-2.5-flash-lite")
+  local chain; IFS=, read -r -a chain <<< "${OPENCLAW_HARDEN_CHAIN:-google/gemini-3.5-flash,google/gemini-3.5-flash-lite,google/gemini-3.6-flash}"
+  [ "${#chain[@]}" = 3 ] || { echo "OPENCLAW_HARDEN_CHAIN needs exactly three models"; exit 1; }
+  PRIMARY="${chain[0]}"
+  FALLBACKS=("${chain[1]}" "${chain[2]}")
+  export HARDEN_PRIMARY="$PRIMARY" HARDEN_F1="${FALLBACKS[0]}" HARDEN_F2="${FALLBACKS[1]}"
   RECEPTIONIST="receptionist"
   CFG="$(openclaw config file 2>/dev/null | tail -1)"
   STATE="$(dirname "$CFG")"
@@ -75,6 +82,8 @@ patch = {
         # is really offered. A global minimal profile and direct schemas make the policy the same in both.
         "profile": "minimal",
         "toolSearch": False,
+        # Code mode (auto for some models) shows a model exec + wait whatever the tool policy says.
+        "codeMode": False,
         "deny": ["group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes",
                  "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
         "elevated": {"enabled": False},
@@ -117,9 +126,9 @@ EOF
 do_verify() {
   echo "== read back (names, counts, PASS/FAIL; no values that could be secrets)"
   cfg_py '
-import json, sys
+import json, os, sys
 c = json.load(open(sys.argv[1]))
-P = "google/gemini-3-flash-preview"; F = ["google/gemini-2.5-flash", "google/gemini-2.5-flash-lite"]
+P = os.environ["HARDEN_PRIMARY"]; F = [os.environ["HARDEN_F1"], os.environ["HARDEN_F2"]]
 d = c["agents"]["defaults"]; r = c["agents"]["entries"].get("receptionist", {})
 def out(n, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + n + (" " + detail if detail else "")); return ok
@@ -134,7 +143,7 @@ res.append(out("allowlist.modelPolicy", sorted(d.get("modelPolicy", {}).get("all
 res.append(out("allowlist.receptionist", sorted(r.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
 rt = r.get("tools", {})
 res.append(out("receptionist.tools", rt.get("profile") == "minimal" and rt.get("allow") == [] and {"gateway", "session_status", "presence"} <= set(rt.get("deny", [])), "profile=%s allow=%s deny=%s" % (rt.get("profile"), rt.get("allow"), rt.get("deny"))))
-res.append(out("tools.profile_and_search", c.get("tools", {}).get("profile") == "minimal" and c.get("tools", {}).get("toolSearch") is False, "profile=%s toolSearch=%s" % (c.get("tools", {}).get("profile"), c.get("tools", {}).get("toolSearch"))))
+res.append(out("tools.profile_and_search", c.get("tools", {}).get("profile") == "minimal" and c.get("tools", {}).get("toolSearch") is False and c.get("tools", {}).get("codeMode") is False, "profile=%s toolSearch=%s codeMode=%s" % (c.get("tools", {}).get("profile"), c.get("tools", {}).get("toolSearch"), c.get("tools", {}).get("codeMode"))))
 need = {"group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"}
 res.append(out("tools.deny", need <= set(c.get("tools", {}).get("deny", [])), "%d entries" % len(c.get("tools", {}).get("deny", []))))
 res.append(out("tools.elevated", c.get("tools", {}).get("elevated", {}).get("enabled") is False))
@@ -179,8 +188,20 @@ print("   mode:", d["sandbox"]["mode"], "| sandbox tools allow:", t.get("allow")
   local out; out="$(openclaw agent --agent "$RECEPTIONIST" --message "run id" --json --timeout 120 2>&1)"
   echo "$out" | python3 -c '
 import json, sys
-raw = sys.stdin.read()
-d = json.loads(raw[raw.index("{"):])
+raw = sys.stdin.read(); dec = json.JSONDecoder(); objs = []; i = 0
+while True:  # the CLI may print log lines and more than one JSON object, and a failed run is an error object
+    j = raw.find("{", i)
+    if j < 0: break
+    try: o, i = dec.raw_decode(raw, j); objs.append(o)
+    except ValueError: i = j + 1
+res = [o for o in objs if isinstance(o, dict) and "result" in o]
+err = [o for o in objs if isinstance(o, dict) and (o.get("ok") is False or "error" in o)]
+if not res:
+    e = err[-1].get("error") if err else None
+    print("   run error:", (e.get("message") if isinstance(e, dict) else e) or "no JSON result in the output")
+    print("FAIL receptionist.run no reply from the model chain")
+    sys.exit(1)
+d = res[-1]
 m = d["result"]["meta"]; ts = m.get("toolSummary") or {}
 calls = ts.get("calls", 0)  # an empty toolSummary means the run made no tool call
 declared = [(e.get("name") if isinstance(e, dict) else e) for e in (m.get("systemPromptReport", {}).get("tools", {}).get("entries") or [])]
