@@ -379,9 +379,9 @@ def sweep(ctx, host, now=None):
             body = _report_text(lane["report"])
             quoted = "\n".join("> " + ln for ln in _trim(body, REPORT_MAX).splitlines())
             failure = report_failure(body)
-            head = "Lane %s (%s) failed: %s." % (name, lane["repo"], failure) if failure else "Lane %s (%s) finished." % (name, lane["repo"])
+            head = "Lane %s (%s) failed: its report says %s." % (name, lane["repo"], json.dumps(failure)) if failure else "Lane %s (%s) finished." % (name, lane["repo"])
             chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To have more done, tell me." % (head, quoted)
-            line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + failure if failure else "finished")
+            line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + json.dumps(failure) if failure else "finished")
         else:
             chat = "Lane %s (%s) stopped: %s.%s Nothing to read. You can start it again by telling me." % (name, lane["repo"], lane.get("detail", "it ended"), lane.get("note", ""))
             line = "%s | report | %s stopped: %s" % (_stamp(now), name, lane.get("detail", "it ended"))

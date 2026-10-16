@@ -122,7 +122,7 @@ MUTANTS = [
     (DISPATCH, "delivered lane keeps its window", "        if wins and name in wins:\n            host.kill_window(name)", "        pass"),
     (DISPATCH, "delivered lane stays open in state", '        lane["status"] = "closed"\n        out.append', '        out.append'),
     (DISPATCH, "failure needs only one of the two signs", "if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):", "if not (BLOCKED_RE.search(flat) or NOTHING_RE.search(flat)):"),
-    (DISPATCH, "failed report announced as finished", 'head = "Lane %s (%s) failed: %s." % (name, lane["repo"], failure) if failure else', 'head = "Lane %s (%s) finished." % (name, lane["repo"]) if True else'),
+    (DISPATCH, "failed report announced as finished", 'head = "Lane %s (%s) failed: its report says %s." % (name, lane["repo"], json.dumps(failure)) if failure else', 'head = "Lane %s (%s) finished." % (name, lane["repo"]) if True else'),
     (DISPATCH, "copilot told to use a worktree", 'work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE', "work_rule = WORK_RULE"),
     (DISPATCH, "stop closes the oldest lane", "name = max(open_)[1]", "name = min(open_)[1]"),
     (DISPATCH, "stop matches long sentences", " and len(t) <= 20:", ":"),
