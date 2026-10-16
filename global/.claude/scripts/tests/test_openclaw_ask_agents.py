@@ -53,6 +53,10 @@ class Edit(unittest.TestCase):
         self.assertEqual(dp.parse("reply oc-x-1: more"), ("reply", "oc-x-1", "more"))
         self.assertEqual(dp.parse("close oc-x-1"), ("close", "oc-x-1"))
         self.assertIn("Main session", LIVE)
+        # the yes flow: the one marker line the poller looks for, in the format dispatch.parse takes after the marker
+        self.assertIn("Say yes to start: start <repo>: <task>", LIVE)
+        self.assertEqual(len(pk.PROPOSAL_LINE.findall("Say yes to start: start <repo>: <task>")), 1)
+        self.assertNotIn("type start", LIVE)
         self.assertNotIn("--session-key", LIVE)
         self.assertIn('starts with "hub:"', LIVE)
         self.assertTrue(pk.HUB_PREFIX.match("hub: something"))
