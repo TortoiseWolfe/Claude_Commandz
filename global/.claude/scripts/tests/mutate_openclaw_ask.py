@@ -14,8 +14,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
-PICKUP, HOOK = "openclaw_pickup.py", "openclaw_ask_hook/handler.js"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_pickup"]
+PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -54,7 +54,12 @@ MUTANTS = [
     (PICKUP, "replies carry the message text", "\"%s | hub list | put on the hub's list | oc-%s\" % (stamp, sha)", "\"%s | hub list | %s | oc-%s\" % (stamp, item[\"text\"], sha)"),
     # the OpenClaw-side hook
     (HOOK, "hook writes for any session", "|| !DASHBOARD_SESSION.test(event.sessionKey)", "|| false"),
-    (HOOK, "hook session pattern loosened", "/^agent:main:dashboard$/", "/^agent:main:dashboard/"),
+    (HOOK, "hook session pattern loosened", "(?::[A-Za-z0-9-]{1,64})?$/", "(?::.*)?/"),
+    (HOOK, "hook session suffix unbounded", "{1,64}", "{1,}"),
+    (HOOK, "hook session id suffix refused", "(?::[A-Za-z0-9-]{1,64})?$/", "$/"),
+    (HOOK, "skip log carries the text", '" via " + String(c.channelId).slice(0, 40)', '" via " + String(c.channelId).slice(0, 40) + " " + c.content'),
+    (HOOK, "skip log fires for every event", 'if (event && event.type === "message" && event.action === "received") {', "if (event) {"),
+    (INSTALL, "install uses -- again", "-u openclaw -e", "-u openclaw --"),
     (HOOK, "hook writes for any channel", "|| !DASHBOARD_CHANNELS.has(c.channelId)", "|| false"),
     (HOOK, "hook also takes twitch", 'new Set(["webchat"])', 'new Set(["webchat", "twitch"])'),
     (HOOK, "hook flood cap off", "if (recent.length >= PER_MINUTE) return;", ""),
@@ -74,6 +79,7 @@ def main():
             continue
         d = Path(tempfile.mkdtemp())
         shutil.copy(SCRIPTS / PICKUP, d / PICKUP)
+        shutil.copy(SCRIPTS / INSTALL, d / INSTALL)
         shutil.copytree(SCRIPTS / "openclaw_ask_hook", d / "openclaw_ask_hook")
         (d / "tests").mkdir()
         for t in TESTS:

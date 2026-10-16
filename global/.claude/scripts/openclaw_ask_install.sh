@@ -11,7 +11,8 @@
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 src="$here/openclaw_ask_hook"
-oc() { timeout 90 wsl.exe -d OpenClawGateway -u openclaw -- "$@"; }
+# -e, not --: after "--" wsl.exe re-parses the command line through a shell, which empties "$d" and friends.
+oc() { timeout 90 wsl.exe -d OpenClawGateway -u openclaw -e "$@"; }
 
 case "${1:-}" in
   apply)
