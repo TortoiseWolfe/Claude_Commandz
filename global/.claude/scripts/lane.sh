@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex and
 # GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -42,16 +42,29 @@
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)
+#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )
+# Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
 #
 # Effort and compaction (Claude lanes only, including --console, --headless and --resume):
-# every Claude lane gets --effort <level> and --settings '{"autoCompactWindow":200000}', so a
-# lane compacts in place instead of growing to 300K. Default effort by model: sonnet high,
-# opus and fable xhigh, haiku no flag (it takes no effort setting). --effort <level> overrides
+# every Claude lane gets --effort <level> and a --settings JSON with autoCompactWindow 200000, so a
+# lane compacts in place instead of growing to 300K. Default effort by model: sonnet, opus and
+# fable high, haiku no flag (it takes no effort setting). --effort <level> overrides
 # it (low, medium, high, xhigh, max); on --resume the level the lane started with is reused.
 # The level is recorded in column 10 of the index; --status shows it with the lane's context size.
+#
+# A lane starts lean (Claude lanes only, every start and resume). Each lane re-reads everything it
+# starts with on every turn, so the same --settings JSON also carries:
+#   - the plugins in LANE_PLUGINS_OFF set to false (list below, near the top of the code);
+#   - disableClaudeAiConnectors, so the claude.ai connectors (Calendly, Clay, Resend, PayPal ...)
+#     are not loaded. They stay on when the lane name ends in -mail, when the prompt file mentions
+#     Gmail, Calendar or Drive (or get_thread, create_draft, list_drafts), or with --connectors.
+#     The choice is recorded in column 11 of the index, shown by --status and reused on --resume;
+#   - --disallowedTools LANE_TOOLS_OFF (the Artifact tools: their schema is about a quarter of a lane's start);
+#   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
+#     the slim rule file LANE_RULES (default ~/repos/hub/lane-rules.md). Both happen only when that
+#     file exists; a repo's own CLAUDE.md files load as usual.
 #
 # Folder trust: a new folder makes Claude Code ask "Yes, I trust this folder". For a folder
 # under ~/repos this script answers it. Anywhere else the window waits for the user.
@@ -61,6 +74,23 @@
 set -euo pipefail
 SESSION=lanes
 
+# Plugins switched off in every Claude lane (set to false through --settings enabledPlugins).
+# Kept on: afa-mods (--status reads its band), security-guidance, code-review.
+LANE_PLUGINS_OFF="
+  creative-writing@grey-haven-plugins creative-writing-skills@creative-writing-skills
+  deep-plan@piercelamb-plugins deep-project@piercelamb-plugins deep-implement@piercelamb-plugins
+  superpowers@claude-plugins-official hookify@claude-plugins-official feature-dev@claude-plugins-official
+  coderabbit@claude-plugins-official frontend-design@claude-plugins-official
+  claude-code-setup@claude-plugins-official claude-md-management@claude-plugins-official
+  supabase@claude-plugins-official
+"
+# Tools withheld from every Claude lane (--disallowedTools). The Artifact tool's schema alone is about a
+# quarter of a lane's starting context, and the standing rule is that nothing is published to Artifacts.
+LANE_TOOLS_OFF="Artifact ArtifactComments ArtifactData"
+# The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
+LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
+LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
+
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
 TAB=$'\t'
@@ -68,10 +98,10 @@ TAB=$'\t'
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
-  lane.sh [--dry-run] [--console] [--effort <level>] --resume <name>
+  lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] --resume <name>
 
 Claude is the default engine. Codex and Copilot run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -79,12 +109,14 @@ Codex and Copilot refuse repositories listed in client-senders.tsv or client-rep
 and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
-Claude lanes default to --effort high on sonnet, xhigh on opus and fable, none on haiku;
+Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they also compact in place at 200K tokens.
+Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
+--connectors (or a name ending in -mail, or a prompt that mentions Gmail, Calendar or Drive) keeps the connectors.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -98,6 +130,7 @@ while [ $# -gt 0 ]; do
       effort_opt="$2"; shift 2 ;;
     --effort=*) effort_opt="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
+    --connectors) connectors_opt=1; shift ;;
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
@@ -140,15 +173,15 @@ find_session() {
 # Fill blank session ids in the index (column 8) where a transcript can be found.
 fill_ids() {
   [ -s "$INDEX" ] || return 0
-  local tmp claimed d n dir m b p r id st eff
+  local tmp claimed d n dir m b p r id st eff conn
   tmp="$(mktemp)"
   claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
-  while IFS="$TAB" read -r d n dir m b p r id st eff; do
+  while IFS="$TAB" read -r d n dir m b p r id st eff conn; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(find_session "$dir" "$st" "$claimed")"
       [ -n "$id" ] && claimed="$claimed $id"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" >>"$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" >>"$tmp"
   done <"$INDEX"
   cat "$tmp" >"$INDEX"; rm -f "$tmp"
 }
@@ -277,12 +310,11 @@ is_claude_model() {
   esac
 }
 
-# Default effort for a Claude model: sonnet high, opus/fable xhigh, haiku none (prints nothing).
+# Default effort for a Claude model: high (sonnet, opus, fable); haiku none (prints nothing).
 default_effort() {
   case "$1" in
     *haiku*) ;;
-    *sonnet*) echo high ;;
-    *) echo xhigh ;;
+    *) echo high ;;
   esac
 }
 
@@ -294,10 +326,31 @@ lane_effort() {  # <model> [recorded]
   else default_effort "$1"; fi
 }
 
-# Flags every Claude lane gets: effort (when the model takes one) and in-place compaction at 200K.
-claude_lane_flags() {  # <effort or empty>
+# Whether a new lane keeps the claude.ai connectors: --connectors, a -mail name, or a prompt that mentions
+# Gmail, Calendar or Drive (or their tool names). Prints on or off.
+lane_connectors() {  # <name> <prompt-file>
+  if [ "$connectors_opt" = 1 ] || [[ "$1" == *-mail ]] \
+     || grep -qiE '\b(gmail|calendar|drive)\b|get_thread|create_draft|list_drafts' -- "$2" 2>/dev/null; then
+    echo on
+  else echo off; fi
+}
+
+# Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction at 200K,
+# plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
+# The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
+claude_lane_flags() {  # <effort or empty> <connectors on|off>
+  local json p
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
-  printf -- '--settings %q' '{"autoCompactWindow":200000}'
+  json='{"autoCompactWindow":200000'
+  [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
+  [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
+  json+=',"enabledPlugins":{'
+  for p in $LANE_PLUGINS_OFF; do json+="\"$p\":false,"; done
+  json="${json%,}}}"
+  printf -- '--settings %q' "$json"
+  [ -z "$LANE_TOOLS_OFF" ] || printf -- ' --disallowedTools %q' "$LANE_TOOLS_OFF"
+  [ -f "$LANE_RULES" ] && printf -- ' --append-system-prompt-file %q' "$LANE_RULES"
+  return 0
 }
 
 # Context size in K tokens from the last assistant usage in a lane's transcript.
@@ -348,7 +401,7 @@ if [ "$mode" = status ]; then
       live="$live$w "
       pane="$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null || true)"
       row="$(index_row "$w")"
-      IFS="$TAB" read -r d n dir m b p rep id st eff <<<"${row:-}"
+      IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"${row:-}"
       if [ -z "$row" ]; then
         rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
@@ -371,7 +424,8 @@ if [ "$mode" = status ]; then
       printf '%-18s report:%-3s %-7s %s\n' "$w" "$wrote" "$state" "$last"
       ctx="?"
       case "${b:-subscription}" in codex|copilot) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
-      printf '    dir:%s model:%s effort:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      case "${b:-subscription}" in codex|copilot) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
+      printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
   else
     echo "(no tmux session \"$SESSION\")"
@@ -379,7 +433,7 @@ if [ "$mode" = status ]; then
   # Index lanes from the last 3 days with no window and no report.
   if [ -s "$INDEX" ]; then
     cutoff="$(date -d '3 days ago' +%F)"
-    while IFS="$TAB" read -r d n dir m b p rep id st eff; do
+    while IFS="$TAB" read -r d n dir m b p rep id st eff conn; do
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
@@ -394,7 +448,7 @@ if [ "$mode" = send ]; then
   name="$1"; shift; text="$*"
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
-    IFS="$TAB" read -r d n dir m b p rep id st eff <<<"$row"
+    IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
       exit 1
@@ -432,7 +486,7 @@ if [ "$mode" = resume ]; then
   fill_ids
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
   if is_headless_billing "${b:-}"; then
     echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
     exit 1
@@ -452,7 +506,9 @@ if [ "$mode" = resume ]; then
     fi
   fi
   eff="$(lane_effort "$m" "${eff:-}")"
-  flags="$(claude_lane_flags "$eff")"
+  # Reuse the recorded connectors choice; a row from before the column was started with them on.
+  if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
+  flags="$(claude_lane_flags "$eff" "$conn")"
   if [ "$console" = 1 ]; then
     cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   else
@@ -464,7 +520,7 @@ if [ "$mode" = resume ]; then
     t new-window -t "$SESSION:" -n "$name" -c "$dir"
   fi
   t send-keys -t "$SESSION:$name" "$cmd" Enter
-  echo "resumed: $name  ($m, effort ${eff:--}, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
+  echo "resumed: $name  ($m, effort ${eff:--}, connectors $conn, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
   exit 0
 fi
 
@@ -531,9 +587,10 @@ fi
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
-eff="-"; flags=""
+eff="-"; flags=""; conn="-"
 if [ "$engine" = claude ]; then
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff")"; eff="${eff:--}"
+  conn="$(lane_connectors "$name" "$prompt")"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
@@ -632,13 +689,13 @@ if [ "$dry" = 0 ]; then
   if [ "$engine" != claude ]; then lane_billing="$engine"
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" >>"$INDEX"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
 fi
 
-echo "lane:   $name  ($model, effort $eff, $dir)"
+echo "lane:   $name  ($model, effort $eff, connectors $conn, $dir)"
 echo "prompt: $hprompt"
 echo "report: $report"
 if [ "$headless" = 1 ] || [ "$engine" != claude ]; then echo "log:    $hand/out.log"; fi
