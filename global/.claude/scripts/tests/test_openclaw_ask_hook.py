@@ -76,6 +76,19 @@ class Hook(unittest.TestCase):
         _, names = self.run_events([with_key(k) for k in bad])
         self.assertEqual(names, [])
 
+    def test_explicit_and_main_session_keys_are_accepted_but_channel_keys_are_not(self):
+        def with_key(k):
+            e = copy.deepcopy(OK)
+            e[SESSION_FIELD] = k
+            return e
+        good = ["agent:main:explicit:map-retest-20261016", "agent:main:explicit", "agent:main:main", "agent:main:main:abc"]
+        _, names = self.run_events([with_key(k) for k in good])
+        self.assertEqual(len(names), len(good))
+        bad = ["agent:main:explicit:a:b", "agent:main:explicitx", "agent:main:mainx", "agent:main:main:", "agent:other:explicit:abc",
+               "agent:main:explicit:a_b", "agent:main:discord:g1", "agent:main:twitch:chan1", "agent:main:youtube:c", "agent:main:telegram:u1"]
+        _, names = self.run_events([with_key(k) for k in bad])
+        self.assertEqual(names, [])
+
     def test_a_skipped_message_logs_the_key_and_channel_but_never_the_text(self):
         e = copy.deepcopy(OK)
         e[SESSION_FIELD] = "agent:main:discord:g1"
