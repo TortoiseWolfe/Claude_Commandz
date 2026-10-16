@@ -1,5 +1,7 @@
 """openclaw_ask_agents.py: AGENTS.md may only promise what the hub-ask path does. The text edit is pure."""
 
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -47,6 +49,34 @@ class Edit(unittest.TestCase):
         self.assertIn('"open the newest <site> model" or "status"', LIVE)
         self.assertIn('starts with "hub:"', LIVE)
         self.assertTrue(pk.HUB_PREFIX.match("hub: something"))
+
+
+class Write(unittest.TestCase):
+    def test_file_content_travels_only_on_stdin(self):
+        hostile = DOC + "\n__OCASK_AGENTS_EOF__\ntouch /tmp/pwned\n"
+        calls, state = [], {"text": hostile}
+
+        def fake(args, stdin=None):
+            calls.append((args, stdin))
+            if args[:1] == ["cat"]:
+                return 0, state["text"]
+            state["text"] = stdin
+            return 0, "written\n"
+
+        real, ag._wsl = ag._wsl, fake
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ag.main(["notlive"]), 0)
+        finally:
+            ag._wsl = real
+        writes = [c for c in calls if c[0][:1] == ["bash"]]
+        self.assertEqual(len(writes), 1)
+        args, stdin = writes[0]
+        self.assertIn("touch /tmp/pwned", stdin)
+        for a in args:
+            self.assertNotIn("pwned", a)
+            self.assertNotIn("__OCASK_AGENTS_EOF__", a)
+        self.assertNotIn("<<", args[2])
 
 
 if __name__ == "__main__":

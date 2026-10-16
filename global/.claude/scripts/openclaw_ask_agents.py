@@ -44,6 +44,17 @@ def _wsl(args, stdin=None):
     return r.returncode, r.stdout.replace("\r", "")
 
 
+WRITE_SCRIPT = (
+    'set -eu; f=$1; stamp=$2; cp -p "$f" "$f.bak-ask-$stamp"; tmp=$(mktemp "$f.new.XXXXXX"); '
+    'cat > "$tmp"; chmod --reference="$f" "$tmp"; mv "$tmp" "$f"; echo written'
+)
+
+
+def write_argv(stamp):
+    """A fixed command; the new file content travels on stdin and is never part of any shell text."""
+    return ["bash", "-c", WRITE_SCRIPT, "_", AGENTS, stamp]
+
+
 def main(argv):
     if len(argv) != 1 or argv[0] not in ("live", "notlive", "show"):
         print(__doc__.split("\n\n")[0], file=sys.stderr)
@@ -64,9 +75,8 @@ def main(argv):
         print("AGENTS.md would pass the 20,000-character cap", file=sys.stderr)
         return 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    script = ("set -eu\nf=%s\ncp -p \"$f\" \"$f.bak-ask-%s\"\ntmp=$(mktemp \"$f.new.XXXXXX\")\ncat > \"$tmp\" <<'__OCASK_AGENTS_EOF__'\n%s__OCASK_AGENTS_EOF__\n"
-              "chmod --reference=\"$f\" \"$tmp\"\nmv \"$tmp\" \"$f\"\necho written\n") % (AGENTS, stamp, new if new.endswith("\n") else new + "\n")
-    rc, out = _wsl(["bash", "-s"], stdin=script)
+    body = new if new.endswith("\n") else new + "\n"
+    rc, out = _wsl(write_argv(stamp), stdin=body)
     _, back = _wsl(["cat", AGENTS])
     if rc != 0 or "written" not in out or back.rstrip("\n") != new.rstrip("\n"):
         print("write or read-back failed; the backup AGENTS.md.bak-ask-%s is beside it" % stamp, file=sys.stderr)
