@@ -283,4 +283,65 @@ assert_contains "$STATUS_OUTPUT" 'engine/billing:subscription' 'status still rea
 assert_contains "$STATUS_OUTPUT" 'engine/billing:codex' 'status displays the Codex engine'
 assert_contains "$STATUS_OUTPUT" 'engine/billing:copilot' 'status displays the Copilot engine'
 
+# Lean Claude lanes: effort high on every model, connectors/plugins/Artifact off, workspace CLAUDE.md swapped for the slim rules.
+PROMPT_MAIL="$TMP/prompt-mail.md"
+printf 'Check the Gmail drafts for replies.\n' >"$PROMPT_MAIL"
+run_lane lean-opus "$REPO" opus "$PROMPT"
+assert_contains "$LAST_COMMAND" '--effort high' 'opus defaults to effort high'
+assert_not_contains "$LAST_COMMAND" 'xhigh' 'no lane defaults to xhigh'
+assert_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'connectors are off by default'
+assert_contains "$LAST_COMMAND" 'superpowers@claude-plugins-official' 'listed plugins are switched off'
+assert_contains "$LAST_COMMAND" 'creative-writing@grey-haven-plugins' 'creative-writing is switched off'
+assert_not_contains "$LAST_COMMAND" 'afa-mods' 'afa-mods stays on'
+assert_not_contains "$LAST_COMMAND" 'security-guidance' 'security-guidance stays on'
+assert_contains "$LAST_COMMAND" '--disallowedTools Artifact' 'the Artifact tools are withheld'
+assert_not_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is kept while no rule file exists'
+assert_not_contains "$LAST_COMMAND" 'append-system-prompt-file' 'no rule file, no appended rules'
+assert_contains "$LAST_OUTPUT" 'connectors off' 'start line reports connectors off'
+run_lane lean-haiku "$REPO" haiku "$PROMPT"
+assert_not_contains "$LAST_COMMAND" '--effort' 'haiku takes no effort'
+run_lane --effort max lean-max "$REPO" opus "$PROMPT"
+assert_contains "$LAST_COMMAND" '--effort max' '--effort still overrides'
+
+printf '# Lane rules\n' >"$HOME_TEST/repos/hub/lane-rules.md"
+run_lane lean-rules "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is excluded once the rule file exists'
+assert_contains "$LAST_COMMAND" "$HOME_TEST/repos/CLAUDE.md" 'the exclude names the workspace CLAUDE.md'
+assert_contains "$LAST_COMMAND" "--append-system-prompt-file $HOME_TEST/repos/hub/lane-rules.md" 'the slim rules are appended'
+
+run_lane lean-mail "$REPO" sonnet "$PROMPT_MAIL"
+assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a prompt that mentions Gmail keeps the connectors'
+assert_contains "$LAST_OUTPUT" 'connectors on' 'start line reports connectors on'
+run_lane triage-mail "$REPO" sonnet "$PROMPT"
+assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a -mail name keeps the connectors'
+run_lane --connectors lean-flag "$REPO" sonnet "$PROMPT"
+assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' '--connectors keeps the connectors'
+conn_of() { awk -F'\t' -v n="$1" '$2==n{c=$11} END{print c}' "$INDEX"; }
+[ "$(conn_of lean-opus)" = off ] || fail 'index records connectors off'
+[ "$(conn_of lean-mail)" = on ] || fail 'index records connectors on'
+checks=$((checks + 2))
+
+# --resume reuses the recorded choice; a row from before the column counts as on.
+for pair in res-off:off res-on:on; do
+  printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsession-x\t-\thigh\t%s\n' \
+    "$(date +%F)" "${pair%%:*}" "$REPO" "$PROMPT" "$TMP/r.md" "${pair#*:}" >>"$INDEX"
+done
+run_lane --dry-run --resume res-off
+assert_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' 'resume keeps connectors off for an off lane'
+assert_contains "$LAST_OUTPUT" 'effort\ high' 'resume reuses the recorded effort'
+run_lane --dry-run --resume res-on
+assert_not_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' 'resume keeps connectors on for an on lane'
+printf '%s\told-row\t%s\tsonnet\tsubscription\t%s\t%s\tsession-old\t-\thigh\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/old-report.md" >>"$INDEX"
+run_lane --dry-run --resume old-row
+assert_not_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' 'a ten-column row resumes with connectors on'
+run_lane --dry-run --connectors --resume res-off
+assert_not_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' '--connectors turns them on at resume'
+
+# --status shows the connectors value, and still reads ten-column rows.
+STATUS_CONN="$(TMUX_HAS_SESSION=1 TMUX_WINDOWS='lean-opus lean-mail old-row' HOME="$HOME_TEST" PATH="$BIN:$PATH" \
+  TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1)"
+assert_contains "$STATUS_CONN" 'connectors:off' 'status shows an off lane'
+assert_contains "$STATUS_CONN" 'connectors:on' 'status shows an on lane and a ten-column row'
+assert_contains "$STATUS_CONN" 'old-row' 'status lists the ten-column row'
+
 printf 'ok - %s checks passed\n' "$checks"

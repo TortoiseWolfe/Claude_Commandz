@@ -115,12 +115,14 @@ cp -a repos/ScriptHammer/.claude/commands/. ~/repos/ScriptHammer/.claude/command
 `global/.claude/scripts/lane.sh` starts work in a named tmux window and keeps a hand-off folder under `~/.claude/state/lanes/` for the prompt, report, and logs.
 
 ```bash
-lane.sh [--dry-run] [--engine claude|codex|copilot] [--allow-client] [--console [--headless]] <name> <repo-dir> <model> <prompt-file>
-lane.sh --status | --send <name> <text> | [--dry-run] [--console] --resume <name>
+lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] <name> <repo-dir> <model> <prompt-file>
+lane.sh --status | --send <name> <text> | [--dry-run] [--console] [--connectors] --resume <name>
 lane.sh --help
 ```
 
 Claude is the default, so existing calls continue to use Claude Code. `--console` keeps Claude on Console credits, and `--headless` runs Claude without an interactive session. Codex and Copilot run headless and save their output in `out.log`; `--status` reports whether each log is still running or has an exit code. `--send` types a message into a live window, and `--resume` resumes a Claude session. Claude lanes keep the existing `console` or `subscription` value in the index. Codex and Copilot use that same index column for `codex` and `copilot`.
+
+Claude lanes start lean, because a lane re-reads everything it starts with on every turn. Effort defaults to `high` on every model (haiku takes none; `--effort` overrides it), and a lane compacts in place at 200K. One `--settings` JSON switches off the claude.ai connectors, the plugins listed in `LANE_PLUGINS_OFF` at the top of the script, and the workspace `~/repos/CLAUDE.md`, which `--append-system-prompt-file` replaces with `$LANE_RULES` (default `~/repos/hub/lane-rules.md`; with no such file the workspace CLAUDE.md loads as before). The Artifact tools are withheld with `--disallowedTools`. Connectors stay on when the lane name ends in `-mail`, when the prompt file mentions Gmail, Calendar or Drive, or with `--connectors`; the choice is column 11 of the index, shown by `--status` and reused by `--resume` (an older row without it counts as on). Measured with a one-line "Reply READY" prompt on sonnet, a lane's first-turn context went from 58.2K to 34.0K tokens.
 
 For Codex and Copilot, the dispatcher checks repository roots in column 2 of `~/repos/hub/client-senders.tsv`, paths listed in `~/repos/hub/client-repos.txt`, and everything under `~/repos/CD/`. The text file has one path per line; blank lines and lines starting with `#` are ignored. Both list files must be readable or those engines are refused. `--allow-client` bypasses this check. The model argument is forwarded to Codex or Copilot only when it is not a Claude model name (`opus`, `sonnet`, `haiku`, or `fable`).
 
