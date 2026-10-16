@@ -53,13 +53,53 @@ class Edit(unittest.TestCase):
         self.assertEqual(dp.parse("reply oc-x-1: more"), ("reply", "oc-x-1", "more"))
         self.assertEqual(dp.parse("close oc-x-1"), ("close", "oc-x-1"))
         self.assertIn("Main session", LIVE)
-        # the yes flow: the one marker line the poller looks for, in the format dispatch.parse takes after the marker
-        self.assertIn("Say yes to start: start <repo>: <task>", LIVE)
-        self.assertEqual(len(pk.PROPOSAL_LINE.findall("Say yes to start: start <repo>: <task>")), 1)
+        # the marker line the poller looks for, in the format parse_menu takes after it; no yes anywhere
+        self.assertIn("Sending to the hub: <one menu sentence>", LIVE)
+        self.assertEqual(len(pk.MARKER_ANY.findall("Sending to the hub: <one menu sentence>")), 1)
+        self.assertEqual(pk.MARKER_LINE.fullmatch("Sending to the hub: status").group("job"), "status")
+        self.assertNotIn("Say yes", LIVE)
+        self.assertNotIn("he says yes", LIVE.lower())
+        self.assertIn("I don't know yet; the [hub] line will say.", LIVE)
+        self.assertIn("Lanes close themselves", LIVE)
         self.assertNotIn("type start", LIVE)
         self.assertNotIn("--session-key", LIVE)
         self.assertIn('starts with "hub:"', LIVE)
         self.assertTrue(pk.HUB_PREFIX.match("hub: something"))
+
+
+class Examples(unittest.TestCase):
+    """The example replies in the live section: a menu action is never refused, and each one ends with a marker the poller can run."""
+    def examples(self):
+        body = LIVE.split("Examples of a whole reply", 1)[1].split("\n\n", 2)[1]
+        lines = body.splitlines()
+        pairs = [(lines[i][2:], lines[i + 1].strip()) for i in range(len(lines) - 1) if lines[i].startswith("- ") and lines[i + 1].startswith("  Sending to the hub:")]
+        self.assertEqual(len(pairs), 6, body)
+        return pairs
+
+    def test_no_menu_action_example_says_it_cannot(self):
+        import re
+        for say, marker in self.examples():
+            self.assertNotRegex(say + " " + marker, re.compile(r"can'?t|cannot|can not|unable|not able|sorry|won't be able", re.I), say)
+            self.assertRegex(say, r"now\.$")  # one line, present tense
+
+    def test_every_example_ends_with_a_marker_the_poller_accepts_and_the_menu_parses(self):
+        import openclaw_pickup as pk
+        sites = {"porch": Path("x")}
+        verbs = set()
+        for say, marker in self.examples():
+            m = pk.MARKER_LINE.fullmatch(marker)
+            self.assertIsNotNone(m, marker)
+            menu = pk.parse_menu(m.group("job"), sites, {})
+            self.assertIsNotNone(menu, marker)
+            verbs.add(menu[0])
+        self.assertEqual(verbs, {"open_model", "status", "start", "reply", "close"})
+
+    def test_open_the_model_with_no_site_is_on_the_menu_and_the_text_says_never_to_ask_which(self):
+        import openclaw_pickup as pk
+        self.assertEqual(pk.parse_menu("open the model", {"porch": Path("x")}, {}), ("open_model", None))
+        self.assertIn("Never ask which one", LIVE)
+        self.assertIn("Never say \"I can't\" about anything on the menu", LIVE)
+        self.assertIn("send it as a start job", LIVE)
 
 
 class Write(unittest.TestCase):

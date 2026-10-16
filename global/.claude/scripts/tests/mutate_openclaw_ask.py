@@ -16,7 +16,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch"]
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -101,6 +101,32 @@ MUTANTS = [
     (DISPATCH, "answers go to another session", 'MAIN_SESSION = "agent:main:main"', 'MAIN_SESSION = "agent:main:explicit:hub"'),
     (DISPATCH, "answers carry a session-key flag", "chat.inject --json --params", "chat.inject --session-key x --json --params"),
     (PICKUP, "lane menu acts on stale asks", "if lane_ask and fresh:", "if lane_ask:"),
+    # the reply-to-his-message check (no yes: the guards live here)
+    (PICKUP, "his message matched by time only (text ignored)", 'if m["role"] != "user" or _norm(m["text"]) != want:', 'if m["role"] != "user":'),
+    (PICKUP, "his message matched by text only (time ignored)", "if d <= MATCH_TOL and (best is None or d < best[0]):", "if best is None or d < best[0]:"),
+    (PICKUP, "his message = the newest message of his", "if d <= MATCH_TOL and (best is None or d < best[0]):", "if True:"),
+    (PICKUP, "a hub line after his message is skipped, not a stop", '            return "none", "a hub line, not the model, came right after his message"', "            continue"),
+    (PICKUP, "provider label no longer checked", 'm["provider"] != "openclaw" and not m["text"].lstrip()', 'not m["text"].lstrip()'),
+    (PICKUP, "[hub] text no longer checked", ' and not m["text"].lstrip().startswith("[hub]")', ""),
+    (PICKUP, "the reply runs on past his next message", '        if m["role"] == "user":\n            break\n', ""),
+    (PICKUP, "two markers allowed", "    if n != 1:", "    if n < 1:"),
+    (PICKUP, "marker may be any line", "MARKER_LINE.fullmatch(lines[-1]) if lines else None", "MARKER_LINE.fullmatch(lines[0]) if lines else None"),
+    (PICKUP, "a marker can say stop", 'return d if d and d[0] != "stop" else None', "return d"),
+    (PICKUP, "same start can run twice", "        if now - used.get(key, 0) < ACT_MAX_AGE:", "        if False:"),
+    (PICKUP, "unanswered messages are dropped at once", '        if status == "wait":\n            waiting.append(e)\n            continue', '        if status == "wait":\n            continue'),
+    (PICKUP, "waiting entries never expire", 'live = [e for e in queue if now - e["ts"] <= ACT_MAX_AGE]', "live = queue"),
+    (PICKUP, "unreadable session loses the message", "        return live, []  # unreadable: try again next poll", "        return [], []"),
+    (PICKUP, "missing message always waits", 'young = now - item["ts"] <= REPLY_WAIT', "young = True"),
+    (PICKUP, "chat reply acted on without being queued by tray gate", 'if kind == "chat" and ctx is not None and type(item.get("ts")) in (int, float):', 'if kind == "chat" and ctx is not None:'),
+    # self-closing lanes, honest failures, Copilot, stop
+    (DISPATCH, "delivered lane keeps its window", "        if wins and name in wins:\n            host.kill_window(name)", "        pass"),
+    (DISPATCH, "delivered lane stays open in state", '        lane["status"] = "closed"\n        out.append', '        out.append'),
+    (DISPATCH, "failure needs only one of the two signs", "if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):", "if not (BLOCKED_RE.search(flat) or NOTHING_RE.search(flat)):"),
+    (DISPATCH, "failed report announced as finished", 'head = "Lane %s (%s) failed: %s." % (name, lane["repo"], failure) if failure else', 'head = "Lane %s (%s) finished." % (name, lane["repo"]) if True else'),
+    (DISPATCH, "copilot told to use a worktree", 'work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE', "work_rule = WORK_RULE"),
+    (DISPATCH, "stop closes the oldest lane", "name = max(open_)[1]", "name = min(open_)[1]"),
+    (DISPATCH, "stop matches long sentences", " and len(t) <= 20:", ":"),
+    (DISPATCH, "undeliverable note still closes the lane", "        if not host.inject(chat):", "        if False:"),
 ]
 
 
