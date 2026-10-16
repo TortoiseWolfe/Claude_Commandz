@@ -413,7 +413,7 @@ class Sweep(Base):
         self.assertIn("without writing a report", chat)
         self.assertEqual(self.state()["lanes"][lane]["status"], "dead")
 
-    def test_codex_out_of_usage_sends_own_repos_to_claude_sonnet_until_the_block_lapses(self):
+    def test_codex_out_of_usage_sends_own_repos_to_copilot_until_the_block_lapses(self):
         self.start("own-app")
         lane = self.lane_names()[0]
         out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
@@ -422,10 +422,51 @@ class Sweep(Base):
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
         self.assertIn("out of usage", chat)
         self.start("own-app", "again", NOW + 200)
-        self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
+        self.assertEqual(self.host.started[-1][2], "copilot")
+        self.assertIn("on Copilot", self.host.chats[-1])
         self.assertIn("Codex is out of usage", self.host.chats[-1])
         self.start("own-app", "later", NOW + 100 + dp.CODEX_BLOCK_SECONDS + 10)
         self.assertEqual(self.host.started[-1][2], "codex")
+
+    def test_copilot_usage_or_quota_limit_blocks_it_then_falls_back_to_claude(self):
+        state = self.state()
+        state["codex_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
+        dp.save_state(self.ctx.state_path, state)
+
+        for i, limit in enumerate(("usage limit", "quota limit")):
+            started = NOW + i * 60
+            state = self.state()
+            state["copilot_blocked_until"] = 0
+            dp.save_state(self.ctx.state_path, state)
+            self.start("own-app", "copilot attempt %d" % i, started)
+            lane = self.host.started[-1][0]
+            self.assertEqual(self.host.started[-1][2], "copilot")
+            out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("Copilot %s reached\nexit 1\n" % limit)
+            (line, chat), = dp.sweep(self.ctx, self.host, started + 100)
+            self.assertIn("Copilot says it is out of usage", chat)
+            self.assertEqual(self.state()["copilot_blocked_until"], started + 100 + dp.COPILOT_BLOCK_SECONDS)
+
+            self.start("own-app", "Claude fallback %d" % i, started + 200)
+            self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
+            self.assertIn("on Claude Sonnet", self.host.chats[-1])
+            self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
+
+        self.start("own-app", "Copilot is available again", started + 101 + dp.COPILOT_BLOCK_SECONDS)
+        self.assertEqual(self.host.started[-1][2], "copilot")
+
+    def test_codex_and_copilot_both_blocked_fall_back_to_claude_sonnet(self):
+        state = self.state()
+        state["codex_blocked_until"] = NOW + dp.CODEX_BLOCK_SECONDS
+        state["copilot_blocked_until"] = NOW + dp.COPILOT_BLOCK_SECONDS
+        dp.save_state(self.ctx.state_path, state)
+
+        self.start("own-app")
+
+        self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
+        self.assertIn("on Claude Sonnet", self.host.chats[-1])
+        self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
 
     def test_an_ordinary_codex_failure_does_not_block_codex(self):
         self.start("own-app")
