@@ -7,7 +7,10 @@ PORT  loopback port to listen on (127.0.0.1 only)
 CTL   a JSON file, re-read on every request: {"<model id>": {"status": 429|200, "text": "...", "call": "<tool>", "args": {...}}}
       A model not listed answers 200 "ok". "call" makes the model reply with a function call to that tool,
       with "args" as its arguments: that is how a staged run plays a prompt-injected model.
+      "needs_declared": true makes it call only when the request declared at least one tool, as a real
+      model API does: with no function declarations there is nothing to call and the model answers in text.
       If CTL names a model "_decl_dump" with {"path": "..."}, each request's tool declarations are written there.
+      If CTL names a model "_sys_dump" with {"path": "..."}, each request's system instruction is written there.
 LOG   one JSON line per request: {"ts","model","stream","tools":[...names offered],"status","tool_result"}.
       tool_result is the newest function response in the request (cut to 400 chars). Never the prompt.
 
@@ -67,6 +70,10 @@ class Handler(BaseHTTPRequestHandler):
         if dump:
             with open(dump, "w") as f:
                 json.dump(body.get("tools"), f)
+        sysdump = control("_sys_dump").get("path")
+        if sysdump:
+            with open(sysdump, "w") as f:
+                json.dump(body.get("systemInstruction") or body.get("system_instruction"), f)
         with open(LOG, "a") as f:
             f.write(json.dumps({"ts": int(time.time()), "model": model, "stream": stream,
                                 "tools": tool_names(body), "status": status,
@@ -80,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(err)
             return
-        if ctl.get("call"):
+        if ctl.get("call") and not (ctl.get("needs_declared") and not tool_names(body)):
             part = {"functionCall": {"name": ctl["call"], "args": ctl.get("args", {})}}
         else:
             part = {"text": ctl.get("text", "ok")}
