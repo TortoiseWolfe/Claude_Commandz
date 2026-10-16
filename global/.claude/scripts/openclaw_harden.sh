@@ -51,26 +51,28 @@ import json, subprocess, sys
 cfg, primary, f1, f2, rid, state = sys.argv[1:7]
 chain = [primary, f1, f2]
 c = json.load(open(cfg))
+# openclaw_local.py's local model stays the last fallback: carry any ollama/ entry through, never add one here
+local = [m for m in (c.get("agents", {}).get("defaults", {}).get("model", {}).get("fallbacks") or []) if m.startswith("ollama/")]
 schema = json.loads(subprocess.run(["openclaw", "config", "schema"], capture_output=True, text=True, check=True).stdout)
 channels = [k for k in schema["properties"]["channels"]["properties"] if k not in ("defaults", "modelByChannel")]
 keep = [b for b in c.get("bindings", []) if not (b.get("agentId") == rid and (b.get("match") or {}).get("accountId") == "*")]
 bindings = keep + [{"type": "route", "agentId": rid, "match": {"channel": ch, "accountId": "*"},
                     "comment": "front desk: untrusted channel input reaches the tool-less receptionist only"} for ch in channels]
-defaults_models = {m: {} for m in chain}
+defaults_models = {m: {} for m in chain + local}
 for m in (c.get("agents", {}).get("defaults", {}).get("models") or {}):
     if m not in defaults_models:
         defaults_models[m] = None  # null deletes the path
 patch = {
     "agents": {
-        "defaults": {"model": {"primary": primary, "fallbacks": [f1, f2]},
+        "defaults": {"model": {"primary": primary, "fallbacks": [f1, f2] + local},
                      "models": defaults_models,
-                     "modelPolicy": {"allow": chain}},
+                     "modelPolicy": {"allow": chain + local}},
         "entries": {rid: {
             "name": "Receptionist",
             "description": "Front desk: reads, classifies, replies. No acting tool. The hub acts.",
             "workspace": state + "/workspace-" + rid,
-            "model": {"primary": primary, "fallbacks": [f1, f2]},
-            "modelPolicy": {"allow": chain},
+            "model": {"primary": primary, "fallbacks": [f1, f2] + local},
+            "modelPolicy": {"allow": chain + local},
             # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
             # minimal profile or the runtime would still declare (session_status, gateway, presence).
             "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
@@ -130,6 +132,8 @@ import json, os, sys
 c = json.load(open(sys.argv[1]))
 P = os.environ["HARDEN_PRIMARY"]; F = [os.environ["HARDEN_F1"], os.environ["HARDEN_F2"]]
 d = c["agents"]["defaults"]; r = c["agents"]["entries"].get("receptionist", {})
+LOCAL = [m for m in d["model"]["fallbacks"] if m.startswith("ollama/")]  # the local tail, if openclaw_local.py added one
+F = F + LOCAL
 def out(n, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + n + (" " + detail if detail else "")); return ok
 res = []
