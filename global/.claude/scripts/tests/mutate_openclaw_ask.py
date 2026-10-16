@@ -96,6 +96,8 @@ MUTANTS = [
     (DISPATCH, "reply to a closed lane", 'get("status") not in ("started", "reported"):\n        names', 'get("status") not in ("started", "reported", "closed"):\n        names'),
     (DISPATCH, "empty report counts as reported", 'if Path(lane["report"]).exists() and Path(lane["report"]).stat().st_size > 0:\n        return "reported", None', 'if Path(lane["report"]).exists():\n        return "reported", None'),
     (DISPATCH, "lost window never counts as dead", 'now - lane["started"] > DEAD_GRACE', "False"),
+    (DISPATCH, "reply sent bare, without the frame", "REPLY_FRAME + text.strip()", "text.strip()"),
+    (DISPATCH, "report posted unquoted", '"> " + ln for ln', '"" + ln for ln'),
     (DISPATCH, "answers go to another session", 'MAIN_SESSION = "agent:main:main"', 'MAIN_SESSION = "agent:main:explicit:hub"'),
     (DISPATCH, "answers carry a session-key flag", "chat.inject --json --params", "chat.inject --session-key x --json --params"),
     (PICKUP, "lane menu acts on stale asks", "if lane_ask and fresh:", "if lane_ask:"),

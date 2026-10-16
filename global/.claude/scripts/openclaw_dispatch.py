@@ -45,6 +45,7 @@ TASK_MAX = 1500
 REPLY_MAX = 1500
 CHAT_MAX = 1900
 REPORT_MAX = 1200
+REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after Codex reports its usage limit, own repos go to Claude Sonnet for this long
 DEAD_GRACE = 120  # seconds a Claude lane may lack a window before it counts as ended
 # Jonathan's ONE chat is "Main session". Every note the dispatcher posts goes here and nowhere else; no other session
@@ -328,8 +329,9 @@ def sweep(ctx, host, now=None):
         lane["status"], changed = verdict, True
         if verdict == "reported":
             body = _report_text(lane["report"])
-            chat = "Lane %s (%s) finished. Its report:\n\n%s\n\nTo send it more, type: reply %s: <your words>. When you're done with it, type: close %s." % (
-                name, lane["repo"], _trim(body, REPORT_MAX), name, name)
+            quoted = "\n".join("> " + ln for ln in _trim(body, REPORT_MAX).splitlines())
+            chat = "Lane %s (%s) finished. Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nTo send it more, type: reply %s: <your words>. When you're done with it, type: close %s." % (
+                name, lane["repo"], quoted, name, name)
             out.append(("%s | report | %s finished; report posted to chat" % (_stamp(now), name), chat))
         else:
             extra = ""
@@ -410,7 +412,7 @@ def do_reply(ctx, host, lane_word, text, now):
         return "%s | reply | couldn't: no such open lane" % stamp, "Couldn't send that: I don't have an open lane called \"%s\". Open lanes I started: %s." % (lane_word[:60], names)
     if len(text) > REPLY_MAX:
         return "%s | reply %s | held: message over %d characters" % (stamp, name, REPLY_MAX), "Held: that message is over %d characters." % REPLY_MAX
-    ok, out = host.send_to_lane(name, text.strip())
+    ok, out = host.send_to_lane(name, REPLY_FRAME + text.strip())  # the frame keeps a leading ! / # & from reaching the lane as a command
     if ok:
         return "%s | reply %s | sent" % (stamp, name), "Sent to %s. It will answer in its report, which I'll post here." % name
     return "%s | reply %s | not sent: %s" % (stamp, name, out), "Couldn't send that to %s: %s" % (name, out or "it did not take")

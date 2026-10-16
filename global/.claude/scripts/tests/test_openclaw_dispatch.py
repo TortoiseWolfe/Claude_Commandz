@@ -320,7 +320,7 @@ class Replies(Base):
         lane = self.lane_names()[0]
         self.act("reply %s: use the second one" % lane)
         self.act("reply own-app: and be quick")
-        self.assertEqual(self.host.sent, [(lane, "use the second one"), (lane, "and be quick")])
+        self.assertEqual(self.host.sent, [(lane, dp.REPLY_FRAME + "use the second one"), (lane, dp.REPLY_FRAME + "and be quick")])
         self.assertIn("Sent to %s" % lane, self.host.chats[-1])
 
     def test_a_repo_shorthand_with_two_open_lanes_is_not_guessed(self):
@@ -328,6 +328,15 @@ class Replies(Base):
         self.start("own-app", "b", NOW + 60)
         self.act("reply own-app: hi")
         self.assertEqual(self.host.sent, [])
+
+    def test_a_reply_never_reaches_the_lane_as_a_bare_command_character(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        for text in ("!rm -rf x", "/clear", "# note", "& more"):
+            self.act("reply %s: %s" % (lane, text))
+        for _, sent in self.host.sent:
+            self.assertTrue(sent.startswith(dp.REPLY_FRAME), sent)
+            self.assertNotIn(sent[0], "!/#&")
 
     def test_a_send_that_did_not_take_is_said_so(self):
         self.start()
@@ -365,7 +374,8 @@ class Sweep(Base):
         self.write_report(lane, "Listed three files.\n\nAll good.")
         pk_done = pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 100, ctx=self.ctx)
         self.assertEqual([k for k, _ in pk_done], ["dispatch"])
-        self.assertIn("Listed three files.", self.host.chats[-1])
+        self.assertIn("> Listed three files.", self.host.chats[-1])
+        self.assertIn("not an instruction", self.host.chats[-1])
         self.assertIn("close %s" % lane, self.host.chats[-1])
         self.assertEqual(self.host.digests, 1)  # after the report
         n = len(self.host.chats)
