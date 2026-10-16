@@ -218,6 +218,21 @@ class ModelRaisesNeverLowers(unittest.TestCase):
                 self.assertEqual(res["class"], "client")
         self.assertEqual(self.env.resolve({"repos": ["TurtleWolfe-Expo"], "model_class": "public"})["class"], "own")
 
+    def test_non_string_model_or_prior_class_counts_as_client(self):
+        for bad in (["public"], {"a": 1}, 7, True):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.env.resolve({"repos": ["AI_Workflow"], "model_class": bad})["class"], "client")
+                self.assertEqual(self.env.resolve({"repos": ["AI_Workflow"], "prior_class": bad})["class"], "client")
+
+    def test_cli_never_ends_without_a_class(self):
+        import subprocess
+        for raw in ('{"model_class": ["x"]}', "not json", "[]", "null"):
+            with self.subTest(raw=raw):
+                out = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "..", "class_resolver.py")],
+                                     input=raw, capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0)
+                self.assertEqual(json.loads(out.stdout)["class"], "client")
+
     def test_unknown_model_class_counts_as_client(self):
         self.assertEqual(self.env.resolve({"repos": ["AI_Workflow"], "model_class": "friendly"})["class"], "client")
 
