@@ -9,7 +9,10 @@ import { writeFileSync, renameSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 export const DROP = process.env.HUBASK_DROP || "/mnt/wsl/ocstage";
-export const DASHBOARD_SESSION = /^agent:main:dashboard(?::[A-Za-z0-9-]{1,64})?$/;
+// The dashboard's own session kinds: dashboard, a named "+" session (explicit) and the main session. Jonathan's
+// first test came from "agent:main:explicit:map-retest-20261016" (16 Oct). A key naming a channel (discord,
+// twitch) never matches, even with channelId webchat.
+export const DASHBOARD_SESSION = /^agent:main:(?:dashboard|explicit|main)(?::[A-Za-z0-9-]{1,64})?$/;
 export const DASHBOARD_CHANNELS = new Set(["webchat"]);
 const MAX_TEXT = 4000;
 const PER_MINUTE = 20;

@@ -55,6 +55,9 @@ MUTANTS = [
     # the OpenClaw-side hook
     (HOOK, "hook writes for any session", "|| !DASHBOARD_SESSION.test(event.sessionKey)", "|| false"),
     (HOOK, "hook session pattern loosened", "(?::[A-Za-z0-9-]{1,64})?$/", "(?::.*)?/"),
+    (HOOK, "hook refuses explicit sessions", "(?:dashboard|explicit|main)", "(?:dashboard|main)"),
+    (HOOK, "hook refuses the main session", "(?:dashboard|explicit|main)", "(?:dashboard|explicit)"),
+    (HOOK, "hook takes any session kind", "(?:dashboard|explicit|main)", "(?:[a-z]+)"),
     (HOOK, "hook session suffix unbounded", "{1,64}", "{1,}"),
     (HOOK, "hook session id suffix refused", "(?::[A-Za-z0-9-]{1,64})?$/", "$/"),
     (HOOK, "skip log carries the text", '" via " + String(c.channelId).slice(0, 40)', '" via " + String(c.channelId).slice(0, 40) + " " + c.content'),
