@@ -14,8 +14,8 @@ up in this module's own state file. Neither is ever a path, an argv word or a sh
 
 The engine follows ~/repos/CLAUDE.md "Rules for every repo": a client repo (hub/client-senders.tsv, hub/client-repos.txt,
 ~/repos/CD) or any repo not owned by TortoiseWolfe gets Claude (Sonnet; Opus for client judgment or email); Jonathan's own
-repos get Codex, or Claude Sonnet when the work needs Docker or wsl.exe, or when a Codex lane has just reported that Codex
-is out of usage.
+repos get Codex, or Claude Sonnet when the work needs Docker or wsl.exe. When Codex is out of usage, own repos use Copilot;
+when Copilot is out of usage too, they use Claude Sonnet.
 
 Budget: at most MAX_RUNNING dispatched lanes at once and MAX_PER_DAY starts a day (past that: "held: <reason>"); when the
 weekly projection (hub/scripts/model_quality_report.py) is past PROJECTION_LIMIT percent, Claude lanes start on Sonnet only.
@@ -46,7 +46,8 @@ REPLY_MAX = 1500
 CHAT_MAX = 1900
 REPORT_MAX = 1200
 REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
-CODEX_BLOCK_SECONDS = 12 * 3600  # after Codex reports its usage limit, own repos go to Claude Sonnet for this long
+CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
+COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
 DEAD_GRACE = 120  # seconds a Claude lane may lack a window before it counts as ended
 # Jonathan's ONE chat is "Main session". Every note the dispatcher posts goes here and nowhere else; no other session
 # under agent main is ever created or written to (not by tests, not by one-off CLI calls). Tests use a fake host.
@@ -337,7 +338,10 @@ def sweep(ctx, host, now=None):
             extra = ""
             if lane["engine"] == "codex" and re.search(r"usage limit", " ".join(_log_exit(Path(lane["report"]).parent)[1]), re.I):
                 state["codex_blocked_until"] = now + CODEX_BLOCK_SECONDS
-                extra = " Codex says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
+                extra = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
+            elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit", " ".join(_log_exit(Path(lane["report"]).parent)[1]), re.I):
+                state["copilot_blocked_until"] = now + COPILOT_BLOCK_SECONDS
+                extra = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
             chat = "Lane %s (%s) stopped: %s.%s Nothing to read. You can start it again with: start %s: <task>." % (name, lane["repo"], detail, extra, lane["repo"])
             out.append(("%s | report | %s stopped: %s" % (_stamp(now), name, detail), chat))
     if changed:
@@ -373,7 +377,10 @@ def do_start(ctx, host, repo_word, task, now):
     engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task)
     note = ""
     if engine == "codex" and state.get("codex_blocked_until", 0) > now:
-        engine, why, note = "claude", "own repo, Codex is out of usage", " (Codex is out of usage)"
+        if state.get("copilot_blocked_until", 0) > now:
+            engine, why, note = "claude", "own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"
+        else:
+            engine, why, note = "copilot", "own repo, Codex is out of usage", " (Codex is out of usage)"
     if engine == "claude" and model == "opus":
         pct = host.projection_pct()
         if pct is not None and pct > PROJECTION_LIMIT:
@@ -400,7 +407,7 @@ def do_start(ctx, host, repo_word, task, now):
     save_state(ctx.state_path, state)
     return "%s | start %s | started %s (%s, %s)" % (stamp, name, lane, engine, why), (
         "Started %s in %s on %s%s. I'll post its report here when it's done. To talk to it meanwhile, type: reply %s: <your words>." % (
-            lane, name, "Codex" if engine == "codex" else "Claude " + model.capitalize(), note, lane))
+            lane, name, "Claude " + model.capitalize() if engine == "claude" else engine.capitalize(), note, lane))
 
 
 def do_reply(ctx, host, lane_word, text, now):
