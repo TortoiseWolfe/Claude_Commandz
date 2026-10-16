@@ -102,18 +102,23 @@ if ! ((H >= 8 && H < 22)); then
   night="after hours, "
 fi
 quiet=$(age "$ACTIVE")
-want=$((quiet / 4)); ((want < 60)) && want=60; ((want > 1800)) && want=1800
+FLOOR=${MUSE_POLL_FLOOR:-300}                  # 2026-10-16 (card 4): was 60 s; Hatch looks every 20 min, so 5 min keeps notes well inside that
+want=$((quiet / 4)); ((want < FLOOR)) && want=$FLOOR; ((want > 1800)) && want=1800
 (($(age "$LAST") < want - 15)) && exit 0      # not due yet (15 s allows for scheduler jitter)
 mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
+CLIENT_LAST=$STATE/muse-poll-client-last.stamp
+CLIENT_EVERY=${MUSE_CLIENT_EVERY:-600}         # client mail looks at most every 10 min (it has a 2-day window, so nothing is missed)
 export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
 queue_weekly_transcripts queue
 
-CLAUDE=$HOME/.local/bin/claude
+CLAUDE=${MUSE_CLAUDE:-$HOME/.local/bin/claude}
 S=$HOME/.claude/scripts
 LOG=$HOME/.claude/state/muse-poll.log
 ts() { date '+%F %T'; }
 cd $HOME/repos || exit 1
+# Learning-loop baseline (spec 002): writes last week's record once, then this is a quick no-op. No model runs.
+[[ -f "$S/learning_baseline.py" ]] && timeout 150 python3 "$S/learning_baseline.py" observe >/dev/null 2>>"$LOG"
 
 # No Write or Edit in general: print mode denies any path not allowed below, and these keep the repos and this
 # config unwritable even if a global allow rule appears. The one writable file is muse_jev.py's request
@@ -132,8 +137,12 @@ check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model ha
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
 
 # Client mail: its own check and queue step, so it runs whether or not a Hatch note is waiting.
-cnew=$("$S/muse_poll_client_check.sh" 2>>"$LOG")
-echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
+cnew=""
+if (($(age "$CLIENT_LAST") >= CLIENT_EVERY - 15)); then
+  touch "$CLIENT_LAST"
+  cnew=$("$S/muse_poll_client_check.sh" 2>>"$LOG")
+  echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
+fi
 if [[ -n "$cnew" ]]; then
   CALLOW="Read,Bash($S/muse_poll_record.sh:*)"
   hprompt=$(cat "$S/muse_poll.client-handle.prompt"); hprompt=${hprompt//\{\{HOME\}\}/$HOME}
