@@ -1,0 +1,23 @@
+# OpenClaw's last-resort model: Ollama on CPU, no GPU (the GPU is shared with SketchUp and scan jobs).
+# Start:  docker compose -p openclaw-local -f docker-compose.yml up -d
+# Stop:   docker compose -p openclaw-local -f docker-compose.yml down
+# No secrets here: Ollama on a loopback port needs none.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: openclaw-local-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - openclaw-local-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_CONTEXT_LENGTH: "16384"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_FLASH_ATTENTION: "1"
+    mem_limit: 6g
+    cpus: 8
+volumes:
+  openclaw-local-models:

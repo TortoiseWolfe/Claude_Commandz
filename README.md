@@ -158,6 +158,37 @@ git commit -m "refresh: sync command backups"
 
 To **add a new repo** to the backup set, create `repos/<new-name>/.claude/commands/` and run the refresh loop.
 
+## OpenClaw local model (last fallback)
+
+OpenClaw's agents run `google/gemini-3.5-flash > 3.5-flash-lite > 3.6-flash`. Gemini's free tier is rate limited,
+so a busy day can run all three dry. `openclaw-local/docker-compose.yml` adds a CPU-only Ollama container
+(no GPU, `mem_limit` 6g, 8 cpus, loopback port 11434) and `global/.claude/scripts/openclaw_local.py` appends
+`ollama/qwen2.5:1.5b-instruct` as the LAST fallback for `agents.defaults` and the receptionist. No tools are
+added, no paid provider, no secrets (the `ollama-local` apiKey is Ollama's documented marker for a loopback host).
+
+```bash
+docker compose -p openclaw-local -f openclaw-local/docker-compose.yml up -d
+docker exec openclaw-local-ollama ollama pull qwen2.5:1.5b-instruct
+wsl.exe -d OpenClawGateway -u openclaw -e python3 - apply < global/.claude/scripts/openclaw_local.py   # one config write, hot-applies
+wsl.exe -d OpenClawGateway -u openclaw -e python3 - verify < global/.claude/scripts/openclaw_local.py
+```
+
+A config write can make the gateway reload the google plugin and close the OpenClaw app: after any apply, reopen
+it from its Start-menu shortcut and check `OpenClaw.Tray.WinUI.exe` is running. `openclaw_harden.sh` carries an
+existing `ollama/` tail through, so re-running it does not drop the local model.
+
+Rules for anything that tests OpenClaw (enforced in `openclaw_local.py`, tested in `tests/test_openclaw_local.py`):
+
+1. Jonathan's one chat is "Main session", `agent:main:main`; replies go there and nowhere else.
+2. Never create or write any other session under agent `main` (no `--agent main`, no `--session-key agent:main:...`,
+   no injected notes). Test on the tool-less agent `hubtest` with `openclaw_local.py probe`, which uses a fresh
+   `agent:hubtest:probe-<time>` session each run.
+
+Measured on CPU while another 8-core job ran (cold = first call after the model loads, 8.3K-token real bootstrap):
+qwen2.5:1.5b 42 s cold prefill, 6 to 13 s warm, 7 to 17 tok/s; 3b 80 s cold, 10 tok/s; llama3.2:3b 78 s cold, 6 tok/s;
+7b 141 s cold, 5 tok/s. Status questions are answered correctly by all of them. None reliably refuses to claim an action
+it cannot take, so treat the local tier as a way to keep answering, not as a router.
+
 ## Design rationale
 
 Why mirror the original paths instead of flattening or grouping by category?
