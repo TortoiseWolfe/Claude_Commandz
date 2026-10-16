@@ -299,6 +299,7 @@ class Ctx:
                  senders=REPOS / "hub/client-senders.tsv", repos_txt=REPOS / "hub/client-repos.txt", root=REPOS):
         self.repos, self.state_path, self.lanes_dir = repos, Path(state_path), Path(lanes_dir)
         self.senders, self.repos_txt, self.root = senders, repos_txt, root
+        self.used_path = self.state_path.with_name("openclaw-proposals-used.json")  # proposals a "yes" has already started
 
 
 def _lane_finished(lane, host, now):

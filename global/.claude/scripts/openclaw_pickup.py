@@ -23,6 +23,10 @@ With --act (the poller, shell only, never a model) a second stage runs on the it
     fit one of those sentences; a site is looked up in a set built from the folders on disk (plus a private alias
     file), a repo in a table from hub/repos.tsv and a lane in the dispatcher's state file, so text never becomes a
     path or an argument. Answers are posted into Jonathan's Main session (agent:main:main) and nowhere else.
+  - a tray message that is a plain "yes" (yes, do it, go ahead, ok ...) starts the job the chat model last proposed: the model ends a
+    reply with ONE line "Say yes to start: start <repo>: <task>", and the hub reads that reply back from Main session, takes the text after
+    the marker, and runs it through the same start path as a typed one. The model's text is data: a repo only from the table, the task
+    quoted, never a path or an argument, and nothing it writes acts without a fresh "yes" from the tray. See find_proposal().
   - a tray message that starts with "hub:" becomes one quoted "Jonathan via OpenClaw:" line in the muse inbox
     and touches a wake file for lane_watch.sh. Any other tray message is chat: logged by hash, nothing more.
 
@@ -242,6 +246,11 @@ OPEN_FORMS = (
     re.compile(r"(?:please )?open (?:the )?(?:newest|latest) (?:model|skp)(?: file)? (?:for|of) " + NAME),
 )
 STATUS_FORMS = ("status", "the status", "what's the status", "whats the status", "what is the status", "send me the status")
+CONFIRM_FORMS = frozenset({"yes", "yes do it", "yes please", "yep", "yeah", "do it", "go", "go ahead", "start it", "ok", "okay", "ok do it", "okay do it"})
+PROPOSAL_MARKER = re.compile(r"say yes to start:", re.I)
+PROPOSAL_LINE = re.compile(r"^[ \t>*_`-]*say yes to start:[ \t]*(?P<job>[^\n]*?)[ \t*_`]*$", re.I | re.M)
+HISTORY_WINDOW = 12
+NOTHING_TO_START = "Nothing to start: the last reply didn't propose a job."
 REPLY_BEGIN, REPLY_END = "<!-- openclaw-ask:begin -->", "<!-- openclaw-ask:end -->"
 
 
@@ -354,8 +363,79 @@ class Host(dispatch.LaneHost):
         r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--", "bash", "-s"], 60, stdin=script)
         return bool(r and r.returncode == 0 and "ok" in r.stdout)
 
+    def main_history(self, limit=HISTORY_WINDOW):
+        """The newest messages of Main session, oldest first, via the gateway's chat.history (a read: it creates nothing). None if unreadable."""
+        params = json.dumps({"sessionKey": dispatch.MAIN_SESSION, "limit": limit}, ensure_ascii=True)
+        r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c",
+                       'cd /home/openclaw && read -r P && openclaw gateway call chat.history --json --params "$P"'], 90, stdin=params + "\n")
+        if not r or r.returncode != 0:
+            return None
+        try:
+            return normalize_history(json.loads(r.stdout))
+        except ValueError:
+            return None
+
     def sleep(self, s):
         time.sleep(s)
+
+
+def normalize_history(obj):
+    """chat.history's answer -> [{"role", "provider", "text", "ts_ms"}] oldest first. Only text parts count (never thinking)."""
+    out = []
+    msgs = obj.get("messages") if isinstance(obj, dict) else None
+    for m in msgs if isinstance(msgs, list) else []:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            c = "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text" and isinstance(x.get("text"), str))
+        ts = m.get("timestamp")
+        out.append({"role": m.get("role"), "provider": m.get("provider"), "text": c if isinstance(c, str) else "",
+                    "ts_ms": ts if type(ts) is int else 0})
+    return out
+
+
+def is_confirm(text):
+    """A plain yes: the whole message is one of CONFIRM_FORMS once case and punctuation are ignored."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split()) in CONFIRM_FORMS
+
+
+def find_proposal(history, now):
+    """-> (job, key) | (None, why). The job is the text after the one "Say yes to start:" marker of the model-written reply
+    that came right before Jonathan's "yes". The tray's "yes" is itself in Main session (and the model has answered it) by the
+    time the poller runs, so the proposal is the message before the newest user message, not the newest message. Fails closed:
+    a [hub] line (provider openclaw, text starting "[hub]": lane reports and our own notes) in that place, a stale reply, no
+    marker or two markers, or a payload that is not a start line all mean nothing starts."""
+    if not history:
+        return None, "no history"
+    users = [i for i, m in enumerate(history) if m["role"] == "user"]
+    if users:
+        i = users[-1]
+        if not is_confirm(history[i]["text"]) or i == 0:
+            return None, "the newest message from him is not a yes to a reply"
+        cand = history[i - 1]
+    else:
+        cand = history[-1]
+    text = cand["text"]
+    if cand["role"] != "assistant" or cand["provider"] == "openclaw" or text.lstrip().startswith("[hub]"):
+        return None, "the reply before the yes is not model-written"
+    if not -60 <= now - cand["ts_ms"] / 1000 <= ACT_MAX_AGE:
+        return None, "the proposal is older than %d minutes" % (ACT_MAX_AGE // 60)
+    if len(PROPOSAL_MARKER.findall(text)) != 1 or len(PROPOSAL_LINE.findall(text)) != 1:
+        return None, "not exactly one proposal line"
+    job = PROPOSAL_LINE.search(text).group("job").lstrip(" \t*_`")
+    parsed = dispatch.parse(job)
+    if not parsed or parsed[0] != "start":
+        return None, "the proposal is not a start line"
+    return job, "%d:%s" % (cand["ts_ms"], hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+
+
+def _used(path):
+    try:
+        v = json.loads(Path(path).read_text())
+        return [k for k in v if isinstance(k, str)] if isinstance(v, list) else []
+    except (OSError, ValueError):
+        return []
 
 
 def open_model(site, path, host, tries=14, pause=3):
@@ -420,6 +500,10 @@ def act_on(item, host, sites, aliases, inbox, wake, now=None, ctx=None):
             line, chat = dispatch.do_close(ctx, host, lane_ask[1], now)
         host.inject(chat)
         return "dispatch", "%s | oc-%s" % (line, sha)
+    if ctx is not None and not ask and not lane_ask and is_confirm(item["text"]):
+        if not fresh:
+            return "inbox", "%s | yes | not run: the message is older than %d minutes | oc-%s" % (stamp, ACT_MAX_AGE // 60, sha)
+        return "dispatch", _start_proposed(ctx, host, now, stamp, sha)
     if lane_ask and not fresh:
         return "inbox", "%s | %s | not run: the message is older than %d minutes | oc-%s" % (stamp, lane_ask[0], ACT_MAX_AGE // 60, sha)
     if ask and fresh:
@@ -438,6 +522,35 @@ def act_on(item, host, sites, aliases, inbox, wake, now=None, ctx=None):
         _wake(wake, sha, stamp)
         return "inbox", "%s | hub list | put on the hub's list | oc-%s" % (stamp, sha)
     return "chat", None
+
+
+def _start_proposed(ctx, host, now, stamp, sha):
+    """Carry out a fresh "yes": read Main session, find the proposal, start it the way a typed start would. Posts to Main session."""
+    history = host.main_history()
+    if history is None:
+        host.inject("Couldn't read the chat just now, so I started nothing. Say yes again in a minute.")
+        return "%s | yes | nothing started: could not read Main session | oc-%s" % (stamp, sha)
+    job, key = find_proposal(history, now)
+    used = _used(ctx.used_path)
+    if job is not None and key in used:
+        job, key = None, "that proposal was already started"
+    if job is None:
+        host.inject(NOTHING_TO_START)
+        return "%s | yes | nothing started: %s | oc-%s" % (stamp, key, sha)
+    _, repo, task = dispatch.parse(job)
+    line, chat = dispatch.do_start(ctx, host, repo, task, now)
+    host.inject(chat)
+    if " | started " in line:
+        _append_used(ctx.used_path, used, key)
+    return "%s (yes) | oc-%s" % (line, sha)
+
+
+def _append_used(path, used, key):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps((used + [key])[-50:]))
+    tmp.replace(p)
 
 
 def _wake(wake, sha, stamp):
