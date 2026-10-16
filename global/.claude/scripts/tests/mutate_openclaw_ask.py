@@ -52,6 +52,9 @@ MUTANTS = [
     (PICKUP, "wake file never touched", "def _wake(wake, sha, stamp):\n    p = Path(wake)", "def _wake(wake, sha, stamp):\n    return\n    p = Path(wake)"),
     (PICKUP, "writer's temp files not skipped", "if name.startswith(TMP_PREFIX):", "if False:"),
     (PICKUP, "replies carry the message text", "\"%s | hub list | put on the hub's list | oc-%s\" % (stamp, sha)", "\"%s | hub list | %s | oc-%s\" % (stamp, item[\"text\"], sha)"),
+    (PICKUP, "prev backups allowed as the model", ' or f.name.lower().endswith("-prev.skp")', ""),
+    (PICKUP, "prev check case-sensitive", 'f.name.lower().endswith("-prev.skp")', 'f.name.endswith("-prev.skp")'),
+    (PICKUP, "site-named file no longer preferred", 'if f.name.lower() == d.name.lower() + ".skp":', "if False:"),
     # the OpenClaw-side hook
     (HOOK, "hook writes for any session", "|| !DASHBOARD_SESSION.test(event.sessionKey)", "|| false"),
     (HOOK, "hook session pattern loosened", "(?::[A-Za-z0-9-]{1,64})?$/", "(?::.*)?/"),
