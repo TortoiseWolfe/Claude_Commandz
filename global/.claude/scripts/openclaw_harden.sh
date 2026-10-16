@@ -2,8 +2,10 @@
 # openclaw_harden.sh: put OpenClaw's front desk on the free-only chain with a tool-less receptionist.
 #
 #   openclaw_harden.sh apply      back up, patch, read everything back (exit 1 if any check fails)
+#   openclaw_harden.sh fix        back up, re-apply the config patch only (no exec-policy, no plugin), read back.
+#                                 For a gateway that already ran apply: it adds what apply missed (see "tools").
 #   openclaw_harden.sh verify     the read-back and proofs only, changes nothing
-#   openclaw_harden.sh rollback   restore the newest backup of the config
+#   openclaw_harden.sh rollback [BACKUP]   restore BACKUP, or the newest backup of the config
 #
 # Runs INSIDE the OpenClawGateway distro as user openclaw. It works on whichever state directory the
 # environment names (OPENCLAW_STATE_DIR), which is how it is tested on a staged copy first. It prints
@@ -62,11 +64,17 @@ patch = {
             "workspace": state + "/workspace-" + rid,
             "model": {"primary": primary, "fallbacks": [f1, f2]},
             "modelPolicy": {"allow": chain},
-            "tools": {"allow": ["session_status"]},
+            # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
+            # minimal profile or the runtime would still declare (session_status, gateway, presence).
+            "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
         }},
     },
     "models": {"providers": {"claude": None}},
     "tools": {
+        # An unset profile leaves core tools unfiltered, and the default tool-search mode hides what a run
+        # is really offered. A global minimal profile and direct schemas make the policy the same in both.
+        "profile": "minimal",
+        "toolSearch": False,
         "deny": ["group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes",
                  "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
         "elevated": {"enabled": False},
@@ -124,7 +132,9 @@ res.append(out("claude.provider_absent", "claude" not in (c.get("models", {}).ge
 res.append(out("allowlist.defaults_models", sorted(d["models"]) == sorted([P] + F), "%d entries" % len(d["models"])))
 res.append(out("allowlist.modelPolicy", sorted(d.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
 res.append(out("allowlist.receptionist", sorted(r.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
-res.append(out("receptionist.tools", r.get("tools", {}).get("allow") == ["session_status"], str(r.get("tools", {}).get("allow"))))
+rt = r.get("tools", {})
+res.append(out("receptionist.tools", rt.get("profile") == "minimal" and rt.get("allow") == [] and {"gateway", "session_status", "presence"} <= set(rt.get("deny", [])), "profile=%s allow=%s deny=%s" % (rt.get("profile"), rt.get("allow"), rt.get("deny"))))
+res.append(out("tools.profile_and_search", c.get("tools", {}).get("profile") == "minimal" and c.get("tools", {}).get("toolSearch") is False, "profile=%s toolSearch=%s" % (c.get("tools", {}).get("profile"), c.get("tools", {}).get("toolSearch"))))
 need = {"group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"}
 res.append(out("tools.deny", need <= set(c.get("tools", {}).get("deny", [])), "%d entries" % len(c.get("tools", {}).get("deny", []))))
 res.append(out("tools.elevated", c.get("tools", {}).get("elevated", {}).get("enabled") is False))
@@ -165,7 +175,7 @@ t = d["sandbox"]["tools"]
 print("   mode:", d["sandbox"]["mode"], "| sandbox tools allow:", t.get("allow"))
 ' | mask
 
-  echo "== receptionist run (one real model call; must make zero tool calls)"
+  echo "== receptionist run (one real model call; zero tools declared, zero tool calls)"
   local out; out="$(openclaw agent --agent "$RECEPTIONIST" --message "run id" --json --timeout 120 2>&1)"
   echo "$out" | python3 -c '
 import json, sys
@@ -173,20 +183,25 @@ raw = sys.stdin.read()
 d = json.loads(raw[raw.index("{"):])
 m = d["result"]["meta"]; ts = m.get("toolSummary") or {}
 calls = ts.get("calls", 0)  # an empty toolSummary means the run made no tool call
+declared = [(e.get("name") if isinstance(e, dict) else e) for e in (m.get("systemPromptReport", {}).get("tools", {}).get("entries") or [])]
 print("   status:", d.get("status"), "| provider/model:", m["agentMeta"].get("provider"), m["agentMeta"].get("model"), "| toolSummary:", ts)
+ok_declared = len(declared) == 0
+print(("PASS" if ok_declared else "FAIL"), "receptionist.tools_declared_to_model", declared)
 ok = d.get("status") == "ok" and calls == 0
 print(("PASS" if ok else "FAIL"), "receptionist.toolSummary.calls", calls)
-sys.exit(0 if ok else 1)' 2>&1 | mask
+sys.exit(0 if (ok and ok_declared) else 1)' 2>&1 | mask
   [ "${PIPESTATUS[1]}" = 0 ] || fail=1
 }
 
 # ---------------------------------------------------------------------------------------------------
-do_apply() {
+check_version() {
   local ver; ver="$(openclaw --version 2>&1 | sed -n 's/^OpenClaw \([0-9.]*\).*/\1/p')"
   if [ "$ver" != "$EXPECT_VERSION" ]; then echo "openclaw is $ver, this script was proved on $EXPECT_VERSION; set OPENCLAW_HARDEN_VERSION to override"; exit 1; fi
+}
 
+backup_and_patch() {
   echo "== 1 backup"
-  local stamp bak; stamp="$(date +%Y%m%d-%H%M%S)"; bak="$CFG.bak-harden-$stamp"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"; bak="$CFG.bak-harden-$stamp"
   cp -p "$CFG" "$bak" && chmod 600 "$bak" && echo "backup: $bak"
   { echo "exec-policy before:"; openclaw exec-policy show 2>&1 | mask; } > "$bak.exec-policy.txt"
   chmod 600 "$bak.exec-policy.txt"
@@ -198,6 +213,20 @@ do_apply() {
   [ "${PIPESTATUS[1]}" = 0 ] || { echo "dry run refused; nothing changed"; exit 1; }
   echo "$patch" | openclaw config patch --stdin 2>&1 | mask | tail -5
   [ "${PIPESTATUS[1]}" = 0 ] || { echo "patch failed; restore with: openclaw_harden.sh rollback"; exit 1; }
+}
+
+do_fix() {
+  check_version
+  backup_and_patch
+  do_verify
+  echo
+  if [ "$fail" = 0 ]; then echo "ALL CHECKS PASS. Undo this fix only with: openclaw_harden.sh rollback   (restores $bak)"; else echo "SOME CHECKS FAILED. Undo this fix only with: openclaw_harden.sh rollback   (restores $bak)"; fi
+  exit "$fail"
+}
+
+do_apply() {
+  check_version
+  backup_and_patch
 
   echo "== 3 exec policy deny-all"
   openclaw exec-policy preset deny-all 2>&1 | mask | tail -3
@@ -217,8 +246,10 @@ do_apply() {
 }
 
 do_rollback() {
-  local bak; bak="$(ls -1t "$CFG".bak-harden-[0-9]* 2>/dev/null | grep -v '\.exec-policy\.txt$' | head -1)"
-  [ -n "$bak" ] || { echo "no backup found beside $CFG"; exit 1; }
+  # With no argument: the newest backup, which is the state just before the latest apply or fix.
+  # To go back to before the first apply, name that backup: rollback "$CFG.bak-harden-<stamp>".
+  local bak; bak="${1:-$(ls -1t "$CFG".bak-harden-[0-9]* 2>/dev/null | grep -v '\.exec-policy\.txt$' | head -1)}"
+  [ -n "$bak" ] && [ -f "$bak" ] || { echo "no backup found beside $CFG"; exit 1; }
   cp -p "$CFG" "$CFG.pre-rollback-$(date +%Y%m%d-%H%M%S)" && cp -p "$bak" "$CFG" && chmod 600 "$CFG" && echo "restored $bak"
   echo "Note: exec approvals stay at deny-all (stricter than before) and the typesafe pin and the receptionist workspace stay; all three are harmless."
   openclaw config validate 2>&1 | mask | tail -3
@@ -229,9 +260,10 @@ main() {
   init
   case "$MODE" in
     apply) do_apply ;;
+    fix) do_fix ;;
     verify) do_verify; exit "$fail" ;;
-    rollback) do_rollback ;;
-    *) echo "usage: openclaw_harden.sh apply|verify|rollback"; exit 2 ;;
+    rollback) do_rollback "${2:-}" ;;
+    *) echo "usage: openclaw_harden.sh apply|fix|verify|rollback [BACKUP]"; exit 2 ;;
   esac
 }
 
