@@ -307,13 +307,15 @@ class Budget(Base):
 
 
 class Replies(Base):
-    def test_started_note_names_the_lane_and_how_to_talk_to_it(self):
+    def test_started_note_names_the_lane_the_task_and_how_to_cancel(self):
         self.start()
         lane = self.lane_names()[0]
         self.assertTrue(lane.startswith("oc-own-app-"))
         msg = self.host.chats[-1]
         self.assertIn("Started %s" % lane, msg)
-        self.assertIn("reply %s:" % lane, msg)
+        self.assertIn("do the thing", msg)
+        self.assertIn("Say stop to cancel.", msg)
+        self.assertNotIn("yes", msg.lower())
 
     def test_reply_goes_to_lane_send_for_a_named_lane_and_for_the_one_open_lane_of_a_repo(self):
         self.start()
@@ -376,7 +378,10 @@ class Sweep(Base):
         self.assertEqual([k for k, _ in pk_done], ["dispatch"])
         self.assertIn("> Listed three files.", self.host.chats[-1])
         self.assertIn("not an instruction", self.host.chats[-1])
-        self.assertIn("close %s" % lane, self.host.chats[-1])
+        self.assertNotIn("type close", self.host.chats[-1])  # he never closes a lane by hand
+        self.assertIn("The lane is closed", self.host.chats[-1])
+        self.assertEqual(self.host.killed, [lane])
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertEqual(self.host.digests, 1)  # after the report
         n = len(self.host.chats)
         pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 200, ctx=self.ctx)
@@ -411,7 +416,8 @@ class Sweep(Base):
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
         self.assertIn("exit 1", chat)
         self.assertIn("without writing a report", chat)
-        self.assertEqual(self.state()["lanes"][lane]["status"], "dead")
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertTrue(self.state()["lanes"][lane]["delivered"])
 
     def test_codex_out_of_usage_sends_own_repos_to_copilot_until_the_block_lapses(self):
         self.start("own-app")
@@ -553,3 +559,132 @@ class Projection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelfClosing(Base):
+    def test_a_delivered_report_kills_the_window_and_marks_the_lane_closed(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.assertIn(lane, self.host.wins)
+        self.write_report(lane)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([lane], "closed"))
+        self.assertNotIn(lane, self.host.wins)
+
+    def test_a_note_that_could_not_be_posted_leaves_the_lane_open_for_the_next_sweep(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.write_report(lane)
+        self.host.inject = lambda text: False
+        self.assertEqual(dp.sweep(self.ctx, self.host, NOW + 100), [])
+        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "reported"))
+        del self.host.inject
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
+        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([lane], "closed"))
+
+    def test_a_closed_lane_is_not_posted_again(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.write_report(lane)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(dp.sweep(self.ctx, self.host, NOW + 200), [])
+
+
+class Failed(Base):
+    def test_a_report_that_changed_nothing_for_a_permission_reason_is_announced_as_failed(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.write_report(lane, "I could not create the worktree: permission denied under the worktrees folder. No changes were made.")
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertIn("failed: I could not create the worktree: permission denied", chat)
+        self.assertNotIn("finished", chat)
+        self.assertIn("failed:", line)
+        self.assertNotIn("finished", line)
+
+    def test_an_honest_finished_report_is_still_finished(self):
+        for body in ("Added the page and the test. All green.", "Fixed the permission check in login. Nothing else changed.", "Changed 3 files; tests pass."):
+            self.setUp()
+            self.start("client-app")
+            lane = self.lane_names()[0]
+            self.write_report(lane, body)
+            (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+            self.assertIn("finished", chat, body)
+            self.assertNotIn("failed", chat, body)
+
+    def test_report_failure_gives_a_short_reason_or_none(self):
+        self.assertIsNone(dp.report_failure("Done."))
+        self.assertIsNone(dp.report_failure("Permission denied came up once, then I fixed it and committed."))
+        reason = dp.report_failure("Tried to push. Operation not permitted. Nothing was pushed.")
+        self.assertIn("not permitted", reason.lower())
+        self.assertLessEqual(len(reason), 160)
+
+
+class WorkRules(Base):
+    def prompt(self):
+        return Path(self.host.started[-1][4]).read_text()
+
+    def test_a_copilot_prompt_says_clone_and_push_from_the_lane_folder_and_never_a_worktree(self):
+        self.start("own-app")
+        self.assertEqual(self.host.started[-1][2], "codex")
+        state = self.state()
+        state["codex_blocked_until"] = NOW + dp.CODEX_BLOCK_SECONDS
+        dp.save_state(self.ctx.state_path, state)
+        self.start("own-app", "second", NOW + 10)
+        self.assertEqual(self.host.started[-1][2], "copilot")
+        text = self.prompt()
+        hand = str(Path(self.host.started[-1][4]).parent)
+        self.assertIn("clone", text)
+        self.assertIn(hand + "/repo", text)
+        self.assertIn("never", text.lower())
+        self.assertNotIn(".worktrees", text)
+        self.assertNotIn("git worktree add", text)
+
+    def test_other_engines_keep_the_worktree_rule(self):
+        self.start("own-app")
+        self.assertEqual(self.host.started[-1][2], "codex")
+        self.assertIn(".worktrees", self.prompt())
+        self.start("client-app", "x", NOW + 10)
+        self.assertEqual(self.host.started[-1][2], "claude")
+        self.assertIn(".worktrees", self.prompt())
+
+
+class Stop(Base):
+    def test_stop_closes_the_newest_lane_he_started(self):
+        self.start("client-app", "old", NOW)
+        self.start("client-app", "new", NOW + 30)
+        newest = self.host.started[-1][0]
+        kind, line = self.act("stop", now=NOW + 60)
+        self.assertEqual(kind, "dispatch")
+        self.assertEqual(self.host.killed, [newest])
+        self.assertEqual(self.state()["lanes"][newest]["status"], "closed")
+        self.assertIn("Stopped %s" % newest, self.host.chats[-1])
+        other = [n for n in self.lane_names() if n != newest][0]
+        self.assertEqual(self.state()["lanes"][other]["status"], "started")
+
+    def test_cancel_that_works_and_a_late_report_is_never_posted_for_a_stopped_lane(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.act("Cancel that.", now=NOW + 30)
+        self.assertEqual(self.host.killed, [lane])
+        self.write_report(lane)
+        n = len(self.host.chats)
+        self.assertEqual(dp.sweep(self.ctx, self.host, NOW + 100), [])
+        self.assertEqual(len(self.host.chats), n)
+
+    def test_stop_with_nothing_running_says_so(self):
+        kind, line = self.act("stop")
+        self.assertEqual(kind, "dispatch")
+        self.assertIn("no lane running", self.host.chats[-1])
+        self.assertEqual(self.host.killed, [])
+
+    def test_stop_only_as_a_short_whole_message(self):
+        self.start("client-app")
+        for t in ("stop the presses and tell me why you did that", "stop" + "!" * 30, "please stop", "don't stop", "stop start own-app: x"):
+            self.assertIsNone(dp.parse(t), t)
+        for t in ("stop", "Stop!", "stop it", "cancel", "cancel that", "cancel it."):
+            self.assertEqual(dp.parse(t), ("stop",), t)
+
+    def test_stop_is_for_tray_messages_only(self):
+        self.start("client-app")
+        kind, line = self.act("stop", source="discord")
+        self.assertEqual((kind, line, self.host.killed), ("ignored", None, []))

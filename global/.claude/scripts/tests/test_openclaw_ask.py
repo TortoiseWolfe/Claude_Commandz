@@ -170,11 +170,15 @@ class Menu(Base):
         for t in ("status", "Status?", "what's the status"):
             self.assertEqual(self.parse(t), ("status", None), t)
 
+    def test_open_the_model_with_no_site_means_the_newest_anywhere(self):
+        for t in ("open the model", "Open the newest model.", "please open the latest skp", "open model", "open the newest model file"):
+            self.assertEqual(self.parse(t), ("open_model", None), t)
+
     def test_nothing_else_parses(self):
         for t in ("open the newest nowhere model", "open the newest ghost model",  # alias to a site not on disk
                   "open the newest ../../etc model", "open the newest C:\\Windows model", "open the newest site-a model; calc",
                   "open the newest porch model and delete the old ones", "open the newest site-a/m001-old model",
-                  "open the newest model", "open the oldest porch model", "status of everything", "open /etc/passwd",
+                  "open the oldest model", "open the oldest porch model", "open the model and delete it", "open the model; calc", "open every model", "status of everything", "open /etc/passwd",
                   "open the newest porch model\nrm -rf ~", ""):
             self.assertIsNone(self.parse(t), repr(t))
 

@@ -7,6 +7,9 @@ menu, each form being the WHOLE message:
     start <repo>: <task>      a lane in that repo
     reply <lane>: <text>      type <text> into that lane's window (lane.sh --send)
     close <lane>              kill that lane's window once its report exists
+    stop | cancel that        typed only: close the newest lane he started, report or not
+
+A lane closes itself: once its report is posted into Main session, sweep() kills its window and marks it closed.
 
 What text may become: a word of the verb, a task (quoted data inside a fixed prompt template) and a message for a
 lane. A repo is looked up in a table built on the PC from hub/repos.tsv (kind=repo, folder exists); a lane is looked
@@ -73,11 +76,36 @@ TASK>>>
 
 Rules:
 - Read this repo's own CLAUDE.md (or AGENTS.md) first if it has one, and follow it.
-- If you change files, do it on a branch in a worktree under ~/repos/.worktrees/, never by switching branches in the main checkout.
+- {work_rule}
 - Look at your own output before reporting: run it, open it, read it back. Say what you saw, not what you expect.
 - Never send email or messages, merge to a client's main, or spend money. If the task needs any of that, stop and ask in the report instead.
 - Finish by writing {report} (150 words or less, plain words: what you did, what you saw, what is left or what you need from him). Then stop.
 """
+
+WORK_RULE = "If you change files, do it on a branch in a worktree under ~/repos/.worktrees/, never by switching branches in the main checkout."
+# Copilot can write only inside its working directory and its lane folder, so a worktree under ~/repos/.worktrees fails there.
+COPILOT_WORK_RULE = (
+    "If you change files, clone the repo into your lane folder ({hand}/repo, from this checkout's origin: git clone \"$(git remote get-url origin)\" {hand}/repo), "
+    "work on a branch there, and commit and push from that clone. Never make a git worktree and never write outside your working directory or your lane folder."
+)
+# A report that says nothing changed because the lane was not allowed to write is a failure, whatever the lane called it.
+BLOCKED_RE = re.compile(r"permission denied|operation not permitted|not permitted|permission problem|permissions? (?:error|issue)|"
+                        r"(?:can(?:no|')t|could not|couldn't|unable to|not able to|not allowed to|wasn't able to) (?:write|create|modify|commit|push|make)|"
+                        r"read-only|outside (?:the |my )?(?:working|allowed|workspace|lane)|sandbox", re.I)
+NOTHING_RE = re.compile(r"no changes|nothing (?:was |got )?(?:changed|written|created|committed|pushed|done|made)|"
+                        r"(?:did not|didn't|could not|couldn't|can't|cannot|unable to|not able to|wasn't able to|was not able to) "
+                        r"(?:change|create|write|commit|push|make|modify|do)|blocked|failed", re.I)
+
+
+def report_failure(body):
+    """-> a short reason when the report says the lane changed nothing because it was not allowed to, else None."""
+    flat = " ".join(body.split())
+    if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):
+        return None
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        if BLOCKED_RE.search(sentence):
+            return sentence.strip()[:160].rstrip(".")
+    return "it was not allowed to write"
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -218,9 +246,14 @@ def choose_engine(path, client, task):
 # ---------------------------------------------------------------------------------------------------------
 # Parsing.
 
+STOP_FORMS = frozenset({"stop", "stop that", "stop it", "cancel", "cancel that", "cancel it"})
+
+
 def parse(text):
-    """The dispatch menu. -> ("start", repo_word, task) | ("reply", lane_word, text) | ("close", lane_word) | None."""
+    """The dispatch menu. -> ("start", repo_word, task) | ("reply", lane_word, text) | ("close", lane_word) | ("stop",) | None."""
     t = " ".join(text.split())
+    if re.sub(r"[^a-z ]+", "", t.lower()).strip() in STOP_FORMS and len(t) <= 20:
+        return ("stop",)
     m = START_RE.fullmatch(t)
     if m:
         return ("start", m.group("repo"), m.group("task"))
@@ -299,7 +332,8 @@ class Ctx:
                  senders=REPOS / "hub/client-senders.tsv", repos_txt=REPOS / "hub/client-repos.txt", root=REPOS):
         self.repos, self.state_path, self.lanes_dir = repos, Path(state_path), Path(lanes_dir)
         self.senders, self.repos_txt, self.root = senders, repos_txt, root
-        self.used_path = self.state_path.with_name("openclaw-proposals-used.json")  # proposals a "yes" has already started
+        self.used_path = self.state_path.with_name("openclaw-proposals-used.json")  # {job key: epoch} a model-proposed start has run
+        self.pending_path = self.state_path.with_name("openclaw-pending.json")  # his messages still waiting for the model's reply
 
 
 def _lane_finished(lane, host, now):
@@ -318,33 +352,48 @@ def _lane_finished(lane, host, now):
 
 
 def sweep(ctx, host, now=None):
-    """Post the report (or the ending) of every lane Jonathan started that has one. -> list of (log line, chat text)."""
+    """Post the report (or the ending) of every lane Jonathan started that has one into Main session, then close the lane
+    (window killed, state "closed"): he never has to. A note that could not be posted leaves the lane open for the next sweep.
+    -> list of (log line, chat text) for the notes posted."""
     now = time.time() if now is None else now
     state = load_state(ctx.state_path)
     out, changed = [], False
     for name, lane in sorted(state["lanes"].items()):
-        if lane.get("status") != "started":
+        if lane.get("status") == "started":
+            verdict, detail = _lane_finished(dict(lane, name=name), host, now)
+            if verdict is None:
+                continue
+            lane["status"], changed = verdict, True
+            if verdict == "dead":
+                lane["detail"] = detail
+                tail = " ".join(_log_exit(Path(lane["report"]).parent)[1])
+                if lane["engine"] == "codex" and re.search(r"usage limit", tail, re.I):
+                    state["codex_blocked_until"] = now + CODEX_BLOCK_SECONDS
+                    lane["note"] = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
+                elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit", tail, re.I):
+                    state["copilot_blocked_until"] = now + COPILOT_BLOCK_SECONDS
+                    lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
+        if lane.get("status") not in ("reported", "dead") or lane.get("delivered"):
             continue
-        verdict, detail = _lane_finished(dict(lane, name=name), host, now)
-        if verdict is None:
-            continue
-        lane["status"], changed = verdict, True
-        if verdict == "reported":
+        if lane["status"] == "reported":
             body = _report_text(lane["report"])
             quoted = "\n".join("> " + ln for ln in _trim(body, REPORT_MAX).splitlines())
-            chat = "Lane %s (%s) finished. Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nTo send it more, type: reply %s: <your words>. When you're done with it, type: close %s." % (
-                name, lane["repo"], quoted, name, name)
-            out.append(("%s | report | %s finished; report posted to chat" % (_stamp(now), name), chat))
+            failure = report_failure(body)
+            head = "Lane %s (%s) failed: %s." % (name, lane["repo"], failure) if failure else "Lane %s (%s) finished." % (name, lane["repo"])
+            chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To have more done, tell me." % (head, quoted)
+            line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + failure if failure else "finished")
         else:
-            extra = ""
-            if lane["engine"] == "codex" and re.search(r"usage limit", " ".join(_log_exit(Path(lane["report"]).parent)[1]), re.I):
-                state["codex_blocked_until"] = now + CODEX_BLOCK_SECONDS
-                extra = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
-            elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit", " ".join(_log_exit(Path(lane["report"]).parent)[1]), re.I):
-                state["copilot_blocked_until"] = now + COPILOT_BLOCK_SECONDS
-                extra = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
-            chat = "Lane %s (%s) stopped: %s.%s Nothing to read. You can start it again with: start %s: <task>." % (name, lane["repo"], detail, extra, lane["repo"])
-            out.append(("%s | report | %s stopped: %s" % (_stamp(now), name, detail), chat))
+            chat = "Lane %s (%s) stopped: %s.%s Nothing to read. You can start it again by telling me." % (name, lane["repo"], lane.get("detail", "it ended"), lane.get("note", ""))
+            line = "%s | report | %s stopped: %s" % (_stamp(now), name, lane.get("detail", "it ended"))
+        if not host.inject(chat):
+            changed = True  # status change above is kept; the note is retried next sweep
+            continue
+        lane["delivered"], changed = True, True
+        wins = host.windows()
+        if wins and name in wins:
+            host.kill_window(name)
+        lane["status"] = "closed"
+        out.append((line, chat))
     if changed:
         save_state(ctx.state_path, state)
     return out
@@ -399,7 +448,8 @@ def do_start(ctx, host, repo_word, task, now):
     report = hand / "report.md"
     prompt = hand / "prompt.md"
     hand.mkdir(parents=True, exist_ok=True)
-    prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report))
+    work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE
+    prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report, work_rule=work_rule))
     ok, msg = host.start_lane(lane, path, engine, model, prompt)
     if not ok:
         return "%s | start %s | couldn't start: %s" % (stamp, name, msg), "Couldn't start the lane in %s: %s" % (name, msg)
@@ -407,8 +457,8 @@ def do_start(ctx, host, repo_word, task, now):
     state["starts"].append(now)
     save_state(ctx.state_path, state)
     return "%s | start %s | started %s (%s, %s)" % (stamp, name, lane, engine, why), (
-        "Started %s in %s on %s%s. I'll post its report here when it's done. To talk to it meanwhile, type: reply %s: <your words>." % (
-            lane, name, "Claude " + model.capitalize() if engine == "claude" else engine.capitalize(), note, lane))
+        "Started %s: %s%s. Say stop to cancel. (%s on %s; I'll post its report here.)" % (
+            lane, _trim(" ".join(task.split()), 120), note, name, "Claude " + model.capitalize() if engine == "claude" else engine.capitalize()))
 
 
 def do_reply(ctx, host, lane_word, text, now):
@@ -445,3 +495,19 @@ def do_close(ctx, host, lane_word, now):
     lane["status"] = "closed"
     save_state(ctx.state_path, state)
     return "%s | close %s | closed" % (stamp, name), "Closed %s." % name
+
+
+def do_stop(ctx, host, now):
+    """Typed "stop" / "cancel that": close the newest lane Jonathan started that is still open, report or not."""
+    stamp = _stamp(now)
+    state = load_state(ctx.state_path)
+    open_ = [(l.get("started", 0), n) for n, l in state["lanes"].items() if l.get("status") in ("started", "reported", "dead") and not l.get("delivered")]
+    if not open_:
+        return "%s | stop | no open lane" % stamp, "There's no lane running to stop."
+    name = max(open_)[1]
+    wins = host.windows()
+    if wins and name in wins and not host.kill_window(name):
+        return "%s | stop %s | window would not close" % (stamp, name), "Couldn't stop %s: its window would not close." % name
+    state["lanes"][name]["status"], state["lanes"][name]["delivered"] = "closed", True
+    save_state(ctx.state_path, state)
+    return "%s | stop %s | stopped" % (stamp, name), "Stopped %s." % name
