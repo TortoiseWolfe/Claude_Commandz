@@ -6,8 +6,9 @@
 # when the folder is empty and appends one block to openclaw-ask-poll.log when something happened.
 #
 # Scheduling: this distro has no systemd (PID 1 is init), so the poll is a Windows Task Scheduler task, like
-# \AFA\OpenClawStatus: \AFA\OpenClawAsk runs every minute
-#   conhost.exe --headless wsl.exe -d Debian -- bash -lc ~/.claude/scripts/openclaw_ask_poll.sh
+# \AFA\OpenClawStatus (export that task's XML, change the command and PT15M to PT1M, import as \AFA\OpenClawAsk):
+#   conhost.exe --headless wsl.exe -d Debian -- bash -lc ~/repos/Claude_Commandz/global/.claude/scripts/openclaw_ask_poll.sh
+# It runs from this repo checkout, not from ~/.claude/scripts: openclaw_pickup.py is run only from the repo.
 # Remove: schtasks.exe /Delete /TN '\AFA\OpenClawAsk' /F
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
