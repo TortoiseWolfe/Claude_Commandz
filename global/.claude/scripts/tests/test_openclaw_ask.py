@@ -89,6 +89,41 @@ class Base(unittest.TestCase):
         return self.inbox.read_text().splitlines()
 
 
+class Models(Base):
+    def put(self, site, name, age):
+        p = self.skp / site / name
+        p.write_bytes(b"x")
+        os.utime(p, (NOW - age, NOW - age))
+        return p
+
+    def test_a_prev_backup_is_never_the_model_even_when_it_is_the_newest_file(self):
+        self.put("site-a", "site-a-prev.skp", 1)
+        self.put("site-a", "m009-PREV.skp", 1)
+        self.assertEqual(pk.site_models(self.skp)["site-a"].name, "m008b-outlines.skp")
+
+    def test_a_folder_holding_only_a_prev_backup_is_not_a_site(self):
+        (self.skp / "site-c").mkdir()
+        self.put("site-c", "site-c-prev.skp", 1)
+        self.assertNotIn("site-c", pk.site_models(self.skp))
+
+    def test_the_file_named_for_the_site_wins_over_a_newer_file(self):
+        want = self.put("site-a", "site-a.skp", 5000)
+        self.put("site-a", "m010-newer.skp", 1)
+        self.assertEqual(pk.site_models(self.skp)["site-a"], want)
+
+    def test_without_a_site_named_file_the_newest_wins(self):
+        self.put("site-b", "n009-newer.skp", 1)
+        self.assertEqual(pk.site_models(self.skp)["site-b"].name, "n009-newer.skp")
+
+    def test_the_open_action_launches_the_model_not_the_backup(self):
+        self.put("site-a", "site-a-prev.skp", 1)
+        host, (kind, _) = self.act(self.item("open the newest site-a model"))
+        self.assertEqual(kind, "action")
+        launched = " ".join(str(c) for c in host.calls)
+        self.assertIn("m008b-outlines.skp", launched)
+        self.assertNotIn("-prev", launched)
+
+
 class Guard(Base):
     def test_a_public_source_can_never_become_an_action_even_if_its_text_names_one(self):
         for source in ("twitch", "discord", "youtube", "drop"):

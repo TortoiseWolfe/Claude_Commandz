@@ -242,7 +242,10 @@ REPLY_BEGIN, REPLY_END = "<!-- openclaw-ask:begin -->", "<!-- openclaw-ask:end -
 
 
 def site_models(skp_root):
-    """-> {site: newest .skp Path} built from the folders on disk. The only place a path comes from."""
+    """-> {site: .skp Path} built from the folders on disk. The only place a path comes from.
+
+    Never a *-prev.skp (the photos lane copies the previous build there just before each new one, so the backup is
+    often the newest file). <site>.skp is the model when it exists; otherwise the newest of what is left."""
     out = {}
     try:
         dirs = sorted(p for p in Path(skp_root).iterdir() if p.is_dir() and not p.is_symlink())
@@ -253,8 +256,11 @@ def site_models(skp_root):
             continue
         best = None
         for f in d.glob("*.skp"):
-            if f.is_symlink() or not f.is_file() or f.name.lower() == "blank.skp" or not SAFE_FILE.match(f.name):
+            if f.is_symlink() or not f.is_file() or f.name.lower() == "blank.skp" or f.name.lower().endswith("-prev.skp") or not SAFE_FILE.match(f.name):
                 continue
+            if f.name.lower() == d.name.lower() + ".skp":
+                best = (float("inf"), f)
+                break
             m = f.stat().st_mtime
             if best is None or m > best[0]:
                 best = (m, f)
