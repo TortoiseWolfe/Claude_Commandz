@@ -225,7 +225,7 @@ def rule_terms(item, L, cfg):
 
 def rule_prior(item, L, cfg):
     pc = item.get("prior_class")
-    return [(pc if pc in STRICTNESS else "client", "class carries forward")] if pc else []
+    return [(pc if isinstance(pc, str) and pc in STRICTNESS else "client", "class carries forward")] if pc else []
 
 
 RULES = {
@@ -261,7 +261,7 @@ def resolve(item, cfg=None, lists=None):
         matched.append({"rule": "no-repo-default", "class": "own", "detail": "no repo named; nothing says public"})
     mc = item.get("model_class")
     if mc is not None:
-        raised = stricter(cls, mc if mc in STRICTNESS else "client")
+        raised = stricter(cls, mc if isinstance(mc, str) and mc in STRICTNESS else "client")
         if raised != cls:
             matched.append({"rule": "model-raised", "class": raised, "detail": "a model raised the class"})
         cls = raised
@@ -276,7 +276,11 @@ def main(argv=None):
         item = json.load(sys.stdin)
     except ValueError:
         item = None   # unparseable input is client
-    print(json.dumps(resolve(item)))
+    try:
+        result = resolve(item)
+    except Exception:   # nothing a bad item or list does may end without a class
+        result = {"class": "client", "rules": [{"rule": "resolver-error", "class": "client", "detail": "fail closed"}], "fail_closed": True}
+    print(json.dumps(result))
     return 0
 
 
