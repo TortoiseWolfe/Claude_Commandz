@@ -62,6 +62,8 @@ cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
 cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
 cp ~/.claude/scripts/class_resolver.py ~/.claude/scripts/route_log.py ~/.claude/scripts/learning_baseline.py global/.claude/scripts/
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
+# openclaw_harden.sh and tests/openclaw_fake_gemini.py are authored here and run inside the
+# OpenClawGateway distro (not from ~/.claude): do not cp over them, and run them only from this repo.
 cp ~/.claude/hooks/roadmap-drift.sh ~/.claude/hooks/explore-override-drift.sh ~/.claude/hooks/explore-override-drift.ref global/.claude/hooks/
 
 # Per-repo commands — loop over existing repos/<name>/ dirs
