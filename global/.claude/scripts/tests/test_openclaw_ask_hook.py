@@ -64,6 +64,32 @@ class Hook(unittest.TestCase):
         _, names = self.run_events(events)
         self.assertEqual(names, [])
 
+    def test_the_dashboard_session_with_an_id_suffix_is_accepted_and_lookalikes_are_not(self):
+        def with_key(k):
+            e = copy.deepcopy(OK)
+            e[SESSION_FIELD] = k
+            return e
+        _, names = self.run_events([with_key("agent:main:dashboard:abc-123"), with_key("agent:main:dashboard:" + "a" * 64)])
+        self.assertEqual(len(names), 2)
+        bad = ["agent:main:dashboard:", "agent:main:dashboard:" + "a" * 65, "agent:main:dashboard:a:b", "agent:main:dashboard:a/b",
+               "agent:main:dashboard:a b", "agent:main:dashboard:x\n", "agent:receptionist:dashboard:abc", "agent:main:dashboardx:abc"]
+        _, names = self.run_events([with_key(k) for k in bad])
+        self.assertEqual(names, [])
+
+    def test_a_skipped_message_logs_the_key_and_channel_but_never_the_text(self):
+        e = copy.deepcopy(OK)
+        e[SESSION_FIELD] = "agent:main:discord:g1"
+        e["context"]["channelId"] = "discord"
+        e["context"]["content"] = "SECRET-TEXT-123"
+        d = tempfile.mkdtemp()
+        r = subprocess.run(["node", "--input-type=module", "-e", DRIVER, str(HANDLER), json.dumps([e, {"type": "command"}])],
+                           capture_output=True, text=True, env=dict(os.environ, HUBASK_DROP=d), timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hub-ask: skipped key agent:main:discord:g1 via discord", r.stdout)
+        self.assertNotIn("SECRET-TEXT-123", r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("skipped"), 1, "only received messages are logged")
+        self.assertEqual(os.listdir(d), [])
+
     def test_control_characters_are_blanked_so_the_item_stays_valid(self):
         e = copy.deepcopy(OK)
         e["context"]["content"] = "hub: a\u0000b\u001bc\nd"

@@ -9,7 +9,7 @@ import { writeFileSync, renameSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 export const DROP = process.env.HUBASK_DROP || "/mnt/wsl/ocstage";
-export const DASHBOARD_SESSION = /^agent:main:dashboard$/;
+export const DASHBOARD_SESSION = /^agent:main:dashboard(?::[A-Za-z0-9-]{1,64})?$/;
 export const DASHBOARD_CHANNELS = new Set(["webchat"]);
 const MAX_TEXT = 4000;
 const PER_MINUTE = 20;
@@ -29,7 +29,14 @@ export function itemFor(event, nowMs, rand = () => randomBytes(5).toString("hex"
 export default function handler(event) {
   const now = Date.now();
   const item = itemFor(event, now);
-  if (!item) return;
+  if (!item) {
+    // Names only, never the text: a missed dashboard message can be traced to the session or channel check.
+    if (event && event.type === "message" && event.action === "received") {
+      const c = event.context || {};
+      console.log("hub-ask: skipped key " + String(event.sessionKey).slice(0, 80) + " via " + String(c.channelId).slice(0, 40));
+    }
+    return;
+  }
   recent = recent.filter((t) => now - t < 60000);
   if (recent.length >= PER_MINUTE) return;
   recent.push(now);
