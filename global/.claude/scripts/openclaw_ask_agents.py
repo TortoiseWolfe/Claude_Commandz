@@ -40,7 +40,7 @@ def apply_section(text, section):
 
 
 def _wsl(args, stdin=None):
-    r = subprocess.run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--"] + args, input=stdin, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e"] + args, input=stdin, capture_output=True, text=True, timeout=60)
     return r.returncode, r.stdout.replace("\r", "")
 
 

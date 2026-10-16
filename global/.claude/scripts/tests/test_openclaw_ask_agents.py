@@ -46,7 +46,14 @@ class Edit(unittest.TestCase):
         sites = {"site-a": Path("x")}
         self.assertEqual(pk.parse_ask("open the newest site-a model", sites, {}), ("open_model", "site-a"))
         self.assertEqual(pk.parse_ask("status", sites, {}), ("status", None))
-        self.assertIn('"open the newest <site> model" or "status"', LIVE)
+        for form in ('"open the newest <site> model"', '"status"', '"start <repo>: <task>"', '"reply <lane>: <words>"', '"close <lane>"'):
+            self.assertIn(form, LIVE)
+        import openclaw_dispatch as dp
+        self.assertEqual(dp.parse("start site-a: do it"), ("start", "site-a", "do it"))
+        self.assertEqual(dp.parse("reply oc-x-1: more"), ("reply", "oc-x-1", "more"))
+        self.assertEqual(dp.parse("close oc-x-1"), ("close", "oc-x-1"))
+        self.assertIn("Main session", LIVE)
+        self.assertNotIn("--session-key", LIVE)
         self.assertIn('starts with "hub:"', LIVE)
         self.assertTrue(pk.HUB_PREFIX.match("hub: something"))
 

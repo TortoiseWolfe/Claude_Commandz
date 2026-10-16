@@ -25,6 +25,7 @@ class FakeHost:
         self.pending = {}
         self.launches, self.never_loads, self.files_titled = launches, never_loads, files_titled
         self.replies = []
+        self.chats = []
         self.digest_ok = True
 
     def sketchup_windows(self):
@@ -51,6 +52,10 @@ class FakeHost:
 
     def deliver_reply(self, lines):
         self.replies.append(list(lines))
+        return True
+
+    def inject(self, text):
+        self.chats.append(text)
         return True
 
     def sleep(self, s):

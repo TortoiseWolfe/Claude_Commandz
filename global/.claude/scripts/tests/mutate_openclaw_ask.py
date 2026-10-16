@@ -15,7 +15,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup"]
+DISPATCH = "openclaw_dispatch.py"
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -72,6 +73,32 @@ MUTANTS = [
     (HOOK, "hook text length uncapped", "|| text.length > MAX_TEXT", ""),
     (HOOK, "hook leaves control characters in", "const text = c.content.replace(/[\\u0000-\\u0008\\u000b-\\u001f\\u007f]/g, \" \").trim();", "const text = c.content.trim();"),
     (HOOK, "hook source is whatever the event says", 'source: "tray"', "source: c.channelId"),
+    # the lane menu (openclaw_dispatch.py): where repos and lanes come from, the budget, the engine, the one chat
+    (DISPATCH, "repo taken from the text, not the table", "hit = ctx.repos.get(repo_word.lower())", 'hit = ctx.repos.get(repo_word.lower()) or (repo_word, "/tmp/" + repo_word, "")'),
+    (DISPATCH, "lane taken from the text, not the state file (reply)", "    name = resolve_lane(lane_word, state)\n    if not name or state", "    name = lane_word\n    if not name or state"),
+    (DISPATCH, "symlinked repo folders listed", "not d.is_symlink() and", ""),
+    (DISPATCH, "folder without .git listed", ' and (d / ".git").exists()', ""),
+    (DISPATCH, "running-lane cap off", "if len(running) >= MAX_RUNNING:", "if False:"),
+    (DISPATCH, "running-lane cap off by one", "if len(running) >= MAX_RUNNING:", "if len(running) > MAX_RUNNING:"),
+    (DISPATCH, "daily cap off", "if today >= MAX_PER_DAY:", "if False:"),
+    (DISPATCH, "daily cap off by one", "if today >= MAX_PER_DAY:", "if today > MAX_PER_DAY:"),
+    (DISPATCH, "Opus allowed past the projection limit", "if engine == \"claude\" and model == \"opus\":\n        pct = host.projection_pct()\n        if pct is not None and pct > PROJECTION_LIMIT:", "if engine == \"claude\" and model == \"opus\":\n        pct = host.projection_pct()\n        if False:"),
+    (DISPATCH, "projection note dropped for Sonnet", "    elif engine == \"claude\":\n        pct = host.projection_pct()\n        if pct is not None and pct > PROJECTION_LIMIT:", "    elif engine == \"claude\":\n        pct = host.projection_pct()\n        if False:"),
+    (DISPATCH, "projection limit raised to 100", "PROJECTION_LIMIT = 90.0", "PROJECTION_LIMIT = 100.0"),
+    (DISPATCH, "client list unreadable counts as own", 'return "the client lists cannot be read"', "return None"),
+    (DISPATCH, "client-senders list ignored", 'if len(f) > 1 and f[1].strip() and os.path.realpath(_expand(f[1])) == real:', "if False:"),
+    (DISPATCH, "CD tree not checked", "if real == cd or real.startswith(cd + os.sep):", "if False:"),
+    (DISPATCH, "foreign owner counts as own", "if not m or m.group(1).lower() != OWNER:", "if False:"),
+    (DISPATCH, "client repos go to Opus always", "if JUDGMENT_RE.search(task):", "if True:"),
+    (DISPATCH, "Docker work goes to Codex", "if DOCKER_RE.search(task) or", "if"),
+    (DISPATCH, "Codex block ignored", 'state.get("codex_blocked_until", 0) > now', "False"),
+    (DISPATCH, "close without a report", 'if lane["status"] == "started" and not has_report:', "if False:"),
+    (DISPATCH, "reply to a closed lane", 'get("status") not in ("started", "reported"):\n        names', 'get("status") not in ("started", "reported", "closed"):\n        names'),
+    (DISPATCH, "empty report counts as reported", 'if Path(lane["report"]).exists() and Path(lane["report"]).stat().st_size > 0:\n        return "reported", None', 'if Path(lane["report"]).exists():\n        return "reported", None'),
+    (DISPATCH, "lost window never counts as dead", 'now - lane["started"] > DEAD_GRACE', "False"),
+    (DISPATCH, "answers go to another session", 'MAIN_SESSION = "agent:main:main"', 'MAIN_SESSION = "agent:main:explicit:hub"'),
+    (DISPATCH, "answers carry a session-key flag", "chat.inject --json --params", "chat.inject --session-key x --json --params"),
+    (PICKUP, "lane menu acts on stale asks", "if lane_ask and fresh:", "if lane_ask:"),
 ]
 
 
@@ -86,6 +113,7 @@ def main():
         d = Path(tempfile.mkdtemp())
         shutil.copy(SCRIPTS / PICKUP, d / PICKUP)
         shutil.copy(SCRIPTS / INSTALL, d / INSTALL)
+        shutil.copy(SCRIPTS / DISPATCH, d / DISPATCH)
         shutil.copytree(SCRIPTS / "openclaw_ask_hook", d / "openclaw_ask_hook")
         (d / "tests").mkdir()
         for t in TESTS:

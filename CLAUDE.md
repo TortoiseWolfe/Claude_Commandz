@@ -63,8 +63,8 @@ cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.
 cp ~/.claude/scripts/class_resolver.py ~/.claude/scripts/route_log.py ~/.claude/scripts/learning_baseline.py global/.claude/scripts/
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
 cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh global/.claude/scripts/
-# openclaw_harden.sh, openclaw_uid.sh, openclaw_pickup.py and tests/{openclaw_fake_gemini.py,test_openclaw_uid_stage.sh,
-# test_openclaw_pickup.py} are authored here and run inside the OpenClawGateway distro or against its drop folder
+# openclaw_harden.sh, openclaw_uid.sh, openclaw_pickup.py, openclaw_dispatch.py and tests/{openclaw_fake_gemini.py,test_openclaw_uid_stage.sh,
+# test_openclaw_pickup.py,test_openclaw_dispatch.py} are authored here and run inside the OpenClawGateway distro or against its drop folder
 # (not from ~/.claude): do not cp over them, and run them only from this repo.
 cp ~/.claude/hooks/roadmap-drift.sh ~/.claude/hooks/explore-override-drift.sh ~/.claude/hooks/explore-override-drift.ref global/.claude/hooks/
 
