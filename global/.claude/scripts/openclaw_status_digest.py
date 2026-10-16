@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""Build the status digest OpenClaw (the front desk) reads at every session start.
+
+No model calls. Everything comes from live sources on the hub:
+  - the roadmap issue body (gh): arc summaries with open/done counts, the title of each open item,
+    "Next session should", the Next 3 sessions;
+  - lane.sh --status: lane name, report yes/no, working/idle (dead lanes are only counted);
+  - lane report.md files from the last 2 days;
+  - the newest .skp per site folder;
+  - open items in muse-inbox.md, titles only.
+
+The digest goes to a third-party model (Google), so the filter fails closed. Jonathan's rule
+(16 Oct): client projects may appear by name with their model or step, what is running and what is
+next; nothing else about clients: no people, emails, addresses, money or mail text.
+
+Lines never pass through as free text. Each source is parsed into small labelled pieces (a title,
+a count, a file name); every piece is cut to a length, scrubbed, then checked against a character
+allowlist and a list of residual patterns. A piece that fails any check is dropped, never repaired
+halfway. Names come from the people index at run time (--people); nothing about real people lives
+in this file or in its tests.
+
+  openclaw_status_digest.py [--out FILE] [--now ISO] [--cap N] [--roadmap-file F] [--lane-status-file F]
+                            [--lanes-dir D] [--skp-root D] [--inbox F] [--people F]...
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+HOME = Path.home()
+CAP_DEFAULT = 9000  # well under OpenClaw's 20,000-char per-file bootstrap limit
+BEGIN = "<!-- openclaw-status:begin -->"
+END = "<!-- openclaw-status:end -->"
+
+# Extraction artefacts and words too common to treat as a name.
+NOT_NAMES = {"the", "and", "for", "with", "his", "her", "their", "our", "who", "new", "all", "any", "one", "two",
+             "info", "hello", "admin", "support", "mail", "team", "office", "contact", "sales", "noreply", "reply",
+             "email", "client", "clients", "group", "digital", "everyone", "anyone", "not", "none"}
+# Real first names that are also English words: masked only when capitalised.
+CAPS_ONLY = {"will", "hill", "lee", "rob", "dean", "mark", "grace", "bill", "rich", "sue", "joy", "may", "june",
+             "april", "art", "pat", "ray", "jack", "kiwi", "page", "bay", "rose", "hope", "faith", "summer", "dawn"}
+
+# Names that are the owner or the fleet's own agents, not client people.
+KEEP_NAMES = {"jonathan", "hatch", "muse", "claude", "openclaw", "gemini", "codex", "copilot", "ollama", "turtlewolfe"}
+
+# ---------------------------------------------------------------------------------------------
+# The filter
+# ---------------------------------------------------------------------------------------------
+
+EMAIL = re.compile(r"[\w.+%-]+@[\w-]+(?:\.[\w-]+)+")
+HANDLE = re.compile(r"(?<!\w)@\w+")
+IDS = [
+    re.compile(r"\br-?\d{5,}\b", re.I),  # Hatch/Gmail draft ids (r-1234..., r1234...)
+    re.compile(r"\bLabel_\d+\b"),
+    re.compile(r"\b[0-9a-f]{12,}\b", re.I),  # 12+ hex: Gmail message/thread ids, long hashes
+    re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16}\b", re.I),
+]
+PHONE = re.compile(r"(?<![\w.])(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?!\d)|\+\d[\d\s().-]{8,}\d")
+LONG_NUM = re.compile(r"\d[\d,. -]{6,}\d|\d{7,}")
+MONEY = re.compile(r"[$€£]\s?\d[\d,]*(?:\.\d+)?(?:[kKmMbB]\b)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars?|USD|bucks)\b", re.I)
+URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+PATH = re.compile(r"(?:~|/home|/mnt|[A-Za-z]:[\\/])[\w./\\~-]*")
+
+STREET_WORDS = (
+    r"St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place|Pkwy|Parkway|"
+    r"Hwy|Highway|Cir|Circle|Ter|Terrace|Trl|Trail"
+)
+ADDRESS = [
+    re.compile(rf"\b\d{{1,6}}\s+(?:[NSEW]{{1,2}}\.?\s+)?(?:[A-Z][\w.'-]*\s+){{0,3}}(?:{STREET_WORDS})\b\.?"),
+    re.compile(r"\b\d{1,6}\s+(?:N|S|E|W|NE|NW|SE|SW)\.?\s+[A-Z]\w+"),
+    re.compile(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b"),
+    re.compile(r"\bP\.?O\.?\s*Box\b", re.I),
+]
+MONEY_WORDS = re.compile(
+    r"\b(invoice[ds]?|payments?|paid|deposits?|retainers?|pricing|prices?|priced|quotes?|quoted|owed|owes|"
+    r"billing|billed|salary|payroll|revenue|budget|costs?|fees?|refunds?|payout|stipend|rates?)\b",
+    re.I,
+)
+MAIL_MARKERS = re.compile(r"^\s*(>|from:|to:|cc:|subject:|sent:|re:|fwd?:)", re.I)
+QUOTE_CHARS = re.compile('["\u201c\u201d\u00ab\u00bb\u2033]')
+SINGLE_QUOTED = re.compile(r"(?<![\w])'[^']{3,}'(?![\w])")
+ALLOWED = re.compile(r"^[A-Za-z0-9 .,:;()/+~#%&'\-_>=\[\]!?*|]+$")
+
+# After scrubbing, none of these may remain anywhere in a piece.
+RESIDUAL = [
+    re.compile(r"[@$€£\\{}<]"),
+    re.compile(r"\br-?\d{5,}\b", re.I),
+    re.compile(r"\d{7,}"),
+    PHONE,
+    re.compile(r"\b[0-9a-f]{12,}\b", re.I),
+    re.compile(r"https?:|www\.", re.I),
+]
+
+TRANSLATE = str.maketrans({
+    "—": " - ", "–": "-", "‒": "-", "−": "-", "’": "'", "‘": "'",
+    "→": "->", "←": "<-", "•": "-", " ": " ", "…": "...", "±": "+/-",
+    "×": "x", "✓": "ok", "✔": "ok", "✅": "ok", "❌": "x",
+})
+
+
+def _words(name):
+    return [w for w in re.split(r"[^A-Za-z]+", name) if len(w) >= 3]
+
+
+def load_names(paths):
+    """Person tokens from the people index and the client-senders list, read at run time.
+
+    people.md is markdown: a person is the leading capitalised words of a <summary> line that is
+    not a <b> group header; GitHub handles and email local parts also count. client-senders.tsv
+    contributes email local parts. Over-collecting is fine: a common word that gets masked only
+    costs a little readability.
+    """
+    names = set()
+    for p in paths:
+        try:
+            text = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = re.match(r"\s*<summary>(?!<b>)\s*((?:[A-Z][\w'.-]+\s+){1,3})", line)
+            if m:
+                for w in _words(m.group(1)):
+                    names.add(w.lower())
+            m = re.match(r"\s*(?:-\s*)?name:\s*([A-Z][\w'-]+)", line)
+            if m:
+                names.add(m.group(1).lower())
+            m = re.match(r"\s*(?:GitHub|Handle)\s+([\w-]+)", line)
+            if m and m.group(1).lower() != "none":
+                names.add(m.group(1).lower())
+                names.update(w.lower() for w in _words(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", m.group(1))))
+            for em in EMAIL.findall(line):
+                local = em.split("@")[0]
+                names.update(w.lower() for w in _words(local))
+    return {n for n in names if n not in KEEP_NAMES and n not in NOT_NAMES}
+
+
+class Filter:
+    def __init__(self, names=()):
+        self.names = set(names)
+        self.name_res = []
+        for group, flags in (([n for n in self.names if n not in CAPS_ONLY], re.I),
+                             ([n.capitalize() for n in self.names if n in CAPS_ONLY], 0)):
+            if group:
+                alt = "|".join(re.escape(n) for n in sorted(group, key=len, reverse=True))
+                self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])", flags))
+
+    def clean(self, text, limit=160, names=True):
+        """Return a safe single-line string, or None when the piece must be dropped."""
+        if text is None:
+            return None
+        t = text.translate(TRANSLATE)
+        if MAIL_MARKERS.match(t) or "OCSTATUS" in t.upper() or "openclaw-status:" in t:
+            return None
+        # markdown and html furniture
+        t = re.sub(r"<[^>]{1,80}>", " ", t)
+        t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+        t = t.replace("**", "").replace("__", "").replace("`", "")
+        t = re.sub(r"(?<![\w*])\*(?=\S)|(?<=\S)\*(?![\w*])", "", t)
+        t = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?", "", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        t = _cut(t, limit)
+        # drops: anything quoted, lines with an address or money talk
+        if QUOTE_CHARS.search(t) or SINGLE_QUOTED.search(t):
+            return None
+        if any(a.search(t) for a in ADDRESS) or MONEY_WORDS.search(t):
+            return None
+        # scrubs
+        t = URL.sub("", t)
+        t = EMAIL.sub("[email]", t)
+        t = HANDLE.sub("", t)
+        t = MONEY.sub("[amount]", t)
+        t = PATH.sub(_basename, t)
+        for rx in IDS:
+            t = rx.sub("[id]", t)
+        t = PHONE.sub("[phone]", t)
+        t = LONG_NUM.sub("[num]", t)
+        if names:
+            for rx in self.name_res:
+                t = rx.sub("[person]", t)
+        t = re.sub(r"\s+", " ", t).strip(" -|")
+        if len(t) < 3 or not re.search(r"[A-Za-z]", t):
+            return None
+        if not ALLOWED.match(t) or any(r.search(t) for r in RESIDUAL):
+            return None
+        return t
+
+
+def _cut(t, limit):
+    if len(t) <= limit:
+        return t
+    cut = t[:limit].rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:-(") + " ..."
+
+
+def _basename(m):
+    s = m.group(0).strip().replace("\\", "/")
+    s = s.rstrip("/ ")
+    base = s.rsplit("/", 1)[-1]
+    return base + " "
+
+
+# ---------------------------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------------------------
+
+
+def parse_roadmap(body):
+    """-> dict(arcs=[{head, open_items:[title], done:int}], next_session:str, next3:[str])."""
+    lines = body.splitlines()
+    arcs, next3 = [], []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        m = re.match(r"<summary><b>(Arc \d+[^<]*)</b>(.*?)\((\d+) open, (\d+) done\)</summary>", line)
+        if m:
+            arc = {"head": f"{m.group(1).strip()}{m.group(2).rstrip()}".strip(), "open": int(m.group(3)),
+                   "done": int(m.group(4)), "items": []}
+            arc["counts"] = f"({arc['open']} open, {arc['done']} done)"
+            i += 1
+            while i < n and lines[i].rstrip() != "</details>":
+                im = re.match(r"- \[ \] (.*)", lines[i])
+                if im:
+                    arc["items"].append(_item_title(im.group(1)))
+                i += 1
+            arcs.append(arc)
+            continue
+        if re.match(r"<summary><b>Next 3 sessions</b>", line):
+            next3.append(re.sub(r"<[^>]+>", "", line))
+            i += 1
+            while i < n and lines[i].rstrip() != "</details>":
+                s = lines[i]
+                if re.match(r"\*\*Session \+\d[^*]*\*\*", s):
+                    next3.append(re.match(r"\*\*(Session \+\d[^*]*)\*\*", s).group(1))
+                elif re.match(r"(?:\d+\.|-) ", s) and "~~" not in s:
+                    next3.append(s)
+                i += 1
+            continue
+        i += 1
+    ns = ""
+    m = re.search(r"^### Next session should\s*\n+(.+?)(?:\n\s*\n|\Z)", body, re.M | re.S)
+    if m:
+        ns = m.group(1).replace("\n", " ")
+    return {"arcs": arcs, "next_session": ns, "next3": next3}
+
+
+def _item_title(text):
+    m = re.match(r"\*\*(.+?)\*\*", text)
+    if m and len(m.group(1)) >= 24:
+        return m.group(1).strip()
+    return text
+
+
+def parse_lane_status(text):
+    """-> (live=[(name, report, state)], dead_count)."""
+    live, dead = [], 0
+    for line in text.splitlines():
+        if line[:1] in " \t":
+            continue
+        m = re.match(r"^([\w.-]+)\s+report:(yes|no)\s+(working|idle)\b", line)
+        if m:
+            live.append((m.group(1), m.group(2), m.group(3)))
+        elif re.match(r"^[\w.-]+\s+dead\b", line):
+            dead += 1
+    return live, dead
+
+
+MAIL_LANE = re.compile(r"mail|absorb|greg|client|inbox", re.I)
+
+
+def recent_reports(lanes_dir, now, days=2):
+    out = []
+    for d in sorted(Path(lanes_dir).glob("*/report.md")):
+        try:
+            mt = datetime.fromtimestamp(d.stat().st_mtime)
+        except OSError:
+            continue
+        if now - mt > timedelta(days=days):
+            continue
+        name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", d.parent.name)
+        out.append((mt, name, d))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return out
+
+
+def report_gist(path, flt, words=45):
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    text = re.sub(r"^#.*$", " ", text, flags=re.M)
+    text = re.sub(r"\s+", " ", text)
+    got, count = [], 0
+    for sent in re.split(r"(?<=[.!?])\s+", text):
+        c = flt.clean(sent, limit=170)
+        if not c:
+            continue
+        got.append(c)
+        count += len(c.split())
+        if count >= words:
+            break
+    return " ".join(got) or None
+
+
+NOISE_SITE = re.compile(r"^(runner|tmp|temp|reference|portfolio|textures|spawn)\b", re.I)
+
+
+def newest_skps(root):
+    """-> [(site, [(file, mtime)...newest first])] for site folders that hold .skp files."""
+    out = []
+    try:
+        sites = sorted(p for p in Path(root).iterdir() if p.is_dir())
+    except OSError:
+        return out
+    for s in sites:
+        files = []
+        for f in s.glob("*.skp"):
+            try:
+                files.append((f.name, datetime.fromtimestamp(f.stat().st_mtime)))
+            except OSError:
+                pass
+        files = [f for f in files if f[0].lower() != "blank.skp"]
+        if files and not NOISE_SITE.match(s.name):
+            files.sort(key=lambda x: x[1], reverse=True)
+            out.append((s.name, files[:2]))
+    out.sort(key=lambda x: x[1][0][1], reverse=True)
+    return out
+
+
+def inbox_titles(text):
+    titles = []
+    for line in text.splitlines():
+        m = re.match(r"- \[ \] [^|]*\|\s*([^|]+)\|", line)
+        if m:
+            titles.append(m.group(1).strip())
+    return titles
+
+
+# ---------------------------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------------------------
+
+
+def _stamp(now):
+    return now.strftime("%a %d %b %Y %H:%M") + " " + time.tzname[time.localtime().tm_isdst > 0]
+
+
+def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, cap=CAP_DEFAULT):
+    rm = parse_roadmap(roadmap_body or "")
+    sections = []  # (title, [lines]) in priority order; trimmed from the back
+
+    # Next up
+    nxt = []
+    ns = rm["next_session"]
+    if ns:
+        gist = []
+        for sent in re.split(r"(?<=[.!?])\s+", ns):
+            c = flt.clean(sent, limit=200)
+            if c:
+                gist.append(c)
+            if sum(len(g) for g in gist) > 380:
+                break
+        if gist:
+            nxt.append("Next session should: " + " ".join(gist))
+    sess_open = False
+    for raw in rm["next3"]:
+        if raw.startswith("Next 3 sessions"):
+            c = flt.clean(raw, limit=220)
+            if c:
+                nxt.append(c)
+            continue
+        if raw.startswith("Session +"):
+            sess_open = True
+            c = flt.clean(raw, limit=60)
+            nxt.append((c or "Session").rstrip(":") + ":")
+            continue
+        if sess_open:
+            c = flt.clean(raw, limit=190)
+            if c:
+                nxt.append("- " + c)
+    sections.append(("To-do: next sessions", nxt))
+
+    # Lanes
+    live, dead = parse_lane_status(lane_status or "")
+    lane_lines = []
+    for name, rep, state in live:
+        c = flt.clean(name, limit=60)
+        if c:
+            lane_lines.append(f"- {c}: {state}, report {'written' if rep == 'yes' else 'not yet'}")
+    if dead:
+        lane_lines.append(f"- {dead} older lanes have ended (their reports are with Claude)")
+    sections.append(("Lanes (tmux windows doing work)", lane_lines))
+
+    # Models
+    arc_text = " ".join(a["head"] for a in rm["arcs"])
+    model_lines = []
+    for site, files in newest_skps(skp_root):
+        cs = flt.clean(site, limit=60)
+        cf = flt.clean(files[0][0], limit=80)
+        if not cs or not cf:
+            continue
+        alias = ""
+        tok = re.split(r"[-_ ]", site)[0]
+        if len(tok) >= 4:
+            for a in rm["arcs"]:
+                if re.search(re.escape(tok), a["head"], re.I):
+                    heads = flt.clean(re.sub(r"^Arc \d+:\s*", "", a["head"]).split(",")[0], limit=70)
+                    if heads:
+                        alias = f" (project: {heads})"
+                    break
+        line = f"- site {cs}{alias}: newest model {cf}, saved {files[0][1].strftime('%d %b %H:%M')}"
+        if len(files) > 1:
+            prev = flt.clean(files[1][0], limit=80)
+            if prev:
+                line += f"; the one before it is {prev}"
+        model_lines.append(line)
+    sections.append(("Newest SketchUp model per site (what 'which model' means for a site)", model_lines[:8]))
+
+    # Recent reports
+    rep_lines = []
+    for mt, name, path in recent_reports(lanes_dir, now):
+        cn = flt.clean(name, limit=50)
+        if not cn:
+            continue
+        gist = None if MAIL_LANE.search(name) else report_gist(path, flt)
+        when = mt.strftime("%d %b %H:%M")
+        rep_lines.append(f"- {cn} ({when}): {gist}" if gist else f"- {cn} ({when}): report written")
+    sections.append(("Lane reports, last 2 days", rep_lines[:12]))
+
+    # Arcs
+    arc_lines = []
+    for a in rm["arcs"]:
+        head = flt.clean(a["head"], limit=110)
+        if not head:
+            continue
+        arc_lines.append(f"{head} {a['counts']}")
+        items = [flt.clean(t, limit=120) for t in a["items"]]
+        items = [t for t in items if t]
+        for t in items[:6]:
+            arc_lines.append(f"  - open: {t}")
+        hidden = a["open"] - min(len(items), 6)
+        if hidden > 0:
+            arc_lines.append(f"  - and {hidden} more open items not listed here")
+    sections.append(("Roadmap arcs and their open items", arc_lines))
+
+    # Hatch inbox
+    titles = [flt.clean(t, limit=100) for t in inbox_titles(inbox_text or "")]
+    titles = [t for t in titles if t]
+    inbox_lines = [f"- {t}" for t in titles[:8]]
+    if len(titles) > 8:
+        inbox_lines.append(f"- and {len(titles) - 8} more")
+    sections.append(("Hatch notes still open (titles only)", inbox_lines))
+
+    return render(sections, now, cap)
+
+
+def render(sections, now, cap):
+    sections = [(t, list(ls)) for t, ls in sections]
+
+    def text():
+        out = [BEGIN, f"## Work in flight (hub digest, as of {_stamp(now)})",
+               "Built by a script on the hub with no model, refreshed every 15 minutes. Status only: for "
+               "anything past a line below, send it to Claude. Newer than this stamp is not known here.", ""]
+        for title, lines in sections:
+            if not lines:
+                continue
+            out.append(f"### {title}")
+            out.extend(lines)
+            out.append("")
+        out.append(END)
+        return "\n".join(out) + "\n"
+
+    s = text()
+    while len(s) > cap:
+        for k in range(len(sections) - 1, -1, -1):
+            if len(sections[k][1]) > 1:
+                sections[k][1].pop()
+                break
+        else:
+            # every section is down to one line: drop whole sections from the back, then the first one's line
+            for k in range(len(sections) - 1, -1, -1):
+                if sections[k][1]:
+                    sections[k][1].clear()
+                    break
+            else:
+                break
+        s = text()
+    return s
+
+
+# ---------------------------------------------------------------------------------------------
+
+
+def _run(cmd, timeout=40):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--out", help="write here (atomically) instead of stdout")
+    ap.add_argument("--now", help="ISO time to stamp (tests)")
+    ap.add_argument("--cap", type=int, default=CAP_DEFAULT)
+    ap.add_argument("--roadmap-file")
+    ap.add_argument("--lane-status-file")
+    ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
+    ap.add_argument("--skp-root", default="/mnt/c/Users/JonPo/Downloads/SketchUpMake2017")
+    ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
+    ap.add_argument("--people", action="append", default=None)
+    a = ap.parse_args(argv)
+
+    now = datetime.fromisoformat(a.now) if a.now else datetime.now()
+    people = a.people if a.people is not None else [
+        str(HOME / "repos/hub/people.md"), str(HOME / "repos/hub/client-senders.tsv"),
+        str(HOME / "repos/family-gift-tracker/coloring/family.yaml")]
+    names = load_names(people)
+    if a.people is None and not names:
+        print("openclaw_status_digest: no names loaded from the people index; refusing to run", file=sys.stderr)
+        return 3
+    flt = Filter(names)
+
+    body = Path(a.roadmap_file).read_text() if a.roadmap_file else _run(
+        ["gh", "issue", "view", "1", "-R", "TortoiseWolfe/workspace", "--json", "body", "-q", ".body"])
+    status = Path(a.lane_status_file).read_text() if a.lane_status_file else _run(
+        [str(HOME / ".claude/scripts/lane.sh"), "--status"])
+    try:
+        inbox = Path(a.inbox).read_text(errors="replace")
+    except OSError:
+        inbox = ""
+    if not body:
+        print("openclaw_status_digest: roadmap unavailable; leaving the last digest alone", file=sys.stderr)
+        return 4
+
+    digest = build(body, status, a.lanes_dir, a.skp_root, inbox, flt, now, a.cap)
+    if a.out:
+        p = Path(a.out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(digest)
+        tmp.replace(p)
+    else:
+        sys.stdout.write(digest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
