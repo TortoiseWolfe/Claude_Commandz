@@ -136,13 +136,27 @@ class Base(unittest.TestCase):
 class ReceptionistQueue(Base):
     def assert_chat_parts_keep_words(self, text):
         parts = dp._chat_parts(text)
+        self.assertTrue(parts)
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
-        payloads = [re.sub(r" ?\(part \d+ of \d+\)$", "", part) for part in parts]
-        self.assertEqual("".join("".join(payload.split()) for payload in payloads),
-                         "".join(text.split()))
-        for left, right in zip(payloads, payloads[1:]):
-            self.assertTrue(left[-1].isspace() or right[0].isspace(),
-                            "chat part boundary split a word")
+        if len(parts) > 1:
+            for i, part in enumerate(parts, 1):
+                self.assertTrue(part.endswith(" (part %d of %d)" % (i, len(parts))))
+        payloads = [re.sub(r" \(part \d+ of \d+\)$", "", part) for part in parts]
+        visible = "".join(c for payload in payloads for c in payload if not c.isspace())
+        source = "".join(c for c in text if not c.isspace())
+        self.assertEqual(visible, source)
+        boundaries = []
+        for payload in payloads[:-1]:
+            boundaries.append(sum(not c.isspace() for c in payload) +
+                              (boundaries[-1] if boundaries else 0))
+        source_offset = 0
+        for word in re.finditer(r"\S+", text):
+            word_end = source_offset + len(word.group())
+            for boundary in boundaries:
+                if source_offset < boundary < word_end:
+                    self.assertGreaterEqual(len(word.group()), dp.CHAT_MAX - 40,
+                                            "chat part boundary split a short word")
+            source_offset = word_end
 
     def test_chat_chunks_keep_words_after_a_newline(self):
         self.assert_chat_parts_keep_words("intro\n" + "abcdefghi " * 200)
@@ -154,20 +168,32 @@ class ReceptionistQueue(Base):
             "abcdefghi " * 220)
 
     def test_chat_chunks_keep_words_in_generated_messages(self):
-        rng = random.Random(43)
-        for _ in range(32):
-            target = rng.randint(1900, 8900)
-            words = []
+        rng = random.Random(1017)
+        for _ in range(1000):
+            target = rng.randint(1, 12000)
+            pieces = []
             length = 0
             while length < target:
-                word = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
-                               for _ in range(rng.randint(1, 15)))
-                separator = rng.choice((" ", " ", "\n", "\n\n"))
-                words.append((separator if words else "") + word)
-                length += len(words[-1])
-            text = "".join(words)
-            self.assertGreaterEqual(len(text), 1900)
-            self.assertLessEqual(len(text), 9000)
+                sample = rng.random()
+                if sample < 0.002:
+                    piece = "x" * rng.randint(dp.CHAT_MAX - 30, 3 * dp.CHAT_MAX)
+                elif sample < 0.05:
+                    piece = "\n\n"
+                elif sample < 0.12:
+                    piece = "\n"
+                elif sample < 0.17:
+                    piece = ". "
+                else:
+                    word = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
+                                   for _ in range(rng.randint(1, 15)))
+                    piece = word + " "
+                pieces.append(piece)
+                length += len(piece)
+            text = "".join(pieces)
+            self.assert_chat_parts_keep_words(text)
+
+    def test_chat_parts_fit_when_whitespace_precedes_a_hard_cut(self):
+        for text in ("intro\n\n" + "x" * 3000, "intro" + " " * 5 + "x" * 3000):
             self.assert_chat_parts_keep_words(text)
 
     def record_question(self, ask_id, status, created, **extra):
@@ -229,7 +255,8 @@ class ReceptionistQueue(Base):
         self.assertEqual([len(part) <= dp.CHAT_MAX for part in self.host.chats], [True] * 3)
         self.assertTrue(all(part.endswith("(part %d of 3)" % i) for i, part in enumerate(self.host.chats, 1)))
         content = "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in self.host.chats)
-        self.assertEqual(content, answer)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in answer if not c.isspace()))
         self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
 
     def test_an_unbroken_token_is_hard_cut_without_losing_characters(self):
@@ -237,13 +264,17 @@ class ReceptionistQueue(Base):
         parts = dp._chat_parts(text)
         self.assertGreater(len(parts), 1)
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
-        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
 
     def test_a_long_token_mixed_with_words_is_relayed_whole(self):
         text = "before words " + ("x" * 4000) + " after words"
         parts = dp._chat_parts(text)
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
-        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
 
     def test_an_over_cap_answer_names_the_ask_holding_its_full_text(self):
         ask_id = "oc-ccccccca"
@@ -272,7 +303,9 @@ class ReceptionistQueue(Base):
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
         self.assertIn("(part 1 of ", parts[0])
         self.assertFalse(parts[0].endswith("\n"))
-        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
 
     def test_post_keeps_a_short_answer_unmarked(self):
         ask_id = "oc-cccccccf"
@@ -829,8 +862,10 @@ class Sweep(Base):
         self.assertGreater(len(sent), 1)
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
         self.assertEqual(
-            "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in sent),
-            chat,
+            "".join(c for part in sent
+                    for c in re.sub(r" \(part \d+ of \d+\)$", "", part)
+                    if not c.isspace()),
+            "".join(c for c in chat if not c.isspace()),
         )
         self.assertNotIn("\x1b", chat)
 

@@ -795,18 +795,10 @@ def _chat_parts(text):
     ref = _chat_ref(text)
     def marked(chunks, count):
         parts = []
-        pending = ""
         for i, chunk in enumerate(chunks, 1):
-            chunk = pending + chunk
-            trailing = chunk[len(chunk.rstrip()):]
-            content = chunk.rstrip()
+            content = chunk.strip()
             marker = "(part %d of %d)" % (i, count)
-            separator = " " if content else ""
-            if i == len(chunks):
-                parts.append(content + separator + trailing + marker)
-            else:
-                parts.append(content + separator + marker)
-            pending = trailing
+            parts.append(content + " " + marker)
         return parts
 
     if len(rough) > MAX_CHAT_PARTS:
