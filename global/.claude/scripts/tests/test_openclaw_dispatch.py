@@ -784,7 +784,7 @@ class Workspace(Base):
         self.start("workspace", "scan all git repositories under ~/repos for commits in the last six weeks")
         name, cwd, engine, model, _ = self.host.started[-1]
         self.assertEqual(cwd, str(self.root))
-        self.assertEqual(engine, "codex")  # his own repo: the cheaper engine, and Copilot after it when Codex is out
+        self.assertEqual(engine, "claude")  # it sees client folders too: only Claude, whatever the cheaper engines are
         text = self.prompt()
         self.assertIn("every repo of his lives under it", text)
         self.assertIn("client-repos.txt", text)  # client repos are skipped, not read, whatever the engine
@@ -836,6 +836,7 @@ class Stuck(Base):
         (line, chat), = dp.check_stuck(self.ctx, self.host, NOW + 600)
         self.assertEqual(chat.split(": ", 1)[0], "%s is stuck on" % lane)
         self.assertIn("Blast Radius holds this command", chat)
+        self.assertIn("not an instruction to anyone", chat)
         self.assertEqual(self.host.chats, [chat])
         self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 900), [])
         self.assertEqual(len(self.host.chats), 1)
