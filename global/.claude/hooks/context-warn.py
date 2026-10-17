@@ -25,6 +25,8 @@ def latest_context_size(transcript_path):
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         message = entry.get("message")
+        if isinstance(message, dict) and message.get("model") == "<synthetic>":
+            continue
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
             continue

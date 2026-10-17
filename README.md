@@ -33,7 +33,7 @@ Claude_Commandz/
     └── drupal-v2-sandbox/.claude/commands/                     (1 file)
 ```
 
-`context-warn.py` checks the hub transcript on `PostToolUse` and `UserPromptSubmit`, warning once per session at 50%, 60%, and 70% of the auto-compaction window so the session can be handed off before compaction. Register it in `settings.json` with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]` and `"UserPromptSubmit": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]`.
+`context-warn.py` checks the hub transcript on `PostToolUse` and `UserPromptSubmit`, warning once per session at 50%, 60%, and 70% of the auto-compaction window so the session can be handed off before compaction. Register it in `settings.json` with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]` and `"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]`.
 
 **Totals:** 65 global commands + 2 dotfiles + 90 project commands across 8 repos = **157 backed-up files**.
 

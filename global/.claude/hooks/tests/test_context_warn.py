@@ -23,7 +23,7 @@ class ContextWarnTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def write_transcript(self, tokens=None, *, corrupt_last=False, empty=False):
+    def write_transcript(self, tokens=None, *, corrupt_last=False, empty=False, synthetic_last=False):
         rows = []
         if tokens is not None:
             rows.append({
@@ -33,6 +33,18 @@ class ContextWarnTests(unittest.TestCase):
                     "cache_read_input_tokens": tokens[1],
                     "cache_creation_input_tokens": tokens[2],
                 }},
+            })
+        if synthetic_last:
+            rows.append({
+                "type": "assistant",
+                "message": {
+                    "model": "<synthetic>",
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
             })
         if corrupt_last:
             rows.append('{"type":')
@@ -78,6 +90,15 @@ class ContextWarnTests(unittest.TestCase):
         self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
         self.write_transcript((208_000, 0, 0))
         self.assertEqual(self.call_hook(), "")
+
+    def test_synthetic_last_entry_uses_prior_usage_without_resetting_stamp(self):
+        self.write_transcript((200_000, 0, 0))
+        output = self.call_hook()
+        self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
+
+        self.write_transcript((200_000, 0, 0), synthetic_last=True)
+        self.assertEqual(self.call_hook(), "")
+        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "50")
 
     def test_warns_at_60_percent(self):
         self.write_transcript((200_000, 0, 40_000))
