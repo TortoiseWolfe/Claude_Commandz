@@ -1469,6 +1469,16 @@ class Diagnose(PassBase):
         self.assertFalse(dp.say(self.ctx, self.host, ASK, "late answer", NOW + 9)[0])
         self.assertFalse(dp.defer(self.ctx, self.host, ASK, "late", NOW + 9)[0])
 
+    def test_promote_is_only_for_a_read_only_check(self):
+        for q in ("merge the own-app pull request", "what is the weather in Portland", "triage the failure and then deploy the fix"):
+            self.asked(q)
+            ok, msg = self.promote()
+            self.assertFalse(ok, q)
+            self.assertIn("read-only check", msg)
+            self.assertEqual(self.ask()["status"], "pending")
+            self.assertEqual(self.host.spawned, [ASK])  # only the question's own pass; no job
+            self.setUp()
+
     def test_promote_refuses_a_repo_not_on_the_table_and_the_question_stays_open(self):
         self.asked()
         for word in ("nowhere", "../x", "own app; rm", ""):
@@ -1596,8 +1606,22 @@ class Diagnose(PassBase):
         self.assertIn("permissionDecisionReason", outs[-1])
         self.assertTrue(all(o["hookEventName"] == "PreToolUse" for o in outs))
         self.assertEqual(counter.read_text(), str(dp.MAIL_CALLS + 1))
-        junk = dp.mailhook("not json", self.tmp / "other-calls")["hookSpecificOutput"]  # a garbled hook call still gets a clamped search
-        self.assertEqual(junk["permissionDecision"], "allow")
+
+    def test_the_mail_hook_fails_closed_and_parallel_calls_never_share_a_slot(self):
+        counter = self.tmp / "mail-calls"
+        counter.write_text("0")
+        deny = lambda raw, c: dp.mailhook(raw, c)["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(deny("not json", counter), "deny")  # garbled input
+        self.assertEqual(deny(json.dumps({"tool_input": {}}), self.tmp / "no-such-calls"), "deny")  # no counter
+        counter.write_text("junk")
+        self.assertEqual(deny(json.dumps({"tool_input": {}}), counter), "deny")  # unreadable counter
+        counter.write_text("0")
+        import threading
+        results = []
+        ts = [threading.Thread(target=lambda: results.append(deny(json.dumps({"tool_input": {"query": "q"}}), counter))) for _ in range(12)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(sorted(results), ["allow"] * dp.MAIL_CALLS + ["deny"] * (12 - dp.MAIL_CALLS))
 
     def test_the_real_question_call_writes_the_mail_clamp_into_its_own_folder_only(self):
         host = dp.LaneHost()
@@ -1628,6 +1652,15 @@ class Diagnose(PassBase):
             sys.stdin = sys_stdin
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["updatedInput"]["pageSize"], dp.MAIL_PAGE)
+        os.environ.pop("AFA_LANE_HAND")  # no pass folder: denied, not waved through
+        sys.stdin = io.StringIO(json.dumps({"tool_input": {"query": "q"}}))
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                dp.main(["mailhook"])
+        finally:
+            sys.stdin = sys_stdin
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 class Facts(PassBase):
