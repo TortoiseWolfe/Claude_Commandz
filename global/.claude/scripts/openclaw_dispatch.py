@@ -873,15 +873,17 @@ def attach_context(ctx, state, lane_name, repo, hand, prompt_path, context, now)
     """Hand a lane what its one-line task refers to: copy the earlier lanes' folders into <hand>/earlier/<lane>/, write the chat to
     <hand>/chat.md, and append the quoted context to its prompt (once). -> a log note ("" when there was nothing to attach)."""
     context = context or {}
-    earlier = earlier_lanes(state, repo, now, lane_name, context.get("followup_of"))
+    # only lanes whose folder the dispatcher made, a direct child of lanes_dir: never a path the state file was edited to point at
+    lanes_dir = ctx.lanes_dir.resolve()
+    earlier = [n for n in earlier_lanes(state, repo, now, lane_name, context.get("followup_of"))
+               if _lane_hand(state["lanes"][n]).resolve().parent == lanes_dir]
     if not earlier and not context.get("history") and not context.get("reply"):
         return ""
     hand = Path(hand)
     budget, copied = {"files": 0, "bytes": 0, "skipped": 0}, {}
     for n in earlier:
         src = _lane_hand(state["lanes"][n])
-        # only a lane folder the dispatcher made: a direct child of lanes_dir, never a path the state file was edited to point at
-        if src.is_dir() and src.resolve().parent == ctx.lanes_dir.resolve() and src.resolve() != hand.resolve():
+        if src.is_dir() and src.resolve() != hand.resolve():
             copied[n] = copy_lane_folder(src, hand / "earlier" / n, budget)
     try:
         prompt = Path(prompt_path).read_text()
