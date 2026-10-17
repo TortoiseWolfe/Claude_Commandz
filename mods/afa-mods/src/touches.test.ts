@@ -176,6 +176,8 @@ describe('the classifier judges the command itself, not text it only carries', (
     'grep -n -- "--prod" mods/afa-mods/src/lib.ts',
     "cat > notes.txt <<'EOF'\nvercel --prod\nrm -rf /\nEOF",
     "tee out.txt <<EOF\nnetlify deploy --prod\nEOF",
+    "cat <<EOF >> notes.md 2>&1\nvercel --prod\nEOF",
+    'git commit -m "redeploy prod notes"',
     'tmux send-keys -t lane "I held vercel --prod and git push --force; try again" Enter',
     'echo "do not run vercel --prod yet"',
     "printf '%s\\n' 'git push --force origin main'",
@@ -193,6 +195,16 @@ describe('the classifier judges the command itself, not text it only carries', (
     ['cd x && vercel --prod', 'production deploy'],
     ['git push --force origin main', 'git push --force'],
     ['echo hi; docker volume prune -f', 'docker volume prune'],
+    ['cat <<EOF | bash\nvercel --prod\nEOF', 'production deploy'],
+    ['cat <<EOF | sh\ngit push --force origin main\nEOF', 'git push --force'],
+    ['sudo bash <<EOF\nvercel --prod\nEOF', 'production deploy'],
+    ['env bash <<EOF\nvercel --prod\nEOF', 'production deploy'],
+    ['ssh host "ls; docker volume prune -f"', 'docker volume prune'],
+    ['ssh host "git push --force origin main"', 'git push --force'],
+    ['xargs sh -c "vercel --prod"', 'production deploy'],
+    ['docker exec app sh -c "vercel --prod"', 'production deploy'],
+    ['vercel "--prod"', 'production deploy'],
+    ["npm run deploy '--production'", 'production deploy'],
   ] as const) {
     test(`still holds: ${command.split('\n')[0]}`, () => {
       expect(classify(command).map(h => h.kind)).toContain(kind)

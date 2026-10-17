@@ -103,7 +103,9 @@ function withoutTextHeredocs(command: string): string {
     const end = lines.findIndex((l, j) => j > i && l.trim() === m[2])
     if (end < 0) continue
     const lead = lines[i].slice(0, m.index).split(/&&|\|\||[;&|]/).pop() ?? ''
-    if (SHELL_WORDS.has(firstWord(lead))) continue
+    const after = lines[i].slice(m.index + m[0].length).replace(/\d*>&-?\d*|&>>?/g, '')
+    // a shell anywhere in the lead (`sudo bash`, `env bash`), or a pipe/and/semicolon after the marker (`cat <<EOF | bash`): the body is run
+    if (lead.split(/\s+/).some(w => SHELL_WORDS.has(w.split('/').pop() ?? '')) || /[|;&`]|\$\(/.test(after)) continue
     i = end // skip the body and its delimiter line
   }
   return out.join('\n')
@@ -173,7 +175,13 @@ export function segmentsOf(command: string): string[] {
   return out
 }
 
-const withoutQuoted = (seg: string) => seg.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, '')
+// A quoted piece that is one word (`"--prod"`) is an argument the shell would unquote, so it stays; a quoted message with spaces is text and goes.
+const QUOTED = /'([^']*)'|"((?:\\.|[^"\\])*)"/g
+const withoutQuoted = (seg: string) => seg.replace(QUOTED, (_m, a?: string, b?: string) => ((a ?? b ?? '') !== '' && /^\S+$/.test(a ?? b ?? '') ? (a ?? b ?? '') : ''))
+
+// Commands that run the quoted text they are given (`ssh host "a; b"`, `docker exec c "..."`): each quoted piece is a command line to judge too.
+const runsQuoted = (seg: string) => RUNS_ITS_ARGS.has(firstWord(seg)) || /^(?:docker|kubectl)\s+(?:exec|run)\b/.test(seg)
+const quotedPieces = (seg: string): string[] => Array.from(seg.matchAll(QUOTED), m => m[1] ?? m[2] ?? '').filter(s => s.trim() !== '')
 
 // Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs its arguments.
 function isProdDeploy(seg: string): boolean {
@@ -198,6 +206,8 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     if (wrapped && depth < 3) {
       holds.push(...classifyWithEnv(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, env))
+    } else if (depth < 3 && runsQuoted(seg)) {
+      for (const piece of quotedPieces(seg)) holds.push(...classifyWithEnv(piece, depth + 1, env))
     }
     const t = seg.split(/\s+/)
     const flags = t.filter(x => x.startsWith('-'))
