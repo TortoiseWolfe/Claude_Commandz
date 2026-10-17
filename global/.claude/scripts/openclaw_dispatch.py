@@ -68,6 +68,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -87,7 +88,7 @@ PROJECTION_CACHE_SECONDS = 30 * 60
 TASK_MAX = 1500
 REPLY_MAX = 1500
 CHAT_MAX = 1900
-REPORT_MAX = 1200
+MAX_CHAT_PARTS = 20
 REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
@@ -356,26 +357,47 @@ class LaneHost:
         key = chat_session()
         if not key:
             return False
-        params = json.dumps({"sessionKey": key, "message": CONTROL_RE.sub(" ", text)[:CHAT_MAX], "label": "hub"}, ensure_ascii=True)
         argv = ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c",
                 'cd /home/openclaw && read -r P && openclaw gateway call chat.inject --json --params "$P"']
-        for attempt, backoff in enumerate((3, 8, None), 1):
-            try:
-                r = self._run(argv, 90, stdin=params + "\n", timeout_result=True)
-            except subprocess.TimeoutExpired as e:
-                r = subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout=e.stdout or "", stderr="timed out")
-            if r and r.returncode == 0 and re.search(r'"ok":\s*true', r.stdout or ""):
-                return True
-            code = r.returncode if r is not None else -1
-            stderr = " ".join((r.stderr if r is not None else "no process result").split())[-300:]
-            _append(STATE / "openclaw-inject.log",
-                    "%s attempt=%d returncode=%d stderr=%s" %
-                    (time.strftime("%Y-%m-%dT%H:%M:%S%z"), attempt, code, stderr))
-            if code == RUN_TIMED_OUT:
+        text = CONTROL_RE.sub(" ", text)
+        if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+            if not _chat_ref(text):
+                try:
+                    path = _store_chat_overflow(text)
+                except OSError as e:
+                    _append(STATE / "openclaw-inject.log", "%s could not store oversized message: %s" %
+                            (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
+                    return False
+                text += "\nFull text: %s" % path
+        try:
+            parts = _chat_parts(text)
+        except ValueError as e:
+            _append(STATE / "openclaw-inject.log", "%s could not split message: %s" %
+                    (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
+            return False
+        for part_number, part in enumerate(parts, 1):
+            params = json.dumps({"sessionKey": key, "message": part, "label": "hub"}, ensure_ascii=True)
+            landed = False
+            for attempt, backoff in enumerate((3, 8, None), 1):
+                try:
+                    r = self._run(argv, 90, stdin=params + "\n", timeout_result=True)
+                except subprocess.TimeoutExpired as e:
+                    r = subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout=e.stdout or "", stderr="timed out")
+                if r and r.returncode == 0 and re.search(r'"ok":\s*true', r.stdout or ""):
+                    landed = True
+                    break
+                code = r.returncode if r is not None else -1
+                stderr = " ".join((r.stderr if r is not None else "no process result").split())[-300:]
+                _append(STATE / "openclaw-inject.log",
+                        "%s part %d of %d attempt=%d returncode=%d stderr=%s" %
+                        (time.strftime("%Y-%m-%dT%H:%M:%S%z"), part_number, len(parts), attempt, code, stderr))
+                if code == RUN_TIMED_OUT:
+                    break
+                if backoff is not None:
+                    self.sleep(backoff)
+            if not landed:
                 return False
-            if backoff is not None:
-                self.sleep(backoff)
-        return False
+        return True
 
     def sleep(self, seconds):
         time.sleep(seconds)
@@ -698,6 +720,117 @@ def _trim(text, n):
     return text if len(text) <= n else text[:n].rstrip() + " … (trimmed)"
 
 
+def _boundary(text, limit):
+    """Return the preferred safe split point in text[:limit], or None if no word boundary fits."""
+    blank_lines = [m.end() for m in re.finditer(r"\n[ \t]*\n", text[:limit])]
+    if blank_lines:
+        return blank_lines[-1]
+    newlines = [m.end() for m in re.finditer(r"\n", text[:limit])]
+    if newlines:
+        return newlines[-1]
+    sentences = [m.end() for m in re.finditer(r"[.!?][\"')\]]*", text[:limit])
+                 if m.end() < len(text) and text[m.end()].isspace()]
+    if sentences:
+        return sentences[-1]
+    spaces = [m.end() for m in re.finditer(r"[ \t]", text[:limit])]
+    return spaces[-1] if spaces else None
+
+
+def _chunks(text, limit):
+    if limit <= 0:
+        return [text] if text else []
+    chunks = []
+    while len(text) > limit:
+        point = _boundary(text, limit)
+        if point is None:
+            point = limit
+        chunks.append(text[:point])
+        text = text[point:]
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def _chat_ref(text):
+    report = re.search(r"(?:^|\n)Full report: ([^\n]+)$", text)
+    if report:
+        return "report", report.group(1)
+    full_text = re.search(r"(?:^|\n)Full text: ([^\n]+)$", text)
+    if full_text:
+        ref = full_text.group(1)
+        if ref.startswith("stored with ask "):
+            return "ask", ref[len("stored with ask "):]
+        return "file", ref
+    return None
+
+
+def _store_chat_overflow(text):
+    folder = STATE / "lanes"
+    folder.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                     prefix="chat-", suffix=".txt", delete=False) as f:
+        f.write(text)
+    return str(Path(f.name).resolve())
+
+
+def _chat_chunks(text, limit):
+    chunks = []
+    while len(text) > limit:
+        point = _boundary(text, limit)
+        if point is None:
+            point = limit
+        chunk, rest = text[:point], text[point:]
+        chunks.append(chunk)
+        text = rest
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def _chat_parts(text):
+    """Split chat text at readable boundaries and include part markers within the message limit."""
+    if len(text) <= CHAT_MAX:
+        return [text]
+    rough = _chunks(text, CHAT_MAX)
+    ref = _chat_ref(text)
+    def marked(chunks, count):
+        parts = []
+        for i, chunk in enumerate(chunks, 1):
+            content = chunk.strip()
+            marker = "(part %d of %d)" % (i, count)
+            parts.append(content + " " + marker)
+        return parts
+
+    if len(rough) > MAX_CHAT_PARTS:
+        count = MAX_CHAT_PARTS
+        marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
+        chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)[:count]
+        return marked(chunks, count) + [_chat_overflow_notice(ref)]
+    count = len(rough)
+    while True:
+        marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
+        chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)
+        if len(chunks) > MAX_CHAT_PARTS:
+            count = MAX_CHAT_PARTS
+            marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
+            chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)[:count]
+            return marked(chunks, count) + [_chat_overflow_notice(ref)]
+        if len(chunks) == count:
+            return marked(chunks, count)
+        count = len(chunks)
+
+
+def _chat_overflow_notice(ref):
+    if ref:
+        kind, value = ref
+        if kind == "report":
+            return "Full text is in the full report: %s" % value
+        if kind == "ask":
+            return "Full text is stored with ask %s." % value
+        return "Full text is stored at: %s" % value
+    return "Full text exceeds the chat part limit and was not included."
+
+
 # ---------------------------------------------------------------------------------------------------------
 # The three actions and the sweep. Each returns (log line, chat text).
 
@@ -780,14 +913,15 @@ def _sweep(ctx, host, now=None):
             continue
         if lane["status"] == "reported":
             body = _report_text(lane["report"])
-            quoted = "\n".join("> " + ln for ln in _trim(body, REPORT_MAX).splitlines())
+            quoted = "\n".join("> " + ln for ln in body.splitlines())
             failure = report_failure(body)
             if failure:
                 lane["failed"], changed = True, True
                 if _refund_start(state, lane, now):
                     changed = True
             head = "%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else "%s finished (repo %s)." % (name, lane["repo"])
-            chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To add to it, reply to %s and I'll start a follow-up with this report." % (head, quoted, name)
+            chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To add to it, reply to %s and I'll start a follow-up with this report.\n\nFull report: %s" % (
+                head, quoted, name, lane["report"])
             line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + json.dumps(failure) if failure else "finished")
         else:
             chat = "%s failed: %s (repo %s).%s Nothing to read. You can start it again by telling me." % (name, lane.get("detail", "it ended"), lane["repo"], lane.get("note", ""))
@@ -1216,7 +1350,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
         state["starts"].append(now)
     save_state(ctx.state_path, state)
     old = (context or {}).get("followup_of")
-    head = followup_head(state, old, lane) if old in state["lanes"] else "%s started: %s." % (lane, _trim(" ".join(task.split()), 120))
+    head = followup_head(state, old, lane) if old in state["lanes"] else "%s started: %s." % (lane, task)
     return "%s | start %s | started %s (%s, %s)%s" % (stamp, name, lane, engine, why, "; " + attached if attached else ""), (
         "%s%s Say stop to cancel. (%s on %s; I'll post its report here.)" % (
             head, note, name, "Claude " + model.capitalize() if engine == "claude" else engine.capitalize()))
@@ -1578,7 +1712,7 @@ def _duplicate_chat(match, ctx=None, now=None):
         answered = time.strftime("%H:%M", time.localtime(ask.get("answered_at", ask.get("created", 0))))
         prefix = "Already answered at %s: " % answered
         answer = str(ask.get("answer") or "").strip() or "(answer text not stored)"
-        return prefix + _trim(answer, max(0, CHAT_MAX - len(prefix)))
+        return prefix + answer
     elapsed = max(0, int((now - created) // 60))
     if ask.get("status") in ("deferred", "fallback", "fallback-lane", "fallback-failed") and now - created >= 10 * 60:
         if ctx is not None:
@@ -1664,7 +1798,7 @@ def hand_off(ctx, host, ask_id, repo_word, task, now, context=None, ignore_asks=
                 asks_of(state)[ask_id]["pass"] = {"exit": -1, "error": "could not start the pass"}
                 save_state(ctx.state_path, state)
     return ("%s | start %s | handed to Claude (ask %s, %d min to take it)" % (stamp, name, ask_id, ASK_WAIT // 60),
-            "handed to Claude: %s" % _trim(" ".join(task.split()), 120))
+            "handed to Claude: %s" % task)
 
 
 def to_hub_list(ctx, ask_id, question, now, why=None):
@@ -1689,7 +1823,7 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
                 "Nothing sent to the hub: the question was empty or over %d characters." % QUESTION_MAX)
     if not ctx.hand_off_first:
         to_hub_list(ctx, ask_id, q, now)
-        return "%s | question | put on the hub's list" % stamp, "On the hub's list: %s" % _trim(q, 120)
+        return "%s | question | put on the hub's list" % stamp, "On the hub's list: %s" % q
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
@@ -1714,7 +1848,7 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
     if full:
         to_hub_list(ctx, ask_id, q, now)
         return ("%s | question | %d questions already waiting: put on the hub's list (ask %s)" % (stamp, len(waiting), ask_id),
-                "Claude already has %d questions in hand, so this one is on the hub's list: %s" % (len(waiting), _trim(q, 120)))
+                "Claude already has %d questions in hand, so this one is on the hub's list: %s" % (len(waiting), q))
     save_context(ctx, ask_id, context)
     if not host.spawn_pass(ask_id):
         with ctx.locked():
@@ -1723,7 +1857,7 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
                 asks_of(state)[ask_id]["pass"] = {"exit": -1, "error": "could not start the pass"}
                 save_state(ctx.state_path, state)
     return ("%s | question | handed to Claude (ask %s, %d min to answer)" % (stamp, ask_id, ASK_WAIT // 60),
-            "asked Claude: %s" % _trim(q, 120))
+            "asked Claude: %s" % q)
 
 
 def defer(ctx, host, ask_id, why, now=None):
@@ -1841,7 +1975,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
         save_state(ctx.state_path, state)
         lane = state["lanes"][lane_name]
         head = (followup_head(state, ask["followup_of"], lane_name) if ask.get("followup_of") in state["lanes"]
-                else "%s started: %s." % (lane_name, _trim(" ".join(str(ask.get("task", "")).split()), 120)))
+                else "%s started: %s." % (lane_name, ask.get("task", "")))
         started = "%s Say stop to cancel. (%s on %s; I'll post its report here.)" % (
             head, lane["repo"],
             "Claude " + str(lane["model"]).capitalize() if lane["engine"] == "claude" else lane["engine"].capitalize())
@@ -1976,8 +2110,14 @@ def post_line(host, text):
     if os.environ.get("AFA_OC_PASS"):
         return False, "post: the dispatch pass may not post"
     text = re.sub(r"^\s*\[hub\]\s*", "", (text or "").strip())
-    if not text or len(text) > CHAT_MAX:
-        return False, "post: empty, or over %d characters" % CHAT_MAX
+    if not text:
+        return False, "post: empty"
+    if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+        try:
+            path = _store_chat_overflow(text)
+        except OSError as e:
+            return False, "post: could not store full text: %s" % e
+        text += "\nFull text: %s" % path
     return (True, "posted") if host.inject(text) else (False, "post: could not post to the chat")
 
 
@@ -2045,8 +2185,8 @@ def post_ask(ctx, host, ask_ids, text, now=None):
         return False, "post: the dispatch pass may not post"
     text = re.sub(r"^\s*\[hub\]\s*", "", (text or "").strip())
     ids = _ask_ids(ask_ids)
-    if not ids or not text or len(text) > CHAT_MAX:
-        return False, "post: bad ask id list, empty, or over %d characters" % CHAT_MAX
+    if not ids or not text:
+        return False, "post: bad ask id list or empty"
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
@@ -2056,7 +2196,10 @@ def post_ask(ctx, host, ask_ids, text, now=None):
                 return False, "post: no such ask %s" % ask_id
             if ask.get("status") not in ("deferred", "pending", "fallback", "fallback-lane"):
                 return False, "post: ask %s is already %s" % (ask_id, ask.get("status"))
-    if not host.inject(text):
+    chat_text = text
+    if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+        chat_text += "\nFull text: stored with ask %s" % ", ".join(ids)
+    if not host.inject(chat_text):
         return False, "post: could not post to the chat"
     with ctx.locked():
         state = load_state(ctx.state_path)
@@ -2065,7 +2208,7 @@ def post_ask(ctx, host, ask_ids, text, now=None):
         for ask_id in ids:
             ask = asks.get(ask_id)
             if ask and ask.get("status") in ("deferred", "pending", "fallback", "fallback-lane"):
-                ask["answer"] = text[:600]
+                ask["answer"] = text
                 ask["status"], ask["answered_at"] = "answered", now
                 settled.append(ask_id)
         save_state(ctx.state_path, state)
@@ -2349,7 +2492,7 @@ def say(ctx, host, ask_id, text, now=None):
         ask = asks_of(state).get(ask_id)
         if ask is None or ask["status"] != "pending":
             return False, "say: ask %s is no longer pending" % ask_id
-        ask["answer"] = text[:600]
+        ask["answer"] = text
         ask["status"], ask["answered_at"] = "answered", now
         save_state(ctx.state_path, state)
     return True, "answered %s" % ask_id
