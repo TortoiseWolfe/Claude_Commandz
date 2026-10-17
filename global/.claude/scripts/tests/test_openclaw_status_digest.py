@@ -395,6 +395,41 @@ class ChatLanes(Base):
         self.assertNotIn("Lanes started from this chat", self.digest(dispatch_state={"lanes": {}}))
 
 
+class AlreadyAsked(Base):
+    def test_recent_asks_are_cleaned_newest_first_and_describe_answers_and_workers(self):
+        now = datetime(2026, 10, 17, 15, 0)
+        t = now.timestamp()
+        state = {"asks": {
+            "oc-00000001": {"task": "count open issues for own-app", "created": t - 3600, "status": "answered",
+                            "answered_at": t - 300, "answer": "There are 8 open issues."},
+            "oc-00000002": {"task": "check the latest pull request", "created": t - 600, "status": "claimed",
+                            "lanes": ["oc-worker-00000002"]},
+            "oc-00000003": {"task": "save a small note", "created": t - 1800, "status": "deferred"},
+            "oc-00000004": {"task": "old issue count", "created": t - 13 * 3600, "status": "pending"}},
+                "lanes": {"oc-worker-00000002": {"status": "started", "started": t - 500}}}
+        out = self.digest(now=now, dispatch_state=state)
+        self.assertIn("### Already asked today", out)
+        section = out.split("### Already asked today", 1)[1].split("###", 1)[0]
+        self.assertLess(section.index("check the latest"), section.index("save a small note"))
+        self.assertLess(section.index("save a small note"), section.index("count open issues"))
+        self.assertIn("- 14:50 check the latest pull request: worker oc-worker-00000002 running", section)
+        self.assertIn("- 14:30 save a small note: with the hub", section)
+        self.assertIn("- 14:00 count open issues for own-app: answered 14:55: There are 8 open issues.", section)
+        self.assertNotIn("old issue count", out)
+
+    def test_section_is_kept_under_the_cap_and_limits_rows(self):
+        now = datetime(2026, 10, 17, 15, 0)
+        t = now.timestamp()
+        asks = {f"oc-{n:08x}": {"task": f"list recent work item number {n}", "created": t - n * 60, "status": "pending"}
+                for n in range(12)}
+        out = self.digest(now=now, cap=1800, dispatch_state={"asks": asks, "lanes": {}})
+        self.assertLessEqual(len(out), 1800)
+        self.assertIn("### Already asked today", out)
+        row_count = out.split("### Already asked today", 1)[1].split("###", 1)[0].count("\n- ")
+        self.assertGreater(row_count, 0)
+        self.assertLessEqual(row_count, 10)
+
+
 class Cli(Base):
     def test_cli_writes_atomically_and_refuses_without_names_or_roadmap(self):
         rm = self.d / "rm.md"

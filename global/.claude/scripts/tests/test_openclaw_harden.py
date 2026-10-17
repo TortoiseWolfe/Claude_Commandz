@@ -56,6 +56,10 @@ class Harden(unittest.TestCase):
         g = p["agents"]["entries"]["receptionist"]
         self.assertEqual(g["name"], "Outside gate")
         self.assertEqual(g["tools"]["allow"], [])
+        self.assertEqual(p["tools"]["alsoAllow"], ["read"])
+        self.assertEqual(p["tools"]["fs"], {"workspaceOnly": True})
+        self.assertNotIn("group:fs", p["tools"]["deny"])
+        self.assertTrue({"write", "edit", "apply_patch"} <= set(p["tools"]["deny"]))
         self.assertEqual({b["match"]["channel"] for b in p["bindings"]}, {"slack", "discord"})
         self.assertIn("workspace-receptionist", err)
 
@@ -120,6 +124,30 @@ class VerifyGate(unittest.TestCase):
         out = self.verify_output(dict(BASE, channels={}, bindings=[]))
         self.assertIn("PASS gate.absent_without_channel", out)
         self.assertNotIn("gate.present_with_channel", out)
+
+    def test_verify_fails_when_a_write_tool_is_not_denied(self):
+        cfg = dict(BASE, channels={}, bindings=[])
+        cfg["tools"] = {"deny": ["group:runtime", "edit", "apply_patch", "group:web", "group:ui", "group:automation",
+                                  "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
+                        "alsoAllow": ["read"], "fs": {"workspaceOnly": True}}
+        out = self.verify_output(cfg)
+        self.assertIn("FAIL tools.deny", out)
+
+    def test_verify_fails_when_workspace_only_is_disabled(self):
+        cfg = dict(BASE, channels={}, bindings=[])
+        cfg["tools"] = {"deny": ["group:runtime", "write", "edit", "apply_patch", "group:web", "group:ui", "group:automation",
+                                  "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
+                        "alsoAllow": ["read"], "fs": {"workspaceOnly": False}}
+        out = self.verify_output(cfg)
+        self.assertIn("FAIL tools.read_only_workspace", out)
+
+    def test_verify_fails_when_also_allow_adds_anything_besides_read(self):
+        cfg = dict(BASE, channels={}, bindings=[])
+        cfg["tools"] = {"deny": ["group:runtime", "write", "edit", "apply_patch", "group:web", "group:ui", "group:automation",
+                                  "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
+                        "alsoAllow": ["read", "write"], "fs": {"workspaceOnly": True}}
+        out = self.verify_output(cfg)
+        self.assertIn("FAIL tools.read_only_workspace", out)
 
 
 if __name__ == "__main__":

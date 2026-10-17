@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# openclaw_harden.sh: put OpenClaw's front desk on the free-only chain with a tool-less receptionist.
+# openclaw_harden.sh: put OpenClaw's front desk on the free-only chain with workspace-scoped read access.
 #
 #   openclaw_harden.sh apply      back up, patch, read everything back (exit 1 if any check fails)
 #   openclaw_harden.sh fix        back up, re-apply the config patch only (no exec-policy, no plugin), read back.
@@ -114,8 +114,12 @@ patch = {
         "toolSearch": False,
         # Code mode (auto for some models) shows a model exec + wait whatever the tool policy says.
         "codeMode": False,
-        "deny": ["group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes",
+        # OpenClaw 2026.9.9 docs: tools.alsoAllow (docs/cli/claws.md) exposes read; tools.fs.workspaceOnly
+        # (docs/start/openclaw.md) confines filesystem reads to the agent workspace.
+        "deny": ["group:runtime", "write", "edit", "apply_patch", "group:web", "group:ui", "group:automation", "group:nodes",
                  "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"],
+        "alsoAllow": ["read"],
+        "fs": {"workspaceOnly": True},
         "elevated": {"enabled": False},
         "sessions": {"visibility": "agent"},
         "agentToAgent": {"enabled": False},
@@ -188,8 +192,13 @@ if GATE:
 else:
     res.append(out("gate.absent_without_channel", "receptionist" not in c["agents"]["entries"], "no channel or binding configured, so no gate agent"))
 res.append(out("tools.profile_and_search", c.get("tools", {}).get("profile") == "minimal" and c.get("tools", {}).get("toolSearch") is False and c.get("tools", {}).get("codeMode") is False, "profile=%s toolSearch=%s codeMode=%s" % (c.get("tools", {}).get("profile"), c.get("tools", {}).get("toolSearch"), c.get("tools", {}).get("codeMode"))))
-need = {"group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"}
-res.append(out("tools.deny", need <= set(c.get("tools", {}).get("deny", [])), "%d entries" % len(c.get("tools", {}).get("deny", []))))
+tools = c.get("tools", {})
+deny = set(tools.get("deny", []))
+need = {"group:runtime", "write", "edit", "apply_patch", "group:web", "group:ui", "group:automation", "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"}
+res.append(out("tools.deny", need <= deny and "group:fs" not in deny, "%d entries" % len(deny)))
+fs = tools.get("fs") or {}
+res.append(out("tools.read_only_workspace", tools.get("alsoAllow") == ["read"] and fs.get("workspaceOnly") is True,
+               "alsoAllow=%s workspaceOnly=%s" % (tools.get("alsoAllow"), fs.get("workspaceOnly"))))
 res.append(out("tools.elevated", c.get("tools", {}).get("elevated", {}).get("enabled") is False))
 res.append(out("tools.sessions", c.get("tools", {}).get("sessions", {}).get("visibility") == "agent" and c.get("tools", {}).get("agentToAgent", {}).get("enabled") is False, "visibility=agent, agentToAgent off"))
 nd = {"system.run", "system.run.prepare", "system.which", "system.execApprovals.get", "system.execApprovals.set", "canvas.eval", "screen.record", "screen.snapshot"}
