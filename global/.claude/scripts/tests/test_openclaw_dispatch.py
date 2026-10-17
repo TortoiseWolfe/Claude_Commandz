@@ -6,6 +6,8 @@ import inspect
 import io
 import json
 import os
+import random
+import re
 import sys
 import tempfile
 import time
@@ -55,7 +57,14 @@ class FakeHost:
         return self.proj
 
     def inject(self, text):
-        self.chats.append(text)
+        try:
+            parts = dp._chat_parts(text)
+        except ValueError:
+            return False
+        self.chats.extend(parts)
+        return True
+
+    def spawn_pass(self, ask_id):
         return True
 
     def refresh_digest(self):
@@ -125,6 +134,68 @@ class Base(unittest.TestCase):
 
 
 class ReceptionistQueue(Base):
+    def assert_chat_parts_keep_words(self, text):
+        parts = dp._chat_parts(text)
+        self.assertTrue(parts)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        if len(parts) > 1:
+            for i, part in enumerate(parts, 1):
+                self.assertTrue(part.endswith(" (part %d of %d)" % (i, len(parts))))
+        payloads = [re.sub(r" \(part \d+ of \d+\)$", "", part) for part in parts]
+        visible = "".join(c for payload in payloads for c in payload if not c.isspace())
+        source = "".join(c for c in text if not c.isspace())
+        self.assertEqual(visible, source)
+        boundaries = []
+        for payload in payloads[:-1]:
+            boundaries.append(sum(not c.isspace() for c in payload) +
+                              (boundaries[-1] if boundaries else 0))
+        source_offset = 0
+        for word in re.finditer(r"\S+", text):
+            word_end = source_offset + len(word.group())
+            for boundary in boundaries:
+                if source_offset < boundary < word_end:
+                    self.assertGreaterEqual(len(word.group()), dp.CHAT_MAX - 40,
+                                            "chat part boundary split a short word")
+            source_offset = word_end
+
+    def test_chat_chunks_keep_words_after_a_newline(self):
+        self.assert_chat_parts_keep_words("intro\n" + "abcdefghi " * 200)
+
+    def test_chat_chunks_keep_words_after_blank_and_short_paragraphs(self):
+        self.assert_chat_parts_keep_words("intro\n\n" + "abcdefghi " * 200)
+        self.assert_chat_parts_keep_words(
+            "first paragraph\nsecond paragraph\nthird paragraph\n" +
+            "abcdefghi " * 220)
+
+    def test_chat_chunks_keep_words_in_generated_messages(self):
+        rng = random.Random(1017)
+        for _ in range(1000):
+            target = rng.randint(1, 12000)
+            pieces = []
+            length = 0
+            while length < target:
+                sample = rng.random()
+                if sample < 0.002:
+                    piece = "x" * rng.randint(dp.CHAT_MAX - 30, 3 * dp.CHAT_MAX)
+                elif sample < 0.05:
+                    piece = "\n\n"
+                elif sample < 0.12:
+                    piece = "\n"
+                elif sample < 0.17:
+                    piece = ". "
+                else:
+                    word = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
+                                   for _ in range(rng.randint(1, 15)))
+                    piece = word + " "
+                pieces.append(piece)
+                length += len(piece)
+            text = "".join(pieces)
+            self.assert_chat_parts_keep_words(text)
+
+    def test_chat_parts_fit_when_whitespace_precedes_a_hard_cut(self):
+        for text in ("intro\n\n" + "x" * 3000, "intro" + " " * 5 + "x" * 3000):
+            self.assert_chat_parts_keep_words(text)
+
     def record_question(self, ask_id, status, created, **extra):
         state = self.state()
         state.setdefault("asks", {})[ask_id] = {
@@ -172,6 +243,85 @@ class ReceptionistQueue(Base):
         ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "Found the result.", NOW)
         self.assertTrue(ok, msg)
         self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
+
+    def test_post_splits_a_long_answer_in_order_and_stores_it_whole(self):
+        ask_id = "oc-ccccccce"
+        answer = " ".join(["word"] * 800)
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "posted answer for " + ask_id)
+        self.assertEqual(len(self.host.chats), 3)
+        self.assertEqual([len(part) <= dp.CHAT_MAX for part in self.host.chats], [True] * 3)
+        self.assertTrue(all(part.endswith("(part %d of 3)" % i) for i, part in enumerate(self.host.chats, 1)))
+        content = "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in self.host.chats)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in answer if not c.isspace()))
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
+
+    def test_an_unbroken_token_is_hard_cut_without_losing_characters(self):
+        text = "x" * 2500
+        parts = dp._chat_parts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
+
+    def test_a_long_token_mixed_with_words_is_relayed_whole(self):
+        text = "before words " + ("x" * 4000) + " after words"
+        parts = dp._chat_parts(text)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
+
+    def test_an_over_cap_answer_names_the_ask_holding_its_full_text(self):
+        ask_id = "oc-ccccccca"
+        answer = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
+        self.assertEqual(len(self.host.chats), dp.MAX_CHAT_PARTS + 1)
+        self.assertIn(ask_id, self.host.chats[-1])
+        self.assertIn("stored with ask", self.host.chats[-1])
+
+    def test_post_line_over_cap_stores_and_names_the_full_text_file(self):
+        text = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"):
+            ok, msg = dp.post_line(self.host, text)
+        self.assertTrue(ok, msg)
+        notice = self.host.chats[-1]
+        self.assertIn("Full text is stored at:", notice)
+        path = Path(notice.split("Full text is stored at: ", 1)[1])
+        self.assertEqual(path.read_text(), text)
+
+    def test_a_blank_line_split_keeps_its_marker_on_the_text_line(self):
+        text = "first paragraph" + (" x" * 600) + "\n\nsecond paragraph" + (" y" * 600)
+        parts = dp._chat_parts(text)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        self.assertIn("(part 1 of ", parts[0])
+        self.assertFalse(parts[0].endswith("\n"))
+        content = "".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts)
+        self.assertEqual("".join(c for c in content if not c.isspace()),
+                         "".join(c for c in text if not c.isspace()))
+
+    def test_post_keeps_a_short_answer_unmarked(self):
+        ask_id = "oc-cccccccf"
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "A short complete answer.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.chats, ["A short complete answer."])
+
+    def test_question_echo_keeps_all_300_characters(self):
+        self.ctx.hand_off_first = True
+        question = "Which current sample is correct? " * 9 + "x"
+        self.assertEqual(len(question), 298)
+        question += "yz"
+        self.assertEqual(len(question), 300)
+        _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
+        self.assertEqual(chat, "asked Claude: " + question)
 
     def test_say_injects_outside_the_state_lock(self):
         ask_id = "oc-cccccccd"
@@ -700,14 +850,52 @@ class Sweep(Base):
         self.assertEqual(len(self.host.chats), n)
         self.assertEqual(self.state()["lanes"][lane]["status"], "started")
 
-    def test_a_long_report_is_trimmed_and_control_characters_dropped(self):
+    def test_a_long_report_is_relayed_in_full_parts_and_control_characters_dropped(self):
         self.start("client-app")
         lane = self.lane_names()[0]
-        self.write_report(lane, "x" * 5000 + "\x1b[2J")
+        report = "result " * 375
+        self.write_report(lane, report + "\x1b[2J")
+        before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertLess(len(chat), dp.CHAT_MAX)
-        self.assertIn("(trimmed)", chat)
+        self.assertIn(report, chat)
+        sent = self.host.chats[before:]
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertEqual(
+            "".join(c for part in sent
+                    for c in re.sub(r" \(part \d+ of \d+\)$", "", part)
+                    if not c.isspace()),
+            "".join(c for c in chat if not c.isspace()),
+        )
         self.assertNotIn("\x1b", chat)
+
+    def test_a_report_with_an_unbroken_token_is_relayed_and_closes_the_lane(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        report = "x" * 2000
+        self.write_report(lane, report)
+        before = len(self.host.chats)
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        sent = self.host.chats[before:]
+        self.assertIn(report, chat)
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertTrue(self.state()["lanes"][lane]["delivered"])
+
+    def test_a_report_over_the_part_limit_points_to_its_full_report_path(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        report = "detail " * 12000
+        self.write_report(lane, report)
+        before = len(self.host.chats)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        sent = self.host.chats[before:]
+        self.assertEqual(len(sent), dp.MAX_CHAT_PARTS + 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertTrue(all(part.endswith("(part %d of %d)" % (i, dp.MAX_CHAT_PARTS))
+                            for i, part in enumerate(sent[:dp.MAX_CHAT_PARTS], 1)))
+        self.assertIn(self.state()["lanes"][lane]["report"], sent[-1])
 
     def test_a_codex_lane_that_exits_without_a_report_is_said_to_have_stopped(self):
         self.start("own-app")
@@ -861,6 +1049,26 @@ class MainSessionOnly(Base):
         self.assertEqual((len(attempts), sleeps, len(log)), (3, [3, 8], 3))
         self.assertTrue(all("returncode=7" in line for line in log))
 
+    def test_inject_stops_when_part_two_fails_and_logs_its_number(self):
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+
+        def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            attempts.append(json.loads(stdin)["message"])
+            if len(attempts) == 1:
+                return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+            return type("R", (), {"returncode": 7, "stdout": "", "stderr": "gateway unavailable"})()
+
+        host._run = run
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:retry"}):
+            self.assertFalse(host.inject("word " * 1000))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text()
+        self.assertEqual((len(attempts), sleeps), (4, [3, 8]))
+        self.assertIn("part 2 of 3 attempt=1", log)
+        self.assertIn("part 2 of 3 attempt=3", log)
+
     def test_inject_does_not_retry_a_timed_out_call(self):
         host = dp.LaneHost()
         attempts = []
@@ -956,11 +1164,16 @@ class MainSessionOnly(Base):
             with self.assertRaises(SystemExit):
                 dp.state_file()
 
-    def test_the_note_is_cleaned_and_capped(self):
-        (argv, stdin), = self.inject_call("a\x1b[2Jb" + "y" * 5000)
-        msg = json.loads(stdin)["message"]
-        self.assertNotIn("\x1b", msg)
-        self.assertLessEqual(len(msg), dp.CHAT_MAX)
+    def test_the_note_is_cleaned_and_split_without_truncation(self):
+        calls = []
+        host = pk.Host()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: calls.append((argv, stdin)) or type(
+            "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        self.assertTrue(host.inject("a\x1b[2Jb " + "word " * 1000))
+        messages = [json.loads(stdin)["message"] for _argv, stdin in calls]
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(len(message) <= dp.CHAT_MAX for message in messages))
+        self.assertNotIn("\x1b", "".join(messages))
 
     def test_no_code_path_names_another_session_or_creates_one(self):
         for f in ("openclaw_dispatch.py", "openclaw_pickup.py"):
