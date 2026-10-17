@@ -95,5 +95,32 @@ class Harden(unittest.TestCase):
         self.assertEqual([m["primary"]] + m["fallbacks"], ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.6-flash", "ollama/q"])
 
 
+class VerifyGate(unittest.TestCase):
+    def verify_output(self, cfg):
+        cfg = json.loads(json.dumps(cfg))
+        cfg["agents"]["defaults"]["models"] = {m: {} for m in ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.6-flash", "ollama/q"]}
+        d = Path(tempfile.mkdtemp())
+        (d / "bin").mkdir()
+        f = d / "bin" / "openclaw"
+        f.write_text(FAKE)
+        f.chmod(f.stat().st_mode | stat.S_IXUSR)
+        c = d / "openclaw.json"
+        c.write_text(json.dumps(cfg))
+        body = "\n".join(SCRIPT.read_text().splitlines()[:-1])
+        run = f'source <(cat <<\'__H__\'\n{body}\n__H__\n)\nHOME="{d}"; init; do_verify'
+        e = dict(os.environ, PATH=f"{d}/bin:{os.environ['PATH']}", FAKE_CFG=str(c), HOME=str(d))
+        r = subprocess.run(["bash", "-c", run], capture_output=True, text=True, env=e, timeout=60)
+        return r.stdout
+
+    def test_verify_fails_when_a_channel_is_configured_but_the_gate_agent_is_missing(self):
+        out = self.verify_output(dict(BASE, channels={"slack": {"enabled": True}}, bindings=[]))
+        self.assertIn("FAIL gate.present_with_channel", out)
+
+    def test_verify_does_not_ask_for_a_gate_when_no_channel_is_configured(self):
+        out = self.verify_output(dict(BASE, channels={}, bindings=[]))
+        self.assertIn("PASS gate.absent_without_channel", out)
+        self.assertNotIn("gate.present_with_channel", out)
+
+
 if __name__ == "__main__":
     unittest.main()
