@@ -96,6 +96,8 @@ PASS_TIMEOUT = 240  # seconds one dispatch pass may run (shorter than ASK_WAIT, 
 PASS_MAX_TURNS = 10
 DEDUP_WINDOW = 15 * 60  # an identical task is not started twice in this long, unless the earlier lane failed
 ASK_KEEP = 3 * 86400
+DEFER_WAIT = 15 * 60  # a deferred question the hub hasn't answered in this long gets its own answer lane
+DEFER_MAX_AGE = 6 * 3600  # older ones stay on the hub's list: a backlog must never start a lane apiece
 PASS_VERBS = ("prompt", "say", "start", "approve")  # the only commands the dispatch pass may run
 # A question the receptionist could not answer ("Sending to the hub: how many open issues ...") gets the same short pass with a
 # different prompt and these commands only: it reads GitHub facts and answers, and it can never start a lane.
@@ -2344,12 +2346,16 @@ def fallback_due(ctx, host, now=None):
     due, questions, deferred = [], [], []
     with ctx.locked():
         state = load_state(ctx.state_path)
+        stale = sorted((a.get("deferred_at", a.get("answered_at", a.get("created", now))), k)
+                       for k, a in asks_of(state).items()
+                       if a.get("kind") == "question" and a.get("status") == "deferred")
+        stale = [k for t, k in stale if DEFER_WAIT <= now - t <= DEFER_MAX_AGE]
+        if stale:  # one answer lane per run, oldest first; the next run takes the next one
+            a = asks_of(state)[stale[0]]
+            a["status"], a["fallback_started_at"] = "fallback-lane", now
+            deferred.append((stale[0], a.get("task", "")))
         for k, a in sorted(asks_of(state).items()):
             if a.get("kind") == "question" and a.get("status") == "deferred":
-                deferred_at = a.get("deferred_at", a.get("answered_at", a.get("created", now)))
-                if now - deferred_at >= 15 * 60:
-                    a["status"], a["fallback_started_at"] = "fallback-lane", now
-                    deferred.append((k, a.get("task", "")))
                 continue
             if a.get("status") != "pending":
                 continue

@@ -213,6 +213,29 @@ class ReceptionistQueue(Base):
         self.assertEqual(dp.fallback_due(self.ctx, host, NOW + 3600), [])
         self.assertEqual(len(host.started), 1)
 
+    def test_a_backlog_of_deferred_questions_starts_one_lane_per_run_oldest_first(self):
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question("oc-aaaaaaaa", "deferred", NOW - 3600, deferred_at=NOW - 20 * 60)
+        self.record_question("oc-bbbbbbbb", "deferred", NOW - 3600, deferred_at=NOW - 40 * 60)
+        self.record_question("oc-cccccccc", "deferred", NOW - 3600, deferred_at=NOW - 30 * 60)
+        host = FakeHost()
+        dp.fallback_due(self.ctx, host, NOW)
+        self.assertEqual(len(host.started), 1)
+        asks = dp.asks_of(self.state())
+        self.assertEqual(asks["oc-bbbbbbbb"]["status"], "fallback-lane")
+        self.assertEqual((asks["oc-aaaaaaaa"]["status"], asks["oc-cccccccc"]["status"]), ("deferred", "deferred"))
+        dp.fallback_due(self.ctx, host, NOW + 60)
+        self.assertEqual(len(host.started), 2)
+        self.assertEqual(dp.asks_of(self.state())["oc-cccccccc"]["status"], "fallback-lane")
+
+    def test_a_deferred_question_older_than_the_max_age_stays_on_the_hubs_list(self):
+        self.record_question("oc-dddddddd", "deferred", NOW - 8 * 3600, deferred_at=NOW - 7 * 3600)
+        host = FakeHost()
+        self.assertEqual(dp.fallback_due(self.ctx, host, NOW), [])
+        self.assertEqual(host.started, [])
+        self.assertEqual(dp.asks_of(self.state())["oc-dddddddd"]["status"], "deferred")
+
     def test_stale_duplicate_is_flagged_again_and_retouches_the_wake_file(self):
         self.ctx.hand_off_first = True
         question = "Which sample status is current?"
