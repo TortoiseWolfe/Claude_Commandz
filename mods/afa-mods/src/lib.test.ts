@@ -1,6 +1,18 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bandText, classify, countInbox, explain, hasExitLine, recentLanes, unattendedRmVerdict, weather } from './lib'
+import {
+  bandText,
+  classify,
+  countInbox,
+  explain,
+  hasExitLine,
+  realPathVerdict,
+  recentLanes,
+  unattendedRmPaths,
+  unattendedRmVerdict,
+  unattendedRoots,
+  weather,
+} from './lib'
 
 const INBOX = [
   '- [x] 2026-10-03 done thing',
@@ -134,5 +146,20 @@ describe('plain words and the unattended verdict', () => {
     const no = unattendedRmVerdict('rm -rf /home/u/repos/App', env)
     expect(no.ok).toBe(false)
     expect(no.ok === false && no.reason).toContain('Delete only by a full path inside')
+  })
+  test('/tmp is no longer a place an unattended lane may delete in', () => {
+    expect(unattendedRmVerdict('rm -rf /tmp/x/y', { ...env, tmpdir: '/tmp/x' }).ok).toBe(false)
+  })
+  test('the allowed folders are the lane folder and the worktrees, nothing else', () => {
+    expect(unattendedRoots(env)).toEqual(['/home/u/handoff/x', '/home/u/repos/.worktrees'])
+    expect(unattendedRmPaths('rm -rf ~/repos/.worktrees/a/./b', env)).toEqual(['/home/u/repos/.worktrees/a/b'])
+  })
+  test('realPathVerdict accepts a resolved path inside a root and refuses the rest', () => {
+    const roots = ['/real/hand', '/real/wt']
+    expect(realPathVerdict([{ path: '/h/x', real: '/real/hand/x' }], roots).ok).toBe(true)
+    expect(realPathVerdict([{ path: '/h/x', real: '/real/hand' }], roots).ok).toBe(false)
+    expect(realPathVerdict([{ path: '/h/x', real: '/real/handy/x' }], roots).ok).toBe(false)
+    expect(realPathVerdict([{ path: '/h/x', real: '' }], roots).ok).toBe(false)
+    expect(realPathVerdict([{ path: '/h/x', real: '/real/hand/x' }], []).ok).toBe(false)
   })
 })
