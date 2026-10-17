@@ -42,6 +42,25 @@ def patch_for(cfg, env=None, hook_installed=False):
 
 
 BASE = {"agents": {"defaults": {"model": {"primary": "google/gemini-3.5-flash", "fallbacks": ["google/gemini-3.5-flash-lite", "google/gemini-3.6-flash", "ollama/q"]}}, "entries": {"main": {"workspace": "/w"}}}}
+FREE_CHAIN = ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.6-flash"]
+
+
+def merge_patch(target, patch):
+    for key, value in patch.items():
+        if isinstance(value, dict):
+            target[key] = merge_patch(target.get(key, {}), value)
+        else:
+            target[key] = value
+    return target
+
+
+def no_chain_config():
+    cfg = json.loads(json.dumps(BASE))
+    defaults = cfg["agents"]["defaults"]
+    defaults.pop("model")
+    defaults.pop("modelPolicy", None)
+    defaults.pop("models", None)
+    return cfg
 
 
 class Harden(unittest.TestCase):
@@ -93,16 +112,55 @@ class Harden(unittest.TestCase):
         p, _, _ = patch_for(dict(BASE, bindings=[]), env={"OPENCLAW_HARDEN_RESET_HOUR": "5"})
         self.assertEqual(p["session"]["reset"]["atHour"], 5)
 
-    def test_the_chain_is_the_default_one(self):
-        p, _, _ = patch_for(dict(BASE, bindings=[]))
+    def test_an_unconfigured_chain_gets_the_free_default(self):
+        p, _, _ = patch_for(dict(no_chain_config(), bindings=[]))
         m = p["agents"]["defaults"]["model"]
-        self.assertEqual([m["primary"]] + m["fallbacks"], ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.6-flash", "ollama/q"])
+        self.assertEqual([m["primary"]] + m["fallbacks"], FREE_CHAIN)
+        self.assertEqual(p["agents"]["defaults"]["modelPolicy"]["allow"], FREE_CHAIN)
+        self.assertEqual(list(p["agents"]["defaults"]["models"]), FREE_CHAIN)
+
+    def test_fix_and_apply_leave_a_configured_claude_chain_and_providers_unchanged(self):
+        cfg = json.loads(json.dumps(BASE))
+        defaults = cfg["agents"]["defaults"]
+        defaults["model"] = {
+            "primary": "claude/claude-haiku-5-5",
+            "fallbacks": ["claude/claude-sonnet-5-5"],
+        }
+        defaults["modelPolicy"] = {"allow": ["claude/claude-haiku-5-5", "claude/claude-sonnet-5-5"]}
+        defaults["models"] = {
+            "claude/claude-haiku-5-5": {"alias": "haiku"},
+            "claude/claude-sonnet-5-5": {"alias": "sonnet"},
+        }
+        cfg["models"] = {"providers": {"claude": {"apiKey": {"source": "store"}, "models": [{"id": "claude-haiku-5-5"}]}}}
+
+        before = {
+            "model": json.dumps(defaults["model"], separators=(",", ":")),
+            "modelPolicy": json.dumps(defaults["modelPolicy"], separators=(",", ":")),
+            "models": json.dumps(defaults["models"], separators=(",", ":")),
+            "providers": json.dumps(cfg["models"]["providers"], separators=(",", ":")),
+        }
+        patch, _, _ = patch_for(cfg)
+        updated = merge_patch(json.loads(json.dumps(cfg)), patch)
+        after = updated["agents"]["defaults"]
+        self.assertEqual(json.dumps(after["model"], separators=(",", ":")), before["model"])
+        self.assertEqual(json.dumps(after["modelPolicy"], separators=(",", ":")), before["modelPolicy"])
+        self.assertEqual(json.dumps(after["models"], separators=(",", ":")), before["models"])
+        self.assertEqual(json.dumps(updated["models"]["providers"], separators=(",", ":")), before["providers"])
+        self.assertEqual(patch["agents"]["defaults"], {})
+        self.assertNotIn("models", patch)
 
 
 class VerifyGate(unittest.TestCase):
     def verify_output(self, cfg):
         cfg = json.loads(json.dumps(cfg))
-        cfg["agents"]["defaults"]["models"] = {m: {} for m in ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.6-flash", "ollama/q"]}
+        defaults = cfg["agents"]["defaults"]
+        model = defaults.get("model") or {}
+        chain = ([model["primary"]] if model.get("primary") else []) + (model.get("fallbacks") or [])
+        defaults.setdefault("models", {}).update({m: {} for m in chain})
+        defaults.setdefault("modelPolicy", {}).setdefault("allow", chain)
+        providers = cfg.setdefault("models", {}).setdefault("providers", {})
+        for m in chain:
+            providers.setdefault(m.split("/", 1)[0], {})
         d = Path(tempfile.mkdtemp())
         (d / "bin").mkdir()
         f = d / "bin" / "openclaw"
@@ -124,6 +182,19 @@ class VerifyGate(unittest.TestCase):
         out = self.verify_output(dict(BASE, channels={}, bindings=[]))
         self.assertIn("PASS gate.absent_without_channel", out)
         self.assertNotIn("gate.present_with_channel", out)
+
+    def test_verify_accepts_a_configured_claude_chain_with_a_provider(self):
+        cfg = json.loads(json.dumps(BASE))
+        cfg["agents"]["defaults"]["model"] = {
+            "primary": "claude/claude-haiku-5-5",
+            "fallbacks": ["claude/claude-sonnet-5-5"],
+        }
+        cfg["agents"]["defaults"]["modelPolicy"] = {
+            "allow": ["claude/claude-haiku-5-5", "claude/claude-sonnet-5-5"]
+        }
+        cfg["models"] = {"providers": {"claude": {"apiKey": {"source": "store"}}}}
+        out = self.verify_output(dict(cfg, channels={}, bindings=[]))
+        self.assertIn("PASS chain.allow_and_provider_entries 2 models checked", out)
 
     def test_verify_fails_when_a_write_tool_is_not_denied(self):
         cfg = dict(BASE, channels={}, bindings=[])
