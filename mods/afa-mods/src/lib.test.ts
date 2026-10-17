@@ -81,12 +81,33 @@ describe('blast radius classifier', () => {
     expect(kinds('bash -c "cd x && rm -rf y"')).toEqual(['rm -rf'])
     expect(kinds('\\rm -rf y')).toEqual(['rm -rf'])
   })
+  test('holds kill-server on the default tmux server', async () => {
+    expect(kinds('tmux kill-server')).toEqual(['tmux shared lanes'])
+  })
+  test('holds kill-session when its target is written with a separate -t', async () => {
+    expect(kinds('tmux kill-session -t lanes')).toEqual(['tmux shared lanes'])
+  })
+  test('holds kill-session when its target is attached to -t', async () => {
+    expect(kinds('tmux kill-session -tlanes')).toEqual(['tmux shared lanes'])
+  })
+  test('holds kill-session when its target is written with -t=', async () => {
+    expect(kinds('tmux kill-session -t=lanes')).toEqual(['tmux shared lanes'])
+  })
   test('lets ordinary commands through', async () => {
     expect(kinds('rm -r build')).toEqual([])
     expect(kinds('rm file.txt')).toEqual([])
     expect(kinds('docker compose down')).toEqual([])
     expect(kinds('git push origin main')).toEqual([])
     expect(kinds('ls -la')).toEqual([])
+  })
+  test('lets private tmux sockets and a single named lane window through', async () => {
+    expect(kinds('tmux -L test kill-server')).toEqual([])
+    expect(kinds('tmux -S /tmp/test.sock kill-server')).toEqual([])
+    expect(kinds('tmux -L test kill-session -t lanes')).toEqual([])
+    expect(kinds('tmux -S /tmp/test.sock kill-session -t lanes')).toEqual([])
+    expect(kinds('tmux kill-window -t lane-2026-10-17-br-tmux')).toEqual([])
+    expect(kinds('tmux kill-session -t other')).toEqual([])
+    expect(kinds('tmux kill-session')).toEqual([])
   })
   test('allows the approved own-scratch commands', async () => {
     expect(
