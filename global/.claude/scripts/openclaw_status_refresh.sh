@@ -2,7 +2,7 @@
 # Rebuild the OpenClaw status digest and put it where OpenClaw loads it at session start:
 # a marked block at the top of MEMORY.md in its main workspace (OpenClaw injects MEMORY.md into every
 # main session, 20,000 chars per file). Data flows hub -> OpenClaw: the remote side prints one
-# "ok <bytes>" line, and the only other thing read back is the receptionist's model name (the digest's client guard).
+# "ok <bytes>" line, and the only other thing read back is the receptionist's model chain (the digest's client guard).
 #
 #   openclaw_status_refresh.sh            build and deliver (what the scheduled task and lane_watch.sh call)
 #   openclaw_status_refresh.sh --build    build only, print the digest path
@@ -22,16 +22,21 @@ flock -n 9 || exit 0
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2
 
-# The receptionist's live model, one name and nothing else: client repos get PR titles in the digest only when it is a claude/ model.
-# The digest checks the shape and treats anything else (empty, an error, another provider) as not Claude: counts only.
+# The receptionist's live model chain (primary, then fallbacks), model names and nothing else: client repos get PR titles in the
+# digest only when every one is a claude/ model, since a fallback reads the same digest. The digest checks the shape and treats
+# anything else (empty, an error, another provider, a line cut short) as not Claude: counts only.
 model=$(timeout 30 wsl.exe -d OpenClawGateway -u openclaw -e python3 -c '
 import json
 c = json.load(open("/home/openclaw/.openclaw/openclaw.json"))
 a = c.get("agents") or {}
-m = next((x.get("model") for x in a.get("list") or [] if isinstance(x, dict) and x.get("id") == "main" and x.get("model")), None)
-m = m or (a.get("defaults") or {}).get("model")
-print(m.get("primary", "") if isinstance(m, dict) else m or "")
-' 2>/dev/null | tr -d '\r\0' | head -1 | cut -c1-120)
+d = (a.get("defaults") or {}).get("model")
+m = next((x.get("model") for x in a.get("list") or [] if isinstance(x, dict) and x.get("id") == "main" and x.get("model")), None) or d
+chain = [m.get("primary", "") if isinstance(m, dict) else m or ""]
+fb = m.get("fallbacks") if isinstance(m, dict) and "fallbacks" in m else (d or {}).get("fallbacks") if isinstance(d, dict) else None
+chain += [f if isinstance(f, str) else "?" for f in fb or []]  # anything odd fails the digest check
+print(",".join(chain))
+' 2>/dev/null | tr -d '\r\0' | head -c 4000 | head -1)
+[ "${#model}" -le 1000 ] || model=""  # never cut a chain short: a dropped fallback would read as all-Claude
 
 python3 "$here/openclaw_status_digest.py" --receptionist-model "$model" --out "$out.new" || { rm -f "$out.new"; exit 1; }
 first=$(head -1 "$out.new"); last=$(tail -1 "$out.new"); size=$(wc -c < "$out.new")

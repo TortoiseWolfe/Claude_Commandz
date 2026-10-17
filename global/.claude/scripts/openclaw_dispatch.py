@@ -280,7 +280,7 @@ class LaneHost:
         r = self._run(["gh"] + list(argv), timeout)
         return (r.stdout or "") if r is not None else ""
 
-    def claude_pass(self, prompt, hand, timeout, verbs=PASS_VERBS):
+    def claude_pass(self, prompt, hand, timeout, verbs=PASS_VERBS, ask=None):
         """One short `claude -p` Sonnet call: none of his settings, CLAUDE.md, connectors, plugins, skills or memory; one tool.
         -> (exit code or -1, stdout). One tool, Bash, and only for this script's PASS_VERBS (prompt / say / start / approve; never lane.sh,
         claim or post), or QUESTION_VERBS for a question: Claude Code refuses
@@ -293,7 +293,8 @@ class LaneHost:
         argv = [str(CLAUDE_BIN), "-p", prompt, "--model", "sonnet", "--max-turns", str(PASS_MAX_TURNS), "--output-format", "json",
                 "--permission-mode", "dontAsk", "--tools", "Bash", "--allowedTools", allow, "--settings", settings,
                 "--setting-sources", "project", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]
-        r = self._run(argv, timeout, cwd=str(hand), env=dict(os.environ, AFA_LANE_UNATTENDED="1", AFA_LANE_HAND=str(hand), AFA_OC_PASS="1"))
+        r = self._run(argv, timeout, cwd=str(hand), env=dict(os.environ, AFA_LANE_UNATTENDED="1", AFA_LANE_HAND=str(hand),
+                                                         AFA_OC_PASS=ask if ask and ASK_ID_RE.fullmatch(ask) else "1"))  # the ask it may act on
         return (-1, "") if r is None else (r.returncode, r.stdout or "")
 
     def inject(self, text):
@@ -2176,9 +2177,9 @@ def run_pass(ctx, host, ask_id, now=None):
         pass_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         if question:  # its own commands: facts, say and defer; no prompt, start or approve, so it cannot begin a lane
-            code, out = host.claude_pass(prompt, pass_dir, PASS_TIMEOUT, verbs=QUESTION_VERBS)
+            code, out = host.claude_pass(prompt, pass_dir, PASS_TIMEOUT, verbs=QUESTION_VERBS, ask=ask_id)
         else:
-            code, out = host.claude_pass(prompt, pass_dir, PASS_TIMEOUT)
+            code, out = host.claude_pass(prompt, pass_dir, PASS_TIMEOUT, ask=ask_id)
         secs = round(time.time() - t0, 1)
     toks, turns, cost = _usage(out)
     rec = {"exit": code, "seconds": secs, "tokens": toks, "turns": turns, "cost_usd": cost}
@@ -2208,8 +2209,24 @@ def _append(path, line):
         f.write(line + "\n")
 
 
+ASK_VERBS = ("claim", "start", "approve", "say", "defer")  # the verbs whose first argument is an ask id
+
+
+def foreign_ask(argv):
+    """A pass runs with AFA_OC_PASS set to its own ask id: it may not claim, start, approve, answer or defer any other ask (a question
+    that talks the pass into closing someone else's ask with a made-up answer). -> the refusal, or None."""
+    bound = os.environ.get("AFA_OC_PASS", "")
+    if ASK_ID_RE.fullmatch(bound) and argv and argv[0] in ASK_VERBS and (len(argv) < 2 or argv[1] != bound):
+        return "%s: this pass may only act on its own ask %s" % (argv[0], bound)
+    return None
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    refused = foreign_ask(argv)
+    if refused:
+        print(refused, file=sys.stderr)
+        return 1
     if len(argv) >= 3 and argv[0] == "claim":
         ctx = Ctx(load_repos())
         ok, msg = claim(ctx, argv[1], argv[2], host=LaneHost())

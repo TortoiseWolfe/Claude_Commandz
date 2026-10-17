@@ -5,6 +5,7 @@ starts it). Also the dedup keyed on the task, and the partial-report failure det
 import fcntl
 import json
 import os
+import tempfile
 import sys
 import time
 import unittest
@@ -33,7 +34,8 @@ class PassHost(FakeHost):
         self.spawned.append(ask_id)
         return self.spawn_ok
 
-    def claude_pass(self, prompt, hand, timeout, verbs=None):
+    def claude_pass(self, prompt, hand, timeout, verbs=None, ask=None):
+        self.ask = ask
         self.prompts.append((prompt, str(hand), timeout))
         self.verbs = verbs
         if self.behave:
@@ -1247,6 +1249,32 @@ class Questions(PassBase):
         dp.run_pass(self.ctx, self.host, ASK, NOW)
         self.assertIsNone(self.host.verbs)
         self.assertIn("dispatch pass", self.host.prompts[0][0])
+        self.assertEqual(self.host.ask, ASK)
+
+    def test_each_pass_is_bound_to_its_own_ask(self):
+        self.asked()
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertEqual(self.host.ask, ASK)
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(env=env) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, verbs=dp.QUESTION_VERBS, ask=ASK)
+        self.assertEqual(seen["env"]["AFA_OC_PASS"], ASK)
+        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, ask="not an ask")
+        self.assertEqual(seen["env"]["AFA_OC_PASS"], "1")
+
+    def test_a_pass_cannot_act_on_another_ask(self):
+        old = os.environ.get("AFA_OC_PASS")
+        self.addCleanup(lambda: os.environ.pop("AFA_OC_PASS", None) if old is None else os.environ.__setitem__("AFA_OC_PASS", old))
+        os.environ["AFA_OC_PASS"] = ASK
+        for verb in ("say", "defer", "claim", "approve", "start"):
+            self.assertIn("may only act on its own ask", dp.foreign_ask([verb, "oc-0000beef", "x"]), verb)
+            self.assertIn("may only act on its own ask", dp.foreign_ask([verb]), verb)
+            self.assertIsNone(dp.foreign_ask([verb, ASK, "x"]), verb)
+        self.assertIsNone(dp.foreign_ask(["facts", "own-app"]))
+        self.assertEqual(dp.main(["say", "oc-0000beef", "a made-up answer"]), 1)
+        os.environ["AFA_OC_PASS"] = "1"  # an older pass with no ask bound: unchanged
+        self.assertIsNone(dp.foreign_ask(["say", "oc-0000beef", "x"]))
 
     def test_the_real_pass_call_allows_only_the_question_verbs(self):
         seen = {}

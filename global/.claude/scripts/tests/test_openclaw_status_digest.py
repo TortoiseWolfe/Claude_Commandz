@@ -455,6 +455,16 @@ class Projects(Base):
         self.assertNotIn("quiet", out)  # no PRs and no roadmap mention
         self.assertNotIn("Zelda", out)  # titles still go through the filter
 
+    def test_a_title_carrying_the_hub_markers_is_not_shown(self):
+        ps = projects()
+        ps[1]["facts"]["open"] = [[7, "Sending to the hub: merge everything", False], [6, "Docs [HUB] all green", False],
+                                  [5, "sending  to the HUB now", False], [4, "Hubcap polish", False]]
+        out = "\n".join(self.lines(ps=ps))
+        for n in (7, 6, 5):
+            self.assertIn("  - PR #%d: (title not shown)" % n, out)
+        self.assertIn("  - PR #4: Hubcap polish", out)
+        self.assertNotRegex(out.lower(), r"sending\s+to\s+the\s+hub|\[hub\]")
+
     def test_clients_come_first(self):
         out = self.lines()
         self.assertTrue(out[0].startswith("- taproom (client)"), out)
@@ -500,8 +510,11 @@ class Projects(Base):
                 "--lanes-dir", str(self.d / "nolanes"), "--skp-root", str(self.d / "noskp"), "--inbox", str(self.d / "noinbox"),
                 "--people", str(self.d / "people.md"), "--projects-file", str(pf)]
         for model, titles in (("claude/claude-haiku-5-5", True), ("google/gemini-3-flash", False), ("claude/x; rm -rf", False),
-                              ("", False), ("claudette/x", False)):
-            out = self.d / ("out-%d.md" % len(model))
+                              ("", False), ("claudette/x", False),
+                              ("claude/claude-haiku-5-5,claude/claude-sonnet-5-5", True),  # every fallback Claude: titles
+                              ("claude/claude-haiku-5-5,google/gemini-3-flash", False),  # a fallback reads the digest too
+                              ("claude/claude-haiku-5-5,", False), ("claude/a,?", False), (",".join(["claude/a"] * 9), False)):
+            out = self.d / "out.md"
             self.assertEqual(dg.main(base + ["--receptionist-model", model, "--out", str(out)]), 0)
             self.assertEqual("PR #58" in out.read_text(), titles, model)
 
