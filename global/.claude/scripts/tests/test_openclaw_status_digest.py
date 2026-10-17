@@ -240,6 +240,12 @@ class FilterUnits(Base):
                 self.assertEqual(self.flt.clean("Stopped %s." % tok), "Stopped %s." % tok)
                 self.assertEqual(self.flt.clean("%s | repo x | running" % tok), "%s | repo x | running" % tok)
 
+    def test_a_lane_name_on_its_own_is_kept(self):
+        # the report list cleans the name by itself, before the date and the gist are added
+        for tok in ("oc-workspace-40816152", "oc-runit-1fbd1aee", "oc-runit-1016-2103", "frontdesk-6", "oc-a1b2c3d4"):
+            with self.subTest(tok=tok):
+                self.assertEqual(self.flt.clean(tok, limit=50), tok)
+
     def test_a_bare_long_number_is_still_scrubbed_next_to_a_lane_name(self):
         self.assertEqual(self.flt.clean("40816152 is not oc-workspace-40816152"), "[num] is not oc-workspace-40816152")
         self.assertEqual(self.flt.clean("order 40816152 today"), "order [num] today")
