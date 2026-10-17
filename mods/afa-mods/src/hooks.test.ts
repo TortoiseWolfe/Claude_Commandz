@@ -107,6 +107,19 @@ describe('blast radius', () => {
     expect(r.deny).toContain('non-interactive')
     expect(log).toContain('denied | git push --force')
   })
+  test('non-interactive: denies tmux kill-server and names the shared lane windows', async ($, on) => {
+    setup(on)
+    let log = ''
+    on('session.surfaces', () => ({ value: [] }))
+    on('fs.write', ($: any, e: any) => {
+      log += e.text
+      return { value: undefined }
+    })
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'tmux kill-server' })
+    expect(r.deny).toContain("closes every lane window (the tmux session 'lanes'), with no undo")
+    expect(r.deny).toContain('every other session and window on the default tmux server')
+    expect(log).toContain('denied | tmux shared lanes')
+  })
   test('non-interactive: allows rm -rf and logs it', async ($, on) => {
     setup(on)
     let log = ''

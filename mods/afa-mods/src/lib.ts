@@ -71,6 +71,7 @@ export const HELD_KINDS = [
   'docker compose down -v',
   'git push --force',
   'production deploy',
+  'tmux shared lanes',
 ] as const
 export type HeldKind = (typeof HELD_KINDS)[number]
 
@@ -91,6 +92,30 @@ const TEXT_CARRIERS = new Set(['echo', 'printf', 'cat', 'grep', 'egrep', 'fgrep'
 const RUNS_ITS_ARGS = new Set(['ssh', 'eval', 'xargs', 'watch', 'su', 'sh', 'bash', 'zsh', 'dash', 'ksh'])
 
 const firstWord = (seg: string) => (strip(seg).replace(/^\\/, '').split(/\s+/)[0] ?? '').split('/').pop() ?? ''
+
+function tmuxInvocation(tokens: string[]): { command: string; index: number; privateSocket: boolean } {
+  let index = 1
+  let privateSocket = false
+  while (index < tokens.length) {
+    const arg = tokens[index]
+    if (arg === '-L' || arg === '-S') {
+      privateSocket = true
+      index += 2
+    } else if (/^-[LS]=?.+/.test(arg)) {
+      privateSocket = true
+      index += 1
+    } else if (arg === '-f' || arg === '-T') {
+      index += 2
+    } else if (/^-[2CluvVND]+$/.test(arg)) {
+      index += 1
+    } else if (arg.startsWith('-')) {
+      index += 1
+    } else {
+      return { command: arg, index, privateSocket }
+    }
+  }
+  return { command: '', index, privateSocket }
+}
 
 // Heredoc bodies that only write a file (cat, tee, python ... <<EOF) are not commands: drop them. A body fed to a shell is kept.
 function withoutTextHeredocs(command: string): string {
@@ -219,6 +244,18 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     const flags = t.filter(x => x.startsWith('-'))
     const add = (kind: HeldKind, hard: boolean) => holds.push({ kind, hard, segment: seg })
 
+    if (/^(?:\S*\/)?tmux$/.test(t[0])) {
+      const invocation = tmuxInvocation(t)
+      if (!invocation.privateSocket && invocation.command === 'kill-server') {
+        add('tmux shared lanes', true)
+      } else if (!invocation.privateSocket && invocation.command === 'kill-session') {
+        const args = t.slice(invocation.index + 1)
+        const targetsLanes = args.some(
+          (arg, i) => (arg === '-t' && args[i + 1] === 'lanes') || /^-t=?lanes$/.test(arg),
+        )
+        if (targetsLanes) add('tmux shared lanes', true)
+      }
+    }
     if (/^(?:\S*\/)?rm$/.test(t[0])) {
       const r = flags.some(f => /^-[^-]*[rR]/.test(f) || f === '--recursive')
       const f = flags.some(f => /^-[^-]*f/.test(f) || f === '--force')
@@ -396,6 +433,16 @@ export function explain(hold: Hold): { what: string; why: string } {
       }
     case 'production deploy':
       return { what: 'ships to the live production site', why: 'production changes wait for the agreed window' }
+    case 'tmux shared lanes':
+      return hold.segment.includes('kill-server')
+        ? {
+            what: "closes every lane window (the tmux session 'lanes'), with no undo; it also closes every other session and window on the default tmux server",
+            why: 'all lanes share the default tmux server, so resetting one server closes every lane',
+          }
+        : {
+            what: "closes every lane window (the tmux session 'lanes'), with no undo",
+            why: 'all lanes share this tmux session, so ending it closes every lane',
+          }
     default:
       return { what: hold.kind, why: 'it is on the held list' }
   }
