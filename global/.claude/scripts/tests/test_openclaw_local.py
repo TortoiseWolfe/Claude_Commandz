@@ -170,7 +170,17 @@ class Patch(unittest.TestCase):
         p = new["models"]["providers"]["ollama"]
         self.assertEqual(p["baseUrl"], "http://127.0.0.1:11434")
         self.assertEqual(p["api"], "ollama")
-        self.assertEqual(list(new["models"]["providers"]), ["ollama"])
+        self.assertEqual(list(new["models"]["providers"]), ["ollama", "google"])
+        self.assertEqual(set(new["models"]["providers"]["google"]), {"models"})  # context caps only: no key, no URL
+        self.assertEqual({m["contextTokens"] for m in new["models"]["providers"]["google"]["models"]}, {L.GEMINI_CAP})
+        self.assertEqual(p["models"][0]["contextTokens"], 32768)
+
+    def test_compaction_summarises_on_gemini_never_the_local_model(self):
+        _, new = self.patched()
+        c = new["agents"]["defaults"]["compaction"]
+        self.assertTrue(c["model"].startswith("google/"))
+        self.assertEqual(c["mode"], "safeguard")
+        self.assertLess(L.GEMINI_CAP, L.CONTEXT_WINDOW)  # a compacted chat must fit the local window
 
     def test_no_secret_shaped_value_is_written(self):
         _, new = self.patched()
