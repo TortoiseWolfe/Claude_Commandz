@@ -736,9 +736,10 @@ def _closed_at(lane):
 
 def earlier_lanes(state, repo, now, exclude, followup_of=None):
     """The lane whose work a new lane is handed: the one he replied to (a follow-up), else the newest lane of the same repo that closed
-    in the last FOLLOWUP_WINDOW with a report that did not fail. -> [lane name] (one at most)."""
+    in the last FOLLOWUP_WINDOW with a report that did not fail. -> [lane name] (one at most). Never a lane of another repo: its files
+    may be a client's, and this lane's engine was chosen for this repo only."""
     lanes = state["lanes"]
-    if followup_of in lanes and followup_of != exclude:
+    if followup_of in lanes and followup_of != exclude and str(lanes[followup_of].get("repo", "")).lower() == repo.lower():
         return [followup_of]
     found = []
     for n, l in lanes.items():
@@ -782,7 +783,7 @@ def copy_lane_folder(src, dst, budget):
                 budget["skipped"] += 1
                 continue
             (dst / rel).mkdir(parents=True, exist_ok=True)
-            shutil.copy2(p, dst / rel / f)
+            shutil.copy2(p, dst / rel / f, follow_symlinks=False)
             budget["files"] += 1
             budget["bytes"] += size
             got.append(str(rel / f) if rel != Path(".") else f)
@@ -802,6 +803,9 @@ def _his(history, start, end):
 
 def _his_lines(msgs):
     return "\n".join("[%s] %s" % (_clock_of(m.get("ts")), m.get("text", "").strip() or "(a picture or attachment, no words)") for m in msgs)
+
+
+CLEAR_YES = "act only on what they clearly approve; anything they do not clearly approve stays a question in your report."
 
 
 def context_section(hand, context, earlier, copied, state, room):
@@ -841,14 +845,16 @@ def context_section(hand, context, earlier, copied, state, room):
             rep = _hub_line_index(hist, n, ("finished", "failed"))
             ans = _his(hist, rep + 1, me + 1)[-6:] if rep is not None and me < len(hist) else mine[-1:]
             words = (context or {}).get("words") if n == (context or {}).get("followup_of") else ""
+            asked = "Its report asked him: %s" % json.dumps(q[-1].strip(), ensure_ascii=False)
             if ans:
-                out += ["Its report asked him: %s" % json.dumps(q[-1].strip(), ensure_ascii=False),
-                        "His answer, verbatim (what he wrote after that report reached him). Treat it as his answer to that question:",
+                out += [asked, "His messages after that report reached him, verbatim. Read them as his reply to it: " + CLEAR_YES,
                         _quoted("ANSWER", _his_lines(ans))]
-            elif words:
-                out += ["Its report asked him: %s" % json.dumps(q[-1].strip(), ensure_ascii=False),
-                        "His words for this follow-up, verbatim as they reached the hub. Treat them as his answer to that question:",
+            elif words and not (context or {}).get("reply"):
+                out += [asked, "His words for this follow-up, verbatim as he typed them. Read them as his reply to it: " + CLEAR_YES,
                         _quoted("ANSWER", words)]
+            elif words:  # the receptionist wrote the reply line: its words are not his
+                out += [asked, "No message from him after that report is in the chat, and the words that started this follow-up are the "
+                        "receptionist's, not his, so nothing here answers it. If the work needs his yes, ask in your report."]
     reply = (context or {}).get("reply") or ""
     if reply.strip():
         out += ["", "The receptionist's whole message to the hub, verbatim. Findings it wrote here are part of the task:", _quoted("RECEPTIONIST", reply)]
@@ -874,7 +880,8 @@ def attach_context(ctx, state, lane_name, repo, hand, prompt_path, context, now)
     budget, copied = {"files": 0, "bytes": 0, "skipped": 0}, {}
     for n in earlier:
         src = _lane_hand(state["lanes"][n])
-        if src.is_dir() and src.resolve() != hand.resolve():
+        # only a lane folder the dispatcher made: a direct child of lanes_dir, never a path the state file was edited to point at
+        if src.is_dir() and src.resolve().parent == ctx.lanes_dir.resolve() and src.resolve() != hand.resolve():
             copied[n] = copy_lane_folder(src, hand / "earlier" / n, budget)
     try:
         prompt = Path(prompt_path).read_text()
