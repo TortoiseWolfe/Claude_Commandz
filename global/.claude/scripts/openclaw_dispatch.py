@@ -127,7 +127,8 @@ WORKSPACE_RULES = (
     "Skip every client repo: do not open anything listed in hub/client-repos.txt or hub/client-senders.tsv, or anything under CD/. "
     "Count them as \"client repos skipped\" and name no client, person or address. "
     "Change no file in any repo from here, with one exception: a roadmap post, which is `python3 ~/.claude/scripts/session_prime_facts.py --post ...` "
-    "(add --dry-run first if you like) and nothing else that writes. If the task needs any other change, say which repo in the report.\n"
+    "(add --dry-run first if you like) and nothing else that writes. Write the --arc, --next3, --next-should and --note files in the folder your report file is in "
+    "and pass their full paths; the script refuses any other path and any option beyond those. If the task needs any other change, say which repo in the report.\n"
     "- If a command is denied, say so in your report as a failure (\"could not complete\", and which command) instead of reporting what you did not see."
 )
 WORK_RULE = "If you change files, do it on a branch in a worktree under ~/repos/.worktrees/, never by switching branches in the main checkout."
