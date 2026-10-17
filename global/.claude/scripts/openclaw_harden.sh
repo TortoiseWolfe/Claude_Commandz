@@ -7,6 +7,16 @@
 #   openclaw_harden.sh verify     the read-back and proofs only, changes nothing
 #   openclaw_harden.sh rollback [BACKUP]   restore BACKUP, or the newest backup of the config
 #
+# The tool-less gate agent ("receptionist" below, shown as "Outside gate") exists only while an outside channel is
+# connected: it is created when openclaw.json has a configured channel or any binding, or when
+# OPENCLAW_HARDEN_GATE=1 forces it. With none, there is nothing for it to catch, and the one agent in the app is
+# the main chat, named Receptionist. Outside input still never reaches a tool-using agent, because the day a
+# channel is connected the gate is created with its bindings in the same run.
+#
+# It also holds the session cycle: the Main chat resets daily at 4 AM (session.reset), the session-handoff hook
+# is enabled, Memory Dreaming and the autonomous skill reviews are off. Source of the hook:
+# openclaw_handoff_hook/, installed by openclaw_handoff_install.sh before this runs.
+#
 # The free chain defaults to the three models proved to answer on 16 Oct 2026 with the gateway's key
 # (gemini-2.5-flash, -lite and 2.5-pro now answer 404 "no longer available to new users", which cools the
 # whole provider). Override with OPENCLAW_HARDEN_CHAIN="provider/model,provider/model,provider/model".
@@ -39,25 +49,36 @@ init() {
   FALLBACKS=("${chain[1]}" "${chain[2]}")
   export HARDEN_PRIMARY="$PRIMARY" HARDEN_F1="${FALLBACKS[0]}" HARDEN_F2="${FALLBACKS[1]}"
   RECEPTIONIST="receptionist"
+  RESET_HOUR="${OPENCLAW_HARDEN_RESET_HOUR:-4}"
   CFG="$(openclaw config file 2>/dev/null | tail -1)"
   STATE="$(dirname "$CFG")"
   [ -f "$CFG" ] || { echo "no config file at the path openclaw reports"; exit 1; }
+  # GATE=1 when an outside channel is configured, any binding exists, or the operator forces it
+  GATE="$(python3 -c '
+import json, os, sys
+c = json.load(open(sys.argv[1]))
+need = bool(c.get("channels")) or bool(c.get("bindings")) or os.environ.get("OPENCLAW_HARDEN_GATE") == "1"
+print(1 if need else 0)' "$CFG")"
+  export HARDEN_GATE="$GATE" HARDEN_RESET_HOUR="$RESET_HOUR" HARDEN_STATE="$STATE"
 }
 
 # ---------------------------------------------------------------------------------------------------
 patch_json() {
-  python3 - "$CFG" "$PRIMARY" "${FALLBACKS[0]}" "${FALLBACKS[1]}" "$RECEPTIONIST" "$STATE" <<'PY'
-import json, subprocess, sys
-cfg, primary, f1, f2, rid, state = sys.argv[1:7]
+  python3 - "$CFG" "$PRIMARY" "${FALLBACKS[0]}" "${FALLBACKS[1]}" "$RECEPTIONIST" "$STATE" "$GATE" "$RESET_HOUR" <<'PY'
+import json, os, subprocess, sys
+cfg, primary, f1, f2, rid, state, gate, reset_hour = sys.argv[1:9]
+gate = gate == "1"
 chain = [primary, f1, f2]
 c = json.load(open(cfg))
 # openclaw_local.py's local model stays the last fallback: carry any ollama/ entry through, never add one here
 local = [m for m in (c.get("agents", {}).get("defaults", {}).get("model", {}).get("fallbacks") or []) if m.startswith("ollama/")]
-schema = json.loads(subprocess.run(["openclaw", "config", "schema"], capture_output=True, text=True, check=True).stdout)
-channels = [k for k in schema["properties"]["channels"]["properties"] if k not in ("defaults", "modelByChannel")]
-keep = [b for b in c.get("bindings", []) if not (b.get("agentId") == rid and (b.get("match") or {}).get("accountId") == "*")]
-bindings = keep + [{"type": "route", "agentId": rid, "match": {"channel": ch, "accountId": "*"},
-                    "comment": "front desk: untrusted channel input reaches the tool-less receptionist only"} for ch in channels]
+bindings = None
+if gate:
+    schema = json.loads(subprocess.run(["openclaw", "config", "schema"], capture_output=True, text=True, check=True).stdout)
+    channels = [k for k in schema["properties"]["channels"]["properties"] if k not in ("defaults", "modelByChannel")]
+    keep = [b for b in c.get("bindings", []) if not (b.get("agentId") == rid and (b.get("match") or {}).get("accountId") == "*")]
+    bindings = keep + [{"type": "route", "agentId": rid, "match": {"channel": ch, "accountId": "*"},
+                        "comment": "front desk: untrusted channel input reaches the tool-less receptionist only"} for ch in channels]
 defaults_models = {m: {} for m in chain + local}
 for m in (c.get("agents", {}).get("defaults", {}).get("models") or {}):
     if m not in defaults_models:
@@ -67,17 +88,24 @@ patch = {
         "defaults": {"model": {"primary": primary, "fallbacks": [f1, f2] + local},
                      "models": defaults_models,
                      "modelPolicy": {"allow": chain + local}},
-        "entries": {rid: {
-            "name": "Receptionist",
-            "description": "Front desk: reads, classifies, replies. No acting tool. The hub acts.",
+        # The one agent in the app is the Main chat. No model pin: it follows the Default chain above.
+        "entries": {"main": {"name": "Receptionist"}, **({rid: {
+            "name": "Outside gate",
+            "description": "Gate for outside channels: reads, classifies, replies. No acting tool. The hub acts.",
             "workspace": state + "/workspace-" + rid,
             "model": {"primary": primary, "fallbacks": [f1, f2] + local},
             "modelPolicy": {"allow": chain + local},
             # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
             # minimal profile or the runtime would still declare (session_status, gateway, presence).
             "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
-        }},
+        }} if gate else {})},
     },
+    # The Main chat starts fresh daily (checked lazily when the next message arrives; the old transcript stays in
+    # the agent's store). Memory Dreaming writes only a diary nothing loads, and the skill reviews make a weekly
+    # session nobody reads.
+    "session": {"reset": {"mode": "daily", "atHour": int(reset_hour)}},
+    "plugins": {"entries": {"memory-core": {"config": {"dreaming": {"enabled": False}}}}},
+    "skills": {"workshop": {"autonomous": {"mode": "off"}}},
     "models": {"providers": {"claude": None}},
     "tools": {
         # An unset profile leaves core tools unfiltered, and the default tool-search mode hides what a run
@@ -95,13 +123,17 @@ patch = {
     "gateway": {"nodes": {"commands": {"deny": [
         "system.run", "system.run.prepare", "system.which", "system.execApprovals.get",
         "system.execApprovals.set", "canvas.eval", "screen.record", "screen.snapshot"]}}},
-    "bindings": bindings,
 }
+if bindings is not None:
+    patch["bindings"] = bindings
+if os.path.exists(os.path.join(state, "hooks", "session-handoff", "handler.js")):
+    patch["hooks"] = {"internal": {"entries": {"session-handoff": {"enabled": True}}}}
 print(json.dumps(patch))
 PY
 }
 
 write_workspace() {
+  [ "$GATE" = 1 ] || return 0
   local ws="$STATE/workspace-$RECEPTIONIST"
   mkdir -p "$ws" && chmod 700 "$ws"
   cat > "$ws/AGENTS.md" <<'EOF'
@@ -132,21 +164,27 @@ import json, os, sys
 c = json.load(open(sys.argv[1]))
 P = os.environ["HARDEN_PRIMARY"]; F = [os.environ["HARDEN_F1"], os.environ["HARDEN_F2"]]
 d = c["agents"]["defaults"]; r = c["agents"]["entries"].get("receptionist", {})
+GATE = os.environ["HARDEN_GATE"] == "1"
 LOCAL = [m for m in d["model"]["fallbacks"] if m.startswith("ollama/")]  # the local tail, if openclaw_local.py added one
 F = F + LOCAL
 def out(n, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + n + (" " + detail if detail else "")); return ok
 res = []
 res.append(out("chain.default", d["model"]["primary"] == P and d["model"]["fallbacks"] == F, " > ".join([d["model"]["primary"]] + d["model"]["fallbacks"])))
-res.append(out("chain.receptionist", r.get("model") == {"primary": P, "fallbacks": F}))
+res.append(out("chain.main_unpinned", "model" not in c["agents"]["entries"].get("main", {}), "Main follows the Default chain"))
+if GATE:
+    res.append(out("chain.receptionist", r.get("model") == {"primary": P, "fallbacks": F}))
 n = sum(1 for _ in json.dumps(c).split("claude/")) - 1
 res.append(out("chain.claude_entries", n == 0, "claude/ strings in config: %d" % n))
 res.append(out("claude.provider_absent", "claude" not in (c.get("models", {}).get("providers") or {})))
 res.append(out("allowlist.defaults_models", sorted(d["models"]) == sorted([P] + F), "%d entries" % len(d["models"])))
 res.append(out("allowlist.modelPolicy", sorted(d.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
-res.append(out("allowlist.receptionist", sorted(r.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
 rt = r.get("tools", {})
-res.append(out("receptionist.tools", rt.get("profile") == "minimal" and rt.get("allow") == [] and {"gateway", "session_status", "presence"} <= set(rt.get("deny", [])), "profile=%s allow=%s deny=%s" % (rt.get("profile"), rt.get("allow"), rt.get("deny"))))
+if GATE:
+    res.append(out("allowlist.receptionist", sorted(r.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
+    res.append(out("receptionist.tools", rt.get("profile") == "minimal" and rt.get("allow") == [] and {"gateway", "session_status", "presence"} <= set(rt.get("deny", [])), "profile=%s allow=%s deny=%s" % (rt.get("profile"), rt.get("allow"), rt.get("deny"))))
+else:
+    res.append(out("gate.absent_without_channel", "receptionist" not in c["agents"]["entries"], "no channel or binding configured, so no gate agent"))
 res.append(out("tools.profile_and_search", c.get("tools", {}).get("profile") == "minimal" and c.get("tools", {}).get("toolSearch") is False and c.get("tools", {}).get("codeMode") is False, "profile=%s toolSearch=%s codeMode=%s" % (c.get("tools", {}).get("profile"), c.get("tools", {}).get("toolSearch"), c.get("tools", {}).get("codeMode"))))
 need = {"group:runtime", "group:fs", "group:web", "group:ui", "group:automation", "group:nodes", "group:plugins", "group:messaging", "sessions_spawn", "sessions_send"}
 res.append(out("tools.deny", need <= set(c.get("tools", {}).get("deny", [])), "%d entries" % len(c.get("tools", {}).get("deny", []))))
@@ -155,7 +193,15 @@ res.append(out("tools.sessions", c.get("tools", {}).get("sessions", {}).get("vis
 nd = {"system.run", "system.run.prepare", "system.which", "system.execApprovals.get", "system.execApprovals.set", "canvas.eval", "screen.record", "screen.snapshot"}
 res.append(out("nodes.commands.deny", nd <= set(c.get("gateway", {}).get("nodes", {}).get("commands", {}).get("deny", []))))
 b = [x for x in c.get("bindings", []) if x.get("agentId") == "receptionist"]
-res.append(out("bindings", len(b) > 0, "%d channels bound to receptionist" % len(b)))
+if GATE:
+    res.append(out("bindings", len(b) > 0, "%d channels bound to the gate" % len(b)))
+res.append(out("main.name", c["agents"]["entries"].get("main", {}).get("name") == "Receptionist"))
+sr = (c.get("session") or {}).get("reset") or {}
+res.append(out("session.reset", sr.get("mode") == "daily" and sr.get("atHour") == int(os.environ["HARDEN_RESET_HOUR"]), "mode=%s atHour=%s" % (sr.get("mode"), sr.get("atHour"))))
+res.append(out("skills.autonomous_off", (((c.get("skills") or {}).get("workshop") or {}).get("autonomous") or {}).get("mode") == "off"))
+res.append(out("dreaming.off", (((((c.get("plugins") or {}).get("entries") or {}).get("memory-core") or {}).get("config") or {}).get("dreaming") or {}).get("enabled") is False))
+hk = (((c.get("hooks") or {}).get("internal") or {}).get("entries") or {}).get("session-handoff") or {}
+res.append(out("hook.session_handoff", hk.get("enabled") is True and os.path.exists(os.path.join(os.environ["HARDEN_STATE"], "hooks", "session-handoff", "handler.js")), "enabled and installed"))
 sys.exit(0 if all(res) else 1)
 ' || fail=1
 
@@ -180,6 +226,7 @@ sys.exit(1 if bad else 0)' | mask
   local ep; ep="$(openclaw exec-policy show 2>&1 | mask)"; echo "$ep" | sed 's/^/   /'
   echo "$ep" | grep -q -i "deny" && ! echo "$ep" | grep -q -i "full · no approval" ; check exec_policy.deny_all $?
 
+  if [ "$GATE" = 1 ]; then
   echo "== sandbox explain --agent $RECEPTIONIST"
   openclaw sandbox explain --agent "$RECEPTIONIST" --json 2>&1 | python3 -c '
 import json, sys
@@ -216,6 +263,9 @@ ok = d.get("status") == "ok" and calls == 0
 print(("PASS" if ok else "FAIL"), "receptionist.toolSummary.calls", calls)
 sys.exit(0 if (ok and ok_declared) else 1)' 2>&1 | mask
   [ "${PIPESTATUS[1]}" = 0 ] || fail=1
+  else
+    echo "== gate agent: not created (no outside channel is connected); nothing to probe"
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------------
