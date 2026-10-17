@@ -61,6 +61,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -321,7 +322,7 @@ class LaneHost:
                 "--settings", settings, "--setting-sources", "project", "--disable-slash-commands", "--no-session-persistence"]
         if mcp_tools:
             argv += ["--disallowedTools", ",".join(MAIL_DENIED)]  # --strict-mcp-config would also drop the connector, so it is left off
-            hooks = {"hooks": {"PreToolUse": [{"matcher": tool, "hooks": [{"type": "command", "command": "python3 %s mailhook" % me}]}
+            hooks = {"hooks": {"PreToolUse": [{"matcher": tool, "hooks": [{"type": "command", "command": "python3 %s mailhook" % shlex.quote(str(me))}]}
                                               for tool in mcp_tools]}}
             try:  # the project settings of the pass's own folder (the only source loaded): the mail search is clamped by mailhook
                 (Path(hand) / ".claude").mkdir(parents=True, exist_ok=True)
@@ -1639,6 +1640,8 @@ def promote(ctx, host, ask_id, repo_word, now=None):
             return False, "promote: question %s is already %s" % (ask_id, ask["status"])
         if word.lower() not in ctx.repos:
             return False, "promote: %s is not a repo on the table; pick one from it, or say or defer" % word
+        if not DIAGNOSE_RE.search(ask["task"]) or WRITE_RE.search(ask["task"]):  # only a read-only check he asked for; mail text cannot widen it
+            return False, "promote: only for a read-only check (diagnose, triage, find out why) with no write in it; say or defer instead"
         task, key = ask["task"], task_key(ask["task"])
         if any(a.get("task_key") == key and a.get("kind") != "question" and now - a.get("created", 0) < DEDUP_WINDOW and not _ask_failed(state, a)
                for a in asks_of(state).values()) or any(
@@ -1827,21 +1830,21 @@ def clamp_mail(tool_input, calls_so_far):
 
 
 def mailhook(raw, counter):
-    """PreToolUse hook for the mail search in the question pass: count the call (the counter file lives in the pass's own folder) and
-    clamp its input with clamp_mail. -> the hook's JSON answer."""
+    """PreToolUse hook for the mail search in the question pass: count the call (the counter file lives in the pass's own folder; the
+    read, the decision and the write happen under one lock, so parallel calls cannot share a slot) and clamp its input with clamp_mail.
+    Fails closed: a counter or input that cannot be read denies the search. -> the hook's JSON answer."""
+    def deny(why):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": why}}
     try:
         data = json.loads(raw)
-        n = int(Path(counter).read_text().strip() or 0) if Path(counter).exists() else 0
-    except (ValueError, OSError):
-        data, n = {}, 0
-    ok, out = clamp_mail((data or {}).get("tool_input") if isinstance(data, dict) else None, n)
-    try:
-        Path(counter).write_text(str(n + 1))
-    except OSError:
-        pass
-    if not ok:
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": out}}
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": out}}
+        with open(str(counter) + ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            n = int(Path(counter).read_text().strip())
+            ok, out = clamp_mail(data.get("tool_input") if isinstance(data, dict) else None, n)
+            Path(counter).write_text(str(n + 1))
+    except (ValueError, OSError, AttributeError):
+        return deny("The mail search could not be checked, so it did not run. Answer without it, or defer.")
+    return deny(out) if not ok else {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": out}}
 
 
 def post_line(host, text):
@@ -2396,9 +2399,7 @@ def main(argv=None):
         ok, msg = promote(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
     elif len(argv) == 1 and argv[0] == "mailhook":
         hand = os.environ.get("AFA_LANE_HAND", "")
-        if not hand:
-            return 1
-        print(json.dumps(mailhook(sys.stdin.read(200000), Path(hand) / "mail-calls")))
+        print(json.dumps(mailhook(sys.stdin.read(200000), Path(hand or "/nonexistent") / "mail-calls")))
         return 0
     elif 2 <= len(argv) <= 4 and argv[0] == "facts":
         ok, msg = facts(Ctx(load_repos()), argv[1], " ".join(argv[2:]))
