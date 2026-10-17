@@ -22,9 +22,13 @@ dialog_waiting() {
   tail -15 | grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'
 }
 
-# Return the done time from the last completed-turn line visible in this pane.
+# Return the last completed-turn line visible in this pane.
+turn_done_line() {
+  tail -15 | sed -nE '/· done [0-9]{1,2}:[0-9]{2}/p' | tail -1
+}
+
 turn_done_time() {
-  tail -15 | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p' | tail -1
+  turn_done_line | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p'
 }
 
 # When sourced (by the test script), stop here with the functions defined.
@@ -44,7 +48,7 @@ report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | h
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 for l in "${lanes[@]}"; do
   seen[$l]=$(stamp "$l")
-  seen_turn[$l]=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null | turn_done_time)
+  seen_turn[$l]=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null | turn_done_line)
 done
 # Jonathan asking the hub from OpenClaw: openclaw_pickup.py --act touches this file when it files a "Jonathan via OpenClaw:" line
 # in muse-inbox.md. It holds only a time and an id, never the message.
@@ -68,8 +72,9 @@ while :; do
       if printf '%s\n' "$pane" | dialog_waiting; then
         echo "waiting on a dialog: $l"; hit=1
       fi
-      done_time=$(printf '%s\n' "$pane" | turn_done_time)
-      if [ -n "$done_time" ] && [ "$done_time" != "${seen_turn[$l]}" ]; then
+      done_line=$(printf '%s\n' "$pane" | turn_done_line)
+      if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
+        done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
         echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1
       fi
     fi
