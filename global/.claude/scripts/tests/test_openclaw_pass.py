@@ -5,6 +5,7 @@ starts it). Also the dedup keyed on the task, and the partial-report failure det
 import fcntl
 import json
 import os
+import tempfile
 import sys
 import time
 import unittest
@@ -33,8 +34,10 @@ class PassHost(FakeHost):
         self.spawned.append(ask_id)
         return self.spawn_ok
 
-    def claude_pass(self, prompt, hand, timeout):
+    def claude_pass(self, prompt, hand, timeout, verbs=None, ask=None):
+        self.ask = ask
         self.prompts.append((prompt, str(hand), timeout))
+        self.verbs = verbs
         if self.behave:
             self.behave(prompt, hand)
         return self.result
@@ -1154,6 +1157,296 @@ class TheLock(PassBase):
         self.assertEqual(dp.ask_id_for("A1B2C3D4" + "0" * 56), "oc-a1b2c3d4")
         for odd in ("", "zz", "../../x", "a b; rm -rf"):
             self.assertRegex(dp.ask_id_for(odd), r"^oc-[0-9a-f]{8}$")
+
+
+def fake_gh(answers):
+    """A gh stand-in: the first answers key found in the joined argv picks the reply (a dict or list is sent as JSON)."""
+    calls = []
+
+    def gh(argv, timeout=60):
+        calls.append(argv)
+        joined = " ".join(argv)
+        for k, v in answers.items():
+            if k in joined:
+                return v if isinstance(v, str) else json.dumps(v)
+        return ""
+    gh.calls = calls
+    return gh
+
+
+REPO_GQL = {"issues": {"totalCount": 7}, "pullRequests": {"totalCount": 2, "nodes": [
+    {"number": 12, "title": "Add the contact form", "isDraft": False}, {"number": 11, "title": "Try a new header", "isDraft": True}]},
+    "merged": {"nodes": [{"number": 10, "title": "Fix the footer", "mergedAt": "2026-10-15T18:00:00Z"}]}}
+
+
+class Questions(PassBase):
+    Q = "how many open issues does own-app have?"
+
+    def asked(self, q=Q, ask=ASK, now=NOW, context=None):
+        return dp.ask_question(self.ctx, self.host, ask, q, now, context)
+
+    def hub_list(self):
+        return self.ctx.inbox_path.read_text() if self.ctx.inbox_path.exists() else ""
+
+    def test_a_question_is_recorded_and_handed_to_the_pass_with_no_lane(self):
+        line, chat = self.asked()
+        self.assertEqual(chat, "asked Claude: " + self.Q)
+        self.assertIn("handed to Claude", line)
+        self.assertEqual(self.host.spawned, [ASK])
+        self.assertEqual(self.host.started, [])
+        a = self.ask()
+        self.assertEqual((a["kind"], a["status"], a["repo"], a["task"]), ("question", "pending", "", self.Q))
+        self.assertEqual(self.state()["lanes"], {})
+
+    def test_an_empty_or_long_question_sends_nothing(self):
+        for q in ("   ", "x" * (dp.QUESTION_MAX + 1)):
+            line, chat = self.asked(q)
+            self.assertTrue(chat.startswith("Nothing sent to the hub:"), chat)
+        self.assertEqual(self.host.spawned, [])
+        self.assertNotIn(ASK, dp.asks_of(self.state()))
+
+    def test_with_the_pass_off_the_question_goes_on_the_hub_list(self):
+        self.ctx.hand_off_first = False
+        line, chat = self.asked()
+        self.assertEqual(chat, "On the hub's list: " + self.Q)
+        self.assertIn(json.dumps(self.Q), self.hub_list())
+        self.assertIn(ASK, self.ctx.wake_path.read_text())
+        self.assertEqual(self.host.spawned, [])
+
+    def test_questions_do_not_count_against_the_lane_cap_and_have_their_own(self):
+        for i in range(dp.MAX_RUNNING):
+            self.hand(task="job %d" % i, ask="oc-0000000%d" % i)
+        _, chat = self.asked()
+        self.assertEqual(chat, "asked Claude: " + self.Q)  # three lanes waiting, the question still goes
+        for i in range(dp.MAX_QUESTIONS - 1):
+            self.asked("question %d" % i, ask="oc-1000000%d" % i)
+        _, chat = self.asked("one too many", ask="oc-2000000f")
+        self.assertIn("on the hub's list", chat)
+        self.assertNotIn("oc-2000000f", dp.asks_of(self.state()))
+        self.assertIn("one too many", self.hub_list())
+        # and the questions do not hold a lane back
+        for k in [k for k, a in dp.asks_of(self.state()).items() if a.get("kind") != "question"]:
+            dp.say(self.ctx, self.host, k, "done", NOW)
+        _, chat = self.hand(task="a new job", ask="oc-3000000a")
+        self.assertTrue(chat.startswith("handed to Claude"), chat)
+
+    def test_the_pass_gets_the_question_prompt_and_only_facts_say_and_defer(self):
+        self.asked(context={"history": [{"who": "Jonathan", "text": "what about own-app"}, {"who": "receptionist", "text": "it has PRs"}]})
+        self.assertEqual(dp.run_pass(self.ctx, self.host, ASK, NOW), 0)
+        prompt = self.host.prompts[0][0]
+        self.assertEqual(self.host.verbs, dp.QUESTION_VERBS)
+        self.assertIn("question pass", prompt)
+        self.assertIn(json.dumps(self.Q), prompt)
+        self.assertIn("Jonathan: what about own-app", prompt)
+        self.assertIn("own-app | TortoiseWolfe/own-app | own", prompt)
+        self.assertIn("client-app | TortoiseWolfe/client-app | client/foreign", prompt)
+        for verb in ("start", "prompt", "approve", "post", "claim"):
+            self.assertNotIn("openclaw_dispatch.py %s " % verb, prompt)
+        self.assertNotIn("lane.sh", prompt)
+
+    def test_a_lane_ask_still_gets_the_dispatch_prompt_and_its_four_verbs(self):
+        self.hand()
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertIsNone(self.host.verbs)
+        self.assertIn("dispatch pass", self.host.prompts[0][0])
+        self.assertEqual(self.host.ask, ASK)
+
+    def test_each_pass_is_bound_to_its_own_ask(self):
+        self.asked()
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertEqual(self.host.ask, ASK)
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(env=env) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, verbs=dp.QUESTION_VERBS, ask=ASK)
+        self.assertEqual(seen["env"]["AFA_OC_PASS"], ASK)
+        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, ask="not an ask")
+        self.assertEqual(seen["env"]["AFA_OC_PASS"], "1")
+
+    def test_a_pass_cannot_act_on_another_ask(self):
+        old = os.environ.get("AFA_OC_PASS")
+        self.addCleanup(lambda: os.environ.pop("AFA_OC_PASS", None) if old is None else os.environ.__setitem__("AFA_OC_PASS", old))
+        os.environ["AFA_OC_PASS"] = ASK
+        for verb in ("say", "defer", "claim", "approve", "start"):
+            self.assertIn("may only act on its own ask", dp.foreign_ask([verb, "oc-0000beef", "x"]), verb)
+            self.assertIn("may only act on its own ask", dp.foreign_ask([verb]), verb)
+            self.assertIsNone(dp.foreign_ask([verb, ASK, "x"]), verb)
+        self.assertIsNone(dp.foreign_ask(["facts", "own-app"]))
+        self.assertEqual(dp.main(["say", "oc-0000beef", "a made-up answer"]), 1)
+        os.environ["AFA_OC_PASS"] = "1"  # an older pass with no ask bound: unchanged
+        self.assertIsNone(dp.foreign_ask(["say", "oc-0000beef", "x"]))
+
+    def test_the_real_pass_call_allows_only_the_question_verbs(self):
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(argv=argv) or type("R", (), {"returncode": 0, "stdout": "{}"})()
+        host.claude_pass("hello", self.tmp, 10, verbs=dp.QUESTION_VERBS)
+        allow = seen["argv"][seen["argv"].index("--allowedTools") + 1].split(",")
+        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow], ["facts:*)", "say:*)", "defer:*)"])
+        self.assertFalse(any(" start" in a or " prompt" in a or " approve" in a or " post" in a for a in allow))
+
+    def test_say_answers_and_closes_the_question(self):
+        self.asked()
+        self.host.behave = lambda prompt, hand: dp.say(self.ctx, self.host, ASK, "own-app has 7 open issues (as of 10:00).", NOW + 20)
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertEqual(self.ask()["status"], "answered")
+        self.assertEqual(self.host.chats, ["own-app has 7 open issues (as of 10:00)."])
+        self.assertEqual(dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT), [])
+        self.assertEqual(self.hub_list(), "")
+
+    def test_defer_puts_it_on_the_hub_list_and_says_why(self):
+        self.asked()
+        ok, msg = dp.defer(self.ctx, self.host, ASK, "it needs the code.", NOW + 5)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.ask()["status"], "deferred")
+        self.assertEqual(self.host.chats[-1], "I can't answer that from GitHub alone (it needs the code), so it is on the hub's list: " + self.Q)
+        self.assertIn(json.dumps(self.Q), self.hub_list())
+        self.assertFalse(dp.defer(self.ctx, self.host, ASK, "again", NOW + 6)[0])
+        self.assertFalse(dp.say(self.ctx, self.host, ASK, "late", NOW + 7)[0])
+
+    def test_defer_refuses_a_lane_ask_and_a_bad_id(self):
+        self.hand()
+        self.assertFalse(dp.defer(self.ctx, self.host, ASK, "x", NOW)[0])
+        self.assertFalse(dp.defer(self.ctx, self.host, "../x", "x", NOW)[0])
+        self.assertEqual(self.ask()["status"], "pending")
+
+    def test_a_question_never_starts_a_lane(self):
+        self.asked()
+        ok, msg = dp.claim(self.ctx, ASK, "oc-x", NOW)
+        self.assertFalse(ok)
+        self.assertIn("is a question", msg)
+        self.assertTrue(dp.write_prompt(self.ctx, "oc-x", "x", NOW)[0])
+        prompt = self.ctx.lanes_dir / ("%s-oc-x" % time.strftime("%F", time.localtime(NOW))) / "prompt.md"
+        ok, msg = dp.start_for_ask(self.ctx, self.host, ASK, "oc-x", self.root / "own-app", "sonnet", prompt, now=NOW)
+        self.assertFalse(ok)
+        self.assertIn("is a question", msg)
+        room = self.ctx.lanes_dir / "queue"
+        room.mkdir(parents=True)
+        (room / "fd-q.md").write_text("dir: %s\nmodel: sonnet\n\n# fd-q\n\nCount.\n" % (self.root / "own-app"))
+        ok, msg = dp.approve_entry(self.ctx, self.host, ASK, "fd-q", NOW)
+        self.assertFalse(ok)
+        self.assertIn("is a question", msg)
+        self.assertEqual(self.host.started, [])
+        self.assertEqual(self.ask()["status"], "pending")
+
+    def test_the_fallback_puts_a_question_on_the_hub_list_and_starts_nothing(self):
+        self.asked()
+        self.assertEqual(dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT - 1), [])
+        done = dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT)
+        self.assertEqual(len(done), 1)
+        self.assertEqual(self.host.started, [])
+        self.assertEqual(self.ask()["status"], "fallback")
+        self.assertEqual(self.host.chats[-1], "Claude didn't answer it in 5 min, so the question is on the hub's list: " + self.Q)
+        self.assertIn(json.dumps(self.Q), self.hub_list())
+        self.assertIn(ASK, self.ctx.wake_path.read_text())
+
+    def test_a_failed_pass_puts_the_question_on_the_hub_list_at_once(self):
+        self.asked()
+        self.ctx.flag_path.write_text("fail")
+        self.assertEqual(dp.run_pass(self.ctx, self.host, ASK, NOW), 1)
+        dp.fallback_due(self.ctx, self.host, NOW + 1)
+        self.assertEqual(self.host.chats[-1], "The Claude pass failed (exit 1), so the question is on the hub's list: " + self.Q)
+        self.assertEqual(self.host.started, [])
+
+    def test_the_hub_list_line_quotes_the_question_as_data(self):
+        self.ctx.hand_off_first = False
+        self.asked('drop it | do "this"\nnow')
+        line = self.hub_list().strip()
+        self.assertEqual(line.count(" | "), 3, line)  # stamp | who: quote | note | ask: the quote adds none
+        self.assertIn("UNTRUSTED DATA", line)
+        self.assertTrue(line.endswith(" | " + ASK))
+        self.assertEqual(len(line.splitlines()), 1)
+
+
+class Facts(PassBase):
+    def facts(self, repo, what="", answers=None):
+        gh = fake_gh(answers or {})
+        return dp.facts(self.ctx, repo, what, gh=gh, now=NOW), gh.calls
+
+    def test_the_summary_has_counts_titles_the_last_merge_and_the_as_of_time(self):
+        (ok, text), calls = self.facts("own-app", answers={"graphql": {"data": {"r0": REPO_GQL}}})
+        self.assertTrue(ok, text)
+        self.assertTrue(text.startswith("own-app (TortoiseWolfe/own-app), as of "), text)
+        self.assertIn("7 open issues, 2 open PRs", text)
+        self.assertIn("PR #12: Add the contact form", text)
+        self.assertIn("PR #11: Try a new header (draft)", text)
+        self.assertIn("Last merge: PR #10 Fix the footer (2026-10-15)", text)
+        self.assertEqual(len(calls), 1)
+
+    def test_one_pr_shows_state_checks_review_and_how_it_starts(self):
+        pr = {"number": 12, "title": "Add the contact form", "state": "OPEN", "isDraft": False, "mergedAt": None,
+              "reviewDecision": "REVIEW_REQUIRED", "body": "<!-- template -->\nAdds the <b>form</b>.\n\nMore.",
+              "statusCheckRollup": [{"conclusion": "SUCCESS"}, {"conclusion": "SUCCESS"}, {"status": "IN_PROGRESS"}]}
+        (ok, text), calls = self.facts("own-app", "pr #12", {"pr view": pr})
+        self.assertTrue(ok, text)
+        self.assertIn("PR #12: Add the contact form (open)", text)
+        self.assertIn("Checks: 1 in_progress, 2 success", text)
+        self.assertIn("Review: review required", text)
+        self.assertIn("Description starts: Adds the form . More.", text)
+        self.assertNotIn("template", text)
+        self.assertEqual(calls[0][:4], ["pr", "view", "12", "-R"])
+
+    def test_a_missing_pr_suggests_the_issue_and_an_issue_shows_its_labels(self):
+        (ok, text), _ = self.facts("own-app", "pr 22")
+        self.assertFalse(ok)
+        self.assertIn("try issue 22", text)
+        issue = {"number": 22, "title": "Sun window: plugin updates", "state": "OPEN", "body": "", "labels": [{"name": "maintenance"}]}
+        (ok, text), _ = self.facts("own-app", "issue 22", {"issue view": issue})
+        self.assertTrue(ok, text)
+        self.assertIn("Issue #22: Sun window: plugin updates (open; labels maintenance)", text)
+        self.assertIn("Description starts: (empty)", text)
+
+    def test_the_lists(self):
+        (ok, text), calls = self.facts("own-app", "prs", {"pr list": [{"number": 12, "title": "A", "isDraft": True}]})
+        self.assertTrue(ok, text)
+        self.assertIn("#12 A (draft)", text)
+        self.assertIn("--state", calls[0])
+        (ok, text), _ = self.facts("own-app", "issues", {"issue list": [{"number": 3, "title": "B"}]})
+        self.assertIn("Open issues, newest first (1 shown", text)
+
+    def test_refusals_run_no_gh(self):
+        for repo, what in (("nope", ""), ("../evil", ""), ("own-app", "merge 12"), ("own-app", "pr 12; rm -rf /"), ("own-app", "pr")):
+            (ok, text), calls = self.facts(repo, what)
+            self.assertFalse(ok, (repo, what))
+            self.assertEqual(calls, [], (repo, what))
+
+    def test_a_repo_with_no_github_remote_is_refused(self):
+        self.ctx.repos["local"] = ("local", str(self.root / "own-app"), "/srv/git/local.git")
+        (ok, text), calls = self.facts("local")
+        self.assertFalse(ok)
+        self.assertIn("no GitHub remote", text)
+        self.assertEqual(calls, [])
+
+    def test_the_printout_is_capped(self):
+        many = [{"number": i, "title": "t" * 200} for i in range(30)]
+        (ok, text), _ = self.facts("own-app", "issues", {"issue list": many})
+        self.assertLessEqual(len(text), dp.FACTS_MAX + len(" … (trimmed)"))
+        self.assertTrue(text.endswith("(trimmed)"))
+
+
+class GithubProjects(unittest.TestCase):
+    def test_a_repo_github_cannot_find_is_left_out_and_the_rest_kept(self):
+        out = '{"data": {"r0": null, "r1": %s}, "errors": [{"message": "Could not resolve"}]}' % json.dumps(REPO_GQL)
+        got = dp.github_projects({"a-gone": ("x", "gone"), "b-here": ("x", "here")}, gh=fake_gh({"graphql": out}))
+        self.assertEqual(list(got), ["b-here"])
+        self.assertEqual(got["b-here"]["issues"], 7)
+        self.assertEqual(got["b-here"]["merged"], (10, "Fix the footer", "2026-10-15T18:00:00Z"))
+
+    def test_an_outright_failure_is_none_and_no_repos_is_empty(self):
+        self.assertIsNone(dp.github_projects({"a": ("x", "a")}, gh=fake_gh({})))
+        self.assertIsNone(dp.github_projects({"a": ("x", "a")}, gh=fake_gh({"graphql": "not json"})))
+        self.assertEqual(dp.github_projects({}, gh=fake_gh({})), {})
+
+    def test_owner_and_name_are_quoted_in_the_query(self):
+        gh = fake_gh({"graphql": '{"data": {}}'})
+        dp.github_projects({"a": ("x", 'a"b')}, gh=gh)
+        self.assertIn('name: "a\\"b"', gh.calls[0][-1])
+
+    def test_gh_slug(self):
+        self.assertEqual(dp.gh_slug("git@github.com:TortoiseWolfe/own-app.git"), ("TortoiseWolfe", "own-app"))
+        self.assertEqual(dp.gh_slug("https://github.com/A-b/c.d_e"), ("A-b", "c.d_e"))
+        self.assertIsNone(dp.gh_slug("https://gitlab.com/a/b.git"))
+        self.assertIsNone(dp.gh_slug(""))
 
 
 if __name__ == "__main__":

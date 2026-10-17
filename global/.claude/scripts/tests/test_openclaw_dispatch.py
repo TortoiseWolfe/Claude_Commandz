@@ -663,6 +663,50 @@ class MainSessionOnly(Base):
         self.assertNotIn("--session-key", argv)
         self.assertNotIn("agent:main", " ".join(argv))  # the key travels in the JSON on stdin only
 
+    def env(self, **kv):
+        old = {k: os.environ.get(k) for k in kv}
+        for k, v in kv.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in old.items()])
+
+    def test_a_live_test_posts_into_its_own_throwaway_session(self):
+        self.env(AFA_OC_TEST="1", AFA_OC_SESSION="agent:fd9test:probe-1")
+        (argv, stdin), = self.inject_call()
+        self.assertEqual(json.loads(stdin)["sessionKey"], "agent:fd9test:probe-1")
+
+    def test_a_session_name_without_the_test_flag_posts_nothing(self):
+        self.env(AFA_OC_TEST=None, AFA_OC_SESSION="agent:fd9test:probe-1")
+        host = pk.Host()
+        calls = []
+        host._run = lambda *a, **k: calls.append(a)
+        self.assertFalse(host.inject("hello"))
+        self.assertEqual(calls, [])
+
+    def test_a_test_can_never_name_another_session_of_agent_main(self):
+        for bad in ("agent:main:main", "agent:main:x", "agent:fd9test", "agent:fd9test:a b", "agent:FD:x", "x"):
+            self.env(AFA_OC_TEST="1", AFA_OC_SESSION=bad)
+            host = pk.Host()
+            calls = []
+            host._run = lambda *a, **k: calls.append(a)
+            self.assertFalse(host.inject("hello"), bad)
+            self.assertEqual(calls, [], bad)
+
+    def test_the_test_state_file_needs_the_test_flag_and_stays_outside_the_live_folder(self):
+        live = dp.STATE / "openclaw-dispatch.json"
+        tmp = Path(tempfile.mkdtemp()) / "s.json"
+        self.env(AFA_OC_TEST=None, AFA_OC_STATE_FILE=str(tmp))
+        self.assertEqual(dp.state_file(), live)
+        self.env(AFA_OC_TEST="1")
+        self.assertEqual(dp.state_file(), tmp)
+        self.assertEqual(dp.Ctx({}).inbox_path, tmp.with_name("muse-inbox.md"))
+        for bad in (str(dp.STATE / "x.json"), "rel.json", str(tmp.with_suffix(".txt"))):
+            self.env(AFA_OC_STATE_FILE=bad)
+            with self.assertRaises(SystemExit):
+                dp.state_file()
+
     def test_the_note_is_cleaned_and_capped(self):
         (argv, stdin), = self.inject_call("a\x1b[2Jb" + "y" * 5000)
         msg = json.loads(stdin)["message"]

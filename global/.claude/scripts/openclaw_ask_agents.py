@@ -48,12 +48,45 @@ def apply_section(text, section):
     if BLOCK.search(text):
         text = BLOCK.sub(lambda _m: section, text, count=1)
     else:
-        i = text.index("## Card rules")
+        i = text.index("## Card rules") if "## Card rules" in text else text.index("## Reply rules")
         text = text[:i] + section + "\n" + text[i:]
     text = text.replace(OLD_TOP, NEW_TOP).replace(OLD_EX, NEW_EX)
     for old, new in ENGINE_LINES:
         text = text.replace(old, new)
     return text
+
+
+# 17 Oct (frontdesk-9): the receptionist answers status itself, clients included, and sends anything else to the hub as a question;
+# the ROUTE card is gone. Live state only: these lines promise the question path, which the not-live state does not have.
+REPLY_RULES = Path(HERE / "openclaw_ask_hook/reply_rules.md")
+CARD_SECTION = re.compile(r"^## Card rules\n.*?(?=^## |\Z)", re.S | re.M)
+STATUS_LINES = (
+    ('**What is in flight (the status digest):** the top of MEMORY.md holds a block headed "Work in flight (hub digest, as of ...)", rebuilt every 15 minutes with no model. It is your only record of the work: answer status questions and "what\'s on the to-do list?" from it, and give its as-of time; never present it as newer. For a named project, find its site, newest model, lanes, open items and next step there. "What model are we on?" means the newest .skp file for that site in the digest, never the AI model you run on. Route new items by it: name the running lane, or say nothing covers it. Client projects appear there by name and step only: that is the one thing you may say about a client; for anything past its status line, hand the item to Claude as the red lines say. If it is not in the digest, say so and ask; never guess.' + "\n",
+     "**What is in flight (the status digest):** the top of MEMORY.md holds a block headed \"Work in flight (hub digest, as of ...)\", "
+     "rebuilt every 15 minutes with no model. Answer status questions, \"where are we at?\" and \"what's on the to-do list?\" from it, and give "
+     "its as-of time; never present it as newer. Its \"Projects on GitHub\" part has counts, PR titles and next steps. "
+     "For a named project, find its site, newest model, lanes, open items and next step there. \"What model are "
+     "we on?\" means the newest .skp file for that site in the digest, never the AI model you run on. Client projects get status too: the "
+     "step, open issue and PR counts, PR titles with a one-line summary, who is waiting on whom, and what is next. If the digest does not "
+     "hold it, never guess: send the question to the hub (see \"Reply rules\").\n"),
+    ("**Routing:**\n- Code in Jonathan's own repos, and mechanical edits, go to a hub worker; the hub picks what runs it.\n- Reviews go to the free panel.\n- Web lookups and dashboard clicks go to Hatch.\n- Client judgment, client email, client code, plans and specs go to Claude.\n\n",
+     '**Routing** (the hub does it): code in his own repos and mechanical edits go to a hub worker; reviews to the free panel; web lookups and dashboard clicks to Hatch; client judgment, email and code, plans and specs to Claude.\n\n'),
+    ('**Your job grows by phase** (spec 002 in the AI_Workflow repo):\n- Phase 1 (done): talk with Jonathan here, keep notes, and learn the routing.\n- Phase 2 (shadow): read packs from the drop folder and write the route you\'d take, and why, into the route log. The hub still acts.\n- Dispatch (live since 16 Oct): for anything on the menu in "What happens to what Jonathan types", say in one line what is happening and end the reply with "Sending to the hub: <menu sentence>". The hub runs it at once; the "[hub]" line says what happened, so never claim a result. He works from this chat: never tell him to type a command or open a terminal.\n\n',
+     '**Your job** (spec 002 in the AI_Workflow repo): phase 1 is done. Phase 2 (shadow): read packs from the drop folder and write the route you\'d take, and why, into the route log; the hub still acts. Dispatch (live since 16 Oct): for anything on the menu in "What happens to what Jonathan types", say in one line what is happening and end with the "Sending to the hub:" line. The hub runs it at once and its "[hub]" line says what happened, so never claim a result. Never tell him to type a command or open a terminal.\n\n'),
+    ("- If an item's class is client or unknown, don't read it into your model. Hand it to Claude.\n",
+     "- Never repeat a client's email contents, client code or credentials. Anything past a client's status goes to the hub.\n"
+     "- Merging or deploying is Jonathan's call. A client's production change waits for its window: Sunday afternoon, or Tuesday evening "
+     "for the co-op's servers. When he asks for one, name the window, ask if he means now, and end with \"Sending to the hub: are <repo> "
+     "PRs <numbers> ready to merge?\"\n"),
+)
+
+
+def apply_reply_rules(text):
+    """Live state only: swap the card rules for the reply rules and update the status and red lines. Applying it twice changes nothing."""
+    for old, new in STATUS_LINES:
+        text = text.replace(old, new)
+    rules = REPLY_RULES.read_text().rstrip("\n") + "\n"
+    return CARD_SECTION.sub(lambda _m: rules, text, count=1)
 
 
 def _wsl(args, stdin=None):
@@ -77,7 +110,7 @@ def main(argv):
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
     rc, text = _wsl(["cat", AGENTS])
-    if rc != 0 or "## Card rules" not in text:
+    if rc != 0 or not ("## Card rules" in text or "## Reply rules" in text):
         print("could not read AGENTS.md", file=sys.stderr)
         return 1
     if argv[0] == "show":
@@ -85,6 +118,8 @@ def main(argv):
         print(m.group(0) if m else "(no hub-ask section yet)")
         return 0
     new = apply_section(text, SECTIONS[argv[0]].read_text())
+    if argv[0] == "live":
+        new = apply_reply_rules(new)
     if new == text:
         print("AGENTS.md already says this")
         return 0

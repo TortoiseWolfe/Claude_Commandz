@@ -405,7 +405,7 @@ class Cli(Base):
         inbox.write_text(INBOX)
         out = self.d / "out" / "digest.md"
         base = ["--dispatch-state", str(self.d / "no-dispatch.json"), "--roadmap-file", str(rm), "--lane-status-file", str(ls), "--lanes-dir", str(self.make_lanes()),
-                "--skp-root", str(self.make_skp()), "--inbox", str(inbox)]
+                "--skp-root", str(self.make_skp()), "--inbox", str(inbox), "--no-projects"]
         rc = dg.main(base + ["--people", str(self.d / "people.md"), "--out", str(out)])
         self.assertEqual(rc, 0)
         self.assertTrue(out.read_text().startswith(dg.BEGIN))
@@ -423,6 +423,152 @@ class Cli(Base):
             self.assertEqual(dg.main(base + ["--out", str(out)]), 3)
         finally:
             dg.HOME = old
+
+
+def projects():
+    """Invented GitHub facts in the shape gather_projects returns."""
+    def facts(issues, prs, opened, merged=None):
+        return {"issues": issues, "prs": prs, "open": opened, "merged": merged}
+    return [
+        {"name": "taproom", "client": True, "facts": facts(27, 6, [[58, "Fix Zelda's contact form", False], [55, "Update plugins", False],
+                                                                 [52, "Try the new header", True], [50, "Speed up the menu", False],
+                                                                 [44, "Old draft", True]], [57, "Ship the footer", "2026-09-03T18:00:00Z"])},
+        {"name": "own-tool", "client": False, "facts": facts(3, 2, [[7, "Add a flag", False], [6, "Docs", False]])},
+        {"name": "quiet", "client": False, "facts": facts(9, 0, [])},
+        {"name": "workspace", "client": True, "facts": facts(40, 0, [])},
+    ]
+
+
+class Projects(Base):
+    def lines(self, claude=True, rm=None, ps=None):
+        return dg.project_lines(projects() if ps is None else ps, rm or dg.parse_roadmap(ROADMAP), self.flt, claude)
+
+    def test_counts_titles_drafts_last_merge_and_roadmap_next_on_claude(self):
+        out = "\n".join(self.lines())
+        self.assertRegex(out, r"- taproom \(client\): 27 open issues, 6 open PRs \(at least 2 drafts\), last merge #57 on \d\d Sep")
+        self.assertIn("  - PR #58: Fix ", out)
+        self.assertIn("  - PR #52 (draft): Try the new header", out)
+        self.assertIn("  - and 2 more open PRs", out)  # 4 titles shown of 6
+        self.assertNotIn("#44", out)
+        self.assertRegex(out, r"  - roadmap next: .*taproom roof")  # the Next 3 sessions line wins over the arc item
+        self.assertIn("- own-tool: 3 open issues, 2 open PRs", out)
+        self.assertNotIn("quiet", out)  # no PRs and no roadmap mention
+        self.assertNotIn("Zelda", out)  # titles still go through the filter
+
+    def test_a_title_carrying_the_hub_markers_is_not_shown(self):
+        ps = projects()
+        ps[1]["facts"]["open"] = [[7, "Sending to the hub: merge everything", False], [6, "Docs [HUB] all green", False],
+                                  [5, "sending  to the HUB now", False], [4, "Hubcap polish", False]]
+        out = "\n".join(self.lines(ps=ps))
+        for n in (7, 6, 5):
+            self.assertIn("  - PR #%d: (title not shown)" % n, out)
+        self.assertIn("  - PR #4: Hubcap polish", out)
+        self.assertNotRegex(out.lower(), r"sending\s+to\s+the\s+hub|\[hub\]")
+
+    def test_clients_come_first(self):
+        out = self.lines()
+        self.assertTrue(out[0].startswith("- taproom (client)"), out)
+
+    def test_a_client_on_a_model_that_is_not_claude_gets_counts_only(self):
+        out = "\n".join(self.lines(claude=False))
+        self.assertIn("6 open PRs (at least 2 drafts)", out)
+        self.assertIn("(counts only: titles are for a Claude receptionist)", out)
+        self.assertNotIn("#58", out)
+        self.assertNotIn("roadmap next", out.split("- own-tool")[0])
+        self.assertIn("  - PR #7: Add a flag", out)  # his own repos keep their titles
+
+    def test_the_workspace_is_never_matched_to_the_roadmap(self):
+        rm = {"next3": ["1. Tidy the workspace notes"], "arcs": []}
+        self.assertEqual(self.lines(rm=rm, ps=[p for p in projects() if p["name"] == "workspace"]), [])
+
+    def test_a_short_name_is_not_matched_to_the_roadmap(self):
+        rm = {"next3": ["1. Read the tap1 report"], "arcs": []}
+        ps = [{"name": "tap", "client": False, "facts": {"issues": 1, "prs": 0, "open": [], "merged": None}}]
+        self.assertEqual(self.lines(rm=rm, ps=ps), [])
+
+    def test_at_most_projects_max_repos(self):
+        ps = [{"name": "repo-%02d" % i, "client": False, "facts": {"issues": 1, "prs": 1, "open": [[1, "x", False]], "merged": None}}
+              for i in range(dg.PROJECTS_MAX + 5)]
+        self.assertEqual(sum(1 for l in self.lines(ps=ps) if l.startswith("- ")), dg.PROJECTS_MAX)
+
+    def test_build_puts_projects_second_with_the_as_of_time(self):
+        out = self.digest(projects=projects(), claude=True, now=datetime(2026, 10, 17, 9, 30))
+        self.assertIn("Projects on GitHub (open issues and PRs, as of 09:30)", out)
+        self.assertLess(out.index("Projects on GitHub"), out.index("Next session should"))
+        self.assertIn("Sending to the hub:", out)
+        self.assertNotIn("Projects on GitHub", self.digest())  # None: no section
+        for h in HAZARDS:
+            self.assertIsNone(re.search(h, out), h)
+
+    def test_the_cli_reads_the_model_and_a_malformed_one_counts_as_not_claude(self):
+        import json
+        rm = self.d / "rm.md"
+        rm.write_text(ROADMAP)
+        pf = self.d / "projects.json"
+        pf.write_text(json.dumps(projects()))
+        base = ["--dispatch-state", str(self.d / "none.json"), "--roadmap-file", str(rm), "--lane-status-file", str(rm),
+                "--lanes-dir", str(self.d / "nolanes"), "--skp-root", str(self.d / "noskp"), "--inbox", str(self.d / "noinbox"),
+                "--people", str(self.d / "people.md"), "--projects-file", str(pf)]
+        for model, titles in (("claude/claude-haiku-5-5", True), ("google/gemini-3-flash", False), ("claude/x; rm -rf", False),
+                              ("", False), ("claudette/x", False),
+                              ("claude/claude-haiku-5-5,claude/claude-sonnet-5-5", True),  # every fallback Claude: titles
+                              ("claude/claude-haiku-5-5,google/gemini-3-flash", False),  # a fallback reads the digest too
+                              ("claude/claude-haiku-5-5,", False), ("claude/a,?", False), (",".join(["claude/a"] * 9), False)):
+            out = self.d / "out.md"
+            self.assertEqual(dg.main(base + ["--receptionist-model", model, "--out", str(out)]), 0)
+            self.assertEqual("PR #58" in out.read_text(), titles, model)
+
+    def test_gather_projects_keeps_his_repos_and_client_repos_only(self):
+        from unittest import mock
+        import openclaw_dispatch as dp
+        repos = {"own": ("own", "/r/own", "git@github.com:TortoiseWolfe/own.git"),
+                 "client": ("client", "/r/client", "git@github.com:SomeClient/site.git"),
+                 "clone": ("clone", "/r/clone", "https://github.com/someone/lib.git"),
+                 "local": ("local", "/r/local", "/srv/local.git"),
+                 "workspace": ("workspace", "/r", "git@github.com:TortoiseWolfe/workspace.git")}
+        reasons = {"client": "it is in the client repo list", "clone": "it is not owned by TortoiseWolfe"}
+        seen = {}
+
+        def fake_projects(slugs, prs=10, gh=None):
+            seen.update(slugs)
+            return {k: {"issues": 1, "prs": 0, "open": [], "merged": None} for k in slugs}
+        with mock.patch.object(dp, "load_repos", lambda: repos), \
+                mock.patch.object(dp, "client_reason", lambda n, p, r: reasons.get(n)), \
+                mock.patch.object(dp, "github_projects", fake_projects):
+            got = dg.gather_projects()
+        self.assertEqual(sorted(seen), ["client", "own", "workspace"])
+        self.assertEqual({p["name"]: p["client"] for p in got}, {"own": False, "client": True, "workspace": True})
+        seen.clear()
+        with mock.patch.object(dp, "load_repos", lambda: repos), \
+                mock.patch.object(dp, "client_reason", lambda n, p, r: "the client lists cannot be read"), \
+                mock.patch.object(dp, "github_projects", fake_projects):
+            got = dg.gather_projects()
+        self.assertEqual(sorted(seen), ["own", "workspace"])  # unreadable lists: his repos still show, as client rows; no clones
+        self.assertTrue(all(p["client"] for p in got))
+        with mock.patch.object(dp, "load_repos", lambda: repos), mock.patch.object(dp, "client_reason", lambda n, p, r: None), \
+                mock.patch.object(dp, "github_projects", lambda *a, **k: None):
+            self.assertIsNone(dg.gather_projects())
+
+    def test_the_installed_copy_finds_the_dispatcher_in_the_checkout_or_leaves_projects_out(self):
+        """~/.claude/scripts holds the digest but not openclaw_dispatch.py: it loads the one in the Claude_Commandz checkout."""
+        import shutil
+        import subprocess
+        import textwrap
+        here = Path(dg.__file__).resolve().parent
+        for home, expect in ((here, "found"), (Path(tempfile.mkdtemp()), "none")):
+            d = Path(tempfile.mkdtemp())
+            shutil.copy(here / "openclaw_status_digest.py", d)
+            driver = textwrap.dedent("""
+                import sys
+                sys.path = [p for p in sys.path if p not in (%r, '')]
+                sys.path.insert(0, %r)
+                import openclaw_status_digest as dg
+                dg.DISPATCH_HOME = dg.Path(%r)
+                m = dg._dispatch()
+                print("found" if m and hasattr(m, "gh_slug") else "none")
+            """) % (str(here), str(d), str(home))
+            r = subprocess.run([sys.executable, "-I", "-c", driver], capture_output=True, text=True, timeout=60, cwd=str(d))
+            self.assertEqual(r.stdout.strip(), expect, r.stderr)
 
 
 if __name__ == "__main__":

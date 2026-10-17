@@ -224,12 +224,21 @@ class Menu(Reply):
         self.assertIn("| status |", [l for k, l in done if l][-1])
         self.assertGreaterEqual(self.host.digests, 1)
 
-    def test_an_unknown_site_or_an_off_menu_sentence_runs_nothing_and_says_so(self):
+    def test_an_unknown_site_or_an_off_menu_sentence_runs_nothing_and_becomes_a_question(self):
+        # frontdesk-9: a marker that is not a menu sentence is a question for the hub. It never starts, sends to or closes a lane;
+        # with no dispatch pass (this ctx) it goes straight onto the hub's list
         for p in ("open the newest nowhere model", "format the disk", "start own-app", "email Greg"):
             self.setUp()
             self.go(self.flow("Sending to the hub: " + p))
             self.assertEqual((self.host.started, self.host.sent, self.host.killed), ([], [], []), p)
-            self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"), p)
+            self.assertTrue(self.host.chats[-1].startswith("On the hub's list: " + p), (p, self.host.chats))
+            self.assertIn(json.dumps(p), self.ctx.inbox_path.read_text())
+            self.assertIn(dp.ask_id_for(td.SHA), self.ctx.wake_path.read_text())
+
+    def test_an_empty_marker_runs_nothing_and_says_so(self):
+        self.go(self.flow("Sending to the hub:"))
+        self.nothing()
+        self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"), self.host.chats)
 
     def test_a_plain_stop_marker_stops_the_newest_lane_when_he_asked_in_other_words(self):
         # 16 Oct 22:28: he asked to stop the roadmap job in a sentence, so the typed "stop" form never fired and the marker was refused
