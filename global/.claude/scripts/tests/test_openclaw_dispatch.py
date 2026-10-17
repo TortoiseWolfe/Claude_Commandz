@@ -400,6 +400,48 @@ class Replies(Base):
         for gone in ("out.log", "pass.log", "repo"):
             self.assertFalse((mine / gone).exists(), gone)
 
+    def closed_client_lane(self, report="Audited it.\n\nNeed from you: OK to move the porch up?"):
+        self.start("client-app", "audit the porch photos", NOW)
+        lane = self.lane_names()[0]
+        self.write_report(lane, report)
+        self.act("close %s" % lane, NOW + 60)
+        return lane
+
+    def test_words_the_receptionist_wrote_are_never_labelled_his_answer(self):
+        lane = self.closed_client_lane()
+        context = {"reply": "Passing that on.\n\nSending to the hub: reply %s: move it" % lane, "history": []}
+        dp.do_reply(self.ctx, self.host, lane, "move it", NOW + 120, None, context)
+        prompt = Path(self.host.started[1][4]).read_text()
+        self.assertIn('Its report asked him: "OK to move the porch up?"', prompt)
+        self.assertNotIn("<<<ANSWER", prompt)
+        self.assertIn("receptionist's, not his, so nothing here answers it", prompt)
+
+    def test_his_answer_is_read_for_what_it_clearly_approves(self):
+        lane = self.closed_client_lane()
+        self.act("reply %s: yes, and the side door" % lane, NOW + 120)
+        prompt = Path(self.host.started[1][4]).read_text()
+        self.assertIn("<<<ANSWER\nyes, and the side door\nANSWER>>>", prompt)
+        self.assertIn(dp.CLEAR_YES, prompt)
+        self.assertNotIn("Treat it as his answer", prompt)
+
+    def test_a_follow_up_never_takes_another_repos_lane(self):
+        lane = self.closed_client_lane()
+        self.assertEqual(dp.earlier_lanes(self.state(), "own-app", NOW + 120, "x", followup_of=lane), [])
+        self.assertEqual(dp.earlier_lanes(self.state(), "client-app", NOW + 120, "x", followup_of=lane), [lane])
+
+    def test_a_lane_whose_folder_is_outside_the_lanes_dir_is_not_copied(self):
+        lane = self.closed_client_lane()
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("not a lane file\n")
+        (outside / "report.md").write_text("Audited it.")
+        state = self.state()
+        state["lanes"][lane]["report"] = str(outside / "report.md")
+        dp.save_state(self.ctx.state_path, state)
+        self.act("reply %s: more" % lane, NOW + 120)
+        hand = Path(self.host.started[1][4]).parent
+        self.assertFalse((hand / "earlier" / lane / "secret.txt").exists())
+
     def test_a_reply_to_a_lane_that_finished_over_a_week_ago_asks_for_a_start(self):
         self.start("client-app")
         lane = self.lane_names()[0]
