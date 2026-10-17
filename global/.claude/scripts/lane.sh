@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex and
 # GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -33,6 +33,11 @@
 # ~/repos/hub/client-repos.txt, as well as ~/repos/CD. If either list is missing,
 # unreadable, or not a regular file, either external engine is refused. --allow-client bypasses the guard.
 # The model argument is passed through to Codex/Copilot only when it is not a Claude model.
+#
+# --ask <oc-id>: this lane answers an OpenClaw ask ("Jonathan via OpenClaw:", ask oc-xxxxxxxx). Once the window is up and the lane is in
+# index.tsv, lane.sh runs `openclaw_dispatch.py claim <id> <name>`, which registers the lane so its finish, failure or stall is
+# posted to Jonathan's OpenClaw chat, and cancels the five-minute fallback that would otherwise start the job a second time.
+# A claim that fails prints a warning and does not undo the lane.
 #
 # Hand-off across hub sessions (lanes outlive the hub terminal; only WSL shutting down stops them):
 #   lane.sh --status                    one line per window in "lanes" (report yes/no, working/idle/error,
@@ -107,7 +112,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] --resume <name>
@@ -118,6 +123,7 @@ Codex and Copilot refuse repositories listed in client-senders.tsv or client-rep
 and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
+--ask <oc-id> claims an OpenClaw ask for this lane (its result then reaches Jonathan's OpenClaw chat).
 Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they also compact in place at 200K tokens.
 Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
@@ -125,7 +131,7 @@ Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; ask_id=
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -138,6 +144,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--effort requires low, medium, high, xhigh, or max" >&2; exit 1; }
       effort_opt="$2"; shift 2 ;;
     --effort=*) effort_opt="${1#*=}"; shift ;;
+    --ask)
+      [ $# -ge 2 ] || { echo "--ask requires an ask id (oc-xxxxxxxx)" >&2; exit 1; }
+      ask_id="$2"; shift 2 ;;
+    --ask=*) ask_id="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
     --connectors) connectors_opt=1; shift ;;
     --console) console=1; shift ;;
@@ -159,6 +169,8 @@ case "$effort_opt" in
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
 esac
 
+[ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
+[ -z "$ask_id" ] || [ "$mode" = start ] || { echo "--ask only applies when starting a lane" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$mode" = start ] || { echo "--headless only applies when starting a lane" >&2; exit 1; }
 
@@ -703,6 +715,17 @@ if [ "$dry" = 0 ]; then
     "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
+fi
+
+# An OpenClaw ask: register this lane under it so the result reaches the chat (and the fallback does not start the job again).
+if [ -n "$ask_id" ]; then
+  if [ "$dry" = 1 ]; then
+    echo "# would run: openclaw_dispatch.py claim $ask_id $name"
+  else
+    claim_py="${AFA_OPENCLAW_DISPATCH:-$HOME/repos/Claude_Commandz/global/.claude/scripts/openclaw_dispatch.py}"
+    if claim_out="$(python3 "$claim_py" claim "$ask_id" "$name" 2>&1)"; then echo "claim:  $claim_out"
+    else echo "WARNING: the lane is running but claiming ask $ask_id failed: $claim_out" >&2; fi
+  fi
 fi
 
 echo "lane:   $name  ($model, effort $eff, connectors $conn, $dir)"

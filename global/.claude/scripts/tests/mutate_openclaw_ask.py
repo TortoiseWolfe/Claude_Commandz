@@ -16,7 +16,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply"]
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -112,7 +112,7 @@ MUTANTS = [
     (PICKUP, "two markers allowed", "    if n != 1:", "    if n < 1:"),
     (PICKUP, "marker may be any line", "MARKER_LINE.fullmatch(lines[-1]) if lines else None", "MARKER_LINE.fullmatch(lines[0]) if lines else None"),
     (PICKUP, "a marker can say stop", 'return d if d and d[0] != "stop" else None', "return d"),
-    (PICKUP, "same start can run twice", "        if now - used.get(key, 0) < ACT_MAX_AGE:", "        if False:"),
+    (PICKUP, "same start can run twice", "if verb == \"start\" and via_chat and dispatch.duplicate_start(ctx, menu[2], now):", "if False:"),
     (PICKUP, "unanswered messages are dropped at once", '        if status == "wait":\n            waiting.append(e)\n            continue', '        if status == "wait":\n            continue'),
     (PICKUP, "waiting entries never expire", 'live = [e for e in queue if now - e["ts"] <= ACT_MAX_AGE]', "live = queue"),
     (PICKUP, "unreadable session loses the message", "        return live, []  # unreadable: try again next poll", "        return [], []"),
@@ -125,13 +125,62 @@ MUTANTS = [
     (DISPATCH, "failed report announced as finished", '"%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else', '"%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if False else'),
     (DISPATCH, "detector never sees a failure", "    if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):\n        return None", "    return None"),
     (DISPATCH, "denied no longer counts as blocked", r"\bdenied\b|\bblocked\b|", r"\bblocked\b|"),
-    (DISPATCH, "could not complete no longer counts as undone", "|complete|finish|scan|", "|finish|"),
+    # ("could not complete" is also caught by the wider "not complete" wording added for partial reports, so dropping its old line changes nothing)
     (DISPATCH, "stuck prompt posted every poll", "        if lane.get(\"stuck\") == first:", "        if False:"),
     (DISPATCH, "lane started without the unattended flag", "env=dict(os.environ, AFA_LANE_UNATTENDED=\"1\")", "env=None"),
     (DISPATCH, "copilot told to use a worktree", 'work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE', "work_rule = WORK_RULE"),
     (DISPATCH, "stop closes the oldest lane", "name = max(open_)[1]", "name = min(open_)[1]"),
     (DISPATCH, "stop matches long sentences", " and len(t) <= 20:", ":"),
     (DISPATCH, "undeliverable note still closes the lane", "        if not host.inject(chat):", "        if False:"),
+    # the dispatch pass (frontdesk-4): the routing branch, the fallback deadline, claim / say, caps, dedup, partial = failed
+    (PICKUP, "routing: jobs skip the pass and the script starts them", 'if verb == "start" and ctx.hand_off_first:', "if False:"),
+    (PICKUP, "routing: every verb goes to the pass", 'if verb == "start" and ctx.hand_off_first:', "if ctx.hand_off_first:"),
+    (PICKUP, "poller never runs the fallback", " + dispatch.fallback_due(ctx, host, now) if ctx", " if ctx"),
+    (DISPATCH, "fallback: the deadline is ignored", 'elif now >= a.get("deadline", 0):', "elif False:"),
+    (DISPATCH, "fallback: one second late", 'elif now >= a.get("deadline", 0):', 'elif now > a.get("deadline", 0):'),
+    (DISPATCH, "fallback: wait stretched to 50 minutes", "ASK_WAIT = 5 * 60", "ASK_WAIT = 50 * 60"),
+    (DISPATCH, "fallback: a failed pass waits out the deadline", 'if "exit" in p and p["exit"] != 0:', "if False:"),
+    (DISPATCH, "fallback: a pass that ended unsettled waits out the deadline", 'elif "exit" in p:', "elif False:"),
+    (DISPATCH, "fallback: also starts asks already claimed", 'if a.get("status") != "pending":\n                continue', "if False:\n                continue"),
+    (DISPATCH, "fallback: ask not marked before the start (a late claim runs twice)", 'a["status"] = "fallback"  # before do_start', "pass  # before do_start"),
+    (DISPATCH, "fallback: not said in the chat", 'host.inject(chat)\n        out.append((line.replace', "out.append((line.replace"),
+    (DISPATCH, "pass timeout longer than the wait", "PASS_TIMEOUT = 240", "PASS_TIMEOUT = 340"),
+    (DISPATCH, "claim: a settled ask can still be claimed", 'if ask["status"] not in ("pending", "claimed"):', "if False:"),
+    (DISPATCH, "claim: lane need not be in the index", 'if row is None:\n            return False, "claim: lane', 'if False:\n            return False, "claim: lane'),
+    (DISPATCH, "claim: does not cancel the fallback", 'ask["status"] = "claimed"', "pass"),
+    (DISPATCH, "claim: lane not registered for the sweep", 'if lane_name not in state["lanes"]:\n            state["lanes"][lane_name] = {', 'if False:\n            state["lanes"][lane_name] = {'),
+    (DISPATCH, "claim: bad lane name accepted", "not LANE_NAME_RE.fullmatch(lane_name or \"\")", "False"),
+    (DISPATCH, "say: a settled ask can be answered again", 'if ask["status"] != "pending":\n            return False, "say:', 'if False:\n            return False, "say:'),
+    (DISPATCH, "say: does not close the ask", 'ask["status"], ask["answered_at"] = "answered", now', 'ask["answered_at"] = now'),
+    (DISPATCH, "say: ask closed even when the chat is unreachable", "if not host.inject(text):", "if False:"),
+    (DISPATCH, "caps: waiting asks not counted against the running cap", "if len(running) + len(waiting) >= MAX_RUNNING:", "if len(running) >= MAX_RUNNING:"),
+    (DISPATCH, "caps: waiting asks not counted against the daily cap", "if isinstance(t, (int, float)) and _day(t) == _day(now)) + len(waiting)", "if isinstance(t, (int, float)) and _day(t) == _day(now))"),
+    (DISPATCH, "caps: the pass has no cap", "if len(running) + len(waiting) >= MAX_RUNNING:", "if False:"),
+    (DISPATCH, "hand-off: same ask handed over twice", "if ask_id in asks:\n            return", "if False:\n            return"),
+    (DISPATCH, "hand-off: spawn failure not recorded", '["pass"] = {"exit": -1, "error": "could not start the pass"}', '["pass"] = None'),
+    (DISPATCH, "dedup: keyed on case and spacing", '" ".join(task.split()).lower().encode', '" ".join(task.split()).encode'),
+    (DISPATCH, "dedup: window ignored (asks)", 'now - a.get("created", 0) < DEDUP_WINDOW', "True"),
+    (DISPATCH, "dedup: window ignored (lanes)", 'now - l.get("started", 0) < DEDUP_WINDOW', "True"),
+    (DISPATCH, "dedup: a failed ask can never be retried", "and not _ask_failed(state, a):", ":"),
+    (DISPATCH, "dedup: a failed lane can never be retried", 'and not l.get("failed"):', ":"),
+    (DISPATCH, "dedup: a stopped lane cannot be retried", '"closed", True, True  # stopped', '"closed", True, False  # stopped'),
+    (DISPATCH, "dedup: a dead lane not marked failed", 'lane["detail"], lane["failed"] = detail, True', 'lane["detail"] = detail'),
+    (DISPATCH, "dedup: a failed report not marked failed", 'if failure:\n                lane["failed"], changed = True, True', 'if failure:\n                changed = True'),
+    (DISPATCH, "dedup: a failed fallback start cannot be retried", 'asks_of(state)[k]["status"] = "fallback-failed"', 'asks_of(state)[k]["status"] = "fallback"'),
+    (DISPATCH, "partial: 'not a complete' is not undone", r"\bnot (?:an? )?(?:complete|full|exact|exhaustive)\b|", ""),
+    (DISPATCH, "partial: the word partial is not undone", r"\bpartial(?:ly)?\b|", ""),
+    (DISPATCH, "partial: 'needs read access' is not undone", r"needs? (?:\w+ ){0,2}(?:read |write )?access|", ""),
+    (DISPATCH, "partial: 'to complete the exact request' is not undone", r"to complete the (?:exact |full )?(?:request|task)|", ""),
+    (DISPATCH, "partial: 'instead of the local' is not undone", r"instead of (?:the )?(?:local|requested)", r"instead of (?:the )?(?:requested)"),
+    (DISPATCH, "pass: the skip flag is ignored", 'if flag == "skip":', "if False:"),
+    (DISPATCH, "pass: the fail flag is ignored", 'if flag == "fail":', "if False:"),
+    (DISPATCH, "pass: tokens not recorded", '"tokens": toks', '"tokens": 0'),
+    (DISPATCH, "pass: runs for an ask already settled", 'if ask is None or ask.get("status") != "pending":', "if ask is None:"),
+    (DISPATCH, "pass: the lock is never taken", "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "pass"),
+    (DISPATCH, "prompt: any lane name may be written", 'or not lane_name.startswith("oc-"):', ":"),
+    (DISPATCH, "prompt: lane name unchecked", "if not LANE_NAME_RE.fullmatch(lane_name or \"\") or not lane_name.startswith", "if not lane_name.startswith"),
+    (DISPATCH, "prompt: size unchecked", "or len(text) > PROMPT_MAX:", ":"),
+    (DISPATCH, "pass: the task is not quoted as data", "task=json.dumps(ask[\"task\"], ensure_ascii=False), repo=ask[\"repo\"]", "task=ask[\"task\"], repo=ask[\"repo\"]"),
 ]
 
 

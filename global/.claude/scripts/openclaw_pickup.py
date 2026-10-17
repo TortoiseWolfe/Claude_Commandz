@@ -29,8 +29,12 @@ With --act (the poller, shell only, never a model) a second stage runs on the it
     guards live here, not in his typing: his message is found in Main session by its time and text (never "the newest message"),
     the reply must be the first thing after it (a [hub] line or lane report in between, or a reply from the openclaw provider,
     means nothing runs), exactly one marker on the last line, then the same tables, budget caps and client routing as a typed
-    sentence; an identical start cannot run twice in 15 minutes. The model's text is data. See find_reply(). The message waits in
+    sentence; an identical task cannot run twice in 15 minutes unless the earlier lane failed. The model's text is data. See find_reply(). The message waits in
     ~/.claude/state/openclaw-pending.json (at most 15 minutes) until the model's reply shows up in Main session.
+  - a job (`start <repo>: <task>`, typed or from the marker) is not started by this script: it becomes an "ask" for a fresh, short
+    Claude dispatch pass (openclaw_dispatch.py hand_off / run_pass) that starts the lane with lane.sh --ask or answers with `say`.
+    The chat hears "handed to Claude: <task>". The hub session is never woken. If the pass fails or nothing claims the ask in 5 minutes,
+    the poller starts the lane itself (fallback_due) and says so.
   - a tray message that starts with "hub:" becomes one quoted "Jonathan via OpenClaw:" line in the muse inbox
     and touches a wake file for lane_watch.sh. Any other tray message is chat: logged by hash, nothing more.
 
@@ -473,29 +477,6 @@ def parse_menu(job, sites, aliases):
     return d if d and d[0] != "stop" else None
 
 
-def _used(path):
-    """{job key: epoch} of the model-proposed starts that already ran."""
-    try:
-        v = json.loads(Path(path).read_text())
-        return {k: t for k, t in v.items() if isinstance(k, str) and isinstance(t, (int, float))} if isinstance(v, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _job_key(menu):
-    return hashlib.sha256(_norm("%s %s %s" % menu).lower().encode("utf-8")).hexdigest()[:16]
-
-
-def _append_used(path, used, key, now):
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    keep = {k: t for k, t in used.items() if now - t < ACT_MAX_AGE}
-    keep[key] = now
-    tmp.write_text(json.dumps(keep))
-    tmp.replace(p)
-
-
 def load_pending(path):
     try:
         v = json.loads(Path(path).read_text())
@@ -579,13 +560,14 @@ def execute(menu, host, ctx, sites, now, stamp, sha, via_chat=False):
     if verb == "status":
         ok = host.refresh_digest()
         return "action", "%s | status | %s | oc-%s" % (stamp, "digest rebuilt and delivered; it is the Work in flight block above" if ok else "FAILED: could not rebuild the digest", sha)
-    used = {}
-    if verb == "start" and via_chat:
-        used, key = _used(ctx.used_path), _job_key(menu)
-        if now - used.get(key, 0) < ACT_MAX_AGE:
-            host.inject("Already started that one a moment ago, so I didn't start it twice.")
-            return "dispatch", "%s | start %s | not run: the same start ran in the last %d minutes | oc-%s" % (stamp, menu[1], ACT_MAX_AGE // 60, sha)
-    if verb == "start":
+    if verb == "start" and via_chat and dispatch.duplicate_start(ctx, menu[2], now):
+        # keyed on the task alone, not the repo; once the earlier lane has failed (or was stopped) the same task may be asked again
+        host.inject("Already started that one a moment ago, so I didn't start it twice.")
+        return "dispatch", "%s | start %s | not run: the same task ran in the last %d minutes and has not failed | oc-%s" % (stamp, menu[1], dispatch.DEDUP_WINDOW // 60, sha)
+    if verb == "start" and ctx.hand_off_first:
+        # every job goes to a fresh, short Claude dispatch pass first; the script starts it itself only if the pass does not (fallback_due)
+        line, chat = dispatch.hand_off(ctx, host, dispatch.ask_id_for(sha), menu[1], menu[2], now)
+    elif verb == "start":
         line, chat = dispatch.do_start(ctx, host, menu[1], menu[2], now)
     elif verb == "reply":
         line, chat = dispatch.do_reply(ctx, host, menu[1], menu[2], now)
@@ -593,9 +575,8 @@ def execute(menu, host, ctx, sites, now, stamp, sha, via_chat=False):
         line, chat = dispatch.do_stop(ctx, host, now)
     else:
         line, chat = dispatch.do_close(ctx, host, menu[1], now)
-    host.inject(chat)
-    if verb == "start" and via_chat and " | started " in line:
-        _append_used(ctx.used_path, used, key, now)
+    if chat:
+        host.inject(chat)
     return "dispatch", "%s%s | oc-%s" % (line, " (chat)" if via_chat else "", sha)
 
 
@@ -692,7 +673,7 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
     sites = site_models(skp_root)
     aliases = load_aliases(aliases_file, sites)
     done = []
-    reported = dispatch.sweep(ctx, host, now) + dispatch.check_stuck(ctx, host, now) if ctx is not None else []
+    reported = dispatch.sweep(ctx, host, now) + dispatch.check_stuck(ctx, host, now) + dispatch.fallback_due(ctx, host, now) if ctx is not None else []
     for line, _chat in reported:
         _append_line(log, line)
         done.append(("dispatch", line))
@@ -755,7 +736,7 @@ def main(argv=None):
             print(quote_untrusted(r["stored"]))
     print("pickup: %s" % (", ".join("%d %s" % (n, v) for v, n in sorted(counts.items())) or "folder empty"))
     if a.act:
-        for kind, line in run_act(results, Host(), a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos())):
+        for kind, line in run_act(results, Host(), a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos(), hand_off_first=True)):
             print("act: %s%s" % (kind, " | " + line if line else ""))
     return 0
 
