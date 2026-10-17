@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -68,6 +69,10 @@ class FakeHost:
 
 
 class Base(unittest.TestCase):
+    def private_paths(self):
+        """The lane index, pass flag and results log default to the live ones under ~/.claude; a test must never write those."""
+        return {"index_path": self.tmp / "index.tsv", "flag_path": self.tmp / "pass.flag", "results_log": self.tmp / "results.log"}
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.root = self.tmp / "repos"
@@ -90,7 +95,7 @@ class Base(unittest.TestCase):
         self.repos_txt = self.root / "hub/client-repos.txt"
         self.repos_txt.write_text("# protected\n")
         self.ctx = dp.Ctx(dp.load_repos(self.root / "hub/repos.tsv", self.root), self.tmp / "dispatch.json", self.tmp / "lanes",
-                          self.senders, self.repos_txt, self.root)
+                          self.senders, self.repos_txt, self.root, **self.private_paths())
         self.host = FakeHost()
         self.inbox, self.wake, self.log = self.tmp / "inbox.md", self.tmp / "wake", self.tmp / "results.log"
 
@@ -323,10 +328,10 @@ class Replies(Base):
         self.assertNotIn("yes", msg.lower())
 
     def test_reply_goes_to_lane_send_for_a_named_lane_and_for_the_one_open_lane_of_a_repo(self):
-        self.start()
+        self.start("client-app")
         lane = self.lane_names()[0]
         self.act("reply %s: use the second one" % lane)
-        self.act("reply own-app: and be quick")
+        self.act("reply client-app: and be quick")
         self.assertEqual(self.host.sent, [(lane, dp.REPLY_FRAME + "use the second one"), (lane, dp.REPLY_FRAME + "and be quick")])
         self.assertIn("Sent to %s" % lane, self.host.chats[-1])
 
@@ -346,9 +351,9 @@ class Replies(Base):
             self.assertNotIn(sent[0], "!/#&")
 
     def test_a_send_that_did_not_take_is_said_so(self):
-        self.start()
-        self.host.send_result = (False, "oc-x is a codex headless lane; start a new lane")
-        self.act("reply own-app: hi")
+        self.start("client-app")
+        self.host.send_result = (False, "its window did not take the words")
+        self.act("reply client-app: hi")
         self.assertIn("Couldn't send", self.host.chats[-1])
 
     def test_close_kills_the_window_of_a_lane_with_a_report(self):
@@ -362,13 +367,79 @@ class Replies(Base):
         self.assertEqual(self.host.killed, [lane])
         self.assertIn("already closed", self.host.chats[-1])
 
-    def test_a_closed_lane_cannot_be_written_to(self):
+    def test_a_reply_to_a_closed_lane_starts_a_follow_up(self):
+        self.start("client-app", "audit the porch photos", NOW)
+        lane = self.lane_names()[0]
+        hand = Path(self.state()["lanes"][lane]["report"]).parent
+        (hand / "audit").mkdir()
+        (hand / "audit/AUDIT.md").write_text("porch is 4 cm low\n")
+        (hand / "out.log").write_text("noise\n")
+        (hand / "pass.log").write_text("noise\n")
+        (hand / "repo").mkdir()
+        (hand / "repo/big.bin").write_text("clone\n")
+        report = "Audited the porch: 4 cm low.\n\nNeed from you: OK to move the porch up?"
+        self.write_report(lane, report)
+        self.act("close %s" % lane, NOW + 60)
+        words = "yes move it, and add the side door too"
+        self.act("reply %s: %s" % (lane, words), NOW + 120)
+        self.assertEqual(self.host.sent, [])  # nothing typed into a closed lane
+        self.assertEqual(len(self.host.started), 2)
+        new, d, _e, _m, prompt_path = self.host.started[1]
+        self.assertEqual(d, str(self.root / "client-app"))
+        self.assertIn("%s had finished at %s, so I started %s with its report, its files and your words." % (
+            lane, time.strftime("%H:%M", time.localtime(NOW + 60)), new), self.host.chats[-1])
+        prompt = Path(prompt_path).read_text()
+        self.assertIn(json.dumps(words), prompt)  # his words, verbatim, are the task
+        self.assertIn('<<<TASK\naudit the porch photos\nTASK>>>', prompt)  # the old task, quoted
+        self.assertIn(report, prompt)  # the old report, verbatim
+        self.assertIn('Its report asked him: "OK to move the porch up?"', prompt)
+        self.assertEqual(prompt.split("<<<ANSWER\n", 1)[1].split("\nANSWER>>>", 1)[0], words)
+        mine = Path(prompt_path).parent / "earlier" / lane
+        self.assertIn(str(mine), prompt)
+        self.assertEqual((mine / "audit/AUDIT.md").read_text(), "porch is 4 cm low\n")
+        for gone in ("out.log", "pass.log", "repo"):
+            self.assertFalse((mine / gone).exists(), gone)
+
+    def test_a_reply_to_a_lane_that_finished_over_a_week_ago_asks_for_a_start(self):
         self.start("client-app")
         lane = self.lane_names()[0]
         self.write_report(lane)
-        self.act("close %s" % lane)
-        self.act("reply %s: hi" % lane)
-        self.assertEqual(self.host.sent, [])
+        self.act("close %s" % lane, NOW + 60)
+        self.act("reply %s: more" % lane, NOW + 60 + dp.REPLY_WINDOW + 60)
+        self.assertEqual(len(self.host.started), 1)
+        self.assertIn("more than 7 days ago", self.host.chats[-1])
+        self.assertIn("start a new lane in client-app", self.host.chats[-1])
+
+    def test_a_reply_to_a_running_headless_lane_is_held_then_followed_up_when_it_closes(self):
+        self.start("own-app", "list the files", NOW)
+        lane = self.lane_names()[0]
+        self.assertIn(self.state()["lanes"][lane]["engine"], ("codex", "copilot"))
+        self.act("reply %s: and count them" % lane, NOW + 30)
+        self.assertEqual(self.host.sent, [])  # lane.sh --send refuses a headless lane: nothing is tried
+        self.assertIn("still working", self.host.chats[-1])
+        self.assertEqual(self.state()["lanes"][lane]["held"][0]["text"], "and count them")
+        self.assertEqual(len(self.host.started), 1)
+        self.write_report(lane, "Listed 12 files.")
+        pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 100, ctx=self.ctx)
+        self.assertEqual(len(self.host.started), 2)
+        new, _d, _e, _m, prompt_path = self.host.started[1]
+        self.assertIn("%s finished" % lane, self.host.chats[-2])  # the report first
+        self.assertIn("%s had finished at" % lane, self.host.chats[-1])
+        self.assertIn("so I started %s" % new, self.host.chats[-1])
+        prompt = Path(prompt_path).read_text()
+        self.assertIn(json.dumps("and count them"), prompt)
+        self.assertIn("Listed 12 files.", prompt)
+        self.assertNotIn("held", self.state()["lanes"][lane])
+        pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 200, ctx=self.ctx)
+        self.assertEqual(len(self.host.started), 2)  # once
+
+
+class NoLiveState(Base):
+    def test_every_path_a_test_context_writes_is_under_its_temp_folder(self):
+        """A test once appended a row to the live ~/.claude/state/lanes/index.tsv through Ctx's default index_path."""
+        for p in (self.ctx.state_path, self.ctx.lanes_dir, self.ctx.index_path, self.ctx.flag_path, self.ctx.results_log,
+                  self.ctx.room_dir, self.ctx.pending_path, self.ctx.context_dir, self.ctx.lock_path):
+            self.assertTrue(Path(p).resolve().is_relative_to(self.tmp.resolve()), p)
 
 
 class Sweep(Base):
@@ -793,7 +864,7 @@ class Workspace(Base):
         super().setUp()
         (self.root / ".git").mkdir()
         self.ctx = dp.Ctx(dp.load_repos(self.root / "hub/repos.tsv", self.root), self.tmp / "dispatch.json", self.tmp / "lanes",
-                          self.senders, self.repos_txt, self.root)
+                          self.senders, self.repos_txt, self.root, **self.private_paths())
 
     def prompt(self):
         return Path(self.host.started[-1][4]).read_text()
@@ -901,3 +972,242 @@ class Stuck(Base):
         done = pk.run_act([], self.host, self.tmp / "none", self.tmp / "aliases.json", self.inbox, self.wake, self.log, NOW + 600, ctx=self.ctx)
         self.assertTrue(any("is stuck on" in l for k, l in done), done)
         self.assertIn("is stuck on", self.log.read_text())
+
+
+# ---------------------------------------------------------------------------------------------------------
+# 17 Oct, 08:39-08:56: a follow-up through the receptionist lost its context. Replayed here step by step with the chat's own
+# shape and wording (repo, site and picture names made neutral for this public repo). Steps:
+#   1. a lane audits the site's photo pairs, writes audit/AUDIT.md in its lane folder, and ends its report with a question;
+#      the sweep posts the report and closes the lane.
+#   2. he pastes pictures; the receptionist writes its own visual audit in the chat.
+#   3. he says "so add your feed back to the visual audit the hub is running"; the reply's marker is "reply <closed lane>: ...".
+#      Before: refused ("I don't have an open lane called ..."). Now: a follow-up lane in the same repo.
+#   4. that follow-up's prompt holds the reply verbatim, the earlier report and the copied audit files.
+#   5. he answers the lane's question ("and yes okay on this ...") and the receptionist sends a one-line start for the same repo.
+#   6. that lane's prompt holds his answer quoted with the question, his words verbatim, the receptionist's whole message and the
+#      earlier lane's files, copied inside its own lane folder, on Copilot (Codex is out), which can read only that folder.
+
+QUESTION = "OK to measure h243, h142z35 and the east windows?"
+REPORT_17 = ("Audited the 17 photo pairs for site-01 against the model; results are in audit/AUDIT.md in my lane folder, with the "
+             "pairs side by side. Four views do not line up: the porch, the side dormer, the fence and the anchor corner. I did not "
+             "change the model.\n\nNeed from you: " + QUESTION)
+AUDIT_MD = "# Visual audit site-01\n\n| pair | verdict |\n|---|---|\n| IMG_A | porch off |\n"
+FINDINGS = ("IMG_A porch/door shifted left and down, roof ridge up/left; IMG_B side dormer up/left, left margin wireframes floating; "
+            "IMG_C fence shifted down/left; IMG_D anchor shifted up and tilted.")
+OWN_AUDIT = "Visual audit of the four screenshots you pasted:\n\n* " + FINDINGS.replace("; ", "\n* ")
+STEP3 = "so add your feed back to the visual audit the hub is running"
+STEP5 = "and yes okay on this and still mege those findings with what you just sent"
+START5 = "merge front-desk visual audit feedback into audit/AUDIT.md and update model correction plan for site-01"
+
+
+def chat(role, text, ts, provider="google"):
+    return {"role": role, "provider": None if role == "user" else provider, "text": text, "ts_ms": int(ts * 1000)}
+
+
+class ChatHost(FakeHost):
+    def __init__(self, history):
+        super().__init__()
+        self.history = history
+
+    def main_history(self, limit=40):
+        return self.history
+
+    def spawn_pass(self, ask_id):
+        self.passes = getattr(self, "passes", []) + [ask_id]
+        return True
+
+
+class FollowUp17Oct(Base):
+    T0 = NOW - 1800  # step 1's lane starts
+
+    def setUp(self):
+        super().setUp()
+        s = self.state()
+        s["codex_blocked_until"] = NOW + 14 * 86400  # Codex is out until 31 Oct: the dispatcher picks Copilot for an own repo
+        dp.save_state(self.ctx.state_path, s)
+        self.history = []
+
+    def say(self, role, text, ts, provider="google"):
+        self.history.append(chat(role, text, ts, provider))
+
+    def hub(self, text, ts):
+        self.say("assistant", "[hub]\n\n" + text, ts, provider="openclaw")
+
+    def step1(self):
+        self.start("own-app", "audit the photo-matched pairs for site-01", self.T0)
+        lane = self.lane_names()[0]
+        self.hub(self.host.chats[-1], self.T0 + 2)
+        hand = Path(self.state()["lanes"][lane]["report"]).parent
+        (hand / "audit").mkdir(parents=True)
+        (hand / "audit/AUDIT.md").write_text(AUDIT_MD)
+        (hand / "audit/IMG_A_pair.png").write_bytes(b"\x89PNG fake")
+        (hand / "out.log").write_text("noise\nexit 0\n")
+        (hand / "repo/.git").mkdir(parents=True)  # a lane's own clone is never copied
+        (hand / "repo/big.bin").write_bytes(b"x" * 10)
+        self.write_report(lane, REPORT_17)
+        os.utime(hand / "report.md", (NOW - 900, NOW - 900))
+        posted = dp.sweep(self.ctx, self.host, NOW - 890)
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.hub(posted[0][1], NOW - 888)
+        return lane, hand
+
+    def run_poll(self, text, ts, now, sha):
+        self.host.history = self.history
+        item = dict(self.item(text, ts=ts), sha256_of_original=sha)
+        with unittest.mock.patch.object(pk, "site_models", return_value={}):
+            return pk.run_act([{"verdict": "accept", "stored": item}], self.host, self.tmp / "skp", self.tmp / "al.json",
+                              self.inbox, self.wake, self.log, now=now, ctx=self.ctx)
+
+    def steps_1_to_4(self, pass_first=False):
+        self.host = ChatHost(self.history)
+        lane, hand = self.step1()
+        self.ctx.hand_off_first = pass_first  # the poller's way: every job goes to the dispatch pass first
+        self.say("user", "", NOW - 200)  # step 2: pictures only
+        self.say("assistant", OWN_AUDIT, NOW - 197)
+        self.say("user", STEP3, NOW - 100)  # step 3
+        reply = ("Passing your visual audit findings to the active worker on `own-app` now so it can merge them into `audit/AUDIT.md`."
+                 "\n\nSending to the hub: reply %s: merge front-desk visual audit findings: %s" % (lane, FINDINGS))
+        self.say("assistant", reply, NOW - 94)
+        self.run_poll(STEP3, NOW - 100, NOW, "c" * 64)
+        return lane, hand, reply
+
+    def test_step3_a_reply_to_the_closed_lane_becomes_a_follow_up_lane_in_the_same_repo(self):
+        lane, _hand, _reply = self.steps_1_to_4()
+        self.assertEqual(self.host.sent, [])  # nothing typed into a dead window
+        self.assertEqual(len(self.host.started), 2)  # step 1's lane, then the follow-up
+        name, d, engine, _model, _prompt = self.host.started[1]
+        self.assertEqual((d, engine), (str(self.root / "own-app"), "copilot"))
+        self.assertNotIn("don't have an open lane", " ".join(self.host.chats))
+        self.assertRegex(self.host.chats[-1], r"^%s had finished at \d\d:\d\d, so I started %s with its report, its files and your words\. " % (
+            lane, name))
+
+    def test_step4_the_follow_up_prompt_holds_the_reply_the_report_and_the_copied_files(self):
+        lane, _hand, reply = self.steps_1_to_4()
+        name, _d, _e, _m, prompt_path = self.host.started[1]
+        prompt = Path(prompt_path).read_text()
+        hand = Path(prompt_path).parent
+        task = "merge front-desk visual audit findings: " + FINDINGS
+        self.assertIn(json.dumps(task, ensure_ascii=False), prompt)  # the reply's words are the task, verbatim
+        self.assertIn(reply, prompt)  # the receptionist's whole message
+        self.assertIn(REPORT_17, prompt)  # the earlier report, verbatim
+        self.assertIn(OWN_AUDIT, prompt)  # the receptionist's own audit, from the chat
+        self.assertIn(STEP3, prompt)
+        self.assertEqual((hand / "earlier" / lane / "audit/AUDIT.md").read_text(), AUDIT_MD)
+        self.assertTrue((hand / "earlier" / lane / "audit/IMG_A_pair.png").is_file())
+        self.assertIn(str(hand / "earlier" / lane), prompt)
+        for gone in ("repo", "out.log", "earlier"):
+            self.assertFalse((hand / "earlier" / lane / gone).exists(), gone)
+        self.assertIn(OWN_AUDIT, (hand / "chat.md").read_text())
+        self.assertLess(len(prompt.encode("utf-8")), 128 * 1024)  # one argv string for copilot -p
+
+    def test_steps_5_and_6_his_approval_is_carried_quoted_with_the_question(self):
+        lane, _hand, _reply = self.steps_1_to_4()
+        follow = self.host.started[1][0]
+        self.hub(self.host.chats[-1], NOW + 2)
+        self.say("user", STEP5, NOW + 30)
+        reply5 = ("Merging those findings into the audit and the correction plan.\n\n```\nROUTE: own\nTO: hub worker\nFOLDER: own-app\n```"
+                  "\n\nSending to the hub: start own-app: " + START5)
+        self.say("assistant", reply5, NOW + 31)
+        self.run_poll(STEP5, NOW + 30, NOW + 60, "d" * 64)
+        self.assertEqual(len(self.host.started), 3)
+        name, _d, engine, _m, prompt_path = self.host.started[2]
+        self.assertNotIn(name, (lane, follow))
+        self.assertEqual(engine, "copilot")
+        prompt = Path(prompt_path).read_text()
+        hand = Path(prompt_path).parent
+        self.assertIn(json.dumps(START5), prompt)
+        self.assertIn("Its report asked him: %s" % json.dumps(QUESTION), prompt)
+        answer = prompt.split("<<<ANSWER\n", 1)[1].split("\nANSWER>>>", 1)[0]
+        self.assertIn(STEP5, answer)
+        self.assertIn(STEP3, answer)
+        self.assertIn(reply5, prompt)
+        self.assertIn(REPORT_17, prompt)
+        self.assertEqual((hand / "earlier" / lane / "audit/AUDIT.md").read_text(), AUDIT_MD)
+
+    def test_step6_a_copilot_lane_reads_the_copied_files_inside_its_own_lane_folder(self):
+        lane, _hand, _reply = self.steps_1_to_4()
+        _n, _d, engine, _m, prompt_path = self.host.started[1]
+        hand = Path(prompt_path).parent
+        prompt = Path(prompt_path).read_text()
+        self.assertEqual(engine, "copilot")
+        self.assertIn("%s/repo" % hand, prompt)  # the Copilot work rule names the same folder
+        for p in (hand / "earlier").rglob("*"):
+            self.assertTrue(p.resolve().is_relative_to(hand.resolve()), p)
+            self.assertFalse(p.is_symlink(), p)
+        lane_sh = (Path(dp.__file__).resolve().parent / "lane.sh").read_text()
+        self.assertRegex(lane_sh, r'hand="\$HOME/\.claude/state/lanes/\$\(date \+%F\)-\$name"')
+        self.assertRegex(lane_sh, r'copilot -p .*--add-dir \$\(printf %q "\$hand"\)')  # the only folder outside the repo it may read
+        self.assertEqual(hand.name, "%s-%s" % (time.strftime("%F", time.localtime(NOW)), self.host.started[1][0]))
+
+    def test_the_dispatch_pass_path_carries_the_same_context(self):
+        lane, _hand, reply = self.steps_1_to_4(pass_first=True)
+        self.assertEqual(len(self.host.started), 1)  # step 1's lane only: the follow-up waits for the pass
+        ask = dp.ask_id_for("c" * 64)
+        self.assertEqual(self.host.passes, [ask])
+        a = dp.asks_of(self.state())[ask]
+        self.assertEqual((a["repo"], a["followup_of"]), ("own-app", lane))
+        name, hand, pass_text = dp.pass_prompt(self.ctx, ask, a, NOW + 5)
+        self.assertIn("follows up lane %s" % lane, pass_text)
+        ok, _ = dp.write_prompt(self.ctx, name, "You are a lane.\n<<<TASK\n\"x\"\nTASK>>>\n", NOW + 5)
+        self.assertTrue(ok)
+        open(self.ctx.index_path, "a").write("x\t%s\t%s\tsonnet\tcopilot\t-\t%s\n" % (name, self.root / "own-app", hand / "report.md"))
+        ok, msg = dp.start_for_ask(self.ctx, self.host, ask, name, str(self.root / "own-app"), "sonnet", hand / "prompt.md", "copilot", NOW + 6)
+        self.assertTrue(ok, msg)
+        prompt = (hand / "prompt.md").read_text()
+        self.assertIn(reply, prompt)
+        self.assertIn(REPORT_17, prompt)
+        self.assertEqual((hand / "earlier" / lane / "audit/AUDIT.md").read_text(), AUDIT_MD)
+        self.assertEqual(prompt.count(dp.CONTEXT_HEAD), 1)
+        self.assertIn("%s had finished at" % lane, self.host.chats[-1])  # claim's [hub] line names the follow-up
+        self.assertIn("so I started %s" % name, self.host.chats[-1])
+
+    def test_a_start_in_a_repo_whose_lane_reported_today_gets_that_report_unasked(self):
+        self.host = ChatHost(self.history)
+        lane, _hand = self.step1()
+        self.start("own-app", "update the correction plan", NOW)
+        prompt = Path(self.host.started[-1][4]).read_text()
+        self.assertIn(REPORT_17, prompt)
+        self.assertIn("Earlier work on this repo; use it if the task refers to it", prompt)
+        self.assertTrue((Path(self.host.started[-1][4]).parent / "earlier" / lane / "audit/AUDIT.md").is_file())
+
+    def age(self, lane, seconds):
+        with self.ctx.locked():
+            st = self.state()
+            st["lanes"][lane]["closed_at"] = NOW - seconds
+            dp.save_state(self.ctx.state_path, st)
+
+    def test_a_start_in_another_repo_or_over_a_day_later_gets_nothing_but_a_reply_within_a_week_still_follows_up(self):
+        self.host = ChatHost(self.history)
+        lane, _hand = self.step1()
+        self.start("docs", "something else", NOW)
+        self.assertNotIn(dp.CONTEXT_HEAD, Path(self.host.started[-1][4]).read_text())  # another repo
+        self.age(lane, dp.FOLLOWUP_WINDOW + 60)
+        self.start("own-app", "something new", NOW + 1)
+        self.assertNotIn("earlier", " ".join(str(p) for p in Path(self.host.started[-1][4]).parent.iterdir()))
+        self.assertNotIn(REPORT_17, Path(self.host.started[-1][4]).read_text())  # over 24 h: not attached unasked
+        self.age(lane, 3 * 86400)
+        self.act("reply %s: more please" % lane, NOW + 5)
+        self.assertEqual(len(self.host.started), 4)  # a reply names it, so 3 days on it still follows up
+        self.assertIn(REPORT_17, Path(self.host.started[-1][4]).read_text())
+
+
+class ReplyFound17Oct(Base):
+    """08:55: two of the receptionist's answers ran wrong. One only mentioned the marker inside a sentence and got a "Nothing sent"
+    line; the next one's reply was dropped because that [hub] line landed in the transcript in front of it."""
+
+    def test_a_marker_mentioned_inside_a_sentence_is_plain_chat(self):
+        run = [chat("assistant", "No.\n\n* **Hub Dispatch:** The `Sending to the hub: start own-app...` command was dispatched.", NOW)]
+        self.assertEqual(pk.marker_job(run), (None, None))
+
+    def test_a_hub_line_posted_while_the_model_was_replying_does_not_hide_the_reply(self):
+        h = [chat("user", "then what do you think I have been asking", NOW - 10),
+             chat("assistant", "[hub]\n\nNothing sent to the hub: the marker was not the last line of the reply.", NOW - 7, "openclaw"),
+             chat("assistant", "Sending it now.\n\nSending to the hub: start own-app: write the findings", NOW - 9)]
+        status, run = pk.find_reply(h, {"text": "then what do you think I have been asking", "ts": NOW - 10}, NOW)
+        self.assertEqual(status, "reply")
+        self.assertEqual(pk.marker_job(run), ("start own-app: write the findings", None))
+
+    def test_a_young_message_with_only_a_hub_line_after_it_waits(self):
+        h = [chat("user", "hello", NOW - 10), chat("assistant", "[hub]\n\nx finished.", NOW - 7, "openclaw")]
+        self.assertEqual(pk.find_reply(h, {"text": "hello", "ts": NOW - 10}, NOW)[0], "wait")
+        self.assertEqual(pk.find_reply(h, {"text": "hello", "ts": NOW - 10}, NOW + pk.REPLY_WAIT + 60)[0], "none")
