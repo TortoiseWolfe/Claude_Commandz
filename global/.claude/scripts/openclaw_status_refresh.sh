@@ -18,6 +18,10 @@ mkdir -p "$state"
 exec 9>"$state/openclaw-status.lock"
 flock -n 9 || exit 0
 
+# The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
+# lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
+timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2
+
 python3 "$here/openclaw_status_digest.py" --out "$out.new" || { rm -f "$out.new"; exit 1; }
 first=$(head -1 "$out.new"); last=$(tail -1 "$out.new"); size=$(wc -c < "$out.new")
 if [ "$first" != "<!-- openclaw-status:begin -->" ] || [ "$last" != "<!-- openclaw-status:end -->" ] || [ "$size" -gt 12000 ]; then
