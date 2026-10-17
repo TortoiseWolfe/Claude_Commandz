@@ -191,6 +191,17 @@ class Patch(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(L.verify("qwen2.5:1.5b-instruct", cfg=new, probe_net=False), 0)
 
+    def test_without_the_gate_agent_the_patch_and_verify_still_work(self):
+        cfg = base_config()
+        del cfg["agents"]["entries"]["receptionist"]
+        cfg["bindings"] = []
+        cfg["agents"]["entries"]["main"]["name"] = "Receptionist"
+        new = merge(cfg, L.build_patch(cfg, "qwen2.5:1.5b-instruct", "/s"))
+        self.assertNotIn("receptionist", new["agents"]["entries"])
+        self.assertEqual(new["agents"]["entries"]["main"], cfg["agents"]["entries"]["main"])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(L.verify("qwen2.5:1.5b-instruct", cfg=new, probe_net=False), 0)
+
     def test_verify_fails_when_the_local_model_is_not_last(self):
         _, new = self.patched()
         new["agents"]["defaults"]["model"]["fallbacks"].append("google/gemini-x")
