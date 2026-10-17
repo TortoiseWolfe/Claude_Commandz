@@ -369,6 +369,32 @@ class EndToEnd(Base):
         self.assertEqual(out.count(dg.BEGIN), 1)
 
 
+class ChatLanes(Base):
+    def test_the_digest_lists_running_and_finished_chat_lanes_with_times_from_the_dispatch_records(self):
+        now = datetime(2026, 10, 17, 9, 0)
+        t = now.timestamp()
+        state = {"lanes": {
+            "oc-ada-stair-generator-33876df9": {"repo": "ada-stair-generator", "status": "closed", "started": t - 3600, "closed_at": t - 720},
+            "oc-own-app-1017-0850": {"repo": "own-app", "status": "started", "started": t - 600},
+            "oc-own-app-1016-0700": {"repo": "own-app", "status": "closed", "started": t - 26 * 3600, "closed_at": t - 25 * 3600},
+            "oc-own-app-1017-0700": {"repo": "own-app", "status": "closed", "started": t - 7200, "closed_at": t - 7000, "failed": True},
+            "oc-probe-1017-0800": {"repo": "own-app", "status": "closed", "started": t - 3600, "closed_at": t - 3500, "test": True}}}
+        out = self.digest(now=now, dispatch_state=state)
+        self.assertIn("- oc-ada-stair-generator-33876df9 (repo ada-stair-generator): finished 08:48", out)
+        self.assertIn("- oc-own-app-1017-0850 (repo own-app): running since 08:50", out)
+        self.assertIn("- oc-own-app-1017-0700 (repo own-app): finished 07:03 (failed)", out)
+        self.assertNotIn("oc-own-app-1016-0700", out)  # over 24 h
+        self.assertNotIn("oc-probe", out)  # a live test's lane
+        self.assertIn("reply <lane>: <words>", out)
+        section = out.split("### Lanes started from this chat", 1)[1].split("###", 1)[0]
+        self.assertLess(section.index("1017-0850"), section.index("33876df9"))  # newest first
+        self.assertLess(out.index("Lanes started from this chat"), out.index("Hub lanes"))
+
+    def test_no_dispatch_records_means_no_section(self):
+        self.assertNotIn("Lanes started from this chat", self.digest(dispatch_state=None))
+        self.assertNotIn("Lanes started from this chat", self.digest(dispatch_state={"lanes": {}}))
+
+
 class Cli(Base):
     def test_cli_writes_atomically_and_refuses_without_names_or_roadmap(self):
         rm = self.d / "rm.md"
@@ -378,7 +404,7 @@ class Cli(Base):
         inbox = self.d / "inbox.md"
         inbox.write_text(INBOX)
         out = self.d / "out" / "digest.md"
-        base = ["--roadmap-file", str(rm), "--lane-status-file", str(ls), "--lanes-dir", str(self.make_lanes()),
+        base = ["--dispatch-state", str(self.d / "no-dispatch.json"), "--roadmap-file", str(rm), "--lane-status-file", str(ls), "--lanes-dir", str(self.make_lanes()),
                 "--skp-root", str(self.make_skp()), "--inbox", str(inbox)]
         rc = dg.main(base + ["--people", str(self.d / "people.md"), "--out", str(out)])
         self.assertEqual(rc, 0)

@@ -24,6 +24,7 @@ in this file or in its tests.
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -404,9 +405,53 @@ def _stamp(now):
     return now.strftime("%a %d %b %Y %H:%M") + " " + time.tzname[time.localtime().tm_isdst > 0]
 
 
-def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, cap=CAP_DEFAULT):
+CHAT_LANES_HOURS = 24
+CHAT_LANES_MAX = 12
+
+
+def chat_lanes(dispatch_state, flt, now):
+    """The lanes started from the chat, from the dispatcher's own records (openclaw-dispatch.json): every one still running, and every
+    one that started or finished in the last CHAT_LANES_HOURS. Newest first. -> [line]."""
+    lanes = (dispatch_state or {}).get("lanes") if isinstance(dispatch_state, dict) else None
+    if not isinstance(lanes, dict):
+        return []
+    t_now, rows = now.timestamp(), []
+    for name, l in lanes.items():
+        if not isinstance(l, dict) or l.get("test"):
+            continue
+        started = l.get("started") if isinstance(l.get("started"), (int, float)) else 0
+        ended = l.get("closed_at") if isinstance(l.get("closed_at"), (int, float)) else None
+        if ended is None and l.get("status") != "started":
+            try:
+                ended = Path(l.get("report", "")).stat().st_mtime
+            except (OSError, TypeError):
+                ended = started
+        running = l.get("status") == "started"
+        if not running and t_now - max(started, ended or 0) > CHAT_LANES_HOURS * 3600:
+            continue
+        c = flt.clean(str(name), limit=80)
+        if not c:
+            continue
+        repo = flt.clean(str(l.get("repo", "")), limit=60)
+        where = f" (repo {repo})" if repo else ""
+        clock = lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+        if running:
+            state = f"running since {clock(started)}" if started else "running"
+        else:
+            state = f"finished {clock(ended)}" + (" (failed)" if l.get("failed") else "")
+        rows.append((max(started, ended or 0), f"- {c}{where}: {state}"))
+    lines = [line for _, line in sorted(rows, reverse=True)[:CHAT_LANES_MAX]]
+    if lines:
+        lines.append("To add to any of these, running or finished: reply <lane>: <words>. The hub starts a follow-up when it has finished.")
+    return lines
+
+
+def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, cap=CAP_DEFAULT, dispatch_state=None):
     rm = parse_roadmap(roadmap_body or "")
     sections = []  # (title, [lines]) in priority order; trimmed from the back
+
+    # The lanes he started from this chat: first, so they are the last thing the cap trims
+    sections.append((f"Lanes started from this chat (dispatcher records, last {CHAT_LANES_HOURS} h)", chat_lanes(dispatch_state, flt, now)))
 
     # Next up
     nxt = []
@@ -448,7 +493,7 @@ def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, 
             lane_lines.append(f"- {c}: {state}, report {'written' if rep == 'yes' else 'not yet'}")
     if dead:
         lane_lines.append(f"- {dead} older lanes have ended (their reports are with Claude)")
-    sections.append(("Lanes (tmux windows doing work)", lane_lines))
+    sections.append(("Hub lanes (tmux windows doing work)", lane_lines))
 
     # Models
     arc_text = " ".join(a["head"] for a in rm["arcs"])
@@ -569,6 +614,8 @@ def main(argv=None):
     ap.add_argument("--skp-root", default="/mnt/c/Users/JonPo/Downloads/SketchUpMake2017")
     ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
     ap.add_argument("--people", action="append", default=None)
+    ap.add_argument("--dispatch-state", default=str(HOME / ".claude/state/openclaw-dispatch.json"),
+                    help="the lane dispatcher's records: the lanes started from the chat")
     a = ap.parse_args(argv)
 
     now = datetime.fromisoformat(a.now) if a.now else datetime.now()
@@ -595,7 +642,11 @@ def main(argv=None):
         print("openclaw_status_digest: roadmap unavailable; leaving the last digest alone", file=sys.stderr)
         return 4
 
-    digest = build(body, status, a.lanes_dir, a.skp_root, inbox, flt, now, a.cap)
+    try:
+        dispatch_state = json.loads(Path(a.dispatch_state).read_text())
+    except (OSError, ValueError):
+        dispatch_state = None
+    digest = build(body, status, a.lanes_dir, a.skp_root, inbox, flt, now, a.cap, dispatch_state)
     if a.out:
         p = Path(a.out)
         p.parent.mkdir(parents=True, exist_ok=True)

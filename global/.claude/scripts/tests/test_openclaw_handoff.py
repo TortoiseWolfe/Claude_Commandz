@@ -31,7 +31,7 @@ else if (spec.mode === "fn") out = h[spec.fn](...spec.args);
 console.log(JSON.stringify({ out, calls }));
 """
 
-GOOD = "Decided: ship Sunday\nOpen asks: oc-compaction (working)\nWaiting on: Hatch"
+GOOD = "Decided: ship Sunday\nWaiting on: Hatch"
 T0 = 1_792_200_000_000
 
 
@@ -111,7 +111,48 @@ class Handoff(unittest.TestCase):
         r = self.write(models={"google/gemini-3.5-flash-lite": "Sure! Here is a summary.", "google/gemini-3.5-flash": GOOD})
         self.assertEqual(r["out"]["how"], "gemini-3.5-flash")
 
-    def test_with_no_model_the_fallback_names_lanes_and_copies_no_chat_text(self):
+    def digest(self, lanes):
+        section = ("### Lanes started from this chat (dispatcher records, last 24 h)\n" + "".join("- %s\n" % l for l in lanes)
+                   + "To add to any of these, running or finished: reply <lane>: <words>.\n\n") if lanes else ""
+        block = ("<!-- openclaw-status:begin -->\n## Work in flight (hub digest, as of 2026-10-17 08:49)\n\n" + section
+                 + "### Hub lanes (tmux windows doing work)\n- frontdesk-8: working\n<!-- openclaw-status:end -->")
+        m = self.memory()  # the refresh replaces only its own block, as openclaw_status_refresh.sh does
+        a, b = m.index("<!-- openclaw-status:begin -->"), m.index("<!-- openclaw-status:end -->") + len("<!-- openclaw-status:end -->")
+        (self.d / "MEMORY.md").write_text(m[:a] + block + m[b:])
+
+    def test_open_asks_come_from_the_hub_lane_records_not_the_model(self):
+        self.digest(["oc-ada-stair-generator-33876df9 (repo ada-stair-generator): finished 08:48", "oc-own-app-1017-0850 (repo own-app): running since 08:50"])
+        wrong = "Decided: merge the audit\nOpen asks: oc-ada-stair-generator-33876df9 (in progress)\nWaiting on: the audit lane"
+        self.write(models={"google/gemini-3.5-flash-lite": wrong})
+        m = self.memory()
+        self.assertNotIn("in progress", m)
+        self.assertIn("Open asks (the hub's lane records, as of 2026-10-17 08:49): oc-ada-stair-generator-33876df9 (repo ada-stair-generator): "
+                      "finished 08:48; oc-own-app-1017-0850 (repo own-app): running since 08:50.", m)
+        self.assertIn("reply <lane>: <words>", m)
+        self.assertIn("Decided: merge the audit", m)
+
+    def test_a_lane_that_closes_later_is_recopied_without_a_model_call(self):
+        self.digest(["oc-own-app-1017-0850 (repo own-app): running since 08:50"])
+        self.write()
+        self.digest(["oc-own-app-1017-0850 (repo own-app): finished 09:05"])
+        m0 = self.memory()
+        r = self.write(models={})  # the same chat: no model is asked
+        self.assertEqual(r["out"]["status"], "asks-refreshed")
+        self.assertEqual(r["calls"], [])
+        m = self.memory()
+        self.assertIn("finished 09:05", m.split("openclaw-handoff:begin", 1)[1])
+        self.assertIn("Decided: ship Sunday", m)
+        self.assertNotIn("running since 08:50", m)
+        self.assertEqual(self.write(models={})["out"]["status"], "unchanged")
+        self.assertIn("# Durable\nfact", m0)
+
+    def test_no_lane_in_the_records_says_so(self):
+        self.digest([])
+        self.write()
+        self.assertIn("Open asks: no lane started from this chat in the last 24 h (the hub's lane records, as of 2026-10-17 08:49).", self.memory())
+
+    def test_with_no_model_and_no_digest_the_fallback_names_lanes_and_copies_no_chat_text(self):
+        (self.d / "MEMORY.md").write_text("# Durable\nfact\n")
         secret_chat = msgs("Acme Corp wants a quote for the porch", "[hub] frontdesk-7 done, oc-session-cycle running", "thanks", "ok")
         r = self.write(messages=secret_chat, models={})
         self.assertEqual(r["out"]["status"], "written")
