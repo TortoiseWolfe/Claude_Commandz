@@ -780,13 +780,6 @@ def _chat_chunks(text, limit):
         if point is None:
             point = limit
         chunk, rest = text[:point], text[point:]
-        trimmed = chunk.rstrip()
-        if trimmed:
-            rest = chunk[len(trimmed):] + rest
-            chunk = trimmed
-        else:
-            point = limit
-            chunk, rest = text[:point], text[point:]
         chunks.append(chunk)
         text = rest
     if text:
@@ -802,12 +795,18 @@ def _chat_parts(text):
     ref = _chat_ref(text)
     def marked(chunks, count):
         parts = []
+        pending = ""
         for i, chunk in enumerate(chunks, 1):
+            chunk = pending + chunk
             trailing = chunk[len(chunk.rstrip()):]
             content = chunk.rstrip()
             marker = "(part %d of %d)" % (i, count)
             separator = " " if content else ""
-            parts.append(content + separator + marker + (trailing if i == len(chunks) else ""))
+            if i == len(chunks):
+                parts.append(content + separator + trailing + marker)
+            else:
+                parts.append(content + separator + marker)
+            pending = trailing
         return parts
 
     if len(rough) > MAX_CHAT_PARTS:

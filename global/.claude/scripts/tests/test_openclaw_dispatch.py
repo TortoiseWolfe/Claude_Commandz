@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 import os
+import random
 import re
 import sys
 import tempfile
@@ -133,6 +134,42 @@ class Base(unittest.TestCase):
 
 
 class ReceptionistQueue(Base):
+    def assert_chat_parts_keep_words(self, text):
+        parts = dp._chat_parts(text)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        payloads = [re.sub(r" ?\(part \d+ of \d+\)$", "", part) for part in parts]
+        self.assertEqual("".join("".join(payload.split()) for payload in payloads),
+                         "".join(text.split()))
+        for left, right in zip(payloads, payloads[1:]):
+            self.assertTrue(left[-1].isspace() or right[0].isspace(),
+                            "chat part boundary split a word")
+
+    def test_chat_chunks_keep_words_after_a_newline(self):
+        self.assert_chat_parts_keep_words("intro\n" + "abcdefghi " * 200)
+
+    def test_chat_chunks_keep_words_after_blank_and_short_paragraphs(self):
+        self.assert_chat_parts_keep_words("intro\n\n" + "abcdefghi " * 200)
+        self.assert_chat_parts_keep_words(
+            "first paragraph\nsecond paragraph\nthird paragraph\n" +
+            "abcdefghi " * 220)
+
+    def test_chat_chunks_keep_words_in_generated_messages(self):
+        rng = random.Random(43)
+        for _ in range(32):
+            target = rng.randint(1900, 8900)
+            words = []
+            length = 0
+            while length < target:
+                word = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
+                               for _ in range(rng.randint(1, 15)))
+                separator = rng.choice((" ", " ", "\n", "\n\n"))
+                words.append((separator if words else "") + word)
+                length += len(words[-1])
+            text = "".join(words)
+            self.assertGreaterEqual(len(text), 1900)
+            self.assertLessEqual(len(text), 9000)
+            self.assert_chat_parts_keep_words(text)
+
     def record_question(self, ask_id, status, created, **extra):
         state = self.state()
         state.setdefault("asks", {})[ask_id] = {
