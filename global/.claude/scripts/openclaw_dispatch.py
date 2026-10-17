@@ -173,6 +173,10 @@ def report_failure(body):
 
 class LaneHost:
     def _run(self, argv, timeout, cwd=None, stdin=None, env=None):
+        # The poll is started by Task Scheduler in a working folder that does not exist inside WSL ("/WINDOWS/system32").
+        # wsl.exe started from such a folder exits 1 and prints nothing, so every post to the chat failed without a word.
+        if cwd is None:
+            cwd = str(Path.home())
         try:
             return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, input=stdin, env=env)
         except (OSError, subprocess.TimeoutExpired):
