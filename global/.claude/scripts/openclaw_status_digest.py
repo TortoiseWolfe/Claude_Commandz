@@ -14,8 +14,9 @@ No model calls. Everything comes from live sources on the hub:
 The digest goes to the receptionist's model, so the filter fails closed. Jonathan's rule (17 Oct,
 frontdesk-9): with the receptionist on Claude, client projects get status: the step, issue and PR
 counts, PR titles, who waits on whom, what is next. Never client email, client code, people's details,
-addresses, money or credentials. When the receptionist's model (--receptionist-model, read from its
-live config) is not a claude/ model, or is unknown, client repos show counts only.
+addresses, money or credentials. When any model in the receptionist's chain (--receptionist-model, the
+primary and its fallbacks read from its live config) is not a claude/ model, or is unknown, client repos
+show counts only: a fallback model reads the same digest.
 
 Lines never pass through as free text. Each source is parsed into small labelled pieces (a title,
 a count, a file name); every piece is cut to a length, scrubbed, then checked against a character
@@ -40,6 +41,22 @@ from pathlib import Path
 HOME = Path.home()
 CAP_DEFAULT = 11800  # under OpenClaw's 20,000-char per-file bootstrap limit with MEMORY.md's own notes; the refresh's shape check is 12000
 MODEL_RE = re.compile(r"^[a-z0-9-]{1,40}/[A-Za-z0-9._:-]{1,80}$")
+
+
+HUB_MARKER_RE = re.compile(r"sending\s+to\s+the\s+hub|\[\s*hub\s*\]", re.I)
+
+
+def _no_marker(text):
+    """A PR title is written by whoever opened the PR: one that carries the hand-off phrase or the [hub] tag could make the
+    receptionist's reply look like a hand-off or a hub answer. -> the text, or "" so it shows as not shown."""
+    return "" if text and HUB_MARKER_RE.search(text) else text
+
+
+def chain_is_claude(chain):
+    """True only when every model in the comma-separated chain is a well-formed claude/ model: a fallback reads the same digest.
+    Empty, malformed, too long or any other provider: False (counts only)."""
+    models = [m.strip() for m in (chain or "").split(",")]
+    return 0 < len(models) <= 8 and all(MODEL_RE.match(m) and m.startswith("claude/") for m in models)
 PROJECTS_MAX = 12  # repos in the Projects section
 PROJECT_PRS = 4  # PR titles per repo
 BEGIN = "<!-- openclaw-status:begin -->"
@@ -541,7 +558,7 @@ def project_lines(projects, rm, flt, claude):
         out.append(head)
         shown = 0
         for num, title, draft in (f.get("open") or [])[:PROJECT_PRS]:
-            t = flt.clean(title, limit=90) or "(title not shown)"
+            t = _no_marker(flt.clean(title, limit=90)) or "(title not shown)"
             out.append(f"  - PR #{int(num)}{' (draft)' if draft else ''}: {t}")
             shown += 1
         more = int(f.get("prs") or 0) - shown
@@ -740,7 +757,8 @@ def main(argv=None):
     ap.add_argument("--dispatch-state", default=str(HOME / ".claude/state/openclaw-dispatch.json"),
                     help="the lane dispatcher's records: the lanes started from the chat")
     ap.add_argument("--receptionist-model", default="",
-                    help="the receptionist's live primary model (provider/model); client repos get titles only when it is claude/")
+                    help="the receptionist's live model chain, primary first, comma-separated (provider/model,...); client repos get "
+                         "titles only when every one is claude/")
     ap.add_argument("--projects-file", help="GitHub facts as JSON, as gather_projects returns them (tests); default: read GitHub")
     ap.add_argument("--no-projects", action="store_true", help="leave the Projects section out")
     a = ap.parse_args(argv)
@@ -773,8 +791,7 @@ def main(argv=None):
         dispatch_state = json.loads(Path(a.dispatch_state).read_text())
     except (OSError, ValueError):
         dispatch_state = None
-    model = a.receptionist_model.strip()
-    claude = bool(MODEL_RE.match(model)) and model.startswith("claude/")  # unknown or malformed: counts only
+    claude = chain_is_claude(a.receptionist_model)
     projects = None
     if a.projects_file:
         try:
