@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# openclaw_harden.sh: put OpenClaw's front desk on the free-only chain with workspace-scoped read access.
+# openclaw_harden.sh: harden the front desk and workspace access without replacing a configured model chain.
 #
 #   openclaw_harden.sh apply      back up, patch, read everything back (exit 1 if any check fails)
 #   openclaw_harden.sh fix        back up, re-apply the config patch only (no exec-policy, no plugin), read back.
@@ -17,9 +17,8 @@
 # is enabled, Memory Dreaming and the autonomous skill reviews are off. Source of the hook:
 # openclaw_handoff_hook/, installed by openclaw_handoff_install.sh before this runs.
 #
-# The free chain defaults to the three models proved to answer on 16 Oct 2026 with the gateway's key
-# (gemini-2.5-flash, -lite and 2.5-pro now answer 404 "no longer available to new users", which cools the
-# whole provider). Override with OPENCLAW_HARDEN_CHAIN="provider/model,provider/model,provider/model".
+# When no default chain is configured, the script seeds the current free default. Existing model settings and
+# providers are left untouched. Override the seed with OPENCLAW_HARDEN_CHAIN="provider/model,provider/model,provider/model".
 #
 # Runs INSIDE the OpenClawGateway distro as user openclaw. It works on whichever state directory the
 # environment names (OPENCLAW_STATE_DIR), which is how it is tested on a staged copy first. It prints
@@ -70,8 +69,10 @@ cfg, primary, f1, f2, rid, state, gate, reset_hour = sys.argv[1:9]
 gate = gate == "1"
 chain = [primary, f1, f2]
 c = json.load(open(cfg))
-# openclaw_local.py's local model stays the last fallback: carry any ollama/ entry through, never add one here
-local = [m for m in (c.get("agents", {}).get("defaults", {}).get("model", {}).get("fallbacks") or []) if m.startswith("ollama/")]
+defaults = c.get("agents", {}).get("defaults", {})
+model = defaults.get("model") or {}
+policy = defaults.get("modelPolicy") or {}
+model_configured = bool(model.get("primary") or model.get("fallbacks")) or bool(policy.get("allow")) or bool(defaults.get("models"))
 bindings = None
 if gate:
     schema = json.loads(subprocess.run(["openclaw", "config", "schema"], capture_output=True, text=True, check=True).stdout)
@@ -79,34 +80,34 @@ if gate:
     keep = [b for b in c.get("bindings", []) if not (b.get("agentId") == rid and (b.get("match") or {}).get("accountId") == "*")]
     bindings = keep + [{"type": "route", "agentId": rid, "match": {"channel": ch, "accountId": "*"},
                         "comment": "front desk: untrusted channel input reaches the tool-less receptionist only"} for ch in channels]
-defaults_models = {m: {} for m in chain + local}
-for m in (c.get("agents", {}).get("defaults", {}).get("models") or {}):
-    if m not in defaults_models:
-        defaults_models[m] = None  # null deletes the path
+default_patch = {}
+if not model_configured:
+    default_patch = {
+        "model": {"primary": primary, "fallbacks": [f1, f2]},
+        "models": {m: {} for m in chain},
+        "modelPolicy": {"allow": chain},
+    }
+agents_patch = {
+    # The one agent in the app is the Main chat. No model pin: it follows the Default chain above.
+    "entries": {"main": {"name": "Receptionist"}, **({rid: {
+        "name": "Outside gate",
+        "description": "Gate for outside channels: reads, classifies, replies. No acting tool. The hub acts.",
+        "workspace": state + "/workspace-" + rid,
+        # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
+        # minimal profile or the runtime would still declare (session_status, gateway, presence).
+        "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
+    }} if gate else {})},
+}
+if default_patch:
+    agents_patch["defaults"] = default_patch
 patch = {
-    "agents": {
-        "defaults": {"model": {"primary": primary, "fallbacks": [f1, f2] + local},
-                     "models": defaults_models,
-                     "modelPolicy": {"allow": chain + local}},
-        # The one agent in the app is the Main chat. No model pin: it follows the Default chain above.
-        "entries": {"main": {"name": "Receptionist"}, **({rid: {
-            "name": "Outside gate",
-            "description": "Gate for outside channels: reads, classifies, replies. No acting tool. The hub acts.",
-            "workspace": state + "/workspace-" + rid,
-            "model": {"primary": primary, "fallbacks": [f1, f2] + local},
-            "modelPolicy": {"allow": chain + local},
-            # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
-            # minimal profile or the runtime would still declare (session_status, gateway, presence).
-            "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
-        }} if gate else {})},
-    },
+    "agents": agents_patch,
     # The Main chat starts fresh daily (checked lazily when the next message arrives; the old transcript stays in
     # the agent's store). Memory Dreaming writes only a diary nothing loads, and the skill reviews make a weekly
     # session nobody reads.
     "session": {"reset": {"mode": "daily", "atHour": int(reset_hour)}},
     "plugins": {"entries": {"memory-core": {"config": {"dreaming": {"enabled": False}}}}},
     "skills": {"workshop": {"autonomous": {"mode": "off"}}},
-    "models": {"providers": {"claude": None}},
     "tools": {
         # An unset profile leaves core tools unfiltered, and the default tool-search mode hides what a run
         # is really offered. A global minimal profile and direct schemas make the policy the same in both.
@@ -166,28 +167,31 @@ do_verify() {
   cfg_py '
 import json, os, sys
 c = json.load(open(sys.argv[1]))
-P = os.environ["HARDEN_PRIMARY"]; F = [os.environ["HARDEN_F1"], os.environ["HARDEN_F2"]]
 d = c["agents"]["defaults"]; r = c["agents"]["entries"].get("receptionist", {})
 GATE = os.environ["HARDEN_GATE"] == "1"
-LOCAL = [m for m in d["model"]["fallbacks"] if m.startswith("ollama/")]  # the local tail, if openclaw_local.py added one
-F = F + LOCAL
+model = d.get("model") or {}
+primary = model.get("primary")
+fallbacks = model.get("fallbacks") or []
+chain = ([primary] if primary else []) + (fallbacks if isinstance(fallbacks, list) else [])
+chain_valid = isinstance(primary, str) and bool(primary) and isinstance(fallbacks, list) and all(isinstance(m, str) for m in fallbacks)
 def out(n, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + n + (" " + detail if detail else "")); return ok
 res = []
-res.append(out("chain.default", d["model"]["primary"] == P and d["model"]["fallbacks"] == F, " > ".join([d["model"]["primary"]] + d["model"]["fallbacks"])))
+res.append(out("chain.default", chain_valid, " > ".join(str(m) for m in chain)))
 res.append(out("chain.main_unpinned", "model" not in c["agents"]["entries"].get("main", {}), "Main follows the Default chain"))
 if GATE:
     # A channel (or binding) with no gate agent behind it would hand outside input to the Main chat.
     res.append(out("gate.present_with_channel", "receptionist" in c["agents"]["entries"], "a channel or binding is configured, so the tool-less gate agent must exist"))
-    res.append(out("chain.receptionist", r.get("model") == {"primary": P, "fallbacks": F}))
-n = sum(1 for _ in json.dumps(c).split("claude/")) - 1
-res.append(out("chain.claude_entries", n == 0, "claude/ strings in config: %d" % n))
-res.append(out("claude.provider_absent", "claude" not in (c.get("models", {}).get("providers") or {})))
-res.append(out("allowlist.defaults_models", sorted(d["models"]) == sorted([P] + F), "%d entries" % len(d["models"])))
-res.append(out("allowlist.modelPolicy", sorted(d.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
+allow = set((d.get("modelPolicy") or {}).get("allow") or [])
+providers = (c.get("models") or {}).get("providers") or {}
+has_provider = lambda m: isinstance(m, str) and "/" in m and m.split("/", 1)[0] in providers
+chain_ok = chain_valid and bool(chain) and all(m in allow and has_provider(m) for m in chain)
+res.append(out("chain.allow_and_provider_entries", chain_ok, "%d models checked" % len(chain)))
+models = d.get("models") or {}
+res.append(out("allowlist.defaults_models", chain_valid and all(m in models for m in chain), "%d entries" % len(models)))
+res.append(out("allowlist.modelPolicy", chain_valid and all(m in allow for m in chain)))
 rt = r.get("tools", {})
 if GATE:
-    res.append(out("allowlist.receptionist", sorted(r.get("modelPolicy", {}).get("allow", [])) == sorted([P] + F)))
     res.append(out("receptionist.tools", rt.get("profile") == "minimal" and rt.get("allow") == [] and {"gateway", "session_status", "presence"} <= set(rt.get("deny", [])), "profile=%s allow=%s deny=%s" % (rt.get("profile"), rt.get("allow"), rt.get("deny"))))
 else:
     res.append(out("gate.absent_without_channel", "receptionist" not in c["agents"]["entries"], "no channel or binding configured, so no gate agent"))
