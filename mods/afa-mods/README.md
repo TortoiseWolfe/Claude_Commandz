@@ -18,7 +18,11 @@ Shown on the same line above the prompt.
 
 **Blast Radius.** A safety net on Bash. It holds `rm -rf`, `docker system|volume|image prune`,
 `docker compose down -v`, `docker volume rm`, `git push --force` / `-f`, and production deploys
-(`--prod`, or `redeploy` aimed at production). Interactively it lists what the command would
+(`--prod`, or `redeploy` aimed at production), plus `tmux kill-server` on the default server and
+`tmux kill-session` targeting the shared `lanes` session. These tmux holds explain that the command
+closes every lane window (the tmux session `lanes`), with no undo; a default-server `kill-server`
+also closes every other session and window there. Private tmux sockets and individual `kill-window`
+commands are not held. Interactively it lists what the command would
 touch and asks `1 - Run it` / `2 - Refuse`. In a non-interactive session (`claude -p`, the Console
 lanes) it never waits: force pushes and production deploys are denied with a reason, the rest are
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.

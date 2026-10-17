@@ -74,7 +74,7 @@ describe('what a held command would touch, for every rule', () => {
           expect(CODE_FRAGMENT.test(line)).toBe(false)
         }
         const said = targets.join('\n')
-        const concrete = /\((dir|file|not found|volume)|\/|branch|container|volume|image|service|host|disk/.test(said)
+        const concrete = /\((dir|file|not found|volume)|\/|branch|container|volume|image|service|host|disk|session|window/.test(said)
         const cant = said.includes("can't tell what this touches: ")
         expect(concrete || cant).toBe(true)
         if (cant) expect(said.split("can't tell what this touches: ")[1].trim().length).toBeGreaterThan(5)
@@ -130,6 +130,15 @@ describe('rm -rf names each path the way the prompt always did', () => {
 })
 
 describe('other rules name their real targets', () => {
+  test('tmux holds name every shared lane window and, for kill-server, the rest of the server', async () => {
+    const session = await touches(probe(), hold('tmux kill-session -t=lanes'), HOME)
+    expect(session).toContain("closes every lane window (the tmux session 'lanes'), with no undo")
+    const server = await touches(probe(), hold('tmux kill-server'), HOME)
+    expect(server).toContain("closes every lane window (the tmux session 'lanes'), with no undo")
+    expect(server).toContain('every other session and window on the default tmux server')
+    expect(explain(hold('tmux kill-session -t lanes')).what).toContain("the tmux session 'lanes'")
+    expect(explain(hold('tmux kill-server')).what).toContain('every other session and window')
+  })
   test('docker volume rm names each volume and whether it exists', async () => {
     const text = await touches(probe({}, PROGRAMS), hold('docker volume rm pgdata cache'), HOME)
     expect(text).toContain('pgdata (volume exists, its data goes)')
