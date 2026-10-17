@@ -417,6 +417,78 @@ class Cli(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("SESSION_PRIME_REAL"), "set SESSION_PRIME_REAL=1 to run against the live hub")
+class UnattendedGuard(unittest.TestCase):
+    """An unattended oc- lane is allowed `--post` by a narrow rule, so the flags that aim the script elsewhere are refused."""
+    def parse(self, *argv):
+        import argparse
+        ap = argparse.ArgumentParser()
+        for flag, default in (("--repo", None), ("--dir", os.getcwd()), ("--machine", None), ("--lanes-dir", "L"), ("--inbox", "I"),
+                              ("--state-dir", "S"), ("--drift-hook", "H"), ("--now", None), ("--arc", None), ("--next3", None),
+                              ("--next-should", None), ("--note", None)):
+            ap.add_argument(flag, default=default)
+        return ap, ap.parse_args(list(argv))
+
+    def test_the_usual_post_flags_pass_from_the_hand_folder(self):
+        hand = tempfile.mkdtemp()
+        for name in ("arc.md", "n3.md"):
+            Path(hand, name).write_text("x")
+        os.environ["AFA_LANE_HAND"] = hand
+        try:
+            ap, a = self.parse("--arc", str(Path(hand, "arc.md")), "--next3", str(Path(hand, "n3.md")))
+            sp.unattended_guard(ap, a)
+            ap, a = self.parse()
+            sp.unattended_guard(ap, a)
+        finally:
+            os.environ.pop("AFA_LANE_HAND")
+
+    def test_the_hook_and_the_other_aimed_flags_are_refused(self):
+        for argv in (("--drift-hook", "/tmp/x.sh"), ("--state-dir", "/tmp/s"), ("--lanes-dir", "/tmp"), ("--inbox", "/etc/passwd"),
+                     ("--repo", "other/repo"), ("--machine", "NX-01"), ("--now", "2026-01-01T00:00:00")):
+            with self.subTest(argv=argv):
+                ap, a = self.parse(*argv)
+                with self.assertRaises(sp.Fail):
+                    sp.unattended_guard(ap, a)
+
+    def test_text_to_post_must_come_from_the_hand_folder(self):
+        hand = tempfile.mkdtemp()
+        outside = tempfile.mkdtemp()
+        Path(outside, "arc.md").write_text("x")
+        os.environ["AFA_LANE_HAND"] = hand
+        try:
+            for flag in ("--arc", "--next3", "--next-should", "--note"):
+                ap, a = self.parse(flag, str(Path(outside, "arc.md")))
+                with self.assertRaises(sp.Fail):
+                    sp.unattended_guard(ap, a)
+            link = Path(hand, "link.md")
+            link.symlink_to(Path(outside, "arc.md"))
+            ap, a = self.parse("--note", str(link))  # a link out of the folder is followed, then refused
+            with self.assertRaises(sp.Fail):
+                sp.unattended_guard(ap, a)
+        finally:
+            os.environ.pop("AFA_LANE_HAND")
+
+    def test_with_no_hand_folder_nothing_is_postable(self):
+        os.environ.pop("AFA_LANE_HAND", None)
+        ap, a = self.parse("--arc", "/tmp/arc.md")
+        with self.assertRaises(sp.Fail):
+            sp.unattended_guard(ap, a)
+
+    def test_main_applies_the_guard_only_when_the_lane_is_unattended(self):
+        calls = []
+        orig = sp.run
+        sp.run = lambda a: calls.append(a) or 0
+        try:
+            os.environ["AFA_LANE_UNATTENDED"] = "1"
+            self.assertNotEqual(sp.main(["--drift-hook", "/tmp/x.sh"]), 0)
+            self.assertEqual(calls, [])
+            os.environ.pop("AFA_LANE_UNATTENDED")
+            self.assertEqual(sp.main(["--drift-hook", "/tmp/x.sh"]), 0)
+            self.assertEqual(len(calls), 1)
+        finally:
+            sp.run = orig
+            os.environ.pop("AFA_LANE_UNATTENDED", None)
+
+
 class RealState(unittest.TestCase):
     def test_facts_mode_on_the_live_hub(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "--dry-run", "--dir", str(Path.home() / "repos")],

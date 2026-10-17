@@ -328,6 +328,26 @@ def drift(args, mode, extra=()):
 # ---------------------------------------------------------------------------------------------
 
 
+UNATTENDED_FIXED = ("repo", "machine", "dir", "lanes_dir", "inbox", "state_dir", "drift_hook", "now")
+
+
+def unattended_guard(ap, a):
+    """An unattended lane (a dispatcher's oc- lane) is allowed this script by a narrow permission rule, so the flags that point it
+    elsewhere or run another script (--drift-hook) are refused, and the text it posts may only come from the lane's own hand-off folder."""
+    for k in UNATTENDED_FIXED:
+        if getattr(a, k) != ap.get_default(k):
+            raise Fail("an unattended lane may not set --%s" % k.replace("_", "-"), 2)
+    hand = os.environ.get("AFA_LANE_HAND", "")
+    for k in ("arc", "next3", "next_should", "note"):
+        p = getattr(a, k)
+        if p is None:
+            continue
+        root = os.path.realpath(hand) if hand else None
+        real = os.path.realpath(p)
+        if not root or os.path.commonpath([root, real]) != root:
+            raise Fail("an unattended lane may post --%s only from its own hand-off folder (AFA_LANE_HAND)" % k.replace("_", "-"), 2)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo")
@@ -347,6 +367,8 @@ def main(argv=None):
     ap.add_argument("--now", help="ISO time (tests)")
     a = ap.parse_args(argv)
     try:
+        if os.environ.get("AFA_LANE_UNATTENDED") == "1":
+            unattended_guard(ap, a)
         return run(a)
     except Fail as e:
         print(f"session_prime_facts: {e}", file=sys.stderr)
