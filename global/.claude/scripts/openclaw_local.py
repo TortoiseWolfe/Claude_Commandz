@@ -36,7 +36,11 @@ DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
 BASE_URL = "http://127.0.0.1:11434"  # no /v1: that selects OpenAI-compatible mode and loses tool-call parsing
 PROVIDER = "ollama"
 CONTEXT_WINDOW = 32768  # qwen2.5 1.5B native; ~1 GB of KV cache on the 8 GB GPU. 16384 left no room beside the ~10K-token main prompt.
-GEMINI_CAP = 32000  # compaction fires near cap minus its reserve (about 24K), so one compacted chat always fits CONTEXT_WINDOW
+# 17 Oct: at 32000 the ~18K setup left about 6K of chat, and a lane's "closed" line was summarised away within minutes.
+# 64000 leaves about 38K. Gemini's window is 200000 and the tier is free; if the gateway log shows quota errors, step back
+# to 48000. Cost: a chat past ~32K no longer fits the local last-resort model (CONTEXT_WINDOW) without compacting first.
+GEMINI_CAP = 64000
+GEMINI_WINDOW = 200000
 GEMINI_MODELS = ("gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash")
 COMPACTION = {  # 16 Oct: compaction ran on the 1.5B model and failed its own quality guard; the summary now comes from Gemini
     "mode": "safeguard", "model": "google/gemini-3.5-flash-lite", "keepRecentTokens": 6000,
@@ -121,7 +125,7 @@ def build_patch(cfg, model, state_dir):
     return {
         "models": {"providers": {
             PROVIDER: provider_block(model),
-            "google": {"models": [{"id": g, "name": g, "contextWindow": 200000, "contextTokens": GEMINI_CAP} for g in GEMINI_MODELS]},
+            "google": {"models": [{"id": g, "name": g, "contextWindow": GEMINI_WINDOW, "contextTokens": GEMINI_CAP} for g in GEMINI_MODELS]},
         }},
         "agents": {
             "defaults": {
