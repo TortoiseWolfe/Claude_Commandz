@@ -20,7 +20,7 @@ Claude_Commandz/
 │   ├── .claude/skills/scroll-world/ # scroll-driven 3D world pipeline (see #9)
 │   │   # not here: skills/site-model (private half); skills/synced (Anthropic re-syncs it); skills/graphify (reinstall, see Restore)
 │   ├── .claude/scripts/          # jev_precheck.py (Jev shadow pre-screen for director.js); muse_jev.py (Jev second opinion on the Muse poller's iffy answers); openclaw_tray.py (4-tool client for the OpenClaw tray MCP); api-quiet.sh; gated_post.sh; portainer_status.py; email_voice_check.py is in the private half
-│   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (picks up Muse's notes in the ~/repos session only; state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; client-specific hooks are kept out of this public repo
+│   ├── .claude/hooks/            # roadmap-drift.sh; muse-drafts.sh (picks up Muse's notes in the ~/repos session only; state file of handled draft IDs); secret-guard.py; explore-override-drift.sh (+ .ref) warns when built-in Explore changes under agents/Explore.md; context-warn.py warns before hub auto-compaction
 │   └── dotfiles/                 # 2 files — settings.json, statusline-command.sh
 └── repos/
     ├── ScriptHammer/.claude/commands/                         (23 files)
@@ -32,6 +32,8 @@ Claude_Commandz/
     ├── KDG/.claude/commands/                                   (1 file)
     └── drupal-v2-sandbox/.claude/commands/                     (1 file)
 ```
+
+`context-warn.py` checks the hub transcript on `PostToolUse` and `UserPromptSubmit`, warning once per session at 50%, 60%, and 70% of the auto-compaction window so the session can be handed off before compaction. Register it in `settings.json` with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]` and `"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]`.
 
 **Totals:** 65 global commands + 2 dotfiles + 90 project commands across 8 repos = **157 backed-up files**.
 
