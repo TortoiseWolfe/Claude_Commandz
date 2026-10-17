@@ -1498,8 +1498,9 @@ def _similar_task(left, right):
     return len(shorter) >= 3 and len(shorter & longer) / len(shorter) >= 0.75
 
 
-def _task_duplicate(state, text, now, ignore_asks=()):
-    """Find the most relevant recent ask or active worker for a fuzzy task match."""
+def _task_duplicate(state, text, now, ignore_asks=(), window=12 * 3600, jobs_only=False):
+    """Find the most relevant recent ask or active worker for a fuzzy task match. A job (jobs_only) is checked against running
+    workers and other jobs inside `window` only: an earlier question with the same words must never block the work itself."""
     if TASK_SKIP_DUP_RE.search(text or ""):
         return None
     asks = asks_of(state)
@@ -1522,7 +1523,9 @@ def _task_duplicate(state, text, now, ignore_asks=()):
         if ask_id in ignore_asks:
             continue
         created = ask.get("created", 0)
-        if not isinstance(created, (int, float)) or not 0 <= now - created <= 12 * 3600:
+        if not isinstance(created, (int, float)) or not 0 <= now - created <= window:
+            continue
+        if jobs_only and ask.get("kind") == "question":
             continue
         if _ask_failed(state, ask) or not _similar_task(text, ask.get("task", "")):
             continue
@@ -1590,7 +1593,7 @@ def hand_off(ctx, host, ask_id, repo_word, task, now, context=None, ignore_asks=
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
-        duplicate = _task_duplicate(state, task, now, ignore_asks)
+        duplicate = _task_duplicate(state, task, now, tuple(ignore_asks) + (ask_id,), window=DEDUP_WINDOW, jobs_only=True)
         if duplicate:
             return "%s | start %s | not run: duplicate task" % (stamp, name), _duplicate_chat(duplicate)
         for k in [k for k, a in asks.items() if now - a.get("created", 0) > ASK_KEEP]:

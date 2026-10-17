@@ -1395,6 +1395,13 @@ class Questions(PassBase):
         self.assertIn("handed to Claude", line)
         self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b"])
 
+    def test_an_answered_question_never_blocks_the_job_itself(self):
+        self.asked("why does the plans page jump after the preview", ask="oc-5000000a")
+        dp.say(self.ctx, self.host, "oc-5000000a", "The preview flag is set before Play.", NOW + 30)
+        line, chat = self.hand(task="fix why the plans page jumps after the preview", ask="oc-5000000b", now=NOW + 60)
+        self.assertIn("handed to Claude", line)
+        self.assertIn("oc-5000000b", self.host.spawned)
+
     def test_a_question_matching_a_running_lane_names_the_worker(self):
         job = "oc-5000000a"
         self.hand(task="find out why the plans page jumps after the preview", ask=job)
