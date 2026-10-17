@@ -5,193 +5,78 @@ scope: personal
 
 Idempotently maintain a single rolling GitHub issue (label `next-session`) that acts as the **durable roadmap** for a repo. The body carries the always-current plan (active arc, next 3 sessions queued, backlog). Comments are the audit trail of what shipped + what changed in the roadmap.
 
-The prime prompt that users paste into a fresh Claude session tells the new model: **read this issue's body** — the roadmap is right there.
-
 ## Mental model
 
-- **Body** = always-current truth. Active arc with remaining tasks. Next 3 sessions queued in priority order. Named backlog items. The body changes on every run.
-- **Comments** = audit trail. What shipped, what got pushed back, what got pulled forward, what changed in the body since last comment. Comments never get rewritten; they accumulate.
-- **Prime prompt** (the fenced block inside the body) = the orientation text users paste into a fresh session. It tells the new model to read the rest of the body first.
+- **Body** = always-current truth. Changes on every run. You write three fields of it: the active arc, the next 3 sessions, and the "next session should" line.
+- **Comments** = audit trail. Never rewritten; they accumulate. A script writes the facts part of each one.
+- **The facts and the posting are a script's job** (`~/.claude/scripts/session_prime_facts.py`): commits, PRs and issues opened or closed, lanes closed with each report's first line, inbox items ticked, the drift check, the stamp, the updatedAt guard, the body write, the comment and the drift-cache seed. Don't gather those by hand and don't rebuild the stamp or the comment by hand.
+- **In the hub, /prep no longer reads this issue's body**: it reads the status page `~/.claude/state/hub-digest.md`, which a script builds from this roadmap and other sources. So the fields you write must be short and current; the page quotes the active arc's head and open items, the Next 3 summary and session labels, and the first paragraph of "Next session should".
 
 ## What to do
 
-### 0. Identify the machine (before anything else)
+### 1. Identify the repo and the machine
 
-Two PCs run this command against the same issues: **NX-01** (the main PC) and **NCC-74656** (the second tower). The machine's identity comes from a file, not its hostname, because hostnames get renamed and a tower session once misidentified itself from one.
+The script reads the repo from `gh repo view` and the machine from `~/.config/afa/machine` (the fleet name, not the hostname: hostnames get renamed). Missing file and the motherboard is `PRO Z690-A` → NX-01, `PRIME Z790M-PLUS` → NCC-74656: write the name into the file. Unknown → STOP and ask. The script refuses to post with no machine.
 
-```bash
-MACHINE="$(cat ~/.config/afa/machine 2>/dev/null)"
-if [ -z "$MACHINE" ]; then
-  case "$(powershell.exe -NoProfile -Command '(Get-CimInstance Win32_BaseBoard).Product' 2>/dev/null | tr -d '\r')" in
-    *"PRO Z690-A"*)      MACHINE=NX-01 ;;
-    *"PRIME Z790M-PLUS"*) MACHINE=NCC-74656 ;;
-  esac
-fi
-echo "machine: ${MACHINE:-UNKNOWN}"
-```
-
-- `~/.config/afa/machine` holds one line, the fleet name. If it's missing and the motherboard is one of the two above, write the name into it.
-- **UNKNOWN** → STOP and ask the user which machine this is. Don't guess.
-- Carry `MACHINE` through every step: every comment's heading names it (Appendix B), and the hub has extra rules in 3b.
-
-### 1. Detect the current repo
+### 2. Run the facts (in the repo's folder)
 
 ```bash
-gh repo view --json nameWithOwner --jq .nameWithOwner
+python3 ~/.claude/scripts/session_prime_facts.py
 ```
 
-Fail loudly if not in a git repo or the remote isn't GitHub. Also confirm `gh auth status` before going further.
+It finds the one open `next-session` issue (none → SEED, step 5; several → STOP and ask which is canonical), saves the issue's `updatedAt` as READ_AT, and prints the facts since the last comment, the drift check, the stamp and, for the hub, the tidy counts. Read that; it replaces the git log, `gh` listing and lane-report reading.
 
-### 2. Check whether the rolling issue already exists
+### 3. Write the three fields (and a note)
+
+Read only what you need of the current body (`gh issue view <n> --repo <owner>/<repo> --json body --jq .body`; in the hub, only the blocks you are changing). Write each field to a file in the scratchpad; each file is the whole replacement block, wrapper included:
+
+- `arc.md`: the active arc. A `<details>` block whose `<summary>` starts `<b>Arc N`, or a `### Active arc` section. If the user said the arc is done or changed direction, swap it; else drop what was completed and add what was discovered. The script replaces the block with the same arc number.
+- `next3.md`: a `<details>` block whose `<summary>` starts `<b>Next 3 sessions`, or a `### Next 3 sessions queued` section. Re-prioritize; promote from the backlog, demote what the user de-prioritized.
+- `next-should.md`: just the paragraph(s) under "### Next session should" (the script keeps the heading). One sentence that tells a cold start where to begin.
+- `note.md` (optional): extra comment sections that are not facts: **Roadmap changes** (what is different in the body), **Watch** (time-sensitive items with dates).
+
+**Workspace hub only:** the facts output ends with the tidy report for THIS machine's `~/repos`. If it prints anything, add or replace one backlog line, "**Tidy ~/repos (<MACHINE>)**", summarising each section with its count. Drop only your own machine's line when the report comes back empty. A tidy line without a machine name was written by NX-01.
+
+A field that cannot be found in the body is an error, not a guess; fix the file. Backlog items stay as they are; edit the body by hand (`gh issue edit`) only for something outside these three fields, and then run step 2 again afterwards so READ_AT is current.
+
+**Workspace hub on NCC-74656 (the tower):** NX-01 owns the hub roadmap's priorities. The script refuses `--arc`, `--next3` and `--next-should` there. Post a note only (its own tower follow-ups, items it finished) and edit just its own lines by hand.
+
+**Workspace hub on NX-01 only: it is the director of directors.** The hub did lane work in its own context on 2026-10-11 (production logs, client drafts) instead of dispatching it. Three rules, so the roadmap keeps the hub in its lane:
+- **The prime-prompt block carries this paragraph**, word for word. Add it if missing, never paraphrase it:
+
+  > This terminal (~/repos on NX-01) is the director of directors. It answers Hatch and the tower, keeps this roadmap and the board, takes Jonathan's decisions, and dispatches. It does no lane work: anything that reads a repo's code, production, logs or a client thread, or writes a draft, goes to a lane, a tmux window in that repo's folder started with ~/.claude/scripts/lane.sh <name> <dir> <model> <prompt-file>, with a self-contained hand-off prompt and a report file. Pick each lane's model by the work (feedback_model_tiers). Read only lane reports. Send searches to subagents. Past about 60% context, hand off what's open and end.
+
+- **"Next 3 sessions" items are written as lanes**: tmux window name, folder, model, the hand-off's first action, and the report path. Never as work for the hub itself. Lane prompts and reports live in `~/.claude/state/lanes/<date>-<name>/`.
+- **The hub's first action in a new session is the lane check.** Closing the hub terminal does not stop the lanes (they are windows in the detached tmux session `lanes`); only WSL shutting down does. So the prime-prompt block says, before anything else: *run `~/.claude/scripts/lane.sh --status`, read every report.md it lists, and resume or close lanes before anything else.* `--status` prints each window's name, whether its report is written, working / idle / error (a "Credit balance too low" or "API Error" in the pane is error), its last pane line, and its folder, model and Claude session id from `~/.claude/state/lanes/index.tsv`; lanes from the last 3 days with no window and no report show as dead. A dead or crashed lane is restarted with `lane.sh --resume <name>` (`claude --resume <session-id> --model <m>` in a fresh window), and a message goes in with `lane.sh --send <name> <text>`, which retries Enter once and says whether it took.
+
+### 4. Post
 
 ```bash
-gh issue list --repo <owner>/<repo> --state open --label next-session --json number,title
+python3 ~/.claude/scripts/session_prime_facts.py --post --dry-run --arc arc.md --next3 next3.md --next-should next-should.md --note note.md
+python3 ~/.claude/scripts/session_prime_facts.py --post --arc arc.md --next3 next3.md --next-should next-should.md --note note.md
 ```
 
-- **Zero matches** → SEED: create the issue with the full roadmap structure (step 3a)
-- **One match** → UPDATE: rewrite the body to reflect the new roadmap state + append a session-end comment (step 3b)
-- **Multiple matches** → STOP. Ask the user which is canonical. Never auto-pick.
+`--dry-run` prints the comment and what would change in the body, and never posts. The real run:
 
-### 3a. SEED (first run in this repo)
+1. checks the issue's `updatedAt` still equals READ_AT. If it moved, another machine or lane edited the issue in between: it stops with exit 6 and posts nothing. Re-read the body, redo the fields, run step 2 again. Never write over a newer body;
+2. replaces the fields, refreshes the single `roadmap-stamp` line (tip rule: `origin/<default>`, or `HEAD` when that is an ancestor), and writes the body;
+3. appends the comment (heading with the time, machine, folder and session; the facts; your note; the "Next session should" line);
+4. seeds the drift-hook cache and runs `roadmap-drift.sh check`. Expect `drift 0 commits (exact, ...)`.
 
-This is **first run** in a repo, so there's no prior roadmap. You're building the initial structure. Two paths:
+The comment says what a lane did only in the private hub: for any other repo, lanes, inbox and client lines are left out, because a public repo's issue must never carry them. Add `--session <id>` if you know the session id.
 
-**3a-i. You have just finished real work in this repo this session.** Capture what shipped and what's next as the seed roadmap.
+### 5. SEED (first run in a repo with no rolling issue)
 
-**3a-ii. You're seeding from a different session.** No work was done on this repo this session — you're just establishing the structure with current repo state as the baseline. The first comment should say so explicitly. (This is the ScriptHammer case from 2026-05-28.)
+Two paths: **seed-from-work** (you finished real work here this session; capture what shipped and what's next) or **seed-baseline** (no work here this session; the first comment says so, see B-2). Either way:
 
-Either way:
+1. `gh label create next-session --color 0E8A16 --description "Rolling roadmap + priming prompt for new sessions" --repo <owner>/<repo> 2>/dev/null || true`
+2. Gather state: `git log --oneline -20`, `git branch --show-current`, open issues and PRs, recently closed, the memory index if present, and any time-sensitive items the user mentioned.
+3. Write the body from **Appendix A**; fill the stamp with the same rule as the script (`BRANCH` from `origin/HEAD` else `main`; `TIP=origin/$BRANCH`, or `HEAD` if that is an ancestor; `TIP_SHA`; `GENERATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)`).
+4. `gh issue create --repo <owner>/<repo> --title "session-prime: roadmap + orient-fast prompt for new sessions" --label next-session --label documentation --body-file <file>`; replace `#NNN` with the number and `gh issue edit` the body.
+5. Post the first comment: for seed-from-work, run step 2 and `--post` (it writes the facts); for seed-baseline use **B-2** below.
+6. Seed the drift cache and confirm: `bash ~/.claude/hooks/roadmap-drift.sh seed-cache "<owner>/<repo>" "<number>" "$TIP_SHA" "$BRANCH" "$GENERATED"` then `bash ~/.claude/hooks/roadmap-drift.sh check` (expect drift 0).
 
-1. Make sure the label exists:
-   ```bash
-   gh label create next-session --color 0E8A16 --description "Rolling roadmap + priming prompt for new sessions" --repo <owner>/<repo> 2>/dev/null || true
-   ```
-
-2. Gather state to populate the initial roadmap:
-   - `git log --oneline -20` — recent commits
-   - `git branch --show-current` — current branch
-   - `gh issue list --repo <owner>/<repo> --state open --json number,title,labels` — open issues
-   - `gh pr list --repo <owner>/<repo> --state open --json number,title` — open PRs
-   - `gh issue list --repo <owner>/<repo> --state closed --search "closed:>=<today-7d>"` — recently closed
-   - Look at `~/.claude/projects/-home-...-<repo>/memory/MEMORY.md` if present — surface the "READ FIRST" pointer
-   - Note any time-sensitive items the user mentioned (meetings, deploys, scheduled cron checkpoints)
-
-3. Write the body using the template in **Appendix A** below. Substitute `<owner>/<repo>`, `<ISSUE_NUMBER>` (use `#NNN` placeholder; fix after create), memory path, current branch.
-
-3.5. **Capture the stamp values** and substitute them into the template's trailing `roadmap-stamp` line. This must match the tip the drift hook measures against, so drift reads 0 immediately after this runs — even with unpushed commits:
-
-   ```bash
-   BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
-   BRANCH="${BRANCH:-main}"
-   TIP="origin/$BRANCH"
-   git merge-base --is-ancestor "$TIP" HEAD 2>/dev/null && TIP=HEAD
-   TIP_SHA="$(git rev-parse "$TIP")"
-   GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-   ```
-
-4. Create:
-   ```bash
-   gh issue create \
-     --repo <owner>/<repo> \
-     --title "session-prime: roadmap + orient-fast prompt for new sessions" \
-     --label next-session \
-     --label documentation \
-     --body-file /tmp/session-prime-body.md
-   ```
-
-5. Replace the `#NNN` placeholder in the body with the actual issue number returned:
-   ```bash
-   sed -i "s/#NNN/#<actual>/g" /tmp/session-prime-body.md
-   gh issue edit <actual> --repo <owner>/<repo> --body-file /tmp/session-prime-body.md
-   ```
-
-6. Append the first comment using the appropriate template from **Appendix B**:
-   - **3a-i case** → use the "session work" template; describe what shipped this session
-   - **3a-ii case** → use the "seeded baseline" template; explicit that no work happened, this is the starting snapshot
-
-7. **Seed the drift-hook cache** (same as 3b step 6) so the next session start is exact and the new issue is not hidden by the hook's negative cache:
-
-   ```bash
-   [ -f ~/.claude/hooks/roadmap-drift.sh ] && bash ~/.claude/hooks/roadmap-drift.sh seed-cache \
-     "<owner>/<repo>" "<actual>" "$TIP_SHA" "$BRANCH" "$GENERATED"
-   bash ~/.claude/hooks/roadmap-drift.sh check    # expect: drift 0 commits (exact, ...)
-   ```
-
-### 3b. UPDATE (subsequent runs in this repo)
-
-The issue already exists. You're doing two things: (1) rewriting the body to reflect what's changed in the roadmap, and (2) appending a comment that audit-trails what changed.
-
-1. Fetch the current body, and note when it was last updated:
-   ```bash
-   gh issue view <issue-number> --repo <owner>/<repo> --json body --jq .body > /tmp/old-body.md
-   gh issue view <issue-number> --repo <owner>/<repo> --json updatedAt --jq .updatedAt   # keep this as READ_AT
-   ```
-   The other machine may edit the same issue between your read and your write. Step 4 checks for that.
-
-2. Gather state since the last comment was posted:
-   - `gh issue view <issue-number> --repo <owner>/<repo> --json comments --jq '.comments[-1].createdAt'` — timestamp of last comment
-   - `git log --oneline --since="<that-timestamp>"` — commits since then
-   - Recently closed/opened issues in the same window
-   - Anything new on the user-stated agenda
-   - **Workspace hub only** (`TortoiseWolfe/workspace`): run `~/repos/hub/scripts/tidy-report.sh`. Its findings are about THIS machine's `~/repos` only. If it prints anything, add or replace one backlog line, "**Tidy ~/repos (<MACHINE>)**", summarising each section with its count. Drop only your own machine's line when the report comes back empty. A tidy line without a machine name was written by NX-01.
-
-3. Update the roadmap in the body.
-
-   **Workspace hub on any machine other than NX-01:** NX-01 owns the hub roadmap's priorities. From the tower:
-   - Edit only lines about this machine's work (its tower follow-ups, items it finished, its own tidy line), plus new backlog items it found. Write the machine name into anything you add, e.g. "(tower)".
-   - Don't re-prioritize the active arc, reorder "Next 3 sessions", or rewrite "Next session should" unless the user explicitly asks. If an item there is now done or stale because of this machine's work, edit just that phrase.
-   - Everything else in the body stays exactly as NX-01 wrote it.
-
-   Otherwise (any other repo, or the hub on NX-01):
-   - **Active arc** → if the user signaled the arc is done or changed direction, swap it. Else, update its "remaining tasks" list to remove what was completed and add what was discovered.
-   - **Next 3 sessions** → re-prioritize. Promote items from backlog if relevant. Demote items the user de-prioritized.
-   - **Backlog** → add anything new captured this session. Remove anything that got built or de-scoped.
-   - **What's the "next session should"** sentence at the bottom of the roadmap section → rewrite to reflect the new top priority.
-
-   **Workspace hub on NX-01 only: it is the director of directors.** The hub did lane work in its own context on 2026-10-11 (production logs, client drafts) instead of dispatching it. Three rules, so the roadmap keeps the hub in its lane:
-   - **The prime-prompt block carries this paragraph**, word for word. Add it if missing, never paraphrase it:
-
-     > This terminal (~/repos on NX-01) is the director of directors. It answers Hatch and the tower, keeps this roadmap and the board, takes Jonathan's decisions, and dispatches. It does no lane work: anything that reads a repo's code, production, logs or a client thread, or writes a draft, goes to a lane, a tmux window in that repo's folder started with ~/.claude/scripts/lane.sh <name> <dir> <model> <prompt-file>, with a self-contained hand-off prompt and a report file. Pick each lane's model by the work (feedback_model_tiers). Read only lane reports. Send searches to subagents. Past about 60% context, hand off what's open and end.
-
-   - **"Next 3 sessions" items are written as lanes**: tmux window name, folder, model, the hand-off's first action, and the report path. Never as work for the hub itself. Lane prompts and reports live in `~/.claude/state/lanes/<date>-<name>/`.
-   - **The hub's first action in a new session is the lane check.** Closing the hub terminal does not stop the lanes (they are windows in the detached tmux session `lanes`); only WSL shutting down does. So the prime-prompt block says, before anything else: *run `~/.claude/scripts/lane.sh --status`, read every report.md it lists, and resume or close lanes before anything else.* `--status` prints each window's name, whether its report is written, working / idle / error (a "Credit balance too low" or "API Error" in the pane is error), its last pane line, and its folder, model and Claude session id from `~/.claude/state/lanes/index.tsv`; lanes from the last 3 days with no window and no report show as dead. A dead or crashed lane is restarted with `lane.sh --resume <name>` (`claude --resume <session-id> --model <m>` in a fresh window), and a message goes in with `lane.sh --send <name> <text>`, which retries Enter once and says whether it took.
-
-3.5. **Refresh the stamp** on the trailing `roadmap-stamp` line — replace the existing one, never append a second. Same values as 3a:
-
-   ```bash
-   BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
-   BRANCH="${BRANCH:-main}"
-   TIP="origin/$BRANCH"
-   git merge-base --is-ancestor "$TIP" HEAD 2>/dev/null && TIP=HEAD
-   TIP_SHA="$(git rev-parse "$TIP")"
-   GENERATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-   ```
-
-   If the old body had no stamp (pre-existing issue), add one — that is the upgrade from approximate drift to exact, and it needs no migration.
-
-4. Confirm nobody edited the issue since step 1, then write the updated body back:
-   ```bash
-   gh issue view <issue-number> --repo <owner>/<repo> --json updatedAt --jq .updatedAt   # must equal READ_AT
-   gh issue edit <issue-number> --repo <owner>/<repo> --body-file /tmp/new-body.md
-   ```
-   If `updatedAt` moved, someone (usually the other machine) changed the issue in between. Re-fetch, redo your edits on the new body, and check again. Never write over a newer body.
-
-5. Append a comment using the "session work" template from **Appendix B**. The comment is the audit trail — it explains what changed in the body and why.
-
-6. **Seed the drift-hook cache** so the next session start is exact and needs no network — and so a newly seeded roadmap issue is never hidden behind the hook's 72-hour negative cache. Skip silently if the script is absent; the stamp in the body is the durable artifact, the cache is only an optimisation:
-
-   ```bash
-   [ -f ~/.claude/hooks/roadmap-drift.sh ] && bash ~/.claude/hooks/roadmap-drift.sh seed-cache \
-     "<owner>/<repo>" "<issue-number>" "$TIP_SHA" "$BRANCH" "$GENERATED"
-   ```
-
-   Then confirm it agrees — this single assertion proves the stamp, the cache and the tip-selection rule are consistent:
-
-   ```bash
-   bash ~/.claude/hooks/roadmap-drift.sh check     # expect: drift 0 commits (exact, ...)
-   ```
-
-### 4. Surface the URL
+### 6. Surface the URL
 
 ```
 ✓ session-prime issue: https://github.com/<owner>/<repo>/issues/<number>
@@ -307,36 +192,6 @@ If the body already contains a `roadmap-stamp` line, **replace it** — never ap
 
 ---
 
-## Appendix B: Comment templates
-
-Two templates depending on the case. **Drop sections that have nothing real to report** — don't include empty `Closed: (none)` lines.
-
-### B-1. Session work template (real work happened)
-
-```markdown
-## Session ended YYYY-MM-DD HH:MM <TZ> (<MACHINE>, <repo dir> session <id>)
-
-**Shipped (<N> commits, all on `origin/<branch>`):**
-- [`<sha>`](https://github.com/<owner>/<repo>/commit/<sha>) — <one-line summary>
-- ...
-
-**Closed:** #N (description), #N (description)
-
-**Opened:** #N (description), #N (description)
-
-**Roadmap changes (what's different in the body vs the previous version):**
-- Active arc: <what moved / what's now active>
-- Promoted from backlog: <item> → Session +<N>
-- Demoted to backlog: <item>
-- Pulled forward: <item>
-- New backlog items: <item>
-
-**Watch:**
-- <time-sensitive item with date — meeting, deploy window, cron checkpoint>
-
-**Next session should:** <one sentence — mirrors the body's "Next session should" so the comment is self-contained>
-```
-
 ### B-2. Seeded baseline template (no work this session — just establishing the issue)
 
 ```markdown
@@ -369,16 +224,9 @@ The rolling-prime issue was created via `/session-prime` from a different repo's
 
 ## Edge cases
 
-- **Not in a git repo / no GitHub remote** — fail loudly, abort.
-- **`gh` not authenticated** — print `gh auth status`, abort.
-- **`gh` not installed** (a fresh machine) — the GitHub MCP connector can't see the private hub repo, so it's no substitute. Install `gh` into `~/.local/bin` from the cli/cli release, check it against the release's checksums file, then have the user run `! gh auth login`.
-- **Machine unknown** (step 0) — ask the user. Never infer it from the hostname.
-- **The other machine's comment is the newest one** — fine. Your comment adds this machine's side; don't restate or contradict theirs. Correct a stale item only by editing that phrase in the body.
-- **Multiple open `next-session` issues** — ask the user which is canonical. Never auto-pick.
-- **Repo has no `~/.claude/projects/.../memory/` dir** — drop that bullet from the prime-prompt block; rely on `git log` + open issues only.
-- **No commits since last comment, but the user wants to update the roadmap anyway** — that's fine. The "Shipped" section in the comment becomes brief or omitted; the "Roadmap changes" section captures the actual update.
-- **Roadmap re-shuffle without a real session ending** — also fine. Run `/session-prime` and the comment explains what re-prioritized + why.
-
-## Why this isn't a Bash script
-
-This command does enough conditional logic (existence check, multi-branch behavior, body diff vs rewrite, comment template selection) that a markdown-instruction file invoking the right `gh` commands per-step is clearer than a 300-line shell script. The model running this skill handles the branching naturally and can adapt the roadmap shape to the specific repo's needs.
+- **Not in a git repo / no GitHub remote / `gh` not authenticated** — the script stops with the error; fix it (`gh auth status`) and rerun. If `gh` is not installed (a fresh machine), install it into `~/.local/bin` from the cli/cli release, check it against the release's checksums, then have the user run `! gh auth login`.
+- **Machine unknown** — ask the user. Never infer it from the hostname.
+- **The other machine's comment is the newest one** — fine. Your comment adds this machine's side; correct a stale item only by editing that phrase in the body.
+- **No commits since the last comment, but the roadmap should change anyway** — fine; the comment says "Nothing shipped" and carries your note.
+- **The script's field locator misses** (an old body shape) — fix the field file's wrapper to match the body, or edit that one block by hand and rerun step 2.
+- **Repo has no memory dir** — drop that bullet from a seeded prime prompt.
