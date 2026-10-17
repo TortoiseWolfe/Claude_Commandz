@@ -127,6 +127,17 @@ class FrontdeskSeven(unittest.TestCase):
         self.assertIn("Lanes close themselves; never tell him to close one.", LIVE)
 
 
+class FrontdeskEleven(unittest.TestCase):
+    """frontdesk-11: a check he asked for is a start job, not a question and not "your call"."""
+    def test_a_diagnosis_is_a_start_job_and_his_asking_is_the_go(self):
+        self.assertIn("A check (diagnose, triage, find out why) is a start too", LIVE)
+        self.assertIn("his asking is the go", LIVE)
+        self.assertIn("Only a write, refund, deploy or message to someone else needs his go.", LIVE)
+
+    def test_client_email_is_not_listed_as_a_free_question(self):
+        self.assertNotIn("client email", LIVE)
+
+
 class Examples(unittest.TestCase):
     """The example replies in the live section: a menu action is never refused, and each one ends with a marker the poller can run."""
     def examples(self):
