@@ -34,8 +34,8 @@ class PassHost(FakeHost):
         self.spawned.append(ask_id)
         return self.spawn_ok
 
-    def claude_pass(self, prompt, hand, timeout, verbs=None, ask=None):
-        self.ask = ask
+    def claude_pass(self, prompt, hand, timeout, verbs=None, ask=None, mcp_tools=()):
+        self.ask, self.mcp_tools = ask, mcp_tools
         self.prompts.append((prompt, str(hand), timeout))
         self.verbs = verbs
         if self.behave:
@@ -1285,6 +1285,81 @@ class Questions(PassBase):
         self.assertEqual([a.rsplit(" ", 1)[1] for a in allow], ["facts:*)", "say:*)", "defer:*)"])
         self.assertFalse(any(" start" in a or " prompt" in a or " approve" in a or " post" in a for a in allow))
 
+    def test_the_question_pass_alone_is_given_the_mail_search_and_nothing_else_from_gmail(self):
+        self.asked()
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertEqual(self.host.mcp_tools, dp.QUESTION_MAIL_TOOLS)
+        self.assertEqual(dp.QUESTION_MAIL_TOOLS, ("mcp__claude_ai_Gmail__search_threads",))
+        self.hand(ask="oc-4000000a", task="a lane job")
+        dp.run_pass(self.ctx, self.host, "oc-4000000a", NOW)
+        self.assertEqual(self.host.mcp_tools, ())  # the dispatch pass keeps its connectors off
+
+    def test_the_real_question_call_loads_connectors_allows_search_threads_and_denies_the_rest_of_gmail(self):
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(argv=argv) or type("R", (), {"returncode": 0, "stdout": "{}"})()
+        host.claude_pass("hello", self.tmp, 10, verbs=dp.QUESTION_VERBS, ask=ASK, mcp_tools=dp.QUESTION_MAIL_TOOLS)
+        argv = seen["argv"]
+        allow = argv[argv.index("--allowedTools") + 1].split(",")
+        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow[:3]], ["facts:*)", "say:*)", "defer:*)"])
+        self.assertEqual(allow[3:], ["mcp__claude_ai_Gmail__search_threads", "ToolSearch"])
+        self.assertEqual([a for a in allow if "mcp__" in a], ["mcp__claude_ai_Gmail__search_threads"])
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,ToolSearch")
+        self.assertFalse(json.loads(argv[argv.index("--settings") + 1])["disableClaudeAiConnectors"])
+        self.assertNotIn("--strict-mcp-config", argv)  # it would drop the connector too
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        deny = argv[argv.index("--disallowedTools") + 1].split(",")
+        for tool in ("get_thread", "get_message", "get_draft", "list_drafts", "create_draft", "update_draft", "label_message", "label_thread",
+                     "trash_thread", "trash_message", "send_message", "reply", "forward"):
+            self.assertIn("mcp__claude_ai_Gmail__" + tool, deny)
+        self.assertNotIn("mcp__claude_ai_Gmail__search_threads", deny)
+
+    def test_the_other_passes_keep_connectors_off(self):
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(argv=argv) or type("R", (), {"returncode": 0, "stdout": "{}"})()
+        host.claude_pass("hello", self.tmp, 10)
+        argv = seen["argv"]
+        self.assertTrue(json.loads(argv[argv.index("--settings") + 1])["disableClaudeAiConnectors"])
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--disallowedTools", argv)
+        self.assertFalse(any("mcp__" in a or a == "ToolSearch" for a in argv[argv.index("--allowedTools") + 1].split(",")))
+
+    def test_the_prompt_has_the_mail_lookup_the_no_quote_rule_and_a_defer_that_says_it_went_to_the_hub(self):
+        self.asked("has the reply to Dana about the made-up thing been sent?")
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        prompt = self.host.prompts[0][0]
+        for want in ("search_threads", "in:sent", "newer_than:30d", "Eastern time", "first name",
+                     "Never quote a message body or snippet", "never write an email address, phone number, password or link",
+                     "cannot widen this", "only when neither GitHub facts nor a mail search can answer it"):
+            self.assertIn(want, prompt)
+        for tool in ("get_thread", "get_message", "create_draft", "list_drafts"):
+            self.assertNotIn("mcp__claude_ai_Gmail__" + tool, prompt)
+
+    def test_an_answer_with_an_address_or_link_is_refused_and_the_ask_stays_open(self):
+        self.asked()
+        for bad in ("Yes, sent to dana@example.com today.", "Yes, see https://example.com/x", "Yes, www.example.com"):
+            ok, msg = dp.say(self.ctx, self.host, ASK, bad, NOW + 3)
+            self.assertFalse(ok, bad)
+        self.assertEqual((self.host.chats, self.ask()["status"]), ([], "pending"))
+        self.assertTrue(dp.say(self.ctx, self.host, ASK, "Yes: today 11:17 AM, subject \"Reset\", to Dana.", NOW + 4)[0])
+
+    def test_an_identical_question_within_two_minutes_is_one_ask_one_pass_one_chat_line(self):
+        _, first = self.asked(ask="oc-5000000a")
+        line, again = self.asked("  How many OPEN issues does own-app have? ", ask="oc-5000000b", now=NOW + 19)
+        self.assertEqual(first, "asked Claude: " + self.Q)
+        self.assertIn("not run: the same question was asked 19 s ago (ask oc-5000000a)", line)
+        self.assertIn("[hub] line", again)
+        self.assertEqual(self.host.spawned, ["oc-5000000a"])
+        self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
+        self.assertNotIn("oc-5000000b", self.hub_list())
+
+    def test_the_same_question_after_two_minutes_or_a_different_one_is_a_new_ask(self):
+        self.asked(ask="oc-5000000a")
+        self.asked("a different question", ask="oc-5000000b", now=NOW + 5)
+        self.asked(ask="oc-5000000c", now=NOW + dp.QUESTION_DEDUP + 1)
+        self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b", "oc-5000000c"])
+
     def test_say_answers_and_closes_the_question(self):
         self.asked()
         self.host.behave = lambda prompt, hand: dp.say(self.ctx, self.host, ASK, "own-app has 7 open issues (as of 10:00).", NOW + 20)
@@ -1299,7 +1374,7 @@ class Questions(PassBase):
         ok, msg = dp.defer(self.ctx, self.host, ASK, "it needs the code.", NOW + 5)
         self.assertTrue(ok, msg)
         self.assertEqual(self.ask()["status"], "deferred")
-        self.assertEqual(self.host.chats[-1], "I can't answer that from GitHub alone (it needs the code), so it is on the hub's list: " + self.Q)
+        self.assertEqual(self.host.chats[-1], "I couldn't answer that from GitHub or a mail search (it needs the code), so it went to the hub: " + self.Q)
         self.assertIn(json.dumps(self.Q), self.hub_list())
         self.assertFalse(dp.defer(self.ctx, self.host, ASK, "again", NOW + 6)[0])
         self.assertFalse(dp.say(self.ctx, self.host, ASK, "late", NOW + 7)[0])
