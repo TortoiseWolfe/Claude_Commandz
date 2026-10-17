@@ -109,11 +109,15 @@ def with_tail(models, ref):
 def build_patch(cfg, model, state_dir):
     ref = local_ref(model)
     d = cfg["agents"]["defaults"]
-    r = cfg["agents"]["entries"][RECEPTIONIST]
+    r = cfg["agents"]["entries"].get(RECEPTIONIST)  # the gate agent exists only while an outside channel is connected
     d_fb = with_tail(d["model"].get("fallbacks", []), ref)
-    r_fb = with_tail(r["model"].get("fallbacks", []), ref)
     d_allow = sorted(set(d.get("modelPolicy", {}).get("allow", [])) | {ref})
-    r_allow = sorted(set(r.get("modelPolicy", {}).get("allow", [])) | {ref})
+    gate = {}
+    if r:
+        r_fb = with_tail(r["model"].get("fallbacks", []), ref)
+        r_allow = sorted(set(r.get("modelPolicy", {}).get("allow", [])) | {ref})
+        gate = {RECEPTIONIST: {"model": {"primary": r["model"]["primary"], "fallbacks": r_fb},
+                               "modelPolicy": {"allow": r_allow}}}
     return {
         "models": {"providers": {
             PROVIDER: provider_block(model),
@@ -127,8 +131,7 @@ def build_patch(cfg, model, state_dir):
                 "compaction": COMPACTION,
             },
             "entries": {
-                RECEPTIONIST: {"model": {"primary": r["model"]["primary"], "fallbacks": r_fb},
-                               "modelPolicy": {"allow": r_allow}},
+                **gate,
                 TEST_AGENT: {
                     "name": "Hub test",
                     "description": "Test agent for the hub. Never routed to; its sessions stay out of the main chat.",
@@ -177,7 +180,7 @@ def verify(model, cfg=None, probe_net=True):
     cfg = cfg or json.load(open(config_path()))
     d = cfg["agents"]["defaults"]
     ents = cfg["agents"]["entries"]
-    r = ents[RECEPTIONIST]
+    r = ents.get(RECEPTIONIST)
     ok = True
 
     def out(name, good, detail=""):
@@ -185,19 +188,20 @@ def verify(model, cfg=None, probe_net=True):
         ok = ok and good
         print(("PASS " if good else "FAIL ") + name + (" " + detail if detail else ""))
 
-    for label, m in (("defaults", d["model"]), (RECEPTIONIST, r["model"]), (TEST_AGENT, ents.get(TEST_AGENT, {}).get("model", {}))):
+    for label, m in (("defaults", d["model"]), *(((RECEPTIONIST, r["model"]),) if r else ()), (TEST_AGENT, ents.get(TEST_AGENT, {}).get("model", {}))):
         chain = [m.get("primary")] + list(m.get("fallbacks", []))
         out("chain." + label, bool(chain[0]) and chain[-1] == ref and chain.count(ref) == 1,
             " > ".join(str(c) for c in chain))
-    for label, pol in (("defaults", d.get("modelPolicy", {})), (RECEPTIONIST, r.get("modelPolicy", {}))):
+    for label, pol in (("defaults", d.get("modelPolicy", {})), *(((RECEPTIONIST, r.get("modelPolicy", {})),) if r else ())):
         out("allowlist." + label, ref in pol.get("allow", []))
     out("defaults.models", ref in d.get("models", {}))
-    rt = r.get("tools", {})
-    out("receptionist.tools", rt.get("allow") == [] and rt.get("profile") == "minimal")
+    if r:
+        rt = r.get("tools", {})
+        out("receptionist.tools", rt.get("allow") == [] and rt.get("profile") == "minimal")
     ht = ents.get(TEST_AGENT, {}).get("tools", {})
     out("hubtest.tools", ht.get("allow") == [] and ht.get("profile") == "minimal")
     out("hubtest.no_bindings", not [b for b in cfg.get("bindings", []) if b.get("agentId") == TEST_AGENT])
-    out("main.entry_untouched", set(ents.get("main", {})) <= {"workspace"}, "keys: " + ",".join(sorted(ents.get("main", {}))))
+    out("main.entry_untouched", set(ents.get("main", {})) <= {"workspace", "name"}, "keys: " + ",".join(sorted(ents.get("main", {}))))
     p = cfg.get("models", {}).get("providers", {}).get(PROVIDER, {})
     out("provider", p.get("baseUrl") == BASE_URL and p.get("api") == "ollama" and any(m.get("id") == model for m in p.get("models", [])))
     provs = cfg.get("models", {}).get("providers", {})
