@@ -6,7 +6,10 @@ menu, each form being the WHOLE message:
 
     start <repo>: <task>      a lane in that repo
     reply <lane>: <text>      type <text> into that lane's window (lane.sh --send)
-    close <lane>              kill that lane's window once its report exists
+    close <lane>              close that lane (its window is killed; one still working is stopped). <lane> is any name it has: the
+                              exact lane name, its ask id (oc-<8 hex>), the 8-hex or mmdd-hhmm tail of its name, or its repo when
+                              only one lane of that repo is open. A word that fits several lanes is refused, naming them.
+    lanes                     the live list of every open lane: exact name, repo, state, start time, first 60 characters of the task
     stop | cancel that        typed only: close the newest lane he started, report or not
 
 A lane closes itself: once its report is posted into Main session, sweep() kills its window and marks it closed.
@@ -38,6 +41,7 @@ nothing claims the ask in that time, fallback_due() starts the lane from the scr
     openclaw_dispatch.py approve <ask> <entry> the pass's way to act on a waiting-room entry the ask names (see "The waiting room")
     openclaw_dispatch.py post "<text>"         the hub puts a [hub] line into the chat with no ask (the pass cannot: AFA_OC_PASS is set for it)
     openclaw_dispatch.py say <ask> "<text>"    post a direct answer to the chat and close the ask
+    openclaw_dispatch.py lanes                 print the live list of open lanes (what the "lanes" marker posts to the chat)
     openclaw_dispatch.py pass <ask>            run the dispatch pass for an ask (spawned by the poller, detached)
 
 Answers go to his Main session (agent:main:main, the one chat he uses) through the gateway's chat.inject call (a note in
@@ -122,7 +126,8 @@ WORKSPACE_RULES = (
     "\n- This is the workspace folder: every repo of his lives under it, so scan across them from here (git -C <repo> log, gh issue list --repo <owner>/<repo>). "
     "Skip every client repo: do not open anything listed in hub/client-repos.txt or hub/client-senders.tsv, or anything under CD/. "
     "Count them as \"client repos skipped\" and name no client, person or address. "
-    "Change no file in any repo from here: if the task needs a change, say which repo in the report.\n"
+    "Change no file in any repo from here, with one exception: a roadmap post, which is `python3 ~/.claude/scripts/session_prime_facts.py --post ...` "
+    "(add --dry-run first if you like) and nothing else that writes. If the task needs any other change, say which repo in the report.\n"
     "- If a command is denied, say so in your report as a failure (\"could not complete\", and which command) instead of reporting what you did not see."
 )
 WORK_RULE = "If you change files, do it on a branch in a worktree under ~/repos/.worktrees/, never by switching branches in the main checkout."
@@ -344,13 +349,16 @@ def choose_engine(path, client, task, workspace=False):
 # Parsing.
 
 STOP_FORMS = frozenset({"stop", "stop that", "stop it", "cancel", "cancel that", "cancel it"})
+LANES_FORMS = frozenset({"lanes", "list lanes", "open lanes", "show lanes", "lane list"})
 
 
 def parse(text):
-    """The dispatch menu. -> ("start", repo_word, task) | ("reply", lane_word, text) | ("close", lane_word) | ("stop",) | None."""
+    """The dispatch menu. -> ("start", repo_word, task) | ("reply", lane_word, text) | ("close", lane_word) | ("stop",) | ("lanes",) | None."""
     t = " ".join(text.split())
     if re.sub(r"[^a-z ]+", "", t.lower()).strip() in STOP_FORMS and len(t) <= 20:
         return ("stop",)
+    if re.sub(r"[^a-z ]+", "", t.lower()).strip() in LANES_FORMS and len(t) <= 20:
+        return ("lanes",)
     m = START_RE.fullmatch(t)
     if m:
         return ("start", m.group("repo"), m.group("task"))
@@ -395,14 +403,38 @@ def _day(epoch):
     return time.strftime("%Y-%m-%d", time.localtime(epoch))
 
 
+SUFFIX_RE = re.compile(r"^(?:[0-9a-f]{8}|\d{4}-\d{4})$")  # the 8-hex tail of an ask id, or the mmdd-hhmm tail of a script-named lane
+
+
+def find_lanes(word, state):
+    """Every lane a word could mean, from the first rule that finds any (so a name never loses to a looser rule):
+    an exact lane name; an ask id (the lanes that ask produced); a unique 8-hex or date suffix; the open lanes of a repo called that.
+    -> list of names: [] none, one = found, several = ambiguous (the caller names them and asks which)."""
+    w = (word or "").strip().lower()
+    lanes = state["lanes"]
+    exact = [n for n in lanes if n.lower() == w]
+    if exact:
+        return exact[:1]
+    if ASK_ID_RE.fullmatch(w):
+        ask = asks_of(state).get(w) or {}
+        hit = [n for n in lanes if n in ask.get("lanes", []) or lanes[n].get("ask") == w]
+        if hit:
+            return sorted(hit)
+    if SUFFIX_RE.fullmatch(w):
+        hit = [n for n in lanes if n.lower().endswith("-" + w)]
+        if hit:
+            return sorted(hit)
+    return sorted(n for n, l in lanes.items() if l.get("status") in ("started", "reported") and l.get("repo", "").lower() == w)
+
+
 def resolve_lane(word, state):
-    """A lane name from the state file: exact (any case), else the one open lane of a repo called that. -> name | None."""
-    w = word.lower()
-    for n in state["lanes"]:
-        if n.lower() == w:
-            return n
-    open_ = [n for n, l in state["lanes"].items() if l.get("status") in ("started", "reported") and l.get("repo", "").lower() == w]
-    return open_[0] if len(open_) == 1 else None
+    """A lane name from the state file, found by any name it has (see find_lanes). -> name | None (none found, or ambiguous)."""
+    hit = find_lanes(word, state)
+    return hit[0] if len(hit) == 1 else None
+
+
+def ambiguous_text(word, hit):
+    return "\"%s\" could mean %d lanes: %s. Say which, by its exact name." % (word[:60], len(hit), ", ".join(hit))
 
 
 def _report_text(path):
@@ -693,7 +725,10 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None):
 def do_reply(ctx, host, lane_word, text, now):
     stamp = _stamp(now)
     state = load_state(ctx.state_path)
-    name = resolve_lane(lane_word, state)
+    hit = find_lanes(lane_word, state)
+    if len(hit) > 1:
+        return "%s | reply | couldn't: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn't send that: " + ambiguous_text(lane_word, hit)
+    name = hit[0] if hit else None
     if not name or state["lanes"][name].get("status") not in ("started", "reported"):
         names = ", ".join(n for n, l in sorted(state["lanes"].items()) if l.get("status") in ("started", "reported")) or "none right now"
         return "%s | reply | couldn't: no such open lane" % stamp, "Couldn't send that: I don't have an open lane called \"%s\". Open lanes I started: %s." % (lane_word[:60], names)
@@ -705,25 +740,41 @@ def do_reply(ctx, host, lane_word, text, now):
     return "%s | reply %s | not sent: %s" % (stamp, name, out), "Couldn't send that to %s: %s" % (name, out or "it did not take")
 
 
+def _stop_lane(state, host, name, stamp, verb="stop"):
+    """Kill a lane's window and mark it stopped (failed, so the same task may be asked again). -> (log line, chat text)."""
+    wins = host.windows()
+    if wins and name in wins and not host.kill_window(name):
+        return "%s | %s %s | window would not close" % (stamp, verb, name), "Couldn't stop %s: its window would not close." % name
+    state["lanes"][name]["status"], state["lanes"][name]["delivered"], state["lanes"][name]["failed"] = "closed", True, True
+    return "%s | %s %s | stopped" % (stamp, verb, name), "Stopped %s." % name
+
+
 def _do_close(ctx, host, lane_word, now):
+    """Close the lane he names, by any name it has (find_lanes). One with a report is closed; one still working is stopped."""
     stamp = _stamp(now)
     state = load_state(ctx.state_path)
-    name = resolve_lane(lane_word, state)
-    if not name:
-        return "%s | close | couldn't: no such lane" % stamp, "Couldn't close that: I don't have a lane called \"%s\"." % lane_word[:60]
+    hit = find_lanes(lane_word, state)
+    if len(hit) > 1:
+        return "%s | close | couldn't: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn't close that: " + ambiguous_text(lane_word, hit)
+    if not hit:
+        return "%s | close | couldn't: no such lane" % stamp, "Couldn't close that: I don't have a lane called \"%s\". Open lanes: %s." % (
+            lane_word[:60], ", ".join(n for n, l in sorted(state["lanes"].items()) if l.get("status") != "closed") or "none right now")
+    name = hit[0]
     lane = state["lanes"][name]
     if lane["status"] == "closed":
         return "%s | close %s | already closed" % (stamp, name), "%s is already closed." % name
     has_report = Path(lane["report"]).exists() and Path(lane["report"]).stat().st_size > 0
     if lane["status"] == "started" and not has_report:
-        return "%s | close %s | held: no report yet" % (stamp, name), "Held: %s hasn't written its report yet, so I won't close it. Type reply %s: <your words> to talk to it." % (name, name)
-    wins = host.windows()
-    killed = host.kill_window(name) if wins and name in wins else True
-    if not killed:
-        return "%s | close %s | window would not close" % (stamp, name), "Couldn't close %s's window." % name
-    lane["status"] = "closed"
+        line, chat = _stop_lane(state, host, name, stamp, "close")  # still working: he named it, so "close" means stop it
+    else:
+        wins = host.windows()
+        killed = host.kill_window(name) if wins and name in wins else True
+        if not killed:
+            return "%s | close %s | window would not close" % (stamp, name), "Couldn't close %s's window." % name
+        lane["status"] = "closed"
+        line, chat = "%s | close %s | closed" % (stamp, name), "Closed %s." % name
     save_state(ctx.state_path, state)
-    return "%s | close %s | closed" % (stamp, name), "Closed %s." % name
+    return line, chat
 
 
 def _do_stop(ctx, host, now):
@@ -734,12 +785,118 @@ def _do_stop(ctx, host, now):
     if not open_:
         return "%s | stop | no open lane" % stamp, "There's no lane running to stop."
     name = max(open_)[1]
+    line, chat = _stop_lane(state, host, name, stamp)
+    if line.endswith("| stopped"):
+        save_state(ctx.state_path, state)
+    return line, chat
+
+
+LANES_TASK_CHARS = 60
+LANES_MAX_LINES = 10
+LANES_DEAD_DAYS = 3  # like lane.sh --status: a lane with no window and no report shows as dead for this long
+TASK_BLOCK_RE = re.compile(r"<<<TASK\n(.*?)\nTASK>>>", re.S)
+
+
+def _index_rows(ctx):
+    """-> {lane name: [tab fields]} from index.tsv, the last row of a name winning (the same file lane.sh --status reads)."""
+    rows = {}
+    try:
+        for line in Path(ctx.index_path).read_text().splitlines():
+            f = line.split("\t")
+            if len(f) >= 7 and f[1]:
+                rows[f[1]] = f
+    except OSError:
+        pass
+    return rows
+
+
+def _lane_task(prompt_path):
+    """The first ~LANES_TASK_CHARS characters of what a lane was asked: the quoted task of a dispatcher prompt, else the first heading
+    or line of a hub prompt. "" when it cannot be read."""
+    try:
+        text = Path(prompt_path).read_text(errors="replace")
+    except (OSError, TypeError):
+        return ""
+    m = TASK_BLOCK_RE.search(text)
+    if m:
+        raw = m.group(1).strip()
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            pass
+        task = raw if isinstance(raw, str) else ""
+    else:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        head = next((l for l in lines if l.startswith("# ")), lines[0] if lines else "")
+        task = re.sub(r"^Lane [\w.-]+:\s*", "", re.sub(r"^#+\s*", "", head))
+    return _trim(CONTROL_RE.sub(" ", " ".join(task.split())), LANES_TASK_CHARS) if task else ""
+
+
+def _clock(epoch, now):
+    t = time.localtime(epoch)
+    same = time.strftime("%F", t) == time.strftime("%F", time.localtime(now))
+    return time.strftime("%-I:%M %p" if same else "%a %-I:%M %p", t)
+
+
+def _nonempty(path):
+    try:
+        return bool(path) and Path(path).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def do_lanes(ctx, host, now):
+    """The live list for "what lanes are open": every lane not closed, read now from the dispatcher's state file, the lane index and
+    tmux (the sources lane.sh --status uses), never from memory. One line each: exact name, repo, state (running | report written |
+    failed | dead), start time, and the first ~60 characters of its task. -> (log line, chat text)."""
+    stamp = _stamp(now)
+    state = load_state(ctx.state_path)
+    rows = _index_rows(ctx)
     wins = host.windows()
-    if wins and name in wins and not host.kill_window(name):
-        return "%s | stop %s | window would not close" % (stamp, name), "Couldn't stop %s: its window would not close." % name
-    state["lanes"][name]["status"], state["lanes"][name]["delivered"], state["lanes"][name]["failed"] = "closed", True, True  # stopped: a retry is allowed
-    save_state(ctx.state_path, state)
-    return "%s | stop %s | stopped" % (stamp, name), "Stopped %s." % name
+    names = {n for n, l in state["lanes"].items() if l.get("status") != "closed"} | set(wins or ())
+    for n, f in rows.items():
+        try:
+            recent = float(f[8]) >= now - LANES_DEAD_DAYS * 86400 if len(f) > 8 else False
+        except ValueError:
+            recent = False
+        if n not in state["lanes"] and recent and not _nonempty(f[6]):
+            names.add(n)  # no window and no report: dead, as --status says
+    found = []
+    for name in names:
+        lane, f = state["lanes"].get(name), rows.get(name)
+        lane = lane or {}
+        if not lane and not f:
+            found.append((0, name, "?", "running", ""))  # a window nobody indexed
+            continue
+        repo = lane.get("repo") or ("workspace" if os.path.realpath(f[2]) == os.path.realpath(str(ctx.root)) else os.path.basename(f[2]))
+        try:
+            started = float(lane.get("started") or (f[8] if f and len(f) > 8 else 0))
+        except ValueError:
+            started = 0
+        report = lane.get("report") or (f[6] if f else "")
+        engine = lane.get("engine") or (f[4] if f and f[4] in ("codex", "copilot") else "claude")
+        if _nonempty(report):
+            body = _report_text(report)
+            st = "failed" if lane.get("failed") or report_failure(body) else "report written"
+        elif lane.get("status") == "dead":
+            st = "dead"
+        elif engine != "claude":
+            st = "running" if (not report or _log_exit(Path(report).parent)[0] is None) else "dead"
+        else:
+            st = "dead" if wins is not None and name not in wins else "running"
+        task = _lane_task(f[5] if f and len(f) > 5 else Path(report).parent / "prompt.md" if report else None)
+        if not task and lane.get("ask"):
+            task = _trim(" ".join(str(asks_of(state).get(lane["ask"], {}).get("task", "")).split()), LANES_TASK_CHARS)
+        found.append((started, name, repo, st, task))
+    found.sort(key=lambda e: (e[0], e[1]))
+    if not found:
+        return "%s | lanes | none open" % stamp, "No lanes are open right now."
+    lines = ["%s | repo %s | %s | started %s | %s" % (n, r, st, _clock(s, now) if s else "?", '"%s"' % t if t else "no task text")
+             for s, n, r, st, t in found[:LANES_MAX_LINES]]
+    more = len(found) - LANES_MAX_LINES
+    chat = "Open lanes right now (%d), read live from the lane list and tmux:\n%s%s" % (
+        len(found), "\n".join(lines), "\n...and %d more." % more if more > 0 else "")
+    return "%s | lanes | %d open" % (stamp, len(found)), chat
 
 
 def sweep(ctx, host, now=None):
@@ -842,13 +999,15 @@ def hand_off(ctx, host, ask_id, repo_word, task, now):
             "handed to Claude: %s" % _trim(" ".join(task.split()), 120))
 
 
-def claim(ctx, ask_id, lane_name, now=None):
+def claim(ctx, ask_id, lane_name, now=None, host=None):
     """Register a lane the pass started under its ask, so sweep and check_stuck announce it like their own, and cancel the fallback.
     Only the lane `start` began for that ask in the last CLAIM_WINDOW is accepted, and only once: one ask, one lane.
-    The lane's folder, engine and model come from the row lane.sh wrote in index.tsv. -> (ok, message)."""
+    The lane's folder, engine and model come from the row lane.sh wrote in index.tsv. With a host, the chat gets the start line that names
+    the lane (so "stop" and "close <name>" have a name to use). -> (ok, message)."""
     now = time.time() if now is None else now
     if not ASK_ID_RE.fullmatch(ask_id or "") or not LANE_NAME_RE.fullmatch(lane_name or ""):
         return False, "claim: bad ask id or lane name"
+    started = None
     with ctx.locked():
         state = load_state(ctx.state_path)
         ask = asks_of(state).get(ask_id)
@@ -884,6 +1043,12 @@ def claim(ctx, ask_id, lane_name, now=None):
         ask["lanes"] = [lane_name]
         ask["claimed_at"] = now
         save_state(ctx.state_path, state)
+        lane = state["lanes"][lane_name]
+        started = "%s started: %s. Say stop to cancel. (%s on %s; I'll post its report here.)" % (
+            lane_name, _trim(" ".join(str(ask.get("task", "")).split()), 120), lane["repo"],
+            "Claude " + str(lane["model"]).capitalize() if lane["engine"] == "claude" else lane["engine"].capitalize())
+    if host is not None and started:
+        host.inject(started)
     return True, "claimed %s for %s" % (lane_name, ask_id)
 
 
@@ -959,7 +1124,7 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
     with ctx.locked():
         claimed = asks_of(load_state(ctx.state_path)).get(ask_id, {}).get("status") == "claimed"
     if not claimed:  # lane.sh's own claim did not land (it only warns): register the running lane here, so the fallback cannot start it twice
-        done, why = claim(ctx, ask_id, lane_name, now)
+        done, why = claim(ctx, ask_id, lane_name, now, host)
         if not done:
             return False, "start: the lane is running but could not be registered (%s)" % why
     return True, "started %s in %s for %s" % (lane_name, name, ask_id)
@@ -1388,7 +1553,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) >= 3 and argv[0] == "claim":
         ctx = Ctx(load_repos())
-        ok, msg = claim(ctx, argv[1], argv[2])
+        ok, msg = claim(ctx, argv[1], argv[2], host=LaneHost())
     elif len(argv) >= 6 and argv[0] == "start":
         rest, engine = argv[2:], "claude"
         if rest[0] == "--engine":
@@ -1399,6 +1564,8 @@ def main(argv=None):
         ok, msg = start_for_ask(Ctx(load_repos()), LaneHost(), argv[1], rest[0], rest[1], rest[2], rest[3], engine)
     elif len(argv) == 3 and argv[0] == "approve":
         ok, msg = approve_entry(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+    elif len(argv) == 1 and argv[0] == "lanes":
+        ok, msg = True, do_lanes(Ctx(load_repos()), LaneHost(), time.time())[1]
     elif len(argv) == 2 and argv[0] == "post":
         ok, msg = post_line(LaneHost(), argv[1])
     elif len(argv) == 2 and argv[0] == "prompt":
@@ -1408,7 +1575,7 @@ def main(argv=None):
     elif len(argv) == 2 and argv[0] == "pass":
         return run_pass(Ctx(load_repos()), LaneHost(), argv[1])
     else:
-        print("usage: openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | post <text> | pass <ask>", file=sys.stderr)
+        print("usage: openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | post <text> | lanes | pass <ask>", file=sys.stderr)
         return 2
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1

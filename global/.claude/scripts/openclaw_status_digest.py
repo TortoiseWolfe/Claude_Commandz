@@ -114,7 +114,8 @@ def load_names(paths):
     contributes email local parts. Over-collecting is fine: a common word that gets masked only
     costs a little readability.
     """
-    names = set()
+    names = NameSet()
+    handles = set()
     for p in paths:
         try:
             text = Path(p).read_text(errors="replace")
@@ -131,22 +132,50 @@ def load_names(paths):
             m = re.match(r"\s*(?:GitHub|Handle)\s+([\w-]+)", line)
             if m and m.group(1).lower() != "none":
                 names.add(m.group(1).lower())
+                handles.add(m.group(1).lower())
                 names.update(w.lower() for w in _words(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", m.group(1))))
             for em in EMAIL.findall(line):
                 local = em.split("@")[0]
                 names.update(w.lower() for w in _words(local))
-    return {n for n in names if n not in KEEP_NAMES and n not in NOT_NAMES}
+    keep = NameSet(n for n in names if n not in KEEP_NAMES and n not in NOT_NAMES)
+    keep.handles = frozenset(h for h in handles if h in keep)
+    return keep
+
+
+# Lane names are the receptionist's working vocabulary: oc-<repo>-<8 hex or MMDD-HHMM>, oc-<8 hex> (an ask) and frontdesk-N.
+# They hold digits the number scrubs would eat, so they are swapped for a placeholder around the scrubs and put back after.
+LANE_TOKEN = re.compile(
+    r"\boc-(?:[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*-(?:[0-9a-f]{8}|\d{4}-\d{4})(?:-\d+)?|[0-9a-f]{8})\b|\bfrontdesk-\d{1,2}\b", re.I)
+_HOLD = re.compile("(\\d+)")
+
+
+class NameSet(set):
+    """Person tokens, plus which of them are GitHub handles (those are written in lower case, so they match in lower case)."""
+    handles = frozenset()
 
 
 class Filter:
     def __init__(self, names=()):
         self.names = set(names)
+        handles = set(getattr(names, "handles", ()))
         self.name_res = []
-        for group, flags in (([n for n in self.names if n not in CAPS_ONLY], re.I),
-                             ([n.capitalize() for n in self.names if n in CAPS_ONLY], 0)):
-            if group:
-                alt = "|".join(re.escape(n) for n in sorted(group, key=len, reverse=True))
-                self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])", flags))
+        # Whole words, with their capitals: "Green" the person is masked, "green" the colour and "CI" the acronym are not.
+        # A handle also matches as written, in lower case, and so does any name glued into an identifier (fitch-rewrite, a_fitch.skp).
+        self.token_re = None
+        if self.names:  # inside a lane name every word is lower case, so case cannot tell a person from a colour
+            alt = "|".join(re.escape(n) for n in sorted(self.names, key=len, reverse=True))
+            self.token_re = re.compile(rf"(?<![A-Za-z])(?:{alt})(?![A-Za-z])", re.I)
+        cased = sorted({f(n) for n in self.names for f in (str.capitalize, str.upper)}, key=len, reverse=True)
+        if cased:
+            alt = "|".join(re.escape(n) for n in cased)
+            self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])"))
+        if self.names:
+            alt = "|".join(re.escape(n) for n in sorted(self.names, key=len, reverse=True))
+            self.name_res.append(re.compile(
+                rf"(?:(?<=[A-Za-z0-9][-_.])(?:{alt})(?![A-Za-z])|(?<![A-Za-z])(?:{alt})(?=[-_.][A-Za-z0-9]))", re.I))
+        if handles:
+            alt = "|".join(re.escape(n) for n in sorted(handles, key=len, reverse=True))
+            self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])", re.I))
 
     def clean(self, text, limit=160, names=True):
         """Return a safe single-line string, or None when the piece must be dropped."""
@@ -168,7 +197,13 @@ class Filter:
             return None
         if any(a.search(t) for a in ADDRESS) or MONEY_WORDS.search(t):
             return None
-        # scrubs
+        # scrubs; lane names ride through them as placeholders
+        held = []
+
+        def hold(m):
+            held.append(m.group(0))
+            return "%d" % (len(held) - 1)
+        t = LANE_TOKEN.sub(hold, t)
         t = URL.sub("", t)
         t = EMAIL.sub("[email]", t)
         t = HANDLE.sub("", t)
@@ -184,9 +219,15 @@ class Filter:
         t = re.sub(r"\s+", " ", t).strip(" -|")
         if len(t) < 3 or not re.search(r"[A-Za-z]", t):
             return None
-        if not ALLOWED.match(t) or any(r.search(t) for r in RESIDUAL):
+        if not ALLOWED.match(_HOLD.sub("x", t)) or any(r.search(_HOLD.sub("x", t)) for r in RESIDUAL):
             return None
-        return t
+
+        def put_back(m):
+            token = held[int(m.group(1))]
+            if names and self.token_re:  # a person's name inside a lane name is still masked, whatever its case
+                token = self.token_re.sub("[person]", token)
+            return token
+        return _HOLD.sub(put_back, t)
 
 
 def _cut(t, limit):

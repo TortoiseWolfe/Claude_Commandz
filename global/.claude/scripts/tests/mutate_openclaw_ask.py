@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass"]
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -76,7 +76,7 @@ MUTANTS = [
     (HOOK, "hook source is whatever the event says", 'source: "tray"', "source: c.channelId"),
     # the lane menu (openclaw_dispatch.py): where repos and lanes come from, the budget, the engine, the one chat
     (DISPATCH, "repo taken from the text, not the table", "hit = ctx.repos.get(repo_word.lower())", 'hit = ctx.repos.get(repo_word.lower()) or (repo_word, "/tmp/" + repo_word, "")'),
-    (DISPATCH, "lane taken from the text, not the state file (reply)", "    name = resolve_lane(lane_word, state)\n    if not name or state", "    name = lane_word\n    if not name or state"),
+    (DISPATCH, "lane taken from the text, not the state file (reply)", "    name = hit[0] if hit else None\n    if not name or state", "    name = lane_word\n    if not name or state"),
     (DISPATCH, "symlinked repo folders listed", "not d.is_symlink() and", ""),
     (DISPATCH, "folder without .git listed", ' and (d / ".git").exists()', ""),
     (DISPATCH, "running-lane cap off", "if len(running) >= MAX_RUNNING:", "if False:"),
@@ -112,7 +112,6 @@ MUTANTS = [
     (PICKUP, "the reply runs on past his next message", '        if m["role"] == "user":\n            break\n', ""),
     (PICKUP, "two markers allowed", "    if n != 1:", "    if n < 1:"),
     (PICKUP, "marker may be any line", "MARKER_LINE.fullmatch(lines[-1]) if lines else None", "MARKER_LINE.fullmatch(lines[0]) if lines else None"),
-    (PICKUP, "a marker can say stop", 'return d if d and d[0] != "stop" else None', "return d"),
     (PICKUP, "same start can run twice", "if verb == \"start\" and via_chat and dispatch.duplicate_start(ctx, menu[2], now):", "if False:"),
     (PICKUP, "unanswered messages are dropped at once", '        if status == "wait":\n            waiting.append(e)\n            continue', '        if status == "wait":\n            continue'),
     (PICKUP, "waiting entries never expire", 'live = [e for e in queue if now - e["ts"] <= ACT_MAX_AGE]', "live = queue"),
@@ -163,7 +162,7 @@ MUTANTS = [
     (DISPATCH, "dedup: window ignored (lanes)", 'now - l.get("started", 0) < DEDUP_WINDOW', "True"),
     (DISPATCH, "dedup: a failed ask can never be retried", "and not _ask_failed(state, a):", ":"),
     (DISPATCH, "dedup: a failed lane can never be retried", 'and not l.get("failed"):', ":"),
-    (DISPATCH, "dedup: a stopped lane cannot be retried", '"closed", True, True  # stopped', '"closed", True, False  # stopped'),
+    (DISPATCH, "dedup: a stopped lane cannot be retried", '["failed"] = "closed", True, True', '["failed"] = "closed", True, False'),
     (DISPATCH, "dedup: a dead lane not marked failed", 'lane["detail"], lane["failed"] = detail, True', 'lane["detail"] = detail'),
     (DISPATCH, "dedup: a failed report not marked failed", 'if failure:\n                lane["failed"], changed = True, True', 'if failure:\n                changed = True'),
     (DISPATCH, "dedup: a failed fallback start cannot be retried", 'asks_of(state)[k]["status"] = "fallback-failed"', 'asks_of(state)[k]["status"] = "fallback"'),
@@ -241,6 +240,26 @@ MUTANTS = [
     (DISPATCH, "room: queued answer misses 'by itself'", "it starts by itself when that finishes", "it will start"),
     (DISPATCH, "room: approve starts it now even when its after-lane is running", 'if st == "waiting":\n        chat = "%s is queued behind', 'if False:\n        chat = "%s is queued behind'),
     (PICKUP, "room: the pickup run never starts the room", "\n                + dispatch.room_due(ctx, host, now))", ")"),
+    # frontdesk-7: lanes are found by any name they have, listed live, and stopped
+    (DISPATCH, "find: an exact name does not win", "    if exact:\n        return exact[:1]", "    if False:\n        return exact[:1]"),
+    (DISPATCH, "find: the ask id finds nothing", "    if ASK_ID_RE.fullmatch(w):\n        ask =", "    if False:\n        ask ="),
+    (DISPATCH, "find: the suffix finds nothing", "    if SUFFIX_RE.fullmatch(w):\n        hit =", "    if False:\n        hit ="),
+    (DISPATCH, "find: a suffix matches inside a name", 'n.lower().endswith("-" + w)', "w in n.lower()"),
+    (DISPATCH, "find: a repo word finds closed lanes too", 'l.get("status") in ("started", "reported") and l.get("repo"', 'True and l.get("repo"'),
+    (DISPATCH, "resolve: an ambiguous word picks the first", "return hit[0] if len(hit) == 1 else None", "return hit[0] if hit else None"),
+    (DISPATCH, "close: an ambiguous word closes the first", "    if len(hit) > 1:\n        return \"%s | close | couldn't:", "    if False:\n        return \"%s | close | couldn't:"),
+    (DISPATCH, "close: a running lane is not stopped", 'if lane["status"] == "started" and not has_report:', "if False:"),
+    (DISPATCH, "close: a missing lane does not list the open ones", 'Open lanes: %s."', 'Open lanes."'),
+    (DISPATCH, "claim: the start line is not posted", "    if host is not None and started:", "    if False:"),
+    (DISPATCH, "claim: the start line drops how to stop", "Say stop to cancel. (%s on %s; I'll post its report here.)\" % (\n            lane_name,", "(%s on %s; I'll post its report here.)\" % (\n            lane_name,"),
+    (DISPATCH, "lanes: a closed lane is listed", 'if l.get("status") != "closed"} | set(wins or ())', "} | set(wins or ())"),
+    (DISPATCH, "lanes: a lane with no window is called running", 'st = "dead" if wins is not None and name not in wins else "running"', 'st = "running"'),
+    (DISPATCH, "lanes: a failed report is called written", 'st = "failed" if lane.get("failed") or report_failure(body) else "report written"', 'st = "report written"'),
+    (DISPATCH, "lanes: the task is not cut", "LANES_TASK_CHARS = 60", "LANES_TASK_CHARS = 6000"),
+    (DISPATCH, "lanes: the list is not capped", "LANES_MAX_LINES = 10", "LANES_MAX_LINES = 1000"),
+    (DISPATCH, "lanes: parse accepts it inside a sentence", 'in LANES_FORMS and len(t) <= 20', 'in LANES_FORMS or "lanes" in t'),
+    (PICKUP, "lanes: the pickup does not answer the lanes marker", 'dispatch.do_lanes(', 'dispatch.do_nothing('),
+    (DISPATCH, "workspace: a second write is allowed", "(add --dry-run first if you like) and nothing else that writes. ", "(add --dry-run first if you like). "),
 ]
 
 
