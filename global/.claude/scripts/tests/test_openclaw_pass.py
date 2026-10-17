@@ -677,6 +677,17 @@ class TheCapCountsRealWork(PassBase):
         dp.sweep(self.ctx, self.host, NOW + 50)
         self.assertEqual(self.state()["starts"], [NOW])
 
+    def test_the_refund_function_gives_one_start_back_per_lane_even_when_asked_twice(self):
+        self.start(task="one", now=NOW)
+        self.start(task="two", now=NOW)
+        a = self.lane_names()[0]
+        self.write_report(a, "Could not read the folder: permission denied.")
+        os.utime(self.state()["lanes"][a]["report"], (NOW + 30, NOW + 30))
+        state = self.state()
+        self.assertTrue(dp._refund_start(state, state["lanes"][a], NOW + 40))
+        self.assertFalse(dp._refund_start(state, state["lanes"][a], NOW + 41))
+        self.assertEqual(state["starts"], [NOW])
+
     def test_a_report_written_before_the_start_is_not_a_fumble_of_this_start(self):
         self.start(task="scan the repos")
         lane = self.lane_names()[0]

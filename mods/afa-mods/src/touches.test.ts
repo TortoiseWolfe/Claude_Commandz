@@ -210,6 +210,9 @@ describe('the classifier judges the command itself, not text it only carries', (
     ['nohup ssh host "git push --force origin main"', 'git push --force'],
     ['docker compose exec app sh -c "vercel --prod"', 'production deploy'],
     ['podman exec app sh -c "vercel --prod"', 'production deploy'],
+    ['$(echo bash) <<EOF\nvercel --prod\nEOF', 'production deploy'],
+    ['"bash" <<EOF\nvercel --prod\nEOF', 'production deploy'],
+    ['doas -u root ssh host "vercel --prod"', 'production deploy'],
     ['vercel "--prod"', 'production deploy'],
     ["npm run deploy '--production'", 'production deploy'],
   ] as const) {
