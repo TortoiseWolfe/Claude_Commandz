@@ -187,6 +187,84 @@ class FrontdeskEight(unittest.TestCase):
         self.assertEqual(ag.apply_section(once, LIVE), once)
 
 
+CARD_DOC = ("# AGENTS\n\n## Role\n\n" + "".join(old for old, _ in ag.STATUS_LINES) + "\n## Where things live\n\nrepos\n\n"
+            "## Card rules\n\nAnswer with a card.\n\n```\nROUTE: own\nTO: hub worker\n```\n\n- Not on the map: ROUTE client, TO Claude.\n")
+
+
+class ReplyRules(unittest.TestCase):
+    """17 Oct (frontdesk-9): live only, the ROUTE card goes, clients get status, and what the digest lacks goes to the hub."""
+    def live(self, doc=CARD_DOC):
+        return ag.apply_reply_rules(ag.apply_section(doc, LIVE))
+
+    def test_the_card_rules_become_the_reply_rules_and_the_card_is_gone(self):
+        out = self.live()
+        self.assertNotIn("## Card rules", out)
+        self.assertIn("## Reply rules", out)
+        self.assertNotIn("ROUTE:", out)
+        self.assertNotIn("TO: ", out)
+        self.assertNotIn("```", out)
+        self.assertTrue(out.rstrip().endswith("Never invent one."))
+        self.assertLess(out.index("hub-ask:end"), out.index("## Reply rules"))
+
+    def test_the_status_and_red_lines_are_swapped(self):
+        out = self.live()
+        for old, new in ag.STATUS_LINES:
+            self.assertNotIn(old, out)
+            self.assertIn(new, out)
+        self.assertIn("Client projects get status too", out)
+        self.assertIn("Never repeat a client's email contents, client code or credentials.", out)
+        self.assertNotIn("don't read it into your model", out)
+        self.assertIn("Sunday afternoon, or Tuesday evening for the co-op's servers", out)
+        self.assertIn("ask if he means now", out)
+
+    def test_applying_twice_changes_nothing_and_the_block_still_lands_before_the_reply_rules(self):
+        once = self.live()
+        self.assertEqual(self.live(once), once)
+        stripped = ag.BLOCK.sub("", once)
+        again = ag.apply_section(stripped, LIVE)
+        self.assertLess(again.index("hub-ask:begin"), again.index("## Reply rules"))
+
+    def test_a_question_the_digest_lacks_goes_to_the_hub_and_the_marker_becomes_a_question(self):
+        import openclaw_pickup as pk
+        rules = ag.REPLY_RULES.read_text()
+        self.assertIn('end the reply with "Sending to the hub: <his question, in one sentence>"', rules)
+        self.assertIn("Never guess", rules)
+        self.assertIn("Anything else the status digest does not answer: his question in one sentence.", LIVE)
+        self.assertNotIn("with no marker line", LIVE)
+        self.assertNotIn("the card", LIVE)
+        # a question is not a menu sentence: the poller sends it on as a question instead of running anything
+        self.assertIsNone(pk.parse_menu("how many open issues does own-app have?", {}, {}))
+        self.assertIsNone(pk.parse_menu("are own-app PRs 12 and 13 ready to merge?", {}, {}))
+
+    def test_the_reply_rules_example_ends_with_a_marker_the_menu_parses(self):
+        import openclaw_dispatch as dp
+        lines = [l for l in ag.REPLY_RULES.read_text().splitlines() if l.startswith("Sending to the hub: ")]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(dp.parse(lines[0][len("Sending to the hub: "):])[0], "start")
+
+    def test_only_the_live_state_gets_the_reply_rules(self):
+        for state, want in (("live", True), ("notlive", False)):
+            box = {"text": CARD_DOC}
+
+            def fake(args, stdin=None):
+                if args[:1] == ["cat"]:
+                    return 0, box["text"]
+                box["text"] = stdin
+                return 0, "written\n"
+            real, ag._wsl = ag._wsl, fake
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(ag.main([state]), 0)
+            finally:
+                ag._wsl = real
+            self.assertEqual("## Reply rules" in box["text"], want, state)
+
+    def test_the_reply_rules_name_no_engine_and_no_card_field(self):
+        rules = ag.REPLY_RULES.read_text()
+        for word in ("Codex", "Copilot", "Gemini", "Haiku", "Sonnet", "ROUTE:", "FOLDER:", "UNSURE:"):
+            self.assertNotIn(word, rules)
+
+
 class Write(unittest.TestCase):
     def test_file_content_travels_only_on_stdin(self):
         hostile = DOC + "\n__OCASK_AGENTS_EOF__\ntouch /tmp/pwned\n"
