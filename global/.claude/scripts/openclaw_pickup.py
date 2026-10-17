@@ -670,9 +670,17 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
         if job is None and why is None:
             continue  # an ordinary answer: nothing to run
         menu = parse_menu(job, sites, aliases) if job is not None else None
-        if menu is None:
-            host.inject("Nothing sent to the hub: %s." % (why or "that isn't something the hub can do"))
-            line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line is not on the menu", sha)
+        if menu is None and why is None and job.strip():
+            # not a menu sentence: a question for the hub. A short Claude pass answers it with GitHub facts as a [hub] line, or puts it
+            # on the hub's list; it never starts a lane (dispatch.ask_question)
+            line, chat = dispatch.ask_question(ctx, host, dispatch.ask_id_for(sha), job, now, chat_context(history, e, got))
+            if chat:
+                host.inject(chat)
+            line = "%s (chat) | oc-%s" % (line, sha)
+            kind = "dispatch"
+        elif menu is None:
+            host.inject("Nothing sent to the hub: %s." % (why or "the marker line was empty"))
+            line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
             kind = "dispatch"
         else:
             kind, line = execute(menu, host, ctx, sites, now, stamp, sha, via_chat=True, context=chat_context(history, e, got))
