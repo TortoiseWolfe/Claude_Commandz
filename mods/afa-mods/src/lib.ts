@@ -229,3 +229,89 @@ function normalizePath(path: string): string {
 export function targetsOf(segment: string): string[] {
   return segment.split(/\s+/).slice(1).filter(x => !x.startsWith('-'))
 }
+
+// In plain words: what a held command does, and why it is held. Shown in the "Run it?" question
+// and in every refusal, so nobody has to decode `rm -rf` from the log.
+export function explain(hold: Hold): { what: string; why: string } {
+  const vars = [...hold.segment.matchAll(/\$\{?([A-Za-z_]\w*)/g)].map(m => m[1])
+  switch (hold.kind) {
+    case 'rm -rf':
+      return {
+        what: 'deletes the named files and folders and everything inside them, without asking for each one',
+        why:
+          vars.length > 0
+            ? `there is no undo, and the path goes through $${vars[0]}: if $${vars[0]} is empty or unset the path collapses (for example "$${vars[0]}/build" becomes "/build") and the wrong place is deleted`
+            : 'there is no undo, and a wrong or empty path deletes far more than meant',
+      }
+    case 'docker system prune':
+    case 'docker image prune':
+      return {
+        what: 'deletes every unused Docker container, network and image on this machine',
+        why: 'one Docker engine is shared by every project here, and another project may need what it removes',
+      }
+    case 'docker volume prune':
+      return {
+        what: 'deletes every Docker volume no running container uses (volumes hold databases and uploads)',
+        why: 'the data in a deleted volume cannot be brought back',
+      }
+    case 'docker volume rm':
+      return { what: 'deletes the named Docker volumes and the data in them', why: 'the data cannot be brought back' }
+    case 'docker compose down -v':
+      return {
+        what: 'stops the compose stack and deletes its volumes (its database and uploads)',
+        why: 'the data in a deleted volume cannot be brought back',
+      }
+    case 'git push --force':
+      return {
+        what: "overwrites the branch on the remote with this machine's history",
+        why: 'commits other people or machines pushed can be lost',
+      }
+    case 'production deploy':
+      return { what: 'ships to the live production site', why: 'production changes wait for the agreed window' }
+    default:
+      return { what: hold.kind, why: 'it is on the held list' }
+  }
+}
+
+export type LaneEnv = { home: string; hand?: string; tmpdir?: string }
+
+// A lane nobody watches (AFA_LANE_UNATTENDED=1, set by lane.sh) may delete only inside: its own hand-off
+// folder (AFA_LANE_HAND), a worktree under ~/repos/.worktrees, or the scratchpad (/tmp, $TMPDIR). The path
+// must be written out in full: no variable, no pattern, no relative path, no `..`.
+export function unattendedRmVerdict(segment: string, env: LaneEnv): { ok: true } | { ok: false; reason: string } {
+  const targets = targetsOf(segment).map(unquote)
+  const hand = env.hand ? normalizePath(env.hand) : undefined
+  const home = normalizePath(env.home)
+  const where = [
+    hand ? `this lane's own folder (${hand})` : null,
+    `a worktree under ${home}/repos/.worktrees`,
+    'the scratchpad under /tmp',
+  ].filter(Boolean).join(', ')
+  const refuse = (target: string, why: string) => ({
+    ok: false as const,
+    reason: `"${target}" ${why}. Delete only by a full path inside ${where}, or leave it and say so in your report.`,
+  })
+  if (targets.length === 0) return refuse('(nothing named)', 'names no path')
+  const roots = [hand, `${home}/repos/.worktrees`, '/tmp', env.tmpdir ? normalizePath(env.tmpdir) : undefined].filter(
+    (r): r is string => Boolean(r),
+  )
+  for (const target of targets) {
+    if (/[$`*?[\]{}]/.test(target)) {
+      const v = /\$\{?([A-Za-z_]\w*)/.exec(target)
+      return refuse(
+        target,
+        v
+          ? `goes through $${v[1]}, which may be empty or unset, so the delete could land on the wrong folder`
+          : 'uses a pattern that expands when it runs, so it could match more than meant',
+      )
+    }
+    const path = target === '~' || target.startsWith('~/') ? `${home}${target.slice(1)}` : target
+    if (!path.startsWith('/')) return refuse(target, 'is not a full path, so it depends on where the shell happens to be')
+    if (path.split('/').includes('..')) return refuse(target, 'climbs out with "..", so it can leave the folder it starts in')
+    const full = normalizePath(path)
+    if (!roots.some(root => full !== root && full.startsWith(`${root}/`))) {
+      return refuse(target, 'is outside the places a lane may clean up (or is one of those places itself)')
+    }
+  }
+  return { ok: true }
+}

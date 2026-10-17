@@ -76,45 +76,59 @@ TASK>>>
 
 Rules:
 - Read this repo's own CLAUDE.md (or AGENTS.md) first if it has one, and follow it.
-- {work_rule}
+- {work_rule}{extra_rules}
 - Look at your own output before reporting: run it, open it, read it back. Say what you saw, not what you expect.
 - Never send email or messages, merge to a client's main, or spend money. If the task needs any of that, stop and ask in the report instead.
 - Finish by writing {report} (150 words or less, plain words: what you did, what you saw, what is left or what you need from him). Then stop.
 """
 
+WORKSPACE_RULES = (
+    "\n- This is the workspace folder: every repo of his lives under it, so scan across them from here (git -C <repo> log, gh issue list --repo <owner>/<repo>). "
+    "Skip every client repo: do not open anything listed in hub/client-repos.txt or hub/client-senders.tsv, or anything under CD/. "
+    "Count them as \"client repos skipped\" and name no client, person or address. "
+    "Change no file in any repo from here: if the task needs a change, say which repo in the report.\n"
+    "- If a command is denied, say so in your report as a failure (\"could not complete\", and which command) instead of reporting what you did not see."
+)
 WORK_RULE = "If you change files, do it on a branch in a worktree under ~/repos/.worktrees/, never by switching branches in the main checkout."
 # Copilot can write only inside its working directory and its lane folder, so a worktree under ~/repos/.worktrees fails there.
 COPILOT_WORK_RULE = (
     "If you change files, clone the repo into your lane folder ({hand}/repo, from this checkout's origin: git clone \"$(git remote get-url origin)\" {hand}/repo), "
     "work on a branch there, and commit and push from that clone. Never make a git worktree and never write outside your working directory or your lane folder."
 )
-# A report that says nothing changed because the lane was not allowed to write is a failure, whatever the lane called it.
+# A report that says the work was not done because the lane was not allowed or able to do it is a failure, whatever the lane called it.
+# Two signs are needed: something stopped it (BLOCKED_RE) and the task was left undone (NOTHING_RE).
 BLOCKED_RE = re.compile(r"permission denied|operation not permitted|not permitted|permission problem|permissions? (?:error|issue)|"
-                        r"(?:can(?:no|')t|could not|couldn't|unable to|not able to|not allowed to|wasn't able to) (?:write|create|modify|commit|push|make)|"
+                        r"\bdenied\b|\bblocked\b|non-interactive|not authori[sz]ed|"
+                        r"(?:can(?:no|')t|could not|couldn't|unable to|not able to|not allowed to|wasn't able to) (?:write|create|modify|commit|push|make|read|run|enumerate|list|access|scan)|"
                         r"read-only|outside (?:the |my )?(?:working|allowed|workspace|lane)|sandbox", re.I)
 NOTHING_RE = re.compile(r"no changes|nothing (?:was |got )?(?:changed|written|created|committed|pushed|done|made)|"
                         r"(?:did not|didn't|could not|couldn't|can't|cannot|unable to|not able to|wasn't able to|was not able to) "
-                        r"(?:change|create|write|commit|push|make|modify|do)|blocked|failed", re.I)
+                        r"(?:change|create|write|commit|push|make|modify|do|complete|finish|scan|read|verify|list|find|enumerate|inspect|check|run)|"
+                        r"(?:not|never|un|in)complete[d]?\b|remains? (?:un\w+|not \w+|needed)|still (?:needed|needs)|"
+                        r"needs? (?:a run|permission|access)|failed", re.I)
 
 
 def report_failure(body):
-    """-> a short reason when the report says the lane changed nothing because it was not allowed to, else None."""
-    flat = " ".join(body.split())
+    """-> a short reason when the report says the task was not done because something stopped the lane, else None."""
+    flat = re.sub(r"\b(?:not|never|no|nothing)\s+(?:\w+\s+)?(?:blocked|denied)\b", "", " ".join(body.split()), flags=re.I)
     if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):
         return None
     for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        if BLOCKED_RE.search(sentence) and NOTHING_RE.search(sentence):
+            return sentence.strip()[:160].rstrip(".")
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
         if BLOCKED_RE.search(sentence):
             return sentence.strip()[:160].rstrip(".")
-    return "it was not allowed to write"
+    return "it was not allowed to do the work"
 
 
 # ---------------------------------------------------------------------------------------------------------
 # What the PC knows. Tests replace Host; every call has a timeout and a fixed argv.
 
 class LaneHost:
-    def _run(self, argv, timeout, cwd=None, stdin=None):
+    def _run(self, argv, timeout, cwd=None, stdin=None, env=None):
         try:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, input=stdin)
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, input=stdin, env=env)
         except (OSError, subprocess.TimeoutExpired):
             return None
 
@@ -127,9 +141,15 @@ class LaneHost:
             return set()  # no session: no windows
         return set(r.stdout.split())
 
+    def pane(self, name):
+        """-> the last 60 lines on screen in a lane's window, or None when it cannot be read."""
+        r = self._run(["tmux", "capture-pane", "-p", "-S", "-60", "-t", "lanes:" + name], 15)
+        return r.stdout if r is not None and r.returncode == 0 else None
+
     def start_lane(self, name, dirpath, engine, model, prompt_path):
         argv = [str(LANE_SH)] + (["--engine", engine] if engine != "claude" else []) + [name, str(dirpath), model, str(prompt_path)]
-        r = self._run(argv, 180, cwd=str(dirpath))
+        # AFA_LANE_UNATTENDED: nobody is at this lane's window, so its Blast Radius guard must never wait for an answer (see lane.sh)
+        r = self._run(argv, 180, cwd=str(dirpath), env=dict(os.environ, AFA_LANE_UNATTENDED="1"))
         if r is None:
             return False, "lane.sh did not answer within 3 minutes"
         if r.returncode != 0:
@@ -181,16 +201,24 @@ class LaneHost:
 # ---------------------------------------------------------------------------------------------------------
 # Tables built on the PC.
 
+WORKSPACE = "workspace"  # the hub folder itself: a job that spans repos starts here so its lane can read every repo under it
+WORKSPACE_REMOTE = "git@github.com:%s/workspace.git" % "TortoiseWolfe"
+
+
 def load_repos(tsv=REPOS / "hub/repos.tsv", root=REPOS):
-    """-> {lowercase name: (name, Path, remote)} for kind=repo rows whose folder exists. The only place a repo comes from."""
+    """-> {lowercase name: (name, Path, remote)} for kind=repo rows whose folder exists, plus "workspace" (the hub folder
+    itself, when it is a git checkout). The only place a repo comes from."""
     out = {}
+    r = Path(root)
+    if r.is_dir() and not r.is_symlink() and (r / ".git").exists():
+        out[WORKSPACE] = (WORKSPACE, r, WORKSPACE_REMOTE)
     try:
         rows = Path(tsv).read_text().splitlines()
     except OSError:
         return out
     for line in rows[1:]:
         f = line.split("\t")
-        if len(f) < 5 or f[4] != "repo" or not REPO_NAME_RE.match(f[0]):
+        if len(f) < 5 or f[4] != "repo" or not REPO_NAME_RE.match(f[0]) or f[0].lower() == WORKSPACE:
             continue
         d = Path(root) / f[0]
         if d.is_dir() and not d.is_symlink() and (d / ".git").exists():
@@ -379,11 +407,11 @@ def sweep(ctx, host, now=None):
             body = _report_text(lane["report"])
             quoted = "\n".join("> " + ln for ln in _trim(body, REPORT_MAX).splitlines())
             failure = report_failure(body)
-            head = "Lane %s (%s) failed: its report says %s." % (name, lane["repo"], json.dumps(failure)) if failure else "Lane %s (%s) finished." % (name, lane["repo"])
+            head = "%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else "%s finished (repo %s)." % (name, lane["repo"])
             chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To have more done, tell me." % (head, quoted)
             line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + json.dumps(failure) if failure else "finished")
         else:
-            chat = "Lane %s (%s) stopped: %s.%s Nothing to read. You can start it again by telling me." % (name, lane["repo"], lane.get("detail", "it ended"), lane.get("note", ""))
+            chat = "%s failed: %s (repo %s).%s Nothing to read. You can start it again by telling me." % (name, lane.get("detail", "it ended"), lane["repo"], lane.get("note", ""))
             line = "%s | report | %s stopped: %s" % (_stamp(now), name, lane.get("detail", "it ended"))
         if not host.inject(chat):
             changed = True  # status change above is kept; the note is retried next sweep
@@ -394,6 +422,58 @@ def sweep(ctx, host, now=None):
             host.kill_window(name)
         lane["status"] = "closed"
         out.append((line, chat))
+    if changed:
+        save_state(ctx.state_path, state)
+    return out
+
+
+STUCK_FOOTER = re.compile(r"Enter to select", re.I)
+RULE_LINE = re.compile(r"^[\s│┃|]*[─━═╌╍┄┅\-╭╮╰╯┌┐└┘]{6,}[\s│┃|]*$")
+OPTION_LINE = re.compile(r"^[\s│┃|]*[❯>›]?\s*\d+[.)]\s")
+
+
+def stuck_prompt(pane):
+    """-> the first line of the dialog a Claude lane is waiting at (a window showing "Enter to select"), or None."""
+    lines = pane.splitlines()
+    feet = [i for i, l in enumerate(lines) if STUCK_FOOTER.search(l)]
+    if not feet:
+        return None
+    i = feet[-1] - 1
+    while i >= 0 and (not lines[i].strip() or RULE_LINE.match(lines[i])):  # blank lines and a closing border sit between the dialog and its footer
+        i -= 1
+    end = i + 1
+    while i >= 0 and not RULE_LINE.match(lines[i]):
+        i -= 1
+    for l in lines[i + 1:end]:
+        text = re.sub(r"^[\s│┃|]+|[\s│┃|]+$", "", CONTROL_RE.sub(" ", l))
+        if text and not OPTION_LINE.match(l) and not RULE_LINE.match(l):
+            return text[:160]
+    return None
+
+
+def check_stuck(ctx, host, now=None):
+    """Once per dialog: a Claude lane Jonathan started that sits at a prompt nobody is there to answer is posted into Main session
+    as "<lane> is stuck on: <the dialog's first line>". -> list of (log line, chat text) for the notes posted."""
+    now = time.time() if now is None else now
+    state = load_state(ctx.state_path)
+    wins = host.windows()
+    out, changed = [], False
+    for name, lane in sorted(state["lanes"].items()):
+        if lane.get("status") != "started" or lane.get("engine") != "claude" or not wins or name not in wins:
+            continue
+        pane = host.pane(name)
+        first = stuck_prompt(pane) if pane else None
+        if first is None:
+            if lane.pop("stuck", None) is not None:
+                changed = True  # it got past the dialog: a later one is news again
+            continue
+        if lane.get("stuck") == first:
+            continue
+        chat = "%s is stuck on: %s. It is waiting at a prompt that nobody is at its window to answer." % (name, json.dumps(first, ensure_ascii=False))
+        if not host.inject(chat):
+            continue
+        lane["stuck"], changed = first, True
+        out.append(("%s | stuck | %s is stuck on: %s" % (_stamp(now), name, json.dumps(first, ensure_ascii=False)), chat))
     if changed:
         save_state(ctx.state_path, state)
     return out
@@ -449,7 +529,8 @@ def do_start(ctx, host, repo_word, task, now):
     prompt = hand / "prompt.md"
     hand.mkdir(parents=True, exist_ok=True)
     work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE
-    prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report, work_rule=work_rule))
+    extra = WORKSPACE_RULES if name == WORKSPACE else ""
+    prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report, work_rule=work_rule, extra_rules=extra))
     ok, msg = host.start_lane(lane, path, engine, model, prompt)
     if not ok:
         return "%s | start %s | couldn't start: %s" % (stamp, name, msg), "Couldn't start the lane in %s: %s" % (name, msg)
@@ -457,7 +538,7 @@ def do_start(ctx, host, repo_word, task, now):
     state["starts"].append(now)
     save_state(ctx.state_path, state)
     return "%s | start %s | started %s (%s, %s)" % (stamp, name, lane, engine, why), (
-        "Started %s: %s%s. Say stop to cancel. (%s on %s; I'll post its report here.)" % (
+        "%s started: %s%s. Say stop to cancel. (%s on %s; I'll post its report here.)" % (
             lane, _trim(" ".join(task.split()), 120), note, name, "Claude " + model.capitalize() if engine == "claude" else engine.capitalize()))
 
 

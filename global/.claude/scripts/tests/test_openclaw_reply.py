@@ -75,7 +75,7 @@ class Acts(Reply):
         self.assertEqual((engine, d), ("codex", str(self.root / "own-app")))
         self.assertIn(json.dumps("list the files in docs"), Path(prompt).read_text())
         self.assertEqual(len(self.host.chats), 1)
-        self.assertRegex(self.host.chats[0], r"^Started oc-own-app-.*: list the files in docs\. Say stop to cancel\.")
+        self.assertRegex(self.host.chats[0], r"^oc-own-app-\S+ started: list the files in docs\. Say stop to cancel\.")
         self.assertNotIn("yes", self.host.chats[0].lower())
         self.assertIn("(chat)", [l for k, l in done if l][-1])
         self.assertEqual(self.lane_names(), [name])

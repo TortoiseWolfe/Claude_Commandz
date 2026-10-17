@@ -344,4 +344,18 @@ assert_contains "$STATUS_CONN" 'connectors:off' 'status shows an off lane'
 assert_contains "$STATUS_CONN" 'connectors:on' 'status shows an on lane and a ten-column row'
 assert_contains "$STATUS_CONN" 'old-row' 'status lists the ten-column row'
 
+# A dispatcher lane (name oc-*, or AFA_LANE_UNATTENDED=1) tells its Claude process nobody is at the window; a hub lane does not.
+run_lane oc-own-1016-0000 "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'dispatcher-named lane starts'
+assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'oc- lane gets the unattended flag'
+assert_contains "$LAST_COMMAND" "$(date +%F)-oc-own-1016-0000" 'oc- lane is told its own folder'
+assert_contains "$LAST_COMMAND" 'claude --model sonnet' 'oc- lane still runs Claude'
+AFA_LANE_UNATTENDED=1 run_lane env-flagged-lane "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'the env flag alone also marks a lane unattended'
+run_lane hub-lane "$REPO" sonnet "$PROMPT"
+assert_not_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED' 'a hub lane is not marked unattended'
+printf '%s\toc-resume-check\t%s\tsonnet\tsubscription\t%s\t%s\tsession-9\t-\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/oc-resume-report.md" >>"$INDEX"
+run_lane --dry-run --resume oc-resume-check
+assert_contains "$LAST_OUTPUT" 'AFA_LANE_UNATTENDED=1' 'a resumed dispatcher lane stays unattended'
+
 printf 'ok - %s checks passed\n' "$checks"

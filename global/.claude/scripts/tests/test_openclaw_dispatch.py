@@ -24,6 +24,10 @@ class FakeHost:
         self.started, self.sent, self.killed, self.chats, self.digests = [], [], [], [], 0
         self.wins, self.start_ok, self.send_result, self.proj = set(), (True, "started"), (True, "sent to x: submitted"), None
         self.proj_asked = 0
+        self.panes = {}
+
+    def pane(self, name):
+        return self.panes.get(name)
 
     def windows(self):
         return set(self.wins)
@@ -312,7 +316,7 @@ class Replies(Base):
         lane = self.lane_names()[0]
         self.assertTrue(lane.startswith("oc-own-app-"))
         msg = self.host.chats[-1]
-        self.assertIn("Started %s" % lane, msg)
+        self.assertIn("%s started" % lane, msg)
         self.assertIn("do the thing", msg)
         self.assertIn("Say stop to cancel.", msg)
         self.assertNotIn("yes", msg.lower())
@@ -507,6 +511,13 @@ class MainSessionOnly(Base):
         self.assertTrue(host.inject(text))
         return calls
 
+    def test_start_lane_marks_the_lane_unattended(self):
+        seen = {}
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(env=env) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        self.assertEqual(host.start_lane("oc-x", "/tmp", "claude", "sonnet", "/tmp/p"), (True, "started"))
+        self.assertEqual(seen["env"]["AFA_LANE_UNATTENDED"], "1")
+
     def test_inject_posts_to_agent_main_main_and_takes_no_session_argument(self):
         self.assertEqual(list(inspect.signature(dp.LaneHost.inject).parameters), ["self", "text"])
         (argv, stdin), = self.inject_call()
@@ -596,7 +607,7 @@ class Failed(Base):
         lane = self.lane_names()[0]
         self.write_report(lane, "I could not create the worktree: permission denied under the worktrees folder. No changes were made.")
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertIn('failed: its report says "I could not create the worktree: permission denied', chat)  # the lane's words stay in quotes
+        self.assertIn('failed: "I could not create the worktree: permission denied', chat)  # the lane's words stay in quotes
         self.assertNotIn("finished", chat)
         self.assertIn("failed:", line)
         self.assertNotIn("finished", line)
@@ -697,3 +708,173 @@ class Stop(Base):
         self.start("client-app")
         kind, line = self.act("stop", source="discord")
         self.assertEqual((kind, line, self.host.killed), ("ignored", None, []))
+
+
+# The two real reports from 16 Oct 19:56 and 19:57: the lanes could not read ~/repos, and the chat said "finished".
+REAL_REPORT_1 = ("I read this repository's CLAUDE.md. I could not complete the scan: the command to inspect git repositories under "
+                 "/home/TurtleWolfe/repos and read its CLAUDE.md was denied because this non-interactive session cannot get the required "
+                 "permission. I have not verified any recent commits. No files were changed. The scan is still needed with permission "
+                 "to read the repositories under ~/repos.")
+REAL_REPORT_2 = ("I read this repository's CLAUDE.md. Attempts to enumerate Git repositories under ~/repos were blocked by the lane's "
+                 "non-interactive file-access permissions. GitHub CLI did return a list of TortoiseWolfe GitHub repositories, but that is "
+                 "not evidence of which repositories are present locally, so I did not substitute it for the requested scope. I did not "
+                 "scan recent commits or open issues, and cannot reliably sort issues by category or complexity without the local "
+                 "repository inventory and issue data. Nothing was changed in the repository. The requested scan remains uncompleted; "
+                 "it needs a run with access to ~/repos and GitHub issue data.")
+
+
+class FailureIsCalledFailure(Base):
+    def test_each_stop_word_and_each_undone_word_counts_on_its_own(self):
+        self.assertIsNotNone(dp.report_failure("The edit was denied. Nothing was written."))
+        self.assertIsNotNone(dp.report_failure("The sandbox stopped me. I could not complete the audit."))
+        self.assertIsNone(dp.report_failure("All done. Nothing was blocked and nothing was denied."))
+
+    def test_the_two_real_reports_are_failures_and_never_finished(self):
+        for body in (REAL_REPORT_1, REAL_REPORT_2):
+            self.setUp()
+            self.start("client-app")
+            lane = self.lane_names()[0]
+            self.write_report(lane, body)
+            (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+            head = chat.split("\n", 1)[0]
+            self.assertTrue(head.startswith("%s failed: " % lane), head)
+            self.assertNotIn("finished", head)
+            self.assertNotIn("finished", line)
+            self.assertIn("failed:", line)
+
+    def test_the_reason_is_one_line_from_the_report(self):
+        for body, word in ((REAL_REPORT_1, "denied"), (REAL_REPORT_2, "blocked")):
+            reason = dp.report_failure(body)
+            self.assertIn(word, reason)
+            self.assertNotIn("\n", reason)
+            self.assertLessEqual(len(reason), 160)
+
+    def test_honest_reports_stay_finished(self):
+        for body in ("Scanned 41 repos: 12 have commits in the last six weeks. 37 open issues. Nothing was blocked.",
+                     "Listed the issues. No access problems; nothing was denied.",
+                     "The push was denied at first, so I rebased and pushed again. Merged, all green.",
+                     "Done. Tests pass, branch pushed.", "Fixed the blocked-state bug in the menu and added a test."):
+            self.assertIsNone(dp.report_failure(body), body)
+
+    def test_a_lane_that_ended_without_a_report_is_announced_as_failed(self):
+        self.start("own-app")
+        lane = self.lane_names()[0]
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("working\nexit 1\n")
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
+        self.assertTrue(chat.startswith("%s failed: " % lane), chat)
+
+
+class Workspace(Base):
+    def setUp(self):
+        super().setUp()
+        (self.root / ".git").mkdir()
+        self.ctx = dp.Ctx(dp.load_repos(self.root / "hub/repos.tsv", self.root), self.tmp / "dispatch.json", self.tmp / "lanes",
+                          self.senders, self.repos_txt, self.root)
+
+    def prompt(self):
+        return Path(self.host.started[-1][4]).read_text()
+
+    def test_workspace_is_on_the_list_when_the_hub_folder_is_a_checkout(self):
+        self.assertEqual(self.ctx.repos["workspace"][1], self.root)
+        self.assertNotIn("workspace", dp.load_repos(self.root / "hub/repos.tsv", self.tmp / "nowhere"))
+
+    def test_a_workspace_job_starts_in_the_hub_folder(self):
+        self.start("workspace", "scan all git repositories under ~/repos for commits in the last six weeks")
+        name, cwd, engine, model, _ = self.host.started[-1]
+        self.assertEqual(cwd, str(self.root))
+        self.assertEqual(engine, "codex")  # his own repo: the cheaper engine, and Copilot after it when Codex is out
+        text = self.prompt()
+        self.assertIn("every repo of his lives under it", text)
+        self.assertIn("client-repos.txt", text)  # client repos are skipped, not read, whatever the engine
+        self.assertIn("could not complete", text)
+
+    def test_a_single_repo_job_is_unchanged(self):
+        self.start("own-app", "list the files")
+        self.assertEqual(self.host.started[-1][1], str(self.root / "own-app"))
+        self.assertNotIn("workspace folder", self.prompt())
+
+    def test_a_tsv_row_called_workspace_cannot_replace_the_hub_folder(self):
+        tsv = self.root / "hub/repos.tsv"
+        tsv.write_text(tsv.read_text() + "workspace\tgit@github.com:TortoiseWolfe/own-app.git\tmain\t2026-10-10\trepo\tmain\n")
+        (self.root / "workspace" / ".git").mkdir(parents=True)
+        self.assertEqual(dp.load_repos(tsv, self.root)["workspace"][1], self.root)
+
+    def test_the_hub_folder_is_listed_as_a_place_to_start_in(self):
+        kind, line = self.act("start nowhere: x")
+        self.assertIn("workspace", self.host.chats[-1])
+
+
+class Stuck(Base):
+    DIALOG = ("● Running the cleanup.\n"
+              "──────────────────────────────────────────────\n"
+              " Blast Radius holds this command. It would touch:\n"
+              " rm -rf: rm -rf $DIR/build\n"
+              " Run it?\n"
+              "\n"
+              " ❯ 1. 1 - Run it\n"
+              "   2. 2 - Refuse\n"
+              "\n"
+              " Enter to select · ↑/↓ to navigate · Esc to cancel\n")
+
+    def test_the_first_line_of_the_dialog_is_found(self):
+        self.assertEqual(dp.stuck_prompt(self.DIALOG), "Blast Radius holds this command. It would touch:")
+        boxed = "╭──────────────╮\n│ Do you want to proceed? │\n│ ❯ 1. Yes │\n│   2. No │\n╰──────────────╯\n Enter to select\n"
+        self.assertEqual(dp.stuck_prompt(boxed), "Do you want to proceed?")
+        self.assertIsNone(dp.stuck_prompt("● Working…\n✻ Thinking (esc to interrupt)\n"))
+
+    def run_lane(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.host.chats.clear()
+        return lane
+
+    def test_a_lane_at_a_dialog_is_posted_once(self):
+        lane = self.run_lane()
+        self.host.panes[lane] = self.DIALOG
+        (line, chat), = dp.check_stuck(self.ctx, self.host, NOW + 600)
+        self.assertEqual(chat.split(": ", 1)[0], "%s is stuck on" % lane)
+        self.assertIn("Blast Radius holds this command", chat)
+        self.assertEqual(self.host.chats, [chat])
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 900), [])
+        self.assertEqual(len(self.host.chats), 1)
+
+    def test_a_new_dialog_after_the_first_is_news_again(self):
+        lane = self.run_lane()
+        self.host.panes[lane] = self.DIALOG
+        dp.check_stuck(self.ctx, self.host, NOW + 600)
+        self.host.panes[lane] = "● Working…\n"
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 700), [])
+        self.host.panes[lane] = self.DIALOG
+        self.assertEqual(len(dp.check_stuck(self.ctx, self.host, NOW + 800)), 1)
+
+    def test_an_undelivered_note_is_tried_again(self):
+        lane = self.run_lane()
+        self.host.panes[lane] = self.DIALOG
+        ok = self.host.inject
+        self.host.inject = lambda text: False
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 600), [])
+        self.host.inject = ok
+        self.assertEqual(len(dp.check_stuck(self.ctx, self.host, NOW + 700)), 1)
+
+    def test_lanes_without_a_window_or_not_running_or_not_claude_are_not_looked_at(self):
+        lane = self.run_lane()
+        self.host.panes[lane] = self.DIALOG
+        self.host.wins.discard(lane)
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 600), [])
+        self.host.wins.add(lane)
+        state = self.state()
+        state["lanes"][lane]["status"] = "closed"
+        dp.save_state(self.ctx.state_path, state)
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 600), [])
+        state["lanes"][lane]["status"], state["lanes"][lane]["engine"] = "started", "codex"
+        dp.save_state(self.ctx.state_path, state)
+        self.assertEqual(dp.check_stuck(self.ctx, self.host, NOW + 600), [])
+
+    def test_each_pickup_run_checks_for_stuck_lanes(self):
+        lane = self.run_lane()
+        self.host.panes[lane] = self.DIALOG
+        done = pk.run_act([], self.host, self.tmp / "none", self.tmp / "aliases.json", self.inbox, self.wake, self.log, NOW + 600, ctx=self.ctx)
+        self.assertTrue(any("is stuck on" in l for k, l in done), done)
+        self.assertIn("is stuck on", self.log.read_text())
