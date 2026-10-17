@@ -692,7 +692,7 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
     sites = site_models(skp_root)
     aliases = load_aliases(aliases_file, sites)
     done = []
-    reported = dispatch.sweep(ctx, host, now) if ctx is not None else []
+    reported = dispatch.sweep(ctx, host, now) + dispatch.check_stuck(ctx, host, now) if ctx is not None else []
     for line, _chat in reported:
         _append_line(log, line)
         done.append(("dispatch", line))

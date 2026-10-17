@@ -95,6 +95,15 @@ INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
 TAB=$'\t'
 
+# A lane the OpenClaw dispatcher started (AFA_LANE_UNATTENDED=1, or a name starting oc-) has nobody at its window. Its Claude
+# process gets AFA_LANE_UNATTENDED=1 and AFA_LANE_HAND=<its hand-off folder>, which the afa-mods Blast Radius guard reads: such a
+# lane is never asked "Run it?", it is allowed a delete inside its own folder, a worktree or the scratchpad and refused the rest.
+lane_env_prefix() {
+  if [ "${AFA_LANE_UNATTENDED:-}" = 1 ] || [[ "$1" == oc-* ]]; then
+    printf 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=%q ' "$2"
+  fi
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -509,10 +518,11 @@ if [ "$mode" = resume ]; then
   # Reuse the recorded connectors choice; a row from before the column was started with them on.
   if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
   flags="$(claude_lane_flags "$eff" "$conn")"
+  uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
-    cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
+    cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   else
-    cmd="claude --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
+    cmd="${uenv}claude --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   fi
   if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
@@ -618,9 +628,9 @@ elif [ "$headless" = 1 ]; then
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
   cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
 else
-  cmd="claude --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
 fi
 t send-keys -t "$target" "$cmd" Enter
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { bandText, classify, countInbox, hasExitLine, recentLanes, weather } from './lib'
+import { bandText, classify, countInbox, explain, hasExitLine, recentLanes, unattendedRmVerdict, weather } from './lib'
 
 const INBOX = [
   '- [x] 2026-10-03 done thing',
@@ -118,5 +118,21 @@ describe('blast radius classifier', () => {
     expect(classify('rm -rf /home/u/.expo', 0, { home: '/home/u' }).map(h => h.kind)).toEqual(['rm -rf'])
     expect(classify('rm -rf /home/u/app/.expo', 0, { home: '/home/u' })).toEqual([])
     expect(kinds('rm -rf ~/repos/app/.expo')).toEqual([])
+  })
+})
+
+describe('plain words and the unattended verdict', () => {
+  const env = { home: '/home/u', hand: '/home/u/handoff/x' }
+  test('explain names what a held command does and why it is held', () => {
+    const [hold] = classify('rm -rf $DIR/build', 0, { home: '/home/u' })
+    const { what, why } = explain(hold)
+    expect(what).toContain('deletes')
+    expect(why).toContain('$DIR is empty or unset')
+  })
+  test('a full path inside the lane folder is ok, anything else says what to do', () => {
+    expect(unattendedRmVerdict('rm -rf /home/u/handoff/x/repo', env).ok).toBe(true)
+    const no = unattendedRmVerdict('rm -rf /home/u/repos/App', env)
+    expect(no.ok).toBe(false)
+    expect(no.ok === false && no.reason).toContain('Delete only by a full path inside')
   })
 })

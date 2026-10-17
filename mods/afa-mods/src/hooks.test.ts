@@ -18,8 +18,8 @@ const PROPS = {
 
 const NOW = Date.parse('2026-10-12T12:00:00Z')
 
-const setup = (on: any) => {
-  mock.env(on, { HOME })
+const setup = (on: any, vars: Record<string, string> = {}) => {
+  mock.env(on, { HOME, ...vars })
   mock.clock(on, { now: NOW })
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))
   on('session.measure', ($: any, e: any) => ({ changed: e.changed }))
@@ -131,5 +131,109 @@ describe('blast radius', () => {
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /tmp/afa-mods-test' })
     expect(r.deny).toBeUndefined()
     expect(log).toContain('allowed (own scratch) | rm -rf | /tmp/afa-mods-test')
+  })
+  test('interactive: the question says in plain words what it stopped and why', async ($, on) => {
+    setup(on)
+    let asked = ''
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [{ name: 'a' }] }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      asked = JSON.stringify(e)
+      return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+    })
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
+    expect(asked).toContain('Blast Radius stopped a command before it ran')
+    expect(asked).toContain('deletes the named files and folders')
+    expect(asked).toContain('a wrong or empty path deletes far more than meant')
+    expect(r.deny).toContain('Blast Radius')
+  })
+})
+
+// A lane the dispatcher started: lane.sh sets AFA_LANE_UNATTENDED=1 and AFA_LANE_HAND. It has a window (so the
+// session counts as interactive) but nobody at it, so the guard must never ask.
+describe('blast radius, unattended lane', () => {
+  const HAND = `${HOME}/handoff/2026-10-16-oc-x`
+  const lane = async (on: any, command: string) => {
+    setup(on, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: HAND })
+    const seen = { asked: false, log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+      seen.asked = true
+      return { result: { answers: { q: '1 - Run it' } }, text: '1 - Run it' }
+    })
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    return { seen, run: async ($: any) => ($.tool.call({ tool: 'Bash', command }) as Promise<any>) }
+  }
+  for (const [what, command] of [
+    ['its own folder', `rm -rf ${HAND}/repo`],
+    ['a worktree', `rm -rf ${HOME}/repos/.worktrees/Claude_Commandz--topic`],
+    ['a worktree by ~', 'rm -rf ~/repos/.worktrees/Claude_Commandz--topic/build'],
+  ] as const) {
+    test(`allows a delete of ${what} by a full path, without asking`, async ($, on) => {
+      const { seen, run } = await lane(on, command)
+      const r = await run($)
+      expect(r.deny).toBeUndefined()
+      expect(seen.asked).toBe(false)
+      expect(seen.log).toContain('allowed (lane folder) | rm -rf')
+    })
+  }
+  test('refuses a delete through an unset variable, says why, and never asks', async ($, on) => {
+    const { seen, run } = await lane(on, 'rm -rf "$BUILD_DIR"/old')
+    const r = await run($)
+    expect(seen.asked).toBe(false)
+    expect(r.deny).toContain('did not wait')
+    expect(r.deny).toContain('$BUILD_DIR, which may be empty or unset')
+    expect(r.deny).toContain(HAND)
+    expect(seen.log).toContain('denied | rm -rf')
+  })
+  for (const command of [
+    `rm -rf ${HOME}/repos/ScriptHammer`,
+    `rm -rf ${HOME}/repos/.worktrees`,
+    `rm -rf ${HAND}`,
+    `rm -rf ${HAND}/../other/x`,
+    `rm -rf ${HOME}/repos/.worktrees/a/../../ScriptHammer`,
+    'rm -rf build',
+    'rm -rf /tmp',
+    `rm -rf ${HAND}/*`,
+    `rm -rf ${HAND}/repo ${HOME}/other`,
+  ]) {
+    test(`refuses ${command}`, async ($, on) => {
+      const { seen, run } = await lane(on, command)
+      const r = await run($)
+      expect(seen.asked).toBe(false)
+      expect(r.deny).toContain('did not wait')
+      expect(r.deny).toContain('Delete only by a full path inside')
+    })
+  }
+  for (const [command, word] of [
+    ['docker volume prune -f', 'Docker volume'],
+    ['docker compose down -v', 'deletes its volumes'],
+    ['git push --force origin main', 'overwrites the branch'],
+  ] as const) {
+    test(`refuses ${command} with a plain reason`, async ($, on) => {
+      const { seen, run } = await lane(on, command)
+      const r = await run($)
+      expect(seen.asked).toBe(false)
+      expect(r.deny).toContain(word)
+      expect(r.deny).toContain('needs Jonathan to approve it')
+    })
+  }
+  test('a lane that is not flagged is still asked', async ($, on) => {
+    setup(on)
+    let asked = false
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [] }))
+    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+      asked = true
+      return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+    })
+    await $.tool.call({ tool: 'Bash', command: `rm -rf ${HOME}/repos/ScriptHammer` })
+    expect(asked).toBe(true)
   })
 })

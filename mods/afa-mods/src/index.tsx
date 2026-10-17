@@ -5,10 +5,12 @@ import {
   bandText,
   classify,
   countInbox,
+  explain,
   hasExitLine,
   ownScratchTargets,
   recentLanes,
   targetsOf,
+  unattendedRmVerdict,
   weather,
 } from './lib'
 import type { Hold } from './lib'
@@ -193,14 +195,45 @@ export const register: Register = on => {
       await noteScratch()
       return next(e)
     }
+    // A lane the dispatcher started has nobody at its window (lane.sh sets AFA_LANE_UNATTENDED=1): it never waits.
+    // A delete inside its own folder, a worktree or the scratchpad, by a full path, runs; everything else is refused with a reason.
+    if ((await $.env.get('AFA_LANE_UNATTENDED')) === '1') {
+      const hand = (await $.env.get('AFA_LANE_HAND')) ?? undefined
+      const approval = 'Leave it out of this job and say in your report that it needs Jonathan to approve it.'
+      const refusals: string[] = []
+      for (const h of holds) {
+        const verdict =
+          h.kind === 'rm -rf'
+            ? unattendedRmVerdict(h.segment, { home, hand, tmpdir })
+            : { ok: false as const, reason: approval }
+        if (verdict.ok && !h.hard) {
+          await note($, home, 'allowed (lane folder)', h)
+          continue
+        }
+        await note($, home, 'denied', h)
+        const { what, why } = explain(h)
+        refusals.push(
+          `${h.kind} "${h.segment.slice(0, 200)}" ${what}. Held because ${why}. ${verdict.ok ? approval : verdict.reason}`,
+        )
+      }
+      if (refusals.length > 0) {
+        return {
+          deny: `Blast Radius refused this command and did not wait, because nobody is at this lane's window to approve it. ${refusals.join(' ')}`,
+        }
+      }
+      await noteScratch()
+      return next(e)
+    }
+
     const isInteractive = (await $.session.surfaces()).length > 0
 
     if (!isInteractive) {
       const hard = holds.find(h => h.hard)
       if (hard) {
         await note($, home, 'denied', hard)
+        const { what, why } = explain(hard)
         return {
-          deny: `Blast Radius: ${hard.kind} is refused in a non-interactive session (nobody to ask).`,
+          deny: `Blast Radius: ${hard.kind} is refused in a non-interactive session (nobody to ask). It ${what}. Held because ${why}.`,
         }
       }
       for (const h of holds) await note($, home, 'allowed', h)
@@ -209,12 +242,17 @@ export const register: Register = on => {
     }
 
     const lines: string[] = []
-    for (const h of holds) lines.push(await touches($, home, h))
+    const plain: string[] = []
+    for (const h of holds) {
+      lines.push(await touches($, home, h))
+      const { what, why } = explain(h)
+      plain.push(`- ${h.kind} ${what}. Held because ${why}.`)
+    }
     const choice = await $.ui.ask(
-      `Blast Radius holds this command. It would touch:\n${lines.join('\n')}\nRun it?`,
+      `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
       ['1 - Run it', '2 - Refuse'],
     )
-    if (!choice.startsWith('1')) return { deny: 'Blast Radius: refused at the prompt.' }
+    if (!choice.startsWith('1')) return { deny: 'Blast Radius: refused at the prompt. The command did not run.' }
     await noteScratch()
     return next(e)
   }).catch(($, e, next) =>
