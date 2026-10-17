@@ -33,8 +33,9 @@ class Edit(unittest.TestCase):
         self.assertEqual(ag.apply_section(b, NOTLIVE), a)
 
     def test_neither_state_lets_the_model_promise_an_action_it_cannot_take(self):
+        self.assertIn("You have no tools", NOTLIVE)
+        self.assertNotIn("You have no tools", LIVE)
         for sec in (NOTLIVE, LIVE):
-            self.assertIn("You have no tools", sec)
             self.assertNotIn("lane list", sec)
             self.assertNotIn("I will start", sec)
         self.assertNotIn("I've put this on the hub's list", NOTLIVE)
@@ -170,8 +171,9 @@ class Examples(unittest.TestCase):
         import openclaw_pickup as pk
         self.assertEqual(pk.parse_menu("open the model", {"porch": Path("x")}, {}), ("open_model", None))
         self.assertIn("Never ask which one", LIVE)
-        self.assertIn("Never say \"I can't\" about anything on the menu", LIVE)
-        self.assertIn("send it as a start job", LIVE)
+        self.assertIn("Never tell him what you cannot do", LIVE)
+        self.assertIn("Already in hand", LIVE)
+        self.assertIn("reports/", LIVE)
 
 
 class FrontdeskEight(unittest.TestCase):
@@ -238,9 +240,9 @@ class ReplyRules(unittest.TestCase):
     def test_a_question_the_digest_lacks_goes_to_the_hub_and_the_marker_becomes_a_question(self):
         import openclaw_pickup as pk
         rules = ag.REPLY_RULES.read_text()
-        self.assertIn('end the reply with "Sending to the hub: <his question, in one sentence>"', rules)
+        self.assertIn('end the reply with "Sending to the hub: <his message exactly as he typed it, on one line>"', rules)
         self.assertIn("Never guess", rules)
-        self.assertIn("Anything else the status digest does not answer: his question in one sentence.", LIVE)
+        self.assertIn("Anything else the status digest does not answer: his message exactly as he typed it, word for word", LIVE)
         self.assertNotIn("with no marker line", LIVE)
         self.assertNotIn("the card", LIVE)
         # a question is not a menu sentence: the poller sends it on as a question instead of running anything
