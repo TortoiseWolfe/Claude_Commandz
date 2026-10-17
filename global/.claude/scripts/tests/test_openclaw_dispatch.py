@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
+import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 
 NOW = 1_800_000_000
@@ -204,6 +205,13 @@ class ReceptionistQueue(Base):
         }
         dp.save_state(self.ctx.state_path, state)
 
+    def run_open(self):
+        output = io.StringIO()
+        with unittest.mock.patch.object(dp, "Ctx", return_value=self.ctx):
+            with unittest.mock.patch("sys.stdout", output):
+                self.assertEqual(dp.main(["open"]), 0)
+        return output.getvalue()
+
     def test_open_lists_deferred_fallback_and_overdue_pending_oldest_first(self):
         self.record_question("oc-aaaaaaaa", "deferred", NOW - 20 * 60)
         self.record_question("oc-bbbbbbbb", "fallback", NOW - 10 * 60)
@@ -211,10 +219,65 @@ class ReceptionistQueue(Base):
         self.record_question("oc-dddddddd", "pending", NOW - 2 * 60, deadline=NOW + 1)
         self.record_question("oc-eeeeeeee", "fallback-lane", NOW - 25 * 60)
         lines = dp.open_question_lines(self.ctx, NOW)
-        self.assertEqual([line.split(" |", 1)[0] for line in lines],
+        rows = [line for line in lines if not line.startswith("    ")]
+        self.assertEqual([line.split(" |", 1)[0] for line in rows],
                          ["oc-eeeeeeee", "oc-aaaaaaaa", "oc-bbbbbbbb", "oc-cccccccc"])
-        self.assertIn("25 min | fallback-lane", lines[0])
+        self.assertIn("25 min | fallback-lane", rows[0])
         self.assertEqual(dp.open_question_lines(dp.Ctx({}, self.tmp / "empty.json"), NOW), [])
+
+    def test_open_prints_latest_saved_user_message_beneath_unchanged_row(self):
+        ask_id = "oc-fffffff1"
+        self.record_question(ask_id, "deferred", time.time() - 15 * 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [
+                {"who": "Jonathan", "text": "First invented question.", "ts": NOW - 120},
+                {"who": "Receptionist", "text": "Invented acknowledgement.", "ts": NOW - 60},
+                {"who": "Jonathan", "text": "Actually, use the second invented detail.", "ts": NOW},
+            ],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines[0], "oc-fffffff1 | 15 min | deferred | Which sample status is current?")
+        self.assertEqual(lines[1], "    Actually, use the second invented detail.")
+
+    def test_open_prints_every_line_of_a_5000_character_user_message_indented(self):
+        ask_id = "oc-fffffff2"
+        first, second = "A" * 2500, "B" * 2500
+        self.record_question(ask_id, "deferred", NOW - 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [{"who": "Jonathan", "text": first + "\n" + second, "ts": NOW}],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines[1:], ["    " + first, "    " + second])
+        self.assertTrue(all(line.startswith("    ") for line in lines[1:]))
+        self.assertEqual(len("".join(line[4:] for line in lines[1:])), 5000)
+
+    def test_open_reports_missing_saved_message_without_context_or_user_message(self):
+        self.record_question("oc-fffffff3", "deferred", NOW - 120)
+        self.record_question("oc-fffffff4", "deferred", NOW - 60)
+        dp.save_context(self.ctx, "oc-fffffff4", {
+            "his_ts": NOW,
+            "history": [{"who": "Receptionist", "text": "Invented reply.", "ts": NOW}],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines.count("    (no saved message)"), 2)
+
+    def test_digest_uses_only_open_question_rows_from_open_output(self):
+        ask_id = "oc-fffffff5"
+        self.record_question(ask_id, "deferred", NOW - 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [{"who": "Jonathan", "text": "Invented words that belong only in open.", "ts": NOW}],
+        })
+        output = "\n".join(dp.open_question_lines(self.ctx, NOW))
+        sections = hd.build_sections(
+            roadmap_body="", lane_status="", lanes_dir=self.tmp / "lanes", inbox_text="", git_log="", tidy_text="",
+            budget="", now=hd.datetime(2026, 10, 17, 18, 0), open_questions_text=output)
+        self.assertEqual(sections[0], (
+            "Open receptionist questions (1)",
+            ["- oc-fffffff5 | 1 min | deferred | Which sample status is current?"],
+        ))
 
     def test_open_verb_prints_none_for_an_empty_state(self):
         state_path = self.tmp / "cli-state.json"
