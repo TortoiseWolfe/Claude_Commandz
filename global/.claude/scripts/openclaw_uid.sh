@@ -4,6 +4,7 @@
 #   openclaw_uid.sh apply              back up, renumber the gateway user, move the gateway to a system unit, fix
 #                                      the drop folder, read everything back (exit 1 if any check fails)
 #   openclaw_uid.sh verify             the read-back and proofs only, changes nothing
+#   openclaw_uid.sh shim               (re)install only the probe shim below; no restart, no uid change
 #   openclaw_uid.sh rollback [BACKUP]  one command: old unit, old uid, old ownership, old folder mode
 #
 # Why this exists. WSL distros share uid 1000 across /mnt/wsl, and the gateway distro sees the main distro's
@@ -23,6 +24,13 @@
 # Piped through `bash -s`, bash reads this file from stdin line by line, and any program started on the way
 # would swallow what is left of it. So the file holds function definitions and one last line only: main runs
 # after the whole file is read, with stdin pointed at /dev/null.
+#
+# The probe shim. OpenClaw Companion decides whether to hand the gateway token to its web chat by running, as the
+# distro's default user, `systemctl --user show openclaw-gateway -p MainPID --value` and matching that pid
+# against the listener on the port. Once the gateway is a system unit the user manager has no such unit and
+# answers 0, so Companion showed "Web Chat Unavailable". /usr/local/bin/systemctl (root-owned, ahead of
+# /usr/bin in the PATH wsl.exe gives) answers exactly that one query from the system manager and passes every
+# other call straight to the real systemctl, so the unit stays a system unit and nothing else changes.
 #
 # Every default below can be overridden by an OC_* variable. That is how the staged copy is tested on a
 # throwaway user and unit first (tests/test_openclaw_uid_stage.sh); the live run uses the defaults.
@@ -54,6 +62,7 @@ init() {
   LIVE="${OC_LIVE:-1}"                     # 1: also ask the real openclaw CLI; stage runs set 0
   SYSUNIT="/etc/systemd/system/$UNIT.service"
   TMPF="/etc/tmpfiles.d/$UNIT-dropdir.conf"
+  SHIM="${OC_SHIM:-/usr/local/bin/systemctl}"
   [ "$(id -u)" = 0 ] || die "run this as root: wsl.exe -d OpenClawGateway -u root -- bash -s -- MODE < THIS_FILE"
   case "$NEW_UID$NEW_GID$DROP_GID$HUB_UID" in *[!0-9]*|"") die "uid/gid settings must be numbers" ;; esac
   define_py
@@ -141,6 +150,25 @@ kv() { # kv key "total=1 writable=2" -> value
   tr ' ' '\n' <<<"$2" | sed -n "s/^$1=//p"
 }
 
+install_probe_shim() {
+  echo "== probe shim $SHIM"
+  local real=/usr/bin/systemctl tmp="$SHIM.ocuid.tmp"
+  [ -x "$real" ] || die "no $real to pass calls on to"
+  cat > "$tmp" <<SH
+#!/bin/sh
+# written by openclaw_uid.sh (shim mode). Companion's provenance probe asks the user manager for this unit's
+# MainPID; the unit is a system unit, so answer that one query from the system manager. Everything else is
+# passed through to the real systemctl untouched.
+case "\$*" in
+  "--user show $UNIT -p MainPID --value"|"--user show $UNIT.service -p MainPID --value")
+    exec $real show $UNIT.service -p MainPID --value ;;
+esac
+exec $real "\$@"
+SH
+  chown root:root "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$SHIM"
+  echo "installed: $(stat -c '%a %U:%G' "$SHIM")"
+}
+
 main_pid() { systemctl show "$UNIT.service" -p MainPID --value 2>/dev/null; }
 
 wait_listen() { # wait_listen SECONDS
@@ -205,6 +233,12 @@ do_verify() {
   else
     check process.uid 1 "no running main pid"
   fi
+
+  echo "== Companion provenance probe"
+  local shim_pid; shim_pid="$(runuser -u "$OC_USER" -- "$SHIM" --user show "$UNIT" -p MainPID --value 2>/dev/null)"
+  [ -n "$pid" ] && [ "$pid" != 0 ] && [ "$shim_pid" = "$pid" ]; check probe.shim_answers_main_pid $? "shim says '$shim_pid', system manager says '$pid'"
+  [ "$(stat -c '%U %a' "$SHIM" 2>/dev/null)" = "root 755" ]; check probe.shim_root_owned $? "$SHIM"
+  runuser -u "$OC_USER" -- "$SHIM" --version >/dev/null 2>&1; check probe.shim_passes_other_calls $?
 
   echo "== drop folder $DROP_DIR"
   local st; st="$(stat -c '%a %u %g' "$DROP_DIR" 2>&1)"
@@ -372,6 +406,7 @@ PY
   systemctl daemon-reload && systemctl enable "$UNIT.service" 2>&1 | tail -1
   systemctl start "$UNIT.service" 2>&1 | tail -3
   wait_listen 120 && echo "gateway is listening on $PORT" || echo "gateway did not listen on $PORT within 120 s (see: journalctl -u $UNIT)"
+  install_probe_shim
 }
 
 do_apply() {
@@ -400,7 +435,7 @@ do_rollback() {
   . "$bk/meta.env"
   echo "== rollback to $bk (uid $NEW_UID -> $OLD_UID, system unit -> user unit)"
   systemctl disable --now "$UNIT.service" 2>&1 | tail -1
-  rm -f "$SYSUNIT" "$TMPF"; systemctl daemon-reload
+  rm -f "$SYSUNIT" "$TMPF" "$SHIM"; systemctl daemon-reload
   local i; for ((i = 0; i < 30; i++)); do ss -ltn "sport = :$PORT" | grep -q LISTEN || break; sleep 1; done
 
   python3 -I - "$OC_USER" "$OLD_UID" "$OLD_GID" "$NEW_UID" "$NEW_GID" <<'PY' || die "account restore failed; the copies are in $bk"
@@ -450,8 +485,9 @@ main() {
   case "$MODE" in
     apply) do_apply ;;
     verify) do_verify; exit "$fail" ;;
+    shim) install_probe_shim; exit 0 ;;
     rollback) do_rollback "${2:-}" ;;
-    *) echo "usage: openclaw_uid.sh apply|verify|rollback [BACKUP_DIR]"; exit 2 ;;
+    *) echo "usage: openclaw_uid.sh apply|verify|shim|rollback [BACKUP_DIR]"; exit 2 ;;
   esac
 }
 
