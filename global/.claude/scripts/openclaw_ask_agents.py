@@ -27,6 +27,20 @@ NEW_TOP = ("- **Top layer, always:** one or two plain sentences: the straight an
 OLD_EX = ('Example. Top layer: "A Codex lane will write the missing test for the pickup script and report back; you will see it appear in the lane list '
           'in the hub when it is done." Detail layer:')
 NEW_EX = 'Example. Top layer: "I can\'t start this myself yet; ask the hub." Detail layer:'
+# 17 Oct (D5): the receptionist names no engine (Codex is out until 31 Oct; the hub picks) and never says a job started before
+# the [hub] line does. These lines sit outside the hub-ask block, so they are swapped here. The example after NEW_EX is the
+# live state's; NEW_EX itself is the not-live one, which names no engine either.
+ENGINE_LINES = (
+    ("Claude Code on the second tower, NCC-74656; Codex and Copilot lanes; a free review panel.",
+     "Claude Code on the second tower, NCC-74656; a free review panel."),
+    ("- Code in Jonathan's own repos goes to Codex or Copilot lanes.\n",
+     "- Code in Jonathan's own repos, and mechanical edits, go to a hub worker; the hub picks what runs it.\n"),
+    ("- Mechanical edits go to Sonnet or Haiku lanes.\n", ""),
+    ("lane.sh (starts a lane in a tmux window, --engine codex|copilot)", "lane.sh (starts a lane in a tmux window)"),
+    ('Example. Top layer: "That is a small test in your Claude_Commandz repo, and a Codex worker can take it. The hub is starting it now." Detail layer:',
+     'Example. Top layer: "That is a small test in your Claude_Commandz repo; I\'m asking the hub to start a worker on it." Detail layer:'),
+    ("TO: Codex lane\n", "TO: hub worker\n"),
+)
 
 
 def apply_section(text, section):
@@ -36,7 +50,10 @@ def apply_section(text, section):
     else:
         i = text.index("## Card rules")
         text = text[:i] + section + "\n" + text[i:]
-    return text.replace(OLD_TOP, NEW_TOP).replace(OLD_EX, NEW_EX)
+    text = text.replace(OLD_TOP, NEW_TOP).replace(OLD_EX, NEW_EX)
+    for old, new in ENGINE_LINES:
+        text = text.replace(old, new)
+    return text
 
 
 def _wsl(args, stdin=None):
