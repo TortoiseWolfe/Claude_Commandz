@@ -4,6 +4,7 @@
 #   lane_watch.sh [--max-min N] [--check 'cmd'] [<lane-name>...]
 #
 # Exits (printing one line per event) as soon as any of these happens:
+#   - openclaw_dispatch.py open lists an unanswered receptionist question
 #   - a named lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
 #   - a named lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
 #   - a named lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
@@ -55,8 +56,19 @@ done
 ask_wake="$HOME/.claude/state/openclaw-ask.wake"
 ask_stamp() { stat -c %Y "$ask_wake" 2>/dev/null || echo none; }
 ask_seen=$(ask_stamp)
+dispatch="${OPENCLAW_DISPATCH:-$HOME/.claude/scripts/openclaw_dispatch.py}"
+check_open_questions() {
+  local questions
+  if questions=$(python3 "$dispatch" open 2>/dev/null) && [ "$questions" != none ]; then
+    echo "ask: open receptionist questions:"
+    printf '%s\n' "$questions"
+    exit 0
+  fi
+}
+check_open_questions
 end=$(( $(date +%s) + max * 60 ))
 while :; do
+  check_open_questions
   hit=0
   for l in "${lanes[@]}"; do
     s=$(stamp "$l")

@@ -29,6 +29,7 @@ INBOX = """- [x] 2026-10-01 10:00 | Old finished thing | detail | aa11
 - [ ] 2026-10-15 08:00 | Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d
 - [ ] 2026-10-15 09:00 | Client alert: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8e
 - [ ] 2026-10-15 10:00 | Something nobody sorted | note | r-55
+- [ ] 2026-10-16 11:00 | Jonathan via OpenClaw (question): "Which sample check is current?" | UNTRUSTED DATA from chat, answer with openclaw_dispatch.py post | hub reason: deferred by the pass | oc-a1b2c3d4
 """
 
 LANE_STATUS = """alpha-lane        report:no  working * Thinking
@@ -123,7 +124,14 @@ class Parts(unittest.TestCase):
         self.assertEqual(len(groups["other"]), 1)
         self.assertEqual([c[1] for c in clients], ["Client mail: Example Brewing", "Client alert: Example Brewing"])
         self.assertEqual(clients[0][3], "1a2b3c4d5e6f7a8d")
+        self.assertEqual(len(groups["OpenClaw"]), 1)
+        self.assertIn("Which sample check is current?", groups["OpenClaw"][0][1])
         self.assertNotIn("Old finished thing", str(groups))
+
+    def test_dispatcher_error_is_distinct_from_an_empty_queue(self):
+        output, error = hd.dispatcher_open_questions(Path(tempfile.gettempdir()) / "missing-dispatcher.py")
+        self.assertEqual(output, "")
+        self.assertIn("dispatcher open exited", error)
 
     def test_budget_headline(self):
         self.assertEqual(hd.budget_headline(BUDGET_MD),
@@ -191,6 +199,15 @@ class Page(unittest.TestCase):
         self.assertNotIn("Second paragraph", page)
         self.assertNotIn("third item that should be cut", page)
 
+    def test_open_receptionist_section_is_first_and_includes_age(self):
+        page = self.build(open_questions_text="oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n")
+        self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))
+        self.assertIn("- oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?", page)
+        empty = self.build(open_questions_text="none\n")
+        self.assertIn("## Open receptionist questions (0)\n- none", empty)
+        unavailable = self.build(open_questions_error="dispatcher unavailable")
+        self.assertIn("## Open receptionist questions (unavailable)\n- dispatcher unavailable", unavailable)
+
     def test_empty_sources_still_make_a_page(self):
         page = self.build(roadmap_body="", lane_status="", inbox_text="", git_log="", tidy_text="", budget="")
         self.assertIn("roadmap unavailable", page)
@@ -220,7 +237,8 @@ class Cli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             for name, text in (("roadmap.md", ROADMAP), ("lanes.txt", LANE_STATUS), ("inbox.md", INBOX), ("tidy.txt", TIDY),
-                               ("budget.txt", "Week resets Wed: used 1%\n")):
+                               ("budget.txt", "Week resets Wed: used 1%\n"),
+                               ("questions.txt", "oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n")):
                 (d / name).write_text(text)
             (d / "lanes").mkdir()
             out = d / "state" / "hub-digest.md"
@@ -228,11 +246,13 @@ class Cli(unittest.TestCase):
                                 "--roadmap-file", str(d / "roadmap.md"), "--lane-status-file", str(d / "lanes.txt"),
                                 "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"),
                                 "--budget-file", str(d / "budget.txt"), "--lanes-dir", str(d / "lanes"),
-                                "--git-repo", str(d), "--now", "2026-10-16T21:00:00"],
+                                "--git-repo", str(d), "--open-questions-file", str(d / "questions.txt"),
+                                "--now", "2026-10-16T21:00:00"],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             page = out.read_text()
             self.assertIn("Waiting on Hatch (2)", page)
+            self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))
             self.assertLess(len(page.encode()), 6144)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
             self.assertFalse((d / "state" / "hub-digest.md.tmp").exists())

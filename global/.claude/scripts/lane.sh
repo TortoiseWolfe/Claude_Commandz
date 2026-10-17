@@ -112,7 +112,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] --resume <name>
@@ -127,11 +127,11 @@ and lines starting with # are ignored. Both list files must be regular readable 
 Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they also compact in place at 200K tokens.
 Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
---connectors (or a name ending in -mail, or a prompt that mentions Gmail, Calendar or Drive) keeps the connectors.
+--connectors keeps connectors; --no-connectors disables them even when the name or prompt would enable them.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; ask_id=
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -149,7 +149,8 @@ while [ $# -gt 0 ]; do
       ask_id="$2"; shift 2 ;;
     --ask=*) ask_id="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
-    --connectors) connectors_opt=1; shift ;;
+    --connectors) connectors_opt=1; no_connectors=0; shift ;;
+    --no-connectors) no_connectors=1; connectors_opt=0; shift ;;
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
@@ -348,9 +349,11 @@ lane_effort() {  # <model> [recorded]
 }
 
 # Whether a new lane keeps the claude.ai connectors: --connectors, a -mail name, or a prompt that mentions
-# Gmail, Calendar or Drive (or their tool names). Prints on or off.
+# Gmail, Calendar or Drive (or their tool names), unless --no-connectors overrides them. Prints on or off.
 lane_connectors() {  # <name> <prompt-file>
-  if [ "$connectors_opt" = 1 ] || [[ "$1" == *-mail ]] \
+  if [ "$no_connectors" = 1 ]; then
+    echo off
+  elif [ "$connectors_opt" = 1 ] || [[ "$1" == *-mail ]] \
      || grep -qiE '\b(gmail|calendar|drive)\b|get_thread|create_draft|list_drafts' -- "$2" 2>/dev/null; then
     echo on
   else echo off; fi
