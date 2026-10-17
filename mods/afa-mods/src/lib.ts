@@ -276,8 +276,40 @@ export function explain(hold: Hold): { what: string; why: string } {
 export type LaneEnv = { home: string; hand?: string; tmpdir?: string }
 
 // A lane nobody watches (AFA_LANE_UNATTENDED=1, set by lane.sh) may delete only inside: its own hand-off
-// folder (AFA_LANE_HAND), a worktree under ~/repos/.worktrees, or the scratchpad (/tmp, $TMPDIR). The path
-// must be written out in full: no variable, no pattern, no relative path, no `..`.
+// folder (AFA_LANE_HAND) or a worktree under ~/repos/.worktrees. The path must be written out in full: no
+// variable, no pattern, no relative path, no `..`. This check is on the words only; a symlink inside an
+// allowed folder that points elsewhere is caught by realPathVerdict, which index.tsx runs on the resolved paths.
+export function unattendedRoots(env: LaneEnv): string[] {
+  const hand = env.hand ? normalizePath(env.hand) : undefined
+  return [hand, `${normalizePath(env.home)}/repos/.worktrees`].filter((r): r is string => Boolean(r))
+}
+
+// The full paths an rm names, once the words check passed: what index.tsx hands to realpath.
+export function unattendedRmPaths(segment: string, env: LaneEnv): string[] {
+  const home = normalizePath(env.home)
+  return targetsOf(segment)
+    .map(unquote)
+    .map(t => normalizePath(t === '~' || t.startsWith('~/') ? `${home}${t.slice(1)}` : t))
+}
+
+// `real` maps each named path to what realpath says it is; `roots` are the allowed folders, themselves resolved.
+// A path that cannot be resolved (empty) is refused, so a failing realpath never opens the door.
+export function realPathVerdict(
+  real: Array<{ path: string; real: string }>,
+  roots: string[],
+): { ok: true } | { ok: false; reason: string } {
+  for (const r of real) {
+    if (!r.real) return { ok: false, reason: `"${r.path}" could not be resolved to its real location, so the delete is refused` }
+    if (!roots.some(root => r.real !== root && r.real.startsWith(`${root}/`))) {
+      return {
+        ok: false,
+        reason: `"${r.path}" really points to ${r.real} (through a link), which is outside this lane's own folder and its worktree`,
+      }
+    }
+  }
+  return { ok: true }
+}
+
 export function unattendedRmVerdict(segment: string, env: LaneEnv): { ok: true } | { ok: false; reason: string } {
   const targets = targetsOf(segment).map(unquote)
   const hand = env.hand ? normalizePath(env.hand) : undefined
@@ -285,16 +317,13 @@ export function unattendedRmVerdict(segment: string, env: LaneEnv): { ok: true }
   const where = [
     hand ? `this lane's own folder (${hand})` : null,
     `a worktree under ${home}/repos/.worktrees`,
-    'the scratchpad under /tmp',
   ].filter(Boolean).join(', ')
   const refuse = (target: string, why: string) => ({
     ok: false as const,
     reason: `"${target}" ${why}. Delete only by a full path inside ${where}, or leave it and say so in your report.`,
   })
   if (targets.length === 0) return refuse('(nothing named)', 'names no path')
-  const roots = [hand, `${home}/repos/.worktrees`, '/tmp', env.tmpdir ? normalizePath(env.tmpdir) : undefined].filter(
-    (r): r is string => Boolean(r),
-  )
+  const roots = unattendedRoots(env)
   for (const target of targets) {
     if (/[$`*?[\]{}]/.test(target)) {
       const v = /\$\{?([A-Za-z_]\w*)/.exec(target)
