@@ -180,7 +180,8 @@ class Patch(unittest.TestCase):
         c = new["agents"]["defaults"]["compaction"]
         self.assertTrue(c["model"].startswith("google/"))
         self.assertEqual(c["mode"], "safeguard")
-        self.assertLess(L.GEMINI_CAP, L.CONTEXT_WINDOW)  # a compacted chat must fit the local window
+        self.assertEqual(L.GEMINI_CAP, 64000)  # 17 Oct, spec-v2: room for ~38K of chat beside the ~18K setup
+        self.assertLess(L.GEMINI_CAP, L.GEMINI_WINDOW)
 
     def test_no_secret_shaped_value_is_written(self):
         _, new = self.patched()
