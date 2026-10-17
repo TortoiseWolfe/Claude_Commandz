@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -55,7 +56,14 @@ class FakeHost:
         return self.proj
 
     def inject(self, text):
-        self.chats.append(text)
+        try:
+            parts = dp._chat_parts(text)
+        except ValueError:
+            return False
+        self.chats.extend(parts)
+        return True
+
+    def spawn_pass(self, ask_id):
         return True
 
     def refresh_digest(self):
@@ -172,6 +180,36 @@ class ReceptionistQueue(Base):
         ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "Found the result.", NOW)
         self.assertTrue(ok, msg)
         self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
+
+    def test_post_splits_a_long_answer_in_order_and_stores_it_whole(self):
+        ask_id = "oc-ccccccce"
+        answer = " ".join(["word"] * 800)
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "posted answer for " + ask_id)
+        self.assertEqual(len(self.host.chats), 3)
+        self.assertEqual([len(part) <= dp.CHAT_MAX for part in self.host.chats], [True] * 3)
+        self.assertTrue(all(part.endswith("(part %d of 3)" % i) for i, part in enumerate(self.host.chats, 1)))
+        content = "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in self.host.chats)
+        self.assertEqual(content, answer)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
+
+    def test_post_keeps_a_short_answer_unmarked(self):
+        ask_id = "oc-cccccccf"
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "A short complete answer.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.chats, ["A short complete answer."])
+
+    def test_question_echo_keeps_all_300_characters(self):
+        self.ctx.hand_off_first = True
+        question = "Which current sample is correct? " * 9 + "x"
+        self.assertEqual(len(question), 298)
+        question += "yz"
+        self.assertEqual(len(question), 300)
+        _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
+        self.assertEqual(chat, "asked Claude: " + question)
 
     def test_say_injects_outside_the_state_lock(self):
         ask_id = "oc-cccccccd"
@@ -700,14 +738,36 @@ class Sweep(Base):
         self.assertEqual(len(self.host.chats), n)
         self.assertEqual(self.state()["lanes"][lane]["status"], "started")
 
-    def test_a_long_report_is_trimmed_and_control_characters_dropped(self):
+    def test_a_long_report_is_relayed_in_full_parts_and_control_characters_dropped(self):
         self.start("client-app")
         lane = self.lane_names()[0]
-        self.write_report(lane, "x" * 5000 + "\x1b[2J")
+        report = "result " * 375
+        self.write_report(lane, report + "\x1b[2J")
+        before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertLess(len(chat), dp.CHAT_MAX)
-        self.assertIn("(trimmed)", chat)
+        self.assertIn(report, chat)
+        sent = self.host.chats[before:]
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertEqual(
+            "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in sent),
+            chat,
+        )
         self.assertNotIn("\x1b", chat)
+
+    def test_a_report_over_the_part_limit_points_to_its_full_report_path(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        report = "detail " * 12000
+        self.write_report(lane, report)
+        before = len(self.host.chats)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        sent = self.host.chats[before:]
+        self.assertEqual(len(sent), dp.MAX_CHAT_PARTS + 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertTrue(all(part.endswith("(part %d of %d)" % (i, dp.MAX_CHAT_PARTS))
+                            for i, part in enumerate(sent[:dp.MAX_CHAT_PARTS], 1)))
+        self.assertIn(self.state()["lanes"][lane]["report"], sent[-1])
 
     def test_a_codex_lane_that_exits_without_a_report_is_said_to_have_stopped(self):
         self.start("own-app")
@@ -861,6 +921,26 @@ class MainSessionOnly(Base):
         self.assertEqual((len(attempts), sleeps, len(log)), (3, [3, 8], 3))
         self.assertTrue(all("returncode=7" in line for line in log))
 
+    def test_inject_stops_when_part_two_fails_and_logs_its_number(self):
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+
+        def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            attempts.append(json.loads(stdin)["message"])
+            if len(attempts) == 1:
+                return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+            return type("R", (), {"returncode": 7, "stdout": "", "stderr": "gateway unavailable"})()
+
+        host._run = run
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:retry"}):
+            self.assertFalse(host.inject("word " * 1000))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text()
+        self.assertEqual((len(attempts), sleeps), (4, [3, 8]))
+        self.assertIn("part 2 of 3 attempt=1", log)
+        self.assertIn("part 2 of 3 attempt=3", log)
+
     def test_inject_does_not_retry_a_timed_out_call(self):
         host = dp.LaneHost()
         attempts = []
@@ -956,11 +1036,16 @@ class MainSessionOnly(Base):
             with self.assertRaises(SystemExit):
                 dp.state_file()
 
-    def test_the_note_is_cleaned_and_capped(self):
-        (argv, stdin), = self.inject_call("a\x1b[2Jb" + "y" * 5000)
-        msg = json.loads(stdin)["message"]
-        self.assertNotIn("\x1b", msg)
-        self.assertLessEqual(len(msg), dp.CHAT_MAX)
+    def test_the_note_is_cleaned_and_split_without_truncation(self):
+        calls = []
+        host = pk.Host()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: calls.append((argv, stdin)) or type(
+            "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        self.assertTrue(host.inject("a\x1b[2Jb " + "word " * 1000))
+        messages = [json.loads(stdin)["message"] for _argv, stdin in calls]
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(len(message) <= dp.CHAT_MAX for message in messages))
+        self.assertNotIn("\x1b", "".join(messages))
 
     def test_no_code_path_names_another_session_or_creates_one(self):
         for f in ("openclaw_dispatch.py", "openclaw_pickup.py"):

@@ -344,11 +344,11 @@ class Saying(PassBase):
         self.assertFalse(dp.say(self.ctx, self.host, ASK, "hello", NOW)[0])
         self.assertEqual(self.ask()["status"], "pending")
 
-    def test_say_stores_only_the_first_600_answer_characters(self):
+    def test_say_stores_the_full_answer(self):
         self.hand()
         text = "A" * 700
         self.assertTrue(dp.say(self.ctx, self.host, ASK, text, NOW)[0])
-        self.assertEqual(self.ask()["answer"], "A" * 600)
+        self.assertEqual(self.ask()["answer"], text)
 
 
 class Fallback(PassBase):
@@ -916,10 +916,15 @@ class StartForAnAsk(PassBase):
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.chats[-1], "the folder is ready")
 
-    def test_post_refuses_empty_oversized_and_the_dispatch_pass(self):
+    def test_post_splits_long_text_and_refuses_empty_and_the_dispatch_pass(self):
         os.environ.pop("AFA_OC_PASS", None)
         self.assertFalse(dp.post_line(self.host, "   ")[0])
-        self.assertFalse(dp.post_line(self.host, "x" * (dp.CHAT_MAX + 1))[0])
+        text = "x " * 1000
+        ok, msg = dp.post_line(self.host, text)
+        self.assertTrue(ok, msg)
+        self.assertGreater(len(self.host.chats), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in self.host.chats))
+        self.host.chats.clear()
         os.environ["AFA_OC_PASS"] = "1"
         try:
             ok, msg = dp.post_line(self.host, "hello")
