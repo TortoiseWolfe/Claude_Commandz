@@ -231,7 +231,8 @@ class Filter:
             for rx in self.name_res:
                 t = rx.sub("[person]", t)
         t = re.sub(r"\s+", " ", t).strip(" -|")
-        if len(t) < 3 or not re.search(r"[A-Za-z]", t):
+        shown = _HOLD.sub(lambda m: held[int(m.group(1))], t)  # a lane name on its own is a whole, readable piece
+        if len(shown) < 3 or not re.search(r"[A-Za-z]", shown):
             return None
         if not ALLOWED.match(_HOLD.sub("x", t)) or any(r.search(_HOLD.sub("x", t)) for r in RESIDUAL):
             return None
