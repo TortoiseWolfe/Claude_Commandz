@@ -35,7 +35,13 @@ RECEPTIONIST = "receptionist"
 DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
 BASE_URL = "http://127.0.0.1:11434"  # no /v1: that selects OpenAI-compatible mode and loses tool-call parsing
 PROVIDER = "ollama"
-CONTEXT_WINDOW = 16384
+CONTEXT_WINDOW = 32768  # qwen2.5 1.5B native; ~1 GB of KV cache on the 8 GB GPU. 16384 left no room beside the ~10K-token main prompt.
+GEMINI_CAP = 32000  # compaction fires near cap minus its reserve (about 24K), so one compacted chat always fits CONTEXT_WINDOW
+GEMINI_MODELS = ("gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash")
+COMPACTION = {  # 16 Oct: compaction ran on the 1.5B model and failed its own quality guard; the summary now comes from Gemini
+    "mode": "safeguard", "model": "google/gemini-3.5-flash-lite", "keepRecentTokens": 6000,
+    "recentTurnsPreserve": 4, "qualityGuard": {"enabled": True, "maxRetries": 2},
+}
 MAX_TOKENS = 1024
 BOOTSTRAP = ("AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md")
 # What a small local model needs at the very end of its prompt to hold the line: it follows the end of a long prompt best.
@@ -89,7 +95,7 @@ def provider_block(model):
         "models": [{
             "id": model, "name": model, "reasoning": False, "input": ["text"],
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": CONTEXT_WINDOW, "maxTokens": MAX_TOKENS,
+            "contextWindow": CONTEXT_WINDOW, "contextTokens": CONTEXT_WINDOW, "maxTokens": MAX_TOKENS,
             "params": {"keep_alive": "30m", "num_ctx": CONTEXT_WINDOW},  # Ollama defaults to 4096 and the real prompt is ~10K
         }],
     }
@@ -109,12 +115,16 @@ def build_patch(cfg, model, state_dir):
     d_allow = sorted(set(d.get("modelPolicy", {}).get("allow", [])) | {ref})
     r_allow = sorted(set(r.get("modelPolicy", {}).get("allow", [])) | {ref})
     return {
-        "models": {"providers": {PROVIDER: provider_block(model)}},
+        "models": {"providers": {
+            PROVIDER: provider_block(model),
+            "google": {"models": [{"id": g, "name": g, "contextWindow": 200000, "contextTokens": GEMINI_CAP} for g in GEMINI_MODELS]},
+        }},
         "agents": {
             "defaults": {
                 "model": {"primary": d["model"]["primary"], "fallbacks": d_fb},
                 "models": {ref: {}},
                 "modelPolicy": {"allow": d_allow},
+                "compaction": COMPACTION,
             },
             "entries": {
                 RECEPTIONIST: {"model": {"primary": r["model"]["primary"], "fallbacks": r_fb},
@@ -190,7 +200,9 @@ def verify(model, cfg=None, probe_net=True):
     out("main.entry_untouched", set(ents.get("main", {})) <= {"workspace"}, "keys: " + ",".join(sorted(ents.get("main", {}))))
     p = cfg.get("models", {}).get("providers", {}).get(PROVIDER, {})
     out("provider", p.get("baseUrl") == BASE_URL and p.get("api") == "ollama" and any(m.get("id") == model for m in p.get("models", [])))
-    paid = [k for k in cfg.get("models", {}).get("providers", {}) if k not in (PROVIDER,)]
+    provs = cfg.get("models", {}).get("providers", {})
+    # google may carry per-model context caps only: no key, no URL, so nothing new to bill or reach
+    paid = [k for k, v in provs.items() if k != PROVIDER and not (k == "google" and set(v) <= {"models"})]
     out("no_other_provider_added", not paid, ",".join(paid) or "only " + PROVIDER)
     if probe_net:
         good, detail = reachable(model)
