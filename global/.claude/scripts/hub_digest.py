@@ -224,7 +224,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
         sections.append(("Open receptionist questions (unavailable)", [f"- {one_line(open_questions_error, 240)}"]))
     else:
         questions = [one_line(line, 210) for line in (open_questions_text or "").splitlines()
-                     if line.strip() and line.strip() != "none"]
+                     if line.strip() and not line[0].isspace() and line.strip() != "none"]
         sections.append((f"Open receptionist questions ({len(questions)})", [f"- {line}" for line in questions] or ["- none"]))
 
     # Lanes
