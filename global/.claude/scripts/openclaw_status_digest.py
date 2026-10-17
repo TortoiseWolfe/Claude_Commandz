@@ -42,7 +42,13 @@ NOT_NAMES = {"the", "and", "for", "with", "his", "her", "their", "our", "who", "
              "email", "client", "clients", "group", "digital", "everyone", "anyone", "not", "none"}
 # Real first names that are also English words: masked only when capitalised.
 CAPS_ONLY = {"will", "hill", "lee", "rob", "dean", "mark", "grace", "bill", "rich", "sue", "joy", "may", "june",
-             "april", "art", "pat", "ray", "jack", "kiwi", "page", "bay", "rose", "hope", "faith", "summer", "dawn"}
+             "april", "art", "pat", "ray", "jack", "kiwi", "page", "bay", "rose", "hope", "faith", "summer", "dawn",
+             # surnames that are colours, trades and plain words: "CI is green" is not a person
+             "green", "brown", "white", "black", "gray", "grey", "young", "king", "stone", "wood", "woods", "hall", "field", "fields",
+             "cook", "baker", "miller", "fisher", "hunter", "mason", "porter", "carter", "gold", "silver", "west", "east", "north",
+             "south", "long", "short", "little", "small", "strong", "sharp", "swift", "wise", "good", "best", "price", "cross", "bell",
+             "lane", "park", "ford", "brooks", "banks", "church", "cole", "fox", "wolf", "lamb", "bird", "crane", "hawk", "frost",
+             "snow", "rains", "reed", "marsh", "wells", "bush", "clay", "flowers", "shepherd", "knight", "bishop", "parker", "cooper"}
 
 # Names that are the owner or the fleet's own agents, not client people.
 KEEP_NAMES = {"jonathan", "hatch", "muse", "claude", "openclaw", "gemini", "codex", "copilot", "ollama", "turtlewolfe"}
@@ -144,9 +150,11 @@ def load_names(paths):
 
 # Lane names are the receptionist's working vocabulary: oc-<repo>-<8 hex or MMDD-HHMM>, oc-<8 hex> (an ask) and frontdesk-N.
 # They hold digits the number scrubs would eat, so they are swapped for a placeholder around the scrubs and put back after.
+# The repo part is letters, each word with at most two digits after it (hr24, trinam-23), so an id or a phone number cannot ride in it.
 LANE_TOKEN = re.compile(
-    r"\boc-(?:[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*-(?:[0-9a-f]{8}|\d{4}-\d{4})(?:-\d+)?|[0-9a-f]{8})\b|\bfrontdesk-\d{1,2}\b", re.I)
-_HOLD = re.compile("(\\d+)")
+    r"\boc-(?:[a-z]{1,24}\d{0,2}(?:-(?:[a-z]{1,24}\d{0,2}|\d{1,2}))*-(?:[0-9a-f]{8}|\d{4}-\d{4})(?:-\d{1,2})?|[0-9a-f]{8})(?![\w-])"
+    r"|\bfrontdesk-\d{1,2}\b", re.I)
+_HOLD = re.compile("\ue000(\\d+)\ue001")
 
 
 class NameSet(set):
@@ -159,18 +167,22 @@ class Filter:
         self.names = set(names)
         handles = set(getattr(names, "handles", ()))
         self.name_res = []
-        # Whole words, with their capitals: "Green" the person is masked, "green" the colour and "CI" the acronym are not.
-        # A handle also matches as written, in lower case, and so does any name glued into an identifier (fitch-rewrite, a_fitch.skp).
+        # Whole words. A name that is also an ordinary word (CAPS_ONLY: green, will, mark) is masked with its capitals only, so "Green"
+        # the person goes and "green" the colour and "CI" the acronym stay; glued into an identifier (green-roof, a_fitch.skp) it is
+        # masked in any case. Every other name is masked in any case.
         self.token_re = None
         if self.names:  # inside a lane name every word is lower case, so case cannot tell a person from a colour
             alt = "|".join(re.escape(n) for n in sorted(self.names, key=len, reverse=True))
             self.token_re = re.compile(rf"(?<![A-Za-z])(?:{alt})(?![A-Za-z])", re.I)
-        cased = sorted({f(n) for n in self.names for f in (str.capitalize, str.upper)}, key=len, reverse=True)
-        if cased:
-            alt = "|".join(re.escape(n) for n in cased)
-            self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])"))
-        if self.names:
-            alt = "|".join(re.escape(n) for n in sorted(self.names, key=len, reverse=True))
+        plain = [n for n in self.names if n not in CAPS_ONLY]
+        common = [n for n in self.names if n in CAPS_ONLY]
+        if plain:
+            alt = "|".join(re.escape(n) for n in sorted(plain, key=len, reverse=True))
+            self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])", re.I))
+        if common:
+            cased = sorted({f(n) for n in common for f in (str.capitalize, str.upper)}, key=len, reverse=True)
+            self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{'|'.join(re.escape(n) for n in cased)})(?:'s)?(?![A-Za-z])"))
+            alt = "|".join(re.escape(n) for n in sorted(common, key=len, reverse=True))
             self.name_res.append(re.compile(
                 rf"(?:(?<=[A-Za-z0-9][-_.])(?:{alt})(?![A-Za-z])|(?<![A-Za-z])(?:{alt})(?=[-_.][A-Za-z0-9]))", re.I))
         if handles:
@@ -201,8 +213,10 @@ class Filter:
         held = []
 
         def hold(m):
+            if re.search(r"[0-9a-f]{12,}", m.group(0), re.I):  # a long hex id dressed as a lane name is not one
+                return m.group(0)
             held.append(m.group(0))
-            return "%d" % (len(held) - 1)
+            return "\ue000%d\ue001" % (len(held) - 1)
         t = LANE_TOKEN.sub(hold, t)
         t = URL.sub("", t)
         t = EMAIL.sub("[email]", t)

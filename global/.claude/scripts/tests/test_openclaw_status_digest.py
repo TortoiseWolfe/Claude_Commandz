@@ -193,7 +193,7 @@ class FilterUnits(Base):
     def test_names_come_from_the_people_files_and_are_masked(self):
         for w in ("zelda", "quimby", "bartholomew", "fitch", "zquimby", "othmar", "vex"):
             self.assertIn(w, self.names)
-        out = self.flt.clean("Zelda's tap and Bartholomew with Fitch")
+        out = self.flt.clean("Zelda's tap and Bartholomew with fitch")
         self.assertEqual(out, "[person] tap and [person] with [person]")
 
     def test_owner_and_fleet_names_survive_and_english_words_are_not_masked(self):
@@ -207,17 +207,24 @@ class FilterUnits(Base):
         out = self.digest(lane_status="fitch-rewrite       report:yes idle    x\n")
         self.assertNotIn("fitch", out.lower())
 
-    def test_names_match_as_whole_words_with_their_capitals(self):
-        extra = dg.NameSet(self.names | {"green"})
-        flt = dg.Filter(extra)
+    def test_a_name_that_is_also_a_plain_word_matches_with_its_capitals_only(self):
+        flt = dg.Filter(dg.NameSet(self.names | {"green"}))
         for src in ("CI is red on all six", "CI is green on all six", "the green light, then CI turns red"):
             with self.subTest(src=src):
                 self.assertEqual(flt.clean(src), src)
         self.assertEqual(flt.clean("Green asked about the tap"), "[person] asked about the tap")
         self.assertEqual(flt.clean("GREEN asked"), "[person] asked")
-        self.assertEqual(flt.clean("Fitch and Zelda arrive"), "[person] and [person] arrive")
         self.assertEqual(flt.clean("Greenhouse tap"), "Greenhouse tap")  # a name inside a longer word is a different word
-        self.assertEqual(flt.clean("the green-roof lane"), "the [person]-roof lane")  # glued into an identifier it is still masked
+        self.assertEqual(flt.clean("the green-roof lane"), "the [person]-roof lane")  # glued into an identifier it is masked in any case
+
+    def test_any_other_name_is_masked_in_any_case(self):
+        for src in ("Fitch and Zelda arrive", "fitch and zelda arrive", "FITCH and ZELDA arrive"):
+            self.assertEqual(self.flt.clean(src), src.replace("Fitch", "[person]").replace("fitch", "[person]").replace("FITCH", "[person]")
+                             .replace("Zelda", "[person]").replace("zelda", "[person]").replace("ZELDA", "[person]"))
+
+    def test_the_colour_surnames_are_in_the_common_word_list(self):
+        for w in ("green", "brown", "white", "black"):
+            self.assertIn(w, dg.CAPS_ONLY)
 
     def test_a_listed_client_name_is_still_scrubbed_in_the_digest_of_a_status_line(self):
         self.assertEqual(self.flt.clean("CI is green; Quimby wants the keg"), "CI is green; [person] wants the keg")
@@ -236,10 +243,18 @@ class FilterUnits(Base):
     def test_a_bare_long_number_is_still_scrubbed_next_to_a_lane_name(self):
         self.assertEqual(self.flt.clean("40816152 is not oc-workspace-40816152"), "[num] is not oc-workspace-40816152")
         self.assertEqual(self.flt.clean("order 40816152 today"), "order [num] today")
-        self.assertEqual(self.flt.clean("oc-workspace-40816152-and-40816152"), "oc-workspace-40816152-and-[num]")
+        self.assertEqual(self.flt.clean("oc-workspace-40816152 and 40816152"), "oc-workspace-40816152 and [num]")
 
     def test_a_person_inside_a_lane_name_is_still_masked(self):
         self.assertEqual(self.flt.clean("lane oc-fitch-40816152 started"), "lane oc-[person]-40816152 started")
+
+    def test_only_the_real_lane_name_shapes_are_protected(self):
+        for smuggled in ("oc-r12345-12345678", "oc-deadbeefdeadbeef-12345678", "oc-john.smith-12345678", "oc-a-5551234567-12345678",
+                         "oc-workspace-12345678-9876543210", "oc-12345678901", "frontdesk-123456"):
+            with self.subTest(smuggled=smuggled):
+                out = self.flt.clean("saw " + smuggled)
+                self.assertTrue(out is None or not re.search(r"\d{7,}|[0-9a-f]{12,}|r-?\d{5,}", out), out)
+        self.assertEqual(self.flt.clean("oc-hr24-1016-2103 and oc-trinam-23-40816152"), "oc-hr24-1016-2103 and oc-trinam-23-40816152")
 
     def test_the_protected_text_cannot_smuggle_a_forbidden_thing_through(self):
         self.assertEqual(self.flt.clean("oc-workspace-40816152 wrote to a@b.co $5"), "oc-workspace-40816152 wrote to [email] [amount]")
