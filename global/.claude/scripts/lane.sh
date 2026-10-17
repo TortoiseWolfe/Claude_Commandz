@@ -359,15 +359,26 @@ lane_connectors() {  # <name> <prompt-file>
 # Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction at 200K,
 # plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
 # The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
-claude_lane_flags() {  # <effort or empty> <connectors on|off>
-  local json p
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name]
+  local json p s r
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
   json='{"autoCompactWindow":200000'
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
   json+=',"enabledPlugins":{'
   for p in $LANE_PLUGINS_OFF; do json+="\"$p\":false,"; done
-  json="${json%,}}}"
+  json="${json%,}}"
+  # An unattended lane has nobody to approve a prompt and auto mode drops the broad python3 rule, so the one roadmap post it may
+  # make gets its own narrow rule, in each way the session-prime skill writes the path. Nothing else is added.
+  if [ "${AFA_LANE_UNATTENDED:-}" = 1 ] || [[ "${3:-}" == oc-* ]]; then
+    json+=',"permissions":{"allow":['
+    for s in '~' "$HOME" '$HOME'; do
+      r="Bash(python3 $s/.claude/scripts/session_prime_facts.py --post:*)"
+      json+="\"$r\","
+    done
+    json="${json%,}]}"
+  fi
+  json+='}'
   printf -- '--settings %q' "$json"
   [ -z "$LANE_TOOLS_OFF" ] || printf -- ' --disallowedTools %q' "$LANE_TOOLS_OFF"
   [ -f "$LANE_RULES" ] && printf -- ' --append-system-prompt-file %q' "$LANE_RULES"
@@ -529,7 +540,7 @@ if [ "$mode" = resume ]; then
   eff="$(lane_effort "$m" "${eff:-}")"
   # Reuse the recorded connectors choice; a row from before the column was started with them on.
   if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
-  flags="$(claude_lane_flags "$eff" "$conn")"
+  flags="$(claude_lane_flags "$eff" "$conn" "$name")"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
@@ -612,7 +623,7 @@ target="$SESSION:$name"
 eff="-"; flags=""; conn="-"
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn")"; eff="${eff:--}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"

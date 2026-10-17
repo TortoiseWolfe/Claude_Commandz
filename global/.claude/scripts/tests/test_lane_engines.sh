@@ -354,6 +354,36 @@ AFA_LANE_UNATTENDED=1 run_lane env-flagged-lane "$REPO" sonnet "$PROMPT"
 assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'the env flag alone also marks a lane unattended'
 run_lane hub-lane "$REPO" sonnet "$PROMPT"
 assert_not_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED' 'a hub lane is not marked unattended'
+# An unattended lane may make one roadmap post, and its settings carry a narrow rule for exactly that; a hub lane's do not.
+# bash printf %q escapes the characters of the JSON, so the settings are compared after the escapes are dropped.
+plain() { printf '%s' "$1" | tr -d '\\'; }
+run_lane oc-rules-1016-0001 "$REPO" sonnet "$PROMPT"
+RULES="$(plain "$LAST_COMMAND")"
+assert_contains "$RULES" '"permissions":{"allow":[' 'an oc- lane carries an allow list'
+assert_contains "$RULES" 'Bash(python3 ~/.claude/scripts/session_prime_facts.py --post:*)' 'the tilde form of the roadmap post is allowed'
+assert_contains "$RULES" "Bash(python3 $HOME_TEST/.claude/scripts/session_prime_facts.py --post:*)" 'the absolute form of the roadmap post is allowed'
+assert_contains "$RULES" 'Bash(python3 $HOME/.claude/scripts/session_prime_facts.py --post:*)' 'the $HOME form of the roadmap post is allowed'
+assert_not_contains "$RULES" 'Bash(python3:*)' 'no broad python3 rule is added'
+printf '%s' "$LAST_COMMAND" | python3 -c '
+import json, re, shlex, sys
+words = shlex.split(sys.stdin.read())
+s = json.loads(words[words.index("--settings") + 1])
+allow = s["permissions"]["allow"]
+assert len(allow) == 3 and all(a.startswith("Bash(python3 ") and a.endswith("session_prime_facts.py --post:*)") for a in allow), allow
+assert s["autoCompactWindow"] == 200000
+' || fail 'the unattended settings are valid JSON with exactly the three roadmap rules'
+checks=$((checks + 1))
+AFA_LANE_UNATTENDED=1 run_lane env-rules "$REPO" sonnet "$PROMPT"
+assert_contains "$(plain "$LAST_COMMAND")" 'session_prime_facts.py --post:*' 'the env flag alone also adds the rule'
+run_lane hub-rules "$REPO" sonnet "$PROMPT"
+assert_not_contains "$(plain "$LAST_COMMAND")" 'session_prime_facts' 'a hub lane gets no roadmap rule'
+assert_not_contains "$(plain "$LAST_COMMAND")" '"permissions"' 'a hub lane gets no permissions block'
+printf '%s' "$LAST_COMMAND" | python3 -c '
+import json, shlex, sys
+words = shlex.split(sys.stdin.read())
+json.loads(words[words.index("--settings") + 1])
+' || fail 'the hub lane settings are still valid JSON'
+checks=$((checks + 1))
 printf '%s\toc-resume-check\t%s\tsonnet\tsubscription\t%s\t%s\tsession-9\t-\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/oc-resume-report.md" >>"$INDEX"
 run_lane --dry-run --resume oc-resume-check
 assert_contains "$LAST_OUTPUT" 'AFA_LANE_UNATTENDED=1' 'a resumed dispatcher lane stays unattended'

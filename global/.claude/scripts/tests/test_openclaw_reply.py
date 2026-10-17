@@ -3,7 +3,7 @@ line "Sending to the hub: <menu sentence>", the poller runs that sentence at onc
 open-model / status paths as a typed one. The guards live here, not in his typing:
   - the reply must be found by his message's time and text (never "the newest message"), so typing again before the poll changes nothing;
   - it must come right after his message and be model-written (never after a [hub] line, a lane report or an openclaw-provider line);
-  - exactly one marker, on the last line; the sentence must be on the menu; "stop" is his word only;
+  - exactly one marker, on the last line; the sentence must be on the menu (a plain "stop" and "lanes" included);
   - repo table, budget caps and client routing are the dispatcher's, and every start is announced with "Say stop to cancel."
 The PC and OpenClaw are fakes: no session is ever touched."""
 
@@ -169,8 +169,8 @@ class Menu(Reply):
         self.assertIn("use the second one", self.host.sent[0][1])
         done = self.go(self.flow("Sending to the hub: close %s" % lane), now=NOW + 5)
         self.assertIn("close %s" % lane, [l for k, l in done if l][-1])
-        self.assertIn("held: no report yet", [l for k, l in done if l][-1])  # a lane with no report is not closed under a worker
-        self.assertEqual(self.host.killed, [])
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")  # he named a running lane and said close: that stops it
+        self.assertIn("Stopped %s" % lane, self.host.chats[-1])
 
     def test_open_the_newest_model_goes_through_the_marker(self):
         sites = {"porch": self.tmp / "porch.skp"}
@@ -231,11 +231,19 @@ class Menu(Reply):
             self.assertEqual((self.host.started, self.host.sent, self.host.killed), ([], [], []), p)
             self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"), p)
 
-    def test_stop_is_his_word_only_a_marker_cannot_stop_a_lane(self):
+    def test_a_plain_stop_marker_stops_the_newest_lane_when_he_asked_in_other_words(self):
+        # 16 Oct 22:28: he asked to stop the roadmap job in a sentence, so the typed "stop" form never fired and the marker was refused
         self.start("client-app")
+        lane = self.lane_names()[0]
         self.go(self.flow("Sending to the hub: stop"))
-        self.assertEqual(self.host.killed, [])
-        self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"))
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertIn("Stopped %s" % lane, self.host.chats[-1])
+
+    def test_a_stop_marker_is_still_only_a_direct_reply_to_his_message(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.go([him(), hub("Started oc-x in own-app on Codex."), msg("assistant", "Sure.\n\nSending to the hub: stop", ASK_TS + 6)])
+        self.assertEqual(self.state()["lanes"][lane]["status"], "started")
 
 
 class DoesNotAct(Reply):
