@@ -1267,7 +1267,7 @@ class Questions(PassBase):
         old = os.environ.get("AFA_OC_PASS")
         self.addCleanup(lambda: os.environ.pop("AFA_OC_PASS", None) if old is None else os.environ.__setitem__("AFA_OC_PASS", old))
         os.environ["AFA_OC_PASS"] = ASK
-        for verb in ("say", "defer", "claim", "approve", "start"):
+        for verb in ("say", "defer", "claim", "approve", "start", "promote"):
             self.assertIn("may only act on its own ask", dp.foreign_ask([verb, "oc-0000beef", "x"]), verb)
             self.assertIn("may only act on its own ask", dp.foreign_ask([verb]), verb)
             self.assertIsNone(dp.foreign_ask([verb, ASK, "x"]), verb)
@@ -1282,7 +1282,7 @@ class Questions(PassBase):
         host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(argv=argv) or type("R", (), {"returncode": 0, "stdout": "{}"})()
         host.claude_pass("hello", self.tmp, 10, verbs=dp.QUESTION_VERBS)
         allow = seen["argv"][seen["argv"].index("--allowedTools") + 1].split(",")
-        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow], ["facts:*)", "say:*)", "defer:*)"])
+        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow], ["facts:*)", "say:*)", "defer:*)", "promote:*)"])
         self.assertFalse(any(" start" in a or " prompt" in a or " approve" in a or " post" in a for a in allow))
 
     def test_the_question_pass_alone_is_given_the_mail_search_and_nothing_else_from_gmail(self):
@@ -1301,8 +1301,8 @@ class Questions(PassBase):
         host.claude_pass("hello", self.tmp, 10, verbs=dp.QUESTION_VERBS, ask=ASK, mcp_tools=dp.QUESTION_MAIL_TOOLS)
         argv = seen["argv"]
         allow = argv[argv.index("--allowedTools") + 1].split(",")
-        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow[:3]], ["facts:*)", "say:*)", "defer:*)"])
-        self.assertEqual(allow[3:], ["mcp__claude_ai_Gmail__search_threads", "ToolSearch"])
+        self.assertEqual([a.rsplit(" ", 1)[1] for a in allow[:4]], ["facts:*)", "say:*)", "defer:*)", "promote:*)"])
+        self.assertEqual(allow[4:], ["mcp__claude_ai_Gmail__search_threads", "ToolSearch"])
         self.assertEqual([a for a in allow if "mcp__" in a], ["mcp__claude_ai_Gmail__search_threads"])
         self.assertEqual(argv[argv.index("--tools") + 1], "Bash,ToolSearch")
         self.assertFalse(json.loads(argv[argv.index("--settings") + 1])["disableClaudeAiConnectors"])
@@ -1431,6 +1431,203 @@ class Questions(PassBase):
         self.assertIn("UNTRUSTED DATA", line)
         self.assertTrue(line.endswith(" | " + ASK))
         self.assertEqual(len(line.splitlines()), 1)
+
+
+class Diagnose(PassBase):
+    """frontdesk-11 (17 Oct): "triage why X" is a check he asked for, so his asking is the go. The receptionist files a start; if it
+    arrives as a question anyway, the question pass promotes it to a job (the normal start path, still guarded) and may not answer
+    "needs your go". The pass's mail search is capped."""
+    T = "triage why the checkout charged the customer twice, and report back before any action"
+
+    def asked(self, q=T, ask=ASK, now=NOW):
+        return dp.ask_question(self.ctx, self.host, ask, q, now, {"history": [{"who": "Jonathan", "text": "look into it"}]})
+
+    def promote(self, repo="own-app", ask=ASK, now=NOW + 5):
+        return dp.promote(self.ctx, self.host, ask, repo, now)
+
+    def test_a_triage_question_becomes_a_job_ask_and_starts_no_lane_itself(self):
+        self.asked()
+        ok, msg = self.promote()
+        self.assertTrue(ok, msg)
+        job = dp.ask_id_for("job" + ASK)
+        asks = dp.asks_of(self.state())
+        self.assertEqual((asks[ASK]["status"], asks[ASK]["promoted_to"]), ("promoted", job))
+        self.assertEqual((asks[job]["status"], asks[job]["repo"], asks[job]["task"]), ("pending", "own-app", self.T))  # his words, unchanged
+        self.assertNotEqual(asks[job].get("kind"), "question")
+        self.assertEqual(self.host.spawned, [ASK, job])  # a fresh dispatch pass for the job; the question's own pass ends
+        self.assertEqual(self.host.started, [])
+        self.assertEqual(self.state()["lanes"], {})
+        self.assertTrue(self.host.chats[-1].startswith("handed to Claude: triage why"), self.host.chats)
+
+    def test_the_question_passes_own_run_ends_promoted_not_answered_and_the_fallback_leaves_it_alone(self):
+        self.asked()
+        self.host.behave = lambda prompt, hand: self.promote()
+        self.assertEqual(dp.run_pass(self.ctx, self.host, ASK, NOW), 0)
+        self.assertEqual(self.ask()["status"], "promoted")
+        self.assertEqual(dp.fallback_due(self.ctx, self.host, NOW + 10), [])  # a promoted question is not the fallback's to put on the list
+        self.assertEqual(self.host.started, [])
+        self.assertFalse(dp.say(self.ctx, self.host, ASK, "late answer", NOW + 9)[0])
+        self.assertFalse(dp.defer(self.ctx, self.host, ASK, "late", NOW + 9)[0])
+
+    def test_promote_refuses_a_repo_not_on_the_table_and_the_question_stays_open(self):
+        self.asked()
+        for word in ("nowhere", "../x", "own app; rm", ""):
+            self.assertFalse(self.promote(word)[0], word)
+        self.assertEqual(self.ask()["status"], "pending")
+        self.assertEqual(self.host.spawned, [ASK])
+        self.assertTrue(dp.say(self.ctx, self.host, ASK, "Counted: none filed.", NOW + 6)[0])
+
+    def test_promote_works_on_a_question_only_once_and_never_on_a_lane_ask(self):
+        self.asked()
+        self.assertTrue(self.promote()[0])
+        self.assertFalse(self.promote()[0])
+        self.hand(ask="oc-6000000a", task="a lane job")
+        self.assertFalse(dp.promote(self.ctx, self.host, "oc-6000000a", "own-app", NOW)[0])
+        self.assertFalse(dp.promote(self.ctx, self.host, "../x", "own-app", NOW)[0])
+        self.assertEqual(self.host.started, [])
+
+    def test_a_promote_held_by_the_lane_cap_leaves_the_question_to_answer(self):
+        for i in range(dp.MAX_RUNNING):
+            self.hand(task="job %d" % i, ask="oc-0000000%d" % i)
+        self.asked()
+        ok, msg = self.promote()
+        self.assertFalse(ok)
+        self.assertIn("safety cap", msg)
+        self.assertEqual(self.ask()["status"], "pending")
+        self.assertNotIn("promoted_to", self.ask())
+        self.assertNotIn(dp.ask_id_for("job" + ASK), dp.asks_of(self.state()))
+        self.assertTrue(dp.say(self.ctx, self.host, ASK, "Held: three lanes are running; try again soon.", NOW + 6)[0])
+
+    def test_a_promote_of_a_task_already_running_is_refused(self):
+        self.hand(task=self.T, ask="oc-6000000b")
+        self.asked(ask="oc-6000000c")
+        ok, msg = dp.promote(self.ctx, self.host, "oc-6000000c", "own-app", NOW + 5)
+        self.assertFalse(ok)
+        self.assertIn("already running", msg)
+        self.assertEqual(dp.asks_of(self.state())["oc-6000000c"]["status"], "pending")
+
+    def test_a_promoted_client_job_still_runs_only_on_claude_through_start(self):
+        self.asked()
+        self.assertTrue(self.promote("client-app")[0])
+        job = dp.ask_id_for("job" + ASK)
+        self.assertEqual(dp.asks_of(self.state())[job]["repo"], "client-app")
+        self.assertTrue(dp.write_prompt(self.ctx, "oc-x", "x", NOW)[0])
+        prompt = self.ctx.lanes_dir / ("%s-oc-x" % time.strftime("%F", time.localtime(NOW))) / "prompt.md"
+        ok, msg = dp.start_for_ask(self.ctx, self.host, job, "oc-x", self.root / "client-app", "sonnet", prompt, engine="copilot", now=NOW)
+        self.assertFalse(ok)
+        self.assertIn("runs on Claude only", msg)
+        self.assertEqual(self.host.started, [])
+
+    def test_the_question_pass_can_run_promote_and_only_on_its_own_ask(self):
+        self.assertIn("promote", dp.QUESTION_VERBS)
+        self.assertNotIn("promote", dp.PASS_VERBS)  # the dispatch pass never needs it
+        old = os.environ.get("AFA_OC_PASS")
+        self.addCleanup(lambda: os.environ.pop("AFA_OC_PASS", None) if old is None else os.environ.__setitem__("AFA_OC_PASS", old))
+        os.environ["AFA_OC_PASS"] = ASK
+        self.assertIsNone(dp.foreign_ask(["promote", ASK, "own-app"]))
+        self.assertIn("may only act on its own ask", dp.foreign_ask(["promote", "oc-0000beef", "own-app"]))
+        self.assertEqual(dp.main(["promote", "oc-0000beef", "own-app"]), 1)
+
+    def test_say_refuses_needs_your_go_for_a_read_only_check_he_asked_for(self):
+        self.asked()
+        for bad in ("Checking Stripe and the app database is the next step and needs your go.",
+                    "Looking at live billing records is your call.",
+                    "I am waiting for your approval before looking at the records.",
+                    "Once you say so I can look at the logs."):
+            ok, msg = dp.say(self.ctx, self.host, ASK, bad, NOW + 3)
+            self.assertFalse(ok, bad)
+            self.assertIn("promote", msg)
+        self.assertEqual((self.host.chats, self.ask()["status"]), ([], "pending"))
+        self.assertTrue(dp.say(self.ctx, self.host, ASK, "No open issue covers it; nothing in mail since Thursday.", NOW + 4)[0])
+
+    def test_say_still_lets_a_merge_or_a_plain_question_say_it_is_his_call(self):
+        self.asked("check whether the open pull request is ready to merge", ask="oc-7000000a")
+        self.assertTrue(dp.say(self.ctx, self.host, "oc-7000000a", "It looks ready; merging is your call, and the window is Sunday afternoon.", NOW + 3)[0])
+        self.asked("how many open issues does own-app have?", ask="oc-7000000b", now=NOW + 1)
+        self.assertTrue(dp.say(self.ctx, self.host, "oc-7000000b", "Seven. Closing them is your call.", NOW + 4)[0])
+
+    def test_the_prompt_offers_promote_and_forbids_a_needs_your_go_answer(self):
+        self.asked()
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        prompt = self.host.prompts[0][0]
+        for want in ("promote %s <repo>" % ASK, "A check he asked for", "is a JOB, not a question", "that is the go",
+                     "Reading live records (Stripe, a database, logs, mail) to diagnose is not a production change",
+                     "Only a write, a refund, a deploy, a merge or a message to another person needs his go",
+                     'never answer that it "needs his go"'):
+            self.assertIn(want, prompt)
+        self.assertNotIn("openclaw_dispatch.py start ", prompt)  # promote is its only way to a job
+
+    def test_the_prompt_states_the_mail_search_cap(self):
+        self.asked("did anyone write about the thing?")
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        for want in ("metadata for five threads at most", "ONE thread (view THREAD_VIEW_MINIMAL, pageSize 1", "a fourth search is refused"):
+            self.assertIn(want, self.host.prompts[0][0])
+
+    def test_the_first_mail_search_is_metadata_and_five_threads_whatever_it_asked_for(self):
+        for asked in ({"query": "in:sent x"}, {"query": "x", "pageSize": 50}, {"query": "x", "view": "THREAD_VIEW_MINIMAL", "pageSize": 20},
+                      {"query": "x", "view": "THREAD_VIEW_METADATA_ONLY", "pageSize": 3 + 40}):
+            ok, inp = dp.clamp_mail(asked, 0)
+            self.assertTrue(ok)
+            self.assertEqual((inp["view"], inp["pageSize"], inp["query"]), (dp.MAIL_METADATA, dp.MAIL_PAGE, asked["query"]))
+        ok, inp = dp.clamp_mail({"query": "x", "pageToken": "abc", "includeTrash": True}, 0)
+        self.assertNotIn("pageToken", inp)
+        self.assertFalse(inp["includeTrash"])
+
+    def test_a_later_search_may_read_one_thread_and_the_fourth_is_refused(self):
+        ok, inp = dp.clamp_mail({"query": "subject:x", "pageSize": 30}, 1)
+        self.assertEqual((ok, inp["view"], inp["pageSize"]), (True, dp.MAIL_MINIMAL, 1))
+        ok, inp = dp.clamp_mail({"query": "subject:x", "view": "THREAD_VIEW_METADATA_ONLY", "pageSize": 30}, 2)
+        self.assertEqual((ok, inp["view"], inp["pageSize"]), (True, dp.MAIL_METADATA, dp.MAIL_PAGE))
+        ok, why = dp.clamp_mail({"query": "x"}, dp.MAIL_CALLS)
+        self.assertFalse(ok)
+        self.assertIn("this pass may make %d" % dp.MAIL_CALLS, why)
+        for junk in (None, "x", 5, []):
+            self.assertTrue(dp.clamp_mail(junk, 0)[0])
+
+    def test_the_mail_hook_counts_calls_in_the_passes_own_folder_and_answers_in_hook_json(self):
+        counter = self.tmp / "mail-calls"
+        counter.write_text("0")
+        outs = [dp.mailhook(json.dumps({"tool_name": "x", "tool_input": {"query": "q", "pageSize": 50}}), counter)["hookSpecificOutput"]
+                for _ in range(dp.MAIL_CALLS + 1)]
+        self.assertEqual([o["permissionDecision"] for o in outs], ["allow"] * dp.MAIL_CALLS + ["deny"])
+        self.assertEqual(outs[0]["updatedInput"]["pageSize"], dp.MAIL_PAGE)
+        self.assertEqual(outs[1]["updatedInput"]["view"], dp.MAIL_MINIMAL)
+        self.assertEqual(outs[1]["updatedInput"]["pageSize"], 1)
+        self.assertIn("permissionDecisionReason", outs[-1])
+        self.assertTrue(all(o["hookEventName"] == "PreToolUse" for o in outs))
+        self.assertEqual(counter.read_text(), str(dp.MAIL_CALLS + 1))
+        junk = dp.mailhook("not json", self.tmp / "other-calls")["hookSpecificOutput"]  # a garbled hook call still gets a clamped search
+        self.assertEqual(junk["permissionDecision"], "allow")
+
+    def test_the_real_question_call_writes_the_mail_clamp_into_its_own_folder_only(self):
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: type("R", (), {"returncode": 0, "stdout": "{}"})()
+        mine, other = Path(tempfile.mkdtemp(dir=self.tmp)), Path(tempfile.mkdtemp(dir=self.tmp))
+        host.claude_pass("hello", mine, 10, verbs=dp.QUESTION_VERBS, ask=ASK, mcp_tools=dp.QUESTION_MAIL_TOOLS)
+        conf = json.loads((mine / ".claude" / "settings.json").read_text())
+        (entry,) = conf["hooks"]["PreToolUse"]
+        self.assertEqual(entry["matcher"], "mcp__claude_ai_Gmail__search_threads")
+        self.assertTrue(entry["hooks"][0]["command"].endswith("openclaw_dispatch.py mailhook"))
+        self.assertEqual((mine / "mail-calls").read_text(), "0")
+        host.claude_pass("hello", other, 10)  # the dispatch pass has no mail and no clamp
+        self.assertFalse((other / ".claude").exists())
+
+    def test_the_mailhook_verb_reads_the_hook_call_from_stdin(self):
+        old = {k: os.environ.get(k) for k in ("AFA_LANE_HAND",)}
+        self.addCleanup(lambda: os.environ.pop("AFA_LANE_HAND", None) if old["AFA_LANE_HAND"] is None else os.environ.__setitem__("AFA_LANE_HAND", old["AFA_LANE_HAND"]))
+        os.environ["AFA_LANE_HAND"] = str(self.tmp)
+        (self.tmp / "mail-calls").write_text("0")
+        import io
+        from contextlib import redirect_stdout
+        sys_stdin, sys.stdin = sys.stdin, io.StringIO(json.dumps({"tool_input": {"query": "q", "pageSize": 50}}))
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = dp.main(["mailhook"])
+        finally:
+            sys.stdin = sys_stdin
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["updatedInput"]["pageSize"], dp.MAIL_PAGE)
 
 
 class Facts(PassBase):
