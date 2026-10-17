@@ -516,6 +516,30 @@ class MainSessionOnly(Base):
         self.assertEqual(host.start_lane("oc-x", "/tmp", "claude", "sonnet", "/tmp/p"), (True, "started"))
         self.assertEqual(seen["env"]["AFA_LANE_UNATTENDED"], "1")
 
+    def test_inject_works_when_the_poll_starts_in_a_folder_that_does_not_exist(self):
+        """Task Scheduler starts the poll in "/WINDOWS/system32", which WSL does not have. The real wsl.exe exits 1 with no
+        output from such a folder, so the answer to a typed "lanes" never reached the chat. A fake wsl.exe does the same."""
+        import subprocess
+        import textwrap
+        d = Path(tempfile.mkdtemp())
+        (d / "bin").mkdir()
+        fake = d / "bin" / "wsl.exe"
+        fake.write_text("#!/usr/bin/env bash\npwd -P >/dev/null 2>&1 || exit 1\ncat >/dev/null\necho '{\"ok\": true}'\n")
+        fake.chmod(0o755)
+        gone = d / "gone"
+        gone.mkdir()
+        driver = textwrap.dedent("""
+            import os, sys
+            sys.path.insert(0, %r)
+            import openclaw_dispatch as dp
+            os.chdir(%r)
+            os.rmdir(%r)
+            print(dp.LaneHost().inject("hello"))
+        """) % (str(Path(dp.__file__).parent), str(gone), str(gone))
+        r = subprocess.run([sys.executable, "-c", driver], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, PATH=str(d / "bin") + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(r.stdout.strip(), "True", r.stdout + r.stderr)
+
     def test_inject_posts_to_agent_main_main_and_takes_no_session_argument(self):
         self.assertEqual(list(inspect.signature(dp.LaneHost.inject).parameters), ["self", "text"])
         (argv, stdin), = self.inject_call()
