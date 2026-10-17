@@ -9,8 +9,11 @@ import {
   hasExitLine,
   ownScratchTargets,
   recentLanes,
+  realPathVerdict,
   targetsOf,
+  unattendedRmPaths,
   unattendedRmVerdict,
+  unattendedRoots,
   weather,
 } from './lib'
 import type { Hold } from './lib'
@@ -202,10 +205,21 @@ export const register: Register = on => {
       const approval = 'Leave it out of this job and say in your report that it needs Jonathan to approve it.'
       const refusals: string[] = []
       for (const h of holds) {
-        const verdict =
+        let verdict: { ok: true } | { ok: false; reason: string } =
           h.kind === 'rm -rf'
             ? unattendedRmVerdict(h.segment, { home, hand, tmpdir })
             : { ok: false as const, reason: approval }
+        if (verdict.ok && h.kind === 'rm -rf') {
+          // The words are inside the lane's folder; now make sure no link on the way leads out of it.
+          const laneEnv = { home, hand, tmpdir }
+          const resolve = async (path: string) => (await run($, ['realpath', '-m', '--', path])).trim()
+          const roots = await Promise.all(unattendedRoots(laneEnv).map(resolve))
+          const paths = unattendedRmPaths(h.segment, laneEnv)
+          verdict = realPathVerdict(
+            await Promise.all(paths.map(async path => ({ path, real: await resolve(path) }))),
+            roots.filter(Boolean),
+          )
+        }
         if (verdict.ok && !h.hard) {
           await note($, home, 'allowed (lane folder)', h)
           continue

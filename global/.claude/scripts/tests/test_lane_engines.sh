@@ -358,4 +358,30 @@ printf '%s\toc-resume-check\t%s\tsonnet\tsubscription\t%s\t%s\tsession-9\t-\n' "
 run_lane --dry-run --resume oc-resume-check
 assert_contains "$LAST_OUTPUT" 'AFA_LANE_UNATTENDED=1' 'a resumed dispatcher lane stays unattended'
 
+# --ask <id>: after the window starts, the lane is claimed under its OpenClaw ask. A failed claim warns and keeps the lane.
+cat >"$TMP/fake_dispatch.py" <<'STUB'
+import os, sys
+open(os.path.join(os.path.dirname(sys.argv[0]), "claim-log"), "a").write(" ".join(sys.argv[1:]) + "\n")
+sys.exit(int(os.environ.get("FAKE_CLAIM_EXIT", "0")))
+STUB
+export AFA_OPENCLAW_DISPATCH="$TMP/fake_dispatch.py"
+run_lane hub-lane-2 "$REPO" sonnet "$PROMPT"
+[ ! -e "$TMP/claim-log" ] || fail 'a lane without --ask must not claim anything'
+checks=$((checks + 1))
+run_lane --ask oc-1a2b3c4d ask-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'a lane with --ask starts'
+assert_contains "$(cat "$TMP/claim-log")" 'claim oc-1a2b3c4d ask-lane' '--ask claims the lane under its ask'
+assert_contains "$LAST_COMMAND" 'claude --model sonnet' '--ask does not change the lane command'
+run_lane --dry-run --ask oc-1a2b3c4d ask-dry "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_OUTPUT" 'would run: openclaw_dispatch.py claim oc-1a2b3c4d ask-dry' 'a dry run says it would claim'
+assert_not_contains "$(cat "$TMP/claim-log")" 'ask-dry' 'a dry run claims nothing'
+FAKE_CLAIM_EXIT=1 run_lane --ask oc-1a2b3c4d ask-failed-claim "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'a failed claim does not undo the lane'
+assert_contains "$LAST_OUTPUT" 'WARNING: the lane is running but claiming ask oc-1a2b3c4d failed' 'a failed claim is loud'
+run_lane --ask not-an-id ask-bad "$REPO" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'a malformed ask id is refused'
+run_lane --ask oc-1a2b3c4d --status
+assert_exit 1 "$LAST_STATUS" '--ask is refused outside a start'
+unset AFA_OPENCLAW_DISPATCH
+
 printf 'ok - %s checks passed\n' "$checks"

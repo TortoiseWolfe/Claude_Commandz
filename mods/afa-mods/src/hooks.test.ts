@@ -154,8 +154,17 @@ describe('blast radius', () => {
 // session counts as interactive) but nobody at it, so the guard must never ask.
 describe('blast radius, unattended lane', () => {
   const HAND = `${HOME}/handoff/2026-10-16-oc-x`
-  const lane = async (on: any, command: string) => {
+  // A stand-in for realpath: `links` maps a path that is really a symlink to where it points. Run with `broken`,
+  // realpath fails the way it would on a sandbox without the program, and the guard must refuse.
+  const lane = async (on: any, command: string, links: Record<string, string> = {}, broken = false) => {
     setup(on, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: HAND })
+    on('process.run', (_$: any, e: any) => {
+      let path: string = e.argv.at(-1)
+      for (const [from, to] of Object.entries(links)) {
+        if (path === from || path.startsWith(`${from}/`)) path = to + path.slice(from.length)
+      }
+      return { value: { exitCode: broken ? 1 : 0, stdout: broken ? '' : `${path}\n`, stderr: '' } }
+    })
     const seen = { asked: false, log: '' }
     on('session.surfaces', () => ({ value: ['terminal'] }))
     on('tool.call', { tool: 'AskUserQuestion' }, () => {
@@ -182,6 +191,30 @@ describe('blast radius, unattended lane', () => {
       expect(seen.log).toContain('allowed (lane folder) | rm -rf')
     })
   }
+  test('refuses a delete inside its folder when a link on the way leads out of it', async ($, on) => {
+    const { seen, run } = await lane(on, `rm -rf ${HAND}/repo/build`, { [`${HAND}/repo`]: `${HOME}/repos/ScriptHammer` })
+    const r = await run($)
+    expect(seen.asked).toBe(false)
+    expect(r.deny).toContain('did not wait')
+    expect(r.deny).toContain(`really points to ${HOME}/repos/ScriptHammer/build (through a link)`)
+  })
+  test('refuses a delete in a worktree whose folder is a link to somewhere else', async ($, on) => {
+    const { run } = await lane(on, `rm -rf ${HOME}/repos/.worktrees/App--x/old`, { [`${HOME}/repos/.worktrees/App--x`]: '/etc' })
+    expect((await run($)).deny).toContain('really points to /etc/old')
+  })
+  test('a lane folder that is itself a link is judged by where it really is, so deletes inside it still work', async ($, on) => {
+    const { run } = await lane(on, `rm -rf ${HAND}/x`, { [HAND]: '/mnt/data/lane' })
+    expect((await run($)).deny).toBeUndefined()
+  })
+  test('a link that stays inside the folder is fine', async ($, on) => {
+    const { seen, run } = await lane(on, `rm -rf ${HAND}/current`, { [`${HAND}/current`]: `${HAND}/repo-2` })
+    expect((await run($)).deny).toBeUndefined()
+    expect(seen.asked).toBe(false)
+  })
+  test('refuses when realpath cannot be run: it fails closed', async ($, on) => {
+    const { run } = await lane(on, `rm -rf ${HAND}/repo`, {}, true)
+    expect((await run($)).deny).toContain('could not be resolved')
+  })
   test('refuses a delete through an unset variable, says why, and never asks', async ($, on) => {
     const { seen, run } = await lane(on, 'rm -rf "$BUILD_DIR"/old')
     const r = await run($)
