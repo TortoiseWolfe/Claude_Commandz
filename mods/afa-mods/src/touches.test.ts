@@ -203,6 +203,13 @@ describe('the classifier judges the command itself, not text it only carries', (
     ['ssh host "git push --force origin main"', 'git push --force'],
     ['xargs sh -c "vercel --prod"', 'production deploy'],
     ['docker exec app sh -c "vercel --prod"', 'production deploy'],
+    ['cat <<EOF > >(bash)\nvercel --prod\nEOF', 'production deploy'],
+    ['bash <(cat <<EOF\nvercel --prod\nEOF\n)', 'production deploy'],
+    ['env -i A=b ssh host "vercel --prod"', 'production deploy'],
+    ['timeout 30 bash -c "vercel --prod"', 'production deploy'],
+    ['nohup ssh host "git push --force origin main"', 'git push --force'],
+    ['docker compose exec app sh -c "vercel --prod"', 'production deploy'],
+    ['podman exec app sh -c "vercel --prod"', 'production deploy'],
     ['vercel "--prod"', 'production deploy'],
     ["npm run deploy '--production'", 'production deploy'],
   ] as const) {

@@ -105,7 +105,8 @@ function withoutTextHeredocs(command: string): string {
     const lead = lines[i].slice(0, m.index).split(/&&|\|\||[;&|]/).pop() ?? ''
     const after = lines[i].slice(m.index + m[0].length).replace(/\d*>&-?\d*|&>>?/g, '')
     // a shell anywhere in the lead (`sudo bash`, `env bash`), or a pipe/and/semicolon after the marker (`cat <<EOF | bash`): the body is run
-    if (lead.split(/\s+/).some(w => SHELL_WORDS.has(w.split('/').pop() ?? '')) || /[|;&`]|\$\(/.test(after)) continue
+    const shellIn = (s: string) => s.split(/\s+/).some(w => SHELL_WORDS.has((w.replace(/^[<>]?\(+/, '').split('/').pop() ?? '')))
+    if (shellIn(lead) || shellIn(after) || /[|;&`]|\$\(|[<>]\(/.test(after) || /[<>]\(/.test(lead)) continue
     i = end // skip the body and its delimiter line
   }
   return out.join('\n')
@@ -180,7 +181,16 @@ const QUOTED = /'([^']*)'|"((?:\\.|[^"\\])*)"/g
 const withoutQuoted = (seg: string) => seg.replace(QUOTED, (_m, a?: string, b?: string) => ((a ?? b ?? '') !== '' && /^\S+$/.test(a ?? b ?? '') ? (a ?? b ?? '') : ''))
 
 // Commands that run the quoted text they are given (`ssh host "a; b"`, `docker exec c "..."`): each quoted piece is a command line to judge too.
-const runsQuoted = (seg: string) => RUNS_ITS_ARGS.has(firstWord(seg)) || /^(?:docker|kubectl)\s+(?:exec|run)\b/.test(seg)
+const WRAPPERS = new Set(['env', 'nohup', 'exec', 'nice', 'ionice', 'stdbuf', 'doas', 'timeout', 'setsid', 'chrt'])
+// The word that really runs: past `env -i A=b`, `nohup`, `timeout 5`, `nice -n 3`, `doas -u x` and the like.
+const commandWord = (seg: string) => {
+  const words = strip(seg).replace(/^\\/, '').split(/\s+/)
+  const at = words.findIndex(w => !(WRAPPERS.has(w.split('/').pop() ?? '') || w.startsWith('-') || /^\d+$/.test(w) || /^\w+=/.test(w)))
+  const first = words.findIndex(w => WRAPPERS.has(w.split('/').pop() ?? ''))
+  return first === -1 || first > at ? firstWord(seg) : (words[at] ?? '').split('/').pop() ?? ''
+}
+const runsQuoted = (seg: string) =>
+  RUNS_ITS_ARGS.has(commandWord(seg)) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(strip(seg))
 const quotedPieces = (seg: string): string[] => Array.from(seg.matchAll(QUOTED), m => m[1] ?? m[2] ?? '').filter(s => s.trim() !== '')
 
 // Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs its arguments.
