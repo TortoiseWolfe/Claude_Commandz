@@ -20,7 +20,10 @@ The engine follows ~/repos/CLAUDE.md "Rules for every repo": a client repo (hub/
 repos get Codex, or Claude Sonnet when the work needs Docker or wsl.exe. When Codex is out of usage, own repos use Copilot;
 when Copilot is out of usage too, they use Claude Sonnet.
 
-Budget: at most MAX_RUNNING dispatched lanes at once and MAX_PER_DAY starts a day (past that: "held: <reason>"); when the
+Budget: at most MAX_RUNNING dispatched lanes at once and MAX_PER_DAY starts a day (past that: "held: <reason>"; the held
+text names this script's own cap, never an API limit). Only real work counts toward the day: a start made with AFA_OC_TEST set
+(live tests and probes) is never counted, and a lane whose report fails within FAIL_REFUND seconds of its start gives its
+start back. The dispatch pass path enforces MAX_RUNNING only; the daily cap applies to the script fallback. When the
 weekly projection (hub/scripts/model_quality_report.py) is past PROJECTION_LIMIT percent, Claude lanes start on Sonnet only.
 
 Every job goes through a fresh, short "dispatch pass" first (run_pass): one `claude -p` Sonnet call that sees only the ask
@@ -28,7 +31,12 @@ Every job goes through a fresh, short "dispatch pass" first (run_pass): one `cla
 A long-running hub session is never woken for it, so its context stays small. The pass has five minutes: if it fails, or
 nothing claims the ask in that time, fallback_due() starts the lane from the script as before and says so in the chat.
 
-    openclaw_dispatch.py claim <ask> <lane>    register a lane the pass started (lane.sh --ask calls this); cancels the fallback
+    openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt>   the pass's only way to start a lane: checks the dir
+                                               (hub/repos.tsv or the workspace), client repos on Claude only, MAX_RUNNING; runs lane.sh --ask
+    openclaw_dispatch.py claim <ask> <lane>    lane.sh --ask calls this: only the lane `start` began for that ask in the last 10 minutes,
+                                               and only once per ask; cancels the fallback
+    openclaw_dispatch.py approve <ask> <entry> the pass's way to act on a waiting-room entry the ask names (see "The waiting room")
+    openclaw_dispatch.py post "<text>"         the hub puts a [hub] line into the chat with no ask (the pass cannot: AFA_OC_PASS is set for it)
     openclaw_dispatch.py say <ask> "<text>"    post a direct answer to the chat and close the ask
     openclaw_dispatch.py pass <ask>            run the dispatch pass for an ask (spawned by the poller, detached)
 
@@ -55,6 +63,9 @@ QUALITY = REPOS / "hub/scripts/model_quality_report.py"
 OWNER = "tortoisewolfe"
 MAX_RUNNING = 3
 MAX_PER_DAY = 12
+FAIL_REFUND = 5 * 60  # a lane whose report fails this soon after its start gives the start back (a fumble is not a day's work)
+CLAIM_WINDOW = 10 * 60  # claim accepts only a lane `start` began for that ask this recently
+TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and probes: their starts never count toward the day
 PROJECTION_LIMIT = 90.0
 PROJECTION_CACHE_SECONDS = 30 * 60
 TASK_MAX = 1500
@@ -69,6 +80,7 @@ PASS_TIMEOUT = 240  # seconds one dispatch pass may run (shorter than ASK_WAIT, 
 PASS_MAX_TURNS = 10
 DEDUP_WINDOW = 15 * 60  # an identical task is not started twice in this long, unless the earlier lane failed
 ASK_KEEP = 3 * 86400
+PASS_VERBS = ("prompt", "say", "start", "approve")  # the only commands the dispatch pass may run
 ASK_ID_RE = re.compile(r"^oc-[0-9a-f]{8}$")
 CLAUDE_BIN = Path(os.environ.get("MUSE_CLAUDE") or HOME / ".local/bin/claude")
 PASS_FLAG = STATE / "openclaw-pass.skip"  # test switch: "skip" = the pass does nothing and records nothing, "fail" = it exits 1
@@ -174,8 +186,8 @@ class LaneHost:
         r = self._run(["tmux", "capture-pane", "-p", "-S", "-60", "-t", "lanes:" + name], 15)
         return r.stdout if r is not None and r.returncode == 0 else None
 
-    def start_lane(self, name, dirpath, engine, model, prompt_path):
-        argv = [str(LANE_SH)] + (["--engine", engine] if engine != "claude" else []) + [name, str(dirpath), model, str(prompt_path)]
+    def start_lane(self, name, dirpath, engine, model, prompt_path, ask=None):
+        argv = [str(LANE_SH)] + (["--engine", engine] if engine != "claude" else []) + (["--ask", ask] if ask else []) + [name, str(dirpath), model, str(prompt_path)]
         # AFA_LANE_UNATTENDED: nobody is at this lane's window, so its Blast Radius guard must never wait for an answer (see lane.sh)
         r = self._run(argv, 180, cwd=str(dirpath), env=dict(os.environ, AFA_LANE_UNATTENDED="1"))
         if r is None:
@@ -231,17 +243,18 @@ class LaneHost:
 
     def claude_pass(self, prompt, hand, timeout):
         """One short `claude -p` Sonnet call: none of his settings, CLAUDE.md, connectors, plugins, skills or memory; one tool.
-        -> (exit code or -1, stdout). One tool, Bash, and only for lane.sh and this script's prompt / say / claim: Claude Code refuses
+        -> (exit code or -1, stdout). One tool, Bash, and only for this script's PASS_VERBS (prompt / say / start / approve; never lane.sh,
+        claim or post): Claude Code refuses
         its Write tool inside ~/.claude (a sensitive folder) whatever the allow list says, so the prompt is saved by `prompt`."""
         me = Path(__file__).resolve()
-        allow = ",".join(["Bash(%s:*)" % LANE_SH, "Bash(python3 %s prompt:*)" % me, "Bash(python3 %s say:*)" % me, "Bash(python3 %s claim:*)" % me])
+        allow = ",".join("Bash(python3 %s %s:*)" % (me, verb) for verb in PASS_VERBS)
         # --setting-sources project: his user settings are left out, because their allow list is wide (python3, git push ...) and would
         # widen this call's four commands; that also leaves out his plugins, hooks and CLAUDE.md. The cwd is the pass's own folder.
         settings = json.dumps({"disableClaudeAiConnectors": True, "autoMemoryEnabled": False})
         argv = [str(CLAUDE_BIN), "-p", prompt, "--model", "sonnet", "--max-turns", str(PASS_MAX_TURNS), "--output-format", "json",
                 "--permission-mode", "dontAsk", "--tools", "Bash", "--allowedTools", allow, "--settings", settings,
                 "--setting-sources", "project", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]
-        r = self._run(argv, timeout, cwd=str(hand), env=dict(os.environ, AFA_LANE_UNATTENDED="1", AFA_LANE_HAND=str(hand)))
+        r = self._run(argv, timeout, cwd=str(hand), env=dict(os.environ, AFA_LANE_UNATTENDED="1", AFA_LANE_HAND=str(hand), AFA_OC_PASS="1"))
         return (-1, "") if r is None else (r.returncode, r.stdout or "")
 
     def inject(self, text):
@@ -421,12 +434,13 @@ def _trim(text, n):
 class Ctx:
     def __init__(self, repos, state_path=STATE / "openclaw-dispatch.json", lanes_dir=STATE / "lanes",
                  senders=REPOS / "hub/client-senders.tsv", repos_txt=REPOS / "hub/client-repos.txt", root=REPOS,
-                 hand_off_first=False, index_path=LANE_INDEX, flag_path=PASS_FLAG, results_log=RESULTS_LOG):
+                 hand_off_first=False, index_path=LANE_INDEX, flag_path=PASS_FLAG, results_log=RESULTS_LOG, room_dir=None):
         self.repos, self.state_path, self.lanes_dir = repos, Path(state_path), Path(lanes_dir)
         self.senders, self.repos_txt, self.root = senders, repos_txt, root
         self.lock_path = self.state_path.with_name(self.state_path.name + ".lock")
         self.hand_off_first = hand_off_first  # jobs go through the dispatch pass first (the poller); off, they start from the script at once
         self.index_path, self.flag_path, self.results_log = Path(index_path), Path(flag_path), Path(results_log)
+        self.room_dir = Path(room_dir) if room_dir else self.lanes_dir / "queue"  # the waiting room: <room>/<lane name>.md
         self.pending_path = self.state_path.with_name("openclaw-pending.json")  # his messages still waiting for the model's reply
 
 
@@ -496,6 +510,8 @@ def _sweep(ctx, host, now=None):
             failure = report_failure(body)
             if failure:
                 lane["failed"], changed = True, True
+                if _refund_start(state, lane, now):
+                    changed = True
             head = "%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else "%s finished (repo %s)." % (name, lane["repo"])
             chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\nThe lane is closed. To have more done, tell me." % (head, quoted)
             line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + json.dumps(failure) if failure else "finished")
@@ -514,6 +530,22 @@ def _sweep(ctx, host, now=None):
     if changed:
         save_state(ctx.state_path, state)
     return out
+
+
+def _refund_start(state, lane, now):
+    """A lane whose report fails within FAIL_REFUND of its start was a fumble, not a day's work: take its start out of the day's count.
+    The time is when the report was written (its mtime), else now. -> True when a start was given back."""
+    if lane.get("refunded") or lane.get("test") or not isinstance(lane.get("started"), (int, float)):
+        return False
+    try:
+        wrote = Path(lane["report"]).stat().st_mtime
+    except OSError:
+        wrote = now
+    if not 0 <= wrote - lane["started"] <= FAIL_REFUND or lane["started"] not in state["starts"]:
+        return False
+    state["starts"].remove(lane["started"])
+    lane["refunded"] = True
+    return True
 
 
 STUCK_FOOTER = re.compile(r"Enter to select", re.I)
@@ -572,6 +604,27 @@ def _stamp(now):
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
 
 
+def is_test():
+    """True when a live test or probe set AFA_OC_TEST: its starts are not real work and never count toward the day."""
+    return os.environ.get(TEST_ENV, "") not in ("", "0")
+
+
+def _frees_at(now):
+    """When today's count starts over: the next local midnight, as '12:00 AM on Sat'."""
+    t = time.localtime(now)
+    return time.strftime("%-I:%M %p on %a", time.localtime(time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))))
+
+
+def held_day_text(now):
+    return ("Held by the lane dispatcher's own safety cap: %d starts a day (openclaw_dispatch.py MAX_PER_DAY). Frees at %s. "
+            "This is not a Gemini or API limit." % (MAX_PER_DAY, _frees_at(now)))
+
+
+def held_running_text(running):
+    return ("Held by the lane dispatcher's own safety cap: %d lanes at once (openclaw_dispatch.py MAX_RUNNING), and %d are still running or "
+            "being set up. Frees when one reports. This is not a Gemini or API limit." % (MAX_RUNNING, running))
+
+
 def _do_start(ctx, host, repo_word, task, now, ask_id=None):
     stamp = _stamp(now)
     task = task.strip()
@@ -588,11 +641,10 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None):
     # budget: running lanes first (the sweep has already marked finished ones), then the day's count
     running = sorted(n for n, l in state["lanes"].items() if l.get("status") == "started")
     if len(running) >= MAX_RUNNING:
-        return ("%s | start %s | held: %d lanes already running" % (stamp, name, len(running)),
-                "Held: %d lanes I started are still running (%s). I can't start another until one reports." % (len(running), ", ".join(running)))
+        return ("%s | start %s | held: %d lanes already running" % (stamp, name, len(running)), held_running_text(len(running)))
     today = sum(1 for t in state["starts"] if _day(t) == _day(now))
     if today >= MAX_PER_DAY:
-        return "%s | start %s | held: %d starts today" % (stamp, name, today), "Held: I've already started %d lanes today, which is the daily limit. Try again tomorrow." % today
+        return "%s | start %s | held: %d starts today" % (stamp, name, today), held_day_text(now)
     engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task, name == WORKSPACE)
     note = ""
     if engine == "codex" and state.get("codex_blocked_until", 0) > now:
@@ -628,7 +680,10 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None):
     if ask_id and ask_id in asks_of(state):
         state["lanes"][lane]["ask"] = ask_id
         asks_of(state)[ask_id]["lanes"] = [lane]
-    state["starts"].append(now)
+    if is_test():
+        state["lanes"][lane]["test"] = True
+    else:
+        state["starts"].append(now)
     save_state(ctx.state_path, state)
     return "%s | start %s | started %s (%s, %s)" % (stamp, name, lane, engine, why), (
         "%s started: %s%s. Say stop to cancel. (%s on %s; I'll post its report here.)" % (
@@ -752,11 +807,13 @@ def duplicate_start(ctx, task, now):
 
 
 def hand_off(ctx, host, ask_id, repo_word, task, now):
-    """Record the ask and start the dispatch pass for it. -> (log line, chat text). Same caps as do_start: running lanes and
-    asks still waiting count together against MAX_RUNNING, and against MAX_PER_DAY with the day's starts."""
+    """Record the ask and start the dispatch pass for it. -> (log line, chat text). Running lanes and asks still waiting count together
+    against MAX_RUNNING. The day's cap is not checked here: the script fallback (do_start) applies it."""
     stamp = _stamp(now)
     task = task.strip()
     hit = ctx.repos.get(repo_word.lower())
+    if not hit and WORKSPACE in ctx.repos and any(e["name"].lower() == repo_word.lower() for e in room_entries(ctx)):
+        hit = ctx.repos[WORKSPACE]  # "start frontdesk-5: ..." names a waiting-room lane, not a repo: the pass approves it
     if not hit or len(task) > TASK_MAX:
         return do_start(ctx, host, repo_word, task, now)  # the same refusal wording as ever
     name = hit[0]
@@ -771,10 +828,7 @@ def hand_off(ctx, host, ask_id, repo_word, task, now):
         running = sorted(n for n, l in state["lanes"].items() if l.get("status") == "started")
         if len(running) + len(waiting) >= MAX_RUNNING:
             return ("%s | start %s | held: %d lanes already running" % (stamp, name, len(running) + len(waiting)),
-                    "Held: %d lanes I started are still running or being set up. I can't start another until one reports." % (len(running) + len(waiting)))
-        today = sum(1 for t in state["starts"] if isinstance(t, (int, float)) and _day(t) == _day(now)) + len(waiting)
-        if today >= MAX_PER_DAY:
-            return "%s | start %s | held: %d starts today" % (stamp, name, today), "Held: I've already started %d lanes today, which is the daily limit. Try again tomorrow." % today
+                    held_running_text(len(running) + len(waiting)))
         asks[ask_id] = {"task": task, "repo": name, "task_key": task_key(task), "created": now, "deadline": now + ASK_WAIT,
                         "status": "pending", "lanes": [], "pass": None}
         save_state(ctx.state_path, state)
@@ -790,6 +844,7 @@ def hand_off(ctx, host, ask_id, repo_word, task, now):
 
 def claim(ctx, ask_id, lane_name, now=None):
     """Register a lane the pass started under its ask, so sweep and check_stuck announce it like their own, and cancel the fallback.
+    Only the lane `start` began for that ask in the last CLAIM_WINDOW is accepted, and only once: one ask, one lane.
     The lane's folder, engine and model come from the row lane.sh wrote in index.tsv. -> (ok, message)."""
     now = time.time() if now is None else now
     if not ASK_ID_RE.fullmatch(ask_id or "") or not LANE_NAME_RE.fullmatch(lane_name or ""):
@@ -799,8 +854,13 @@ def claim(ctx, ask_id, lane_name, now=None):
         ask = asks_of(state).get(ask_id)
         if ask is None:
             return False, "claim: no such ask %s" % ask_id
-        if ask["status"] not in ("pending", "claimed"):
+        if ask["status"] != "pending":
             return False, "claim: ask %s is already %s%s" % (ask_id, ask["status"], " by " + ", ".join(ask.get("lanes", [])) if ask.get("lanes") else "")
+        begun = ask.get("starting")
+        if not isinstance(begun, dict) or begun.get("lane") != lane_name:
+            return False, "claim: lane %s was not started for ask %s (only `start` begins a lane for an ask)" % (lane_name, ask_id)
+        if not 0 <= now - begun.get("at", 0) <= CLAIM_WINDOW:
+            return False, "claim: the start of %s is not from the last %d minutes" % (lane_name, CLAIM_WINDOW // 60)
         row = None
         try:
             for line in Path(ctx.index_path).read_text().splitlines():
@@ -816,13 +876,301 @@ def claim(ctx, ask_id, lane_name, now=None):
         if lane_name not in state["lanes"]:
             state["lanes"][lane_name] = {"repo": repo, "engine": row[4] if row[4] in ("codex", "copilot") else "claude", "model": row[3],
                                          "started": now, "status": "started", "report": row[6], "task_key": ask.get("task_key"), "ask": ask_id}
-            state["starts"].append(now)
+            if is_test():
+                state["lanes"][lane_name]["test"] = True
+            else:
+                state["starts"].append(now)
         ask["status"] = "claimed"
-        if lane_name not in ask["lanes"]:
-            ask["lanes"].append(lane_name)
+        ask["lanes"] = [lane_name]
         ask["claimed_at"] = now
         save_state(ctx.state_path, state)
     return True, "claimed %s for %s" % (lane_name, ask_id)
+
+
+ENGINES = ("claude", "codex", "copilot")
+MODELS = ("sonnet", "opus", "haiku")
+
+
+def vet_start(ctx, dirpath, engine, model):
+    """The checks every lane the dispatcher starts for the pass or from the waiting room gets: the folder is a repo on the list (or the
+    workspace), a client repo or the workspace runs on Claude only, the engine and model are known words. -> (problem | None, hit)."""
+    if engine not in ENGINES or model not in MODELS:
+        return "engine must be one of %s and model one of %s" % ("/".join(ENGINES), "/".join(MODELS)), None
+    d = _expand(str(dirpath))
+    if not os.path.isabs(d):
+        return "the folder must be a full path", None
+    real = os.path.realpath(d)
+    hit = next((v for v in ctx.repos.values() if os.path.realpath(str(v[1])) == real), None)
+    if hit is None:
+        return "%s is not a repo on the list (hub/repos.tsv) or the workspace folder" % d[:120], None
+    name, path, remote = hit
+    why = client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root)
+    if engine != "claude" and (why or name == WORKSPACE):
+        return "%s runs on Claude only (%s)" % (name, why or "it is the workspace folder, which holds client repos"), None
+    return None, hit
+
+
+def _prompt_ok(ctx, lane_name, prompt_path, now):
+    """The prompt must be the one `prompt` saved for this lane: <lanes>/<today or yesterday>-<lane>/prompt.md."""
+    real = os.path.realpath(str(prompt_path))
+    return any(real == os.path.realpath(str(ctx.lanes_dir / ("%s-%s" % (time.strftime("%F", time.localtime(t)), lane_name)) / "prompt.md"))
+               for t in (now, now - 86400)) and os.path.isfile(real)
+
+
+def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, engine="claude", now=None):
+    """The dispatch pass's only way to start a lane. Checks first (vet_start, the prompt is the saved one, MAX_RUNNING; the daily cap is the
+    script fallback's), writes the start under the ask so `claim` will accept exactly this lane, then runs lane.sh --ask. One ask, one lane.
+    -> (ok, message)."""
+    now = time.time() if now is None else now
+    if not ASK_ID_RE.fullmatch(ask_id or "") or not LANE_NAME_RE.fullmatch(lane_name or "") or not lane_name.startswith("oc-"):
+        return False, "start: bad ask id, or the lane name is not oc-<plain characters>"
+    problem, hit = vet_start(ctx, dirpath, engine, model)
+    if problem:
+        return False, "start: refused: " + problem
+    if not _prompt_ok(ctx, lane_name, prompt_path, now):
+        return False, "start: refused: the prompt is not the one saved for %s by `prompt`" % lane_name
+    name, path, _remote = hit
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        ask = asks_of(state).get(ask_id)
+        if ask is None:
+            return False, "start: no such ask %s" % ask_id
+        if ask["status"] != "pending":
+            return False, "start: ask %s is already %s" % (ask_id, ask["status"])
+        if ask.get("starting"):
+            return False, "start: refused: ask %s already began lane %s (one ask, one lane)" % (ask_id, ask["starting"].get("lane"))
+        if lane_name in state["lanes"]:
+            return False, "start: a lane called %s already exists" % lane_name
+        running = sorted(n for n, l in state["lanes"].items() if l.get("status") == "started")
+        beginning = sorted(k for k, a in asks_of(state).items() if k != ask_id and a.get("status") == "pending" and a.get("starting"))
+        if len(running) + len(beginning) >= MAX_RUNNING:
+            return False, "start: refused: " + held_running_text(len(running) + len(beginning))
+        ask["starting"] = {"lane": lane_name, "at": now, "dir": str(path), "engine": engine}
+        save_state(ctx.state_path, state)
+    ok, msg = host.start_lane(lane_name, path, engine, model, prompt_path, ask=ask_id)
+    if not ok:
+        with ctx.locked():
+            state = load_state(ctx.state_path)
+            a = asks_of(state).get(ask_id)
+            if a is not None and a.get("status") == "pending":
+                a.pop("starting", None)  # lane.sh did not start it: the ask may try again
+                save_state(ctx.state_path, state)
+        return False, "start: " + msg
+    with ctx.locked():
+        claimed = asks_of(load_state(ctx.state_path)).get(ask_id, {}).get("status") == "claimed"
+    if not claimed:  # lane.sh's own claim did not land (it only warns): register the running lane here, so the fallback cannot start it twice
+        done, why = claim(ctx, ask_id, lane_name, now)
+        if not done:
+            return False, "start: the lane is running but could not be registered (%s)" % why
+    return True, "started %s in %s for %s" % (lane_name, name, ask_id)
+
+
+def post_line(host, text):
+    """The hub puts a line into Jonathan's chat with no ask: for an answer that reached the hub another way. The pass cannot (AFA_OC_PASS)."""
+    if os.environ.get("AFA_OC_PASS"):
+        return False, "post: the dispatch pass may not post"
+    text = re.sub(r"^\s*\[hub\]\s*", "", (text or "").strip())
+    if not text or len(text) > CHAT_MAX:
+        return False, "post: empty, or over %d characters" % CHAT_MAX
+    return (True, "posted") if host.inject(text) else (False, "post: could not post to the chat")
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The waiting room: lanes the hub has planned. ~/.claude/state/lanes/queue/<lane name>.md = header lines, then the full brief:
+#     dir: <path>        model: <model>        engine: <claude|copilot>  (optional, default claude)
+#     after: <lane name> (optional)            approved: <who, when>     (optional; absent = waiting for Jonathan's go)
+# The dispatch pass approves an entry his words name (`approve`). Every pickup run (room_due, no model) starts each approved entry
+# whose "after" lane has finished well (or that has no "after"), and never one whose "after" lane failed. A started entry never starts twice.
+
+ROOM_HEADERS = ("dir", "model", "engine", "after", "approved", "start-failed")
+HEADER_RE = re.compile(r"^([a-z][a-z-]*):[ \t]*(.*)$")
+
+
+def parse_entry(path):
+    """-> {name, path, headers, body_at, brief} for a waiting-room file, or None when its name or text is not usable."""
+    path = Path(path)
+    if path.suffix != ".md" or not LANE_NAME_RE.fullmatch(path.stem):
+        return None
+    try:
+        lines = path.read_text(errors="replace").split("\n")
+    except OSError:
+        return None
+    headers, i = {}, 0
+    while i < len(lines):
+        m = HEADER_RE.match(lines[i])
+        if not m or m.group(1) not in ROOM_HEADERS:
+            break
+        headers.setdefault(m.group(1), CONTROL_RE.sub(" ", m.group(2)).strip())
+        i += 1
+    brief = "\n".join(lines[i:]).lstrip("\n")
+    return {"name": path.stem, "path": path, "headers": headers, "body_at": i, "brief": brief}
+
+
+def room_entries(ctx):
+    try:
+        files = sorted(Path(ctx.room_dir).glob("*.md"))
+    except OSError:
+        return []
+    return [e for e in (parse_entry(f) for f in files) if e]
+
+
+def first_heading(entry):
+    for ln in entry["brief"].splitlines():
+        t = CONTROL_RE.sub(" ", ln).strip().lstrip("#").strip()
+        if t:
+            return t[:100]
+    return "(empty brief)"
+
+
+def room_summary(ctx):
+    """The room as the pass sees it: one line per entry, name | waits for | approved or not | first heading of the brief."""
+    rows = []
+    for e in room_entries(ctx):
+        h = e["headers"]
+        rows.append("%s | %s | %s | %s" % (e["name"], "after " + h["after"] if h.get("after") else "no wait", "approved" if h.get("approved") else "waiting for his go",
+                                          first_heading(e)))
+    return "\n".join(rows)
+
+
+def after_state(ctx, after):
+    """Where the lane an entry waits on stands. -> ("done", None) | ("failed", reason) | ("waiting", None).
+    Its report is found by name in the lane index, else as <lanes>/<date>-<name>/report.md; it counts once it exists and is not empty."""
+    report = None
+    try:
+        for line in Path(ctx.index_path).read_text().splitlines():
+            f = line.split("\t")
+            if len(f) >= 7 and f[1] == after and f[6] not in ("", "-"):
+                report = Path(f[6])
+    except OSError:
+        pass
+    if report is None or not report.exists():
+        found = sorted(Path(ctx.lanes_dir).glob("????-??-??-%s/report.md" % after))
+        report = found[-1] if found else None
+    body = _report_text(report) if report is not None else ""
+    if not body:
+        return "waiting", None
+    why = report_failure(body)
+    return ("failed", why) if why else ("done", None)
+
+
+def _set_header(entry, key, value):
+    """Put `key: value` into the entry's header block (replacing an old one); the brief is untouched."""
+    p = entry["path"]
+    lines = p.read_text(errors="replace").split("\n")
+    head = [l for l in lines[:entry["body_at"]] if not l.startswith(key + ":")]
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text("\n".join(head + ["%s: %s" % (key, CONTROL_RE.sub(" ", value).strip())] + lines[entry["body_at"]:]))
+    tmp.replace(p)
+
+
+def room_start(ctx, host, entry, now):
+    """Start one approved, unblocked entry. The state file remembers it first, so it can never start twice. -> (log line, chat text)."""
+    stamp, name, h = _stamp(now), entry["name"], entry["headers"]
+    engine, model = h.get("engine") or "claude", h.get("model") or "sonnet"
+    problem, hit = vet_start(ctx, h.get("dir", ""), engine, model)
+    if problem or not entry["brief"].strip():
+        problem = problem or "the brief is empty"
+        _set_header(entry, "start-failed", problem)
+        return "%s | room %s | not started: %s" % (stamp, name, problem), "%s did not start: %s. It stays in the waiting room." % (name, problem)
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        started = state.setdefault("room_started", {})
+        if name in started:
+            try:
+                entry["path"].unlink()  # a leftover copy of an entry that already started
+            except OSError:
+                pass
+            return None, None
+        started[name] = {"at": now, "after": h.get("after")}
+        save_state(ctx.state_path, state)
+    hand = ctx.lanes_dir / ("%s-%s" % (time.strftime("%F", time.localtime(now)), name))
+    hand.mkdir(parents=True, exist_ok=True)
+    prompt = hand / "prompt.md"
+    prompt.write_text(entry["brief"].rstrip("\n") + "\n")
+    entry["path"].unlink()
+    ok, msg = host.start_lane(name, hit[1], engine, model, prompt)
+    behind = " (was queued behind %s)" % h["after"] if h.get("after") else ""
+    if not ok:
+        with ctx.locked():  # it never started, so it is not a leftover copy of a started one: fixing the header lets it go again
+            state = load_state(ctx.state_path)
+            state.setdefault("room_started", {}).pop(name, None)
+            save_state(ctx.state_path, state)
+        entry["path"].write_text("\n".join("%s: %s" % kv for kv in h.items() if kv[0] != "start-failed") + "\nstart-failed: %s\n\n" % CONTROL_RE.sub(" ", msg)[:200] + entry["brief"])
+        return "%s | room %s | not started: %s" % (stamp, name, msg), "%s did not start: %s. It stays in the waiting room." % (name, msg)
+    return "%s | room %s | started%s" % (stamp, name, behind), "started %s%s" % (name, behind)
+
+
+def room_due(ctx, host, now=None):
+    """Every pickup run: start each approved entry whose "after" lane finished well (or that has none); tell the chat, once, about one
+    whose "after" lane failed. -> list of (log line, chat text) for the notes posted."""
+    now = time.time() if now is None else now
+    out = []
+    for e in room_entries(ctx):
+        h = e["headers"]
+        if not h.get("approved") or h.get("start-failed"):
+            continue
+        if h.get("after"):
+            st, why = after_state(ctx, h["after"])
+            if st == "waiting":
+                continue
+            if st == "failed":
+                with ctx.locked():
+                    state = load_state(ctx.state_path)
+                    seen = state.setdefault("room_notified", {})
+                    if seen.get(e["name"]) == h["after"]:
+                        continue
+                    seen[e["name"]] = h["after"]
+                    save_state(ctx.state_path, state)
+                chat = "%s stays queued: %s failed" % (e["name"], h["after"])
+                host.inject(chat)
+                out.append(("%s | room %s | stays queued: %s failed" % (_stamp(now), e["name"], h["after"]), chat))
+                continue
+        line, chat = room_start(ctx, host, e, now)
+        if line is None:
+            continue
+        host.inject(chat)
+        out.append((line, chat))
+    return out
+
+
+def approve_entry(ctx, host, ask_id, entry_name, now=None):
+    """The pass's `approve`: his words (the ask) name a waiting-room entry. Approve it if it is not yet, then answer the chat: queued behind
+    its "after" lane, or started now. The ask is settled first, so the repo fallback can never also run it. -> (ok, message)."""
+    now = time.time() if now is None else now
+    if not ASK_ID_RE.fullmatch(ask_id or "") or not LANE_NAME_RE.fullmatch(entry_name or ""):
+        return False, "approve: bad ask id or entry name"
+    entry = next((e for e in room_entries(ctx) if e["name"].lower() == entry_name.lower()), None)
+    if entry is None:
+        return False, "approve: nothing called %s in the waiting room" % entry_name[:60]
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        ask = asks_of(state).get(ask_id)
+        if ask is None:
+            return False, "approve: no such ask %s" % ask_id
+        if ask["status"] != "pending":
+            return False, "approve: ask %s is already %s" % (ask_id, ask["status"])
+        if not re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(entry["name"]), ask.get("task", ""), re.I):
+            return False, "approve: his words do not name %s, so I will not approve it" % entry["name"]
+        ask["status"], ask["answered_at"], ask["room"] = "answered", now, entry["name"]
+        save_state(ctx.state_path, state)
+    h = entry["headers"]
+    if not h.get("approved"):
+        _set_header(entry, "approved", "Jonathan via receptionist, %s" % _stamp(now))
+        entry = parse_entry(entry["path"])
+        h = entry["headers"]
+    st, why = after_state(ctx, h["after"]) if h.get("after") else ("done", None)
+    if st == "waiting":
+        chat = "%s is queued behind %s; it starts by itself when that finishes" % (entry["name"], h["after"])
+    elif st == "failed":
+        chat = "%s stays queued: %s failed" % (entry["name"], h["after"])
+    elif h.get("start-failed"):
+        chat = "%s is approved, but it did not start earlier: %s" % (entry["name"], h["start-failed"])
+    else:
+        line, chat = room_start(ctx, host, entry, now)
+        chat = chat or "%s already started" % entry["name"]
+    if not host.inject(chat):
+        host.inject(chat)
+    return True, "%s: %s" % (entry["name"], chat)
 
 
 PROMPT_MAX = 30000
@@ -894,7 +1242,12 @@ def fallback_due(ctx, host, now=None):
                 if k in asks_of(state):
                     asks_of(state)[k]["status"] = "fallback-failed"
                     save_state(ctx.state_path, state)
-        chat = "%s, so I started it myself. %s" % (why, chat) if " | started " in line else "%s, and %s" % (why, chat[0].lower() + chat[1:])
+        if " | started " in line:
+            chat = "%s, so I started it myself. %s" % (why, chat)
+        elif chat.startswith("Held by"):
+            chat = "%s. %s" % (why, chat)  # the held line is quoted word for word (the receptionist repeats it as written)
+        else:
+            chat = "%s, and %s" % (why, chat[0].lower() + chat[1:])
         host.inject(chat)
         out.append((line.replace(" | start ", " | fallback ", 1) if " | start " in line else line, chat))
     return out
@@ -927,12 +1280,14 @@ Engine rules (from hub/lane-rules.md): {engine_rule}
 - Work that spans repos (scan, count, compare, list across repos, anything on his GitHub as a whole): folder {root} (the workspace), Claude sonnet, and add the WORKSPACE RULES below to the prompt.
 - Code in one of his own repos (one of the "own" rows): --engine copilot, folder = that repo, copilot work rule below. If it needs Docker or wsl.exe: Claude sonnet in that repo instead.
 - If the answer is a short fact you can state without looking at any repo (what a command is, what this receptionist can do), do not start a lane: run python3 {me} say {ask} "<your answer, plain words>".
-
+- The waiting room holds lanes the hub has already planned (name | waits for | approved or not | what it is). If his words name one of them ("queue frontdesk-5 ...", "go ahead with frontdesk-5"), it is NOT a repo job: run python3 {me} approve {ask} <name>. That approves it if it is not yet and answers the chat itself (queued behind its earlier lane, or started now). Then stop; never start a lane for it.
+{room_block}
 To start a lane:
 1. Save the lane's prompt (the lane name is {lane}) by running: python3 {me} prompt {lane} <<'PROMPT_END'  with the prompt text on the lines after it and PROMPT_END alone on the last line. It lands in {hand}/prompt.md. The prompt must be self-contained: use the template below, fill in {{repo}}, {{dir}}, {{work_rule}} and {{extra_rules}}, and copy the quoted task unchanged.
-2. Run: {lane_sh} --ask {ask} [--engine copilot] {lane} <folder> sonnet {hand}/prompt.md
-   lane.sh registers the lane under this ask itself; do not call claim. If it fails, say so in one line and stop.
-Usage of lane.sh: lane.sh [--engine claude|codex|copilot] --ask <id> <name> <dir> <model> <prompt-file>
+2. Run: python3 {me} start {ask} [--engine copilot] {lane} <folder> sonnet {hand}/prompt.md
+   `start` checks the folder (it must be one of the repos above or {root}), keeps a client repo or the workspace on Claude, applies the
+   running-lane cap, and starts the lane under this ask. It refuses a second lane for the same ask. If it refuses or fails, say so in one line and stop.
+Usage: python3 {me} start <ask> [--engine claude|codex|copilot] <lane> <folder> <model> <prompt-file>
 
 PROMPT TEMPLATE (fill the four braces, keep the rest):
 <<<TEMPLATE
@@ -951,6 +1306,7 @@ CLAUDE WORK RULE (use as {{work_rule}} for a Claude lane):
 
 
 def pass_prompt(ctx, ask_id, ask, now):
+    room = room_summary(ctx)
     rows = []
     for name, path, remote in sorted(ctx.repos.values(), key=lambda v: v[0].lower()):
         why = client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root)
@@ -962,7 +1318,8 @@ def pass_prompt(ctx, ask_id, ask, now):
     template = TEMPLATE.replace("{task}", json.dumps(ask["task"], ensure_ascii=False)).replace("{report}", str(hand / "report.md"))
     return lane, hand, PASS_PROMPT.format(
         task=json.dumps(ask["task"], ensure_ascii=False), repo=ask["repo"], ask=ask_id, root=ctx.root, table="\n".join(rows),
-        engine_rule=_engine_rule(), me=Path(__file__).resolve(), hand_root=ctx.lanes_dir, lane=lane, hand=hand, lane_sh=LANE_SH,
+        engine_rule=_engine_rule(), me=Path(__file__).resolve(), hand_root=ctx.lanes_dir, lane=lane, hand=hand,
+        room_block=("Waiting room right now:\n" + room + "\n") if room else "(The waiting room is empty right now.)\n",
         template=template,
         workspace_rules=WORKSPACE_RULES.strip(), copilot_rule=COPILOT_WORK_RULE.replace("{hand}", str(hand)), work_rule=WORK_RULE)
 
@@ -1032,6 +1389,18 @@ def main(argv=None):
     if len(argv) >= 3 and argv[0] == "claim":
         ctx = Ctx(load_repos())
         ok, msg = claim(ctx, argv[1], argv[2])
+    elif len(argv) >= 6 and argv[0] == "start":
+        rest, engine = argv[2:], "claude"
+        if rest[0] == "--engine":
+            engine, rest = rest[1], rest[2:]
+        if len(rest) != 4:
+            print("usage: openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt-file>", file=sys.stderr)
+            return 2
+        ok, msg = start_for_ask(Ctx(load_repos()), LaneHost(), argv[1], rest[0], rest[1], rest[2], rest[3], engine)
+    elif len(argv) == 3 and argv[0] == "approve":
+        ok, msg = approve_entry(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+    elif len(argv) == 2 and argv[0] == "post":
+        ok, msg = post_line(LaneHost(), argv[1])
     elif len(argv) == 2 and argv[0] == "prompt":
         ok, msg = write_prompt(Ctx(load_repos()), argv[1], sys.stdin.read(PROMPT_MAX + 1))
     elif len(argv) == 3 and argv[0] == "say":
@@ -1039,7 +1408,7 @@ def main(argv=None):
     elif len(argv) == 2 and argv[0] == "pass":
         return run_pass(Ctx(load_repos()), LaneHost(), argv[1])
     else:
-        print("usage: openclaw_dispatch.py claim <ask> <lane> | prompt <lane> (text on stdin) | say <ask> <text> | pass <ask>", file=sys.stderr)
+        print("usage: openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | post <text> | pass <ask>", file=sys.stderr)
         return 2
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1

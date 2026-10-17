@@ -10,13 +10,14 @@ import {
   ownScratchTargets,
   recentLanes,
   realPathVerdict,
-  targetsOf,
   unattendedRmPaths,
   unattendedRmVerdict,
   unattendedRoots,
   weather,
 } from './lib'
 import type { Hold } from './lib'
+import { touches } from './touches'
+import type { Probe } from './touches'
 
 const isHub = atom({ plugin: 'afa-mods', key: 'isHub' } as const, false)
 const prepRan = atom({ plugin: 'afa-mods', key: 'prepRan' } as const, false)
@@ -56,11 +57,6 @@ async function refreshBand($: Engine) {
 
 const LOG = '.claude/state/mods/blast-radius.log'
 
-const firstLines = (text: string, n: number) => {
-  const lines = text.split('\n').filter(l => l.trim() !== '')
-  return lines.slice(0, n).join('\n') + (lines.length > n ? `\n... ${lines.length - n} more` : '')
-}
-
 const run = async ($: Engine, argv: string[]) => {
   try {
     const r = await $.process.run(argv, { timeoutMs: 10_000 })
@@ -70,49 +66,10 @@ const run = async ($: Engine, argv: string[]) => {
   }
 }
 
-// What one hold would touch, in a few lines. Read-only probes only; a remote
-// URL is never printed (it can carry a token).
-async function touches($: Engine, home: string, hold: Hold): Promise<string> {
-  const head = `${hold.kind}: ${hold.segment.slice(0, 300)}${hold.segment.length > 300 ? ' ... (cut, full command is longer)' : ''}`
-  if (hold.kind === 'rm -rf') {
-    const out: string[] = []
-    const all = targetsOf(hold.segment)
-    if (all.length > 8) out.push(`  ... ${all.length - 8} more targets not listed`)
-    for (const raw of all.slice(0, 8)) {
-      const path = raw.replace(/^~(?=\/|$)/, home).replace(/^["']|["']$/g, '')
-      if (/[*?[]/.test(path)) {
-        out.push(`  ${path} (pattern, expands when it runs)`)
-        continue
-      }
-      try {
-        const st = await $.fs.stat(path)
-        if (st.kind === 'directory') {
-          const n = (await $.fs.list(path)).length
-          out.push(`  ${path} (folder, ${n} entries at the top level, all removed)`)
-        } else out.push(`  ${path} (${st.kind}, ${st.size} bytes)`)
-      } catch {
-        out.push(`  ${path} (not found)`)
-      }
-    }
-    return [head, ...out].join('\n')
-  }
-  if (/^docker (system|image) prune/.test(hold.kind)) {
-    return `${head}\n${firstLines(await run($, ['docker', 'system', 'df']), 6)}`
-  }
-  if (hold.kind.startsWith('docker volume') || hold.kind === 'docker compose down -v') {
-    const named = hold.kind === 'docker volume rm' ? targetsOf(hold.segment).slice(2) : []
-    const vols =
-      named.length > 0
-        ? named.join('\n')
-        : firstLines(await run($, ['docker', 'volume', 'ls', '--format', '{{.Name}}']), 10)
-    return `${head}\nvolumes in play:\n${vols}`
-  }
-  if (hold.kind === 'git push --force') {
-    const branch = (await run($, ['git', 'branch', '--show-current'])).trim()
-    return `${head}\nrewrites remote history; current branch: ${branch || '(detached)'}`
-  }
-  return head
-}
+// What a refusal says about one hold, beyond what it does and why: the things it would have touched
+// (touches.ts, the same text the question shows). The engine is passed as the probe: it has the same fs / process calls.
+const wouldTouch = async ($: Engine, home: string, hold: Hold) =>
+  (await touches($ as unknown as Probe, hold, home)).split('\n').slice(1).map(l => l.trim()).join('; ')
 
 // Non-interactive runs have nobody to ask: the verdict is written down here.
 async function note($: Engine, home: string, verdict: string, hold: Hold) {
@@ -227,7 +184,7 @@ export const register: Register = on => {
         await note($, home, 'denied', h)
         const { what, why } = explain(h)
         refusals.push(
-          `${h.kind} "${h.segment.slice(0, 200)}" ${what}. Held because ${why}. ${verdict.ok ? approval : verdict.reason}`,
+          `${h.kind} "${h.segment.slice(0, 200)}" ${what}. Held because ${why}. It would touch: ${await wouldTouch($, home, h)}. ${verdict.ok ? approval : verdict.reason}`,
         )
       }
       if (refusals.length > 0) {
@@ -247,7 +204,7 @@ export const register: Register = on => {
         await note($, home, 'denied', hard)
         const { what, why } = explain(hard)
         return {
-          deny: `Blast Radius: ${hard.kind} is refused in a non-interactive session (nobody to ask). It ${what}. Held because ${why}.`,
+          deny: `Blast Radius: ${hard.kind} is refused in a non-interactive session (nobody to ask). It ${what}. Held because ${why}. It would touch: ${await wouldTouch($, home, hard)}.`,
         }
       }
       for (const h of holds) await note($, home, 'allowed', h)
@@ -258,7 +215,7 @@ export const register: Register = on => {
     const lines: string[] = []
     const plain: string[] = []
     for (const h of holds) {
-      lines.push(await touches($, home, h))
+      lines.push(await touches($ as unknown as Probe, h, home))
       const { what, why } = explain(h)
       plain.push(`- ${h.kind} ${what}. Held because ${why}.`)
     }
@@ -270,6 +227,10 @@ export const register: Register = on => {
     await noteScratch()
     return next(e)
   }).catch(($, e, next) =>
-    next.called ? next(e) : { deny: 'Blast Radius: its guard failed, so the command is held.' },
+    next.called
+      ? next(e)
+      : {
+          deny: "Blast Radius: its guard failed, so the command is held. It would touch: can't tell what this touches: the guard failed before it could look.",
+        },
   )
 }

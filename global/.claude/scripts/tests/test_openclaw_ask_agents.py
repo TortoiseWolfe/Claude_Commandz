@@ -73,6 +73,26 @@ class Edit(unittest.TestCase):
         self.assertTrue(pk.HUB_PREFIX.match("hub: something"))
 
 
+class Refusals(unittest.TestCase):
+    def test_a_held_or_failed_job_is_answered_by_quoting_the_newest_hub_line_word_for_word(self):
+        self.assertIn("A held or failed job is answered with the newest [hub] line, word for word.", LIVE)
+        self.assertIn("into your answer exactly as written, in quotation marks", LIVE)
+        self.assertIn("Never paraphrase it", LIVE)
+        self.assertIn("never name a cause the line does not name", LIVE)
+        self.assertIn("not a Gemini, API or usage limit", LIVE)
+        self.assertNotIn("A held or failed job", NOTLIVE)
+
+    def test_the_text_the_dispatcher_posts_for_a_hold_is_what_the_rule_tells_him_to_quote(self):
+        import openclaw_dispatch as dp
+        for held in (dp.held_day_text(1_800_000_000), dp.held_running_text(3)):
+            self.assertTrue(held.startswith("Held by the lane dispatcher's own safety cap:"))
+            self.assertIn("openclaw_dispatch.py MAX_", held)
+            self.assertTrue(held.endswith("This is not a Gemini or API limit."))
+
+    def test_the_live_text_stays_under_the_agents_file_cap(self):
+        self.assertLess(len(LIVE), 8000)
+
+
 class Examples(unittest.TestCase):
     """The example replies in the live section: a menu action is never refused, and each one ends with a marker the poller can run."""
     def examples(self):
