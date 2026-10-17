@@ -429,18 +429,19 @@ class Replies(Base):
         self.assertEqual(dp.earlier_lanes(self.state(), "own-app", NOW + 120, "x", followup_of=lane), [])
         self.assertEqual(dp.earlier_lanes(self.state(), "client-app", NOW + 120, "x", followup_of=lane), [lane])
 
-    def test_a_lane_whose_folder_is_outside_the_lanes_dir_is_not_copied(self):
+    def test_a_lane_whose_folder_is_outside_the_lanes_dir_is_neither_copied_nor_quoted(self):
         lane = self.closed_client_lane()
         outside = self.tmp / "elsewhere"
         outside.mkdir()
         (outside / "secret.txt").write_text("not a lane file\n")
-        (outside / "report.md").write_text("Audited it.")
+        (outside / "report.md").write_text("Planted report.")
         state = self.state()
         state["lanes"][lane]["report"] = str(outside / "report.md")
         dp.save_state(self.ctx.state_path, state)
         self.act("reply %s: more" % lane, NOW + 120)
         hand = Path(self.host.started[1][4]).parent
         self.assertFalse((hand / "earlier" / lane / "secret.txt").exists())
+        self.assertNotIn("Planted report.", (hand / "prompt.md").read_text())
 
     def test_a_reply_to_a_lane_that_finished_over_a_week_ago_asks_for_a_start(self):
         self.start("client-app")
