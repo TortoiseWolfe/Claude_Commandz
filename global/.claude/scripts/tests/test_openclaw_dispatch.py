@@ -32,8 +32,9 @@ class FakeHost:
     def windows(self):
         return set(self.wins)
 
-    def start_lane(self, name, dirpath, engine, model, prompt_path):
+    def start_lane(self, name, dirpath, engine, model, prompt_path, ask=None):
         self.started.append((name, str(dirpath), engine, model, str(prompt_path)))
+        self.asked = getattr(self, "asked", []) + [ask]
         if self.start_ok[0] and engine == "claude":
             self.wins.add(name)
         return self.start_ok
