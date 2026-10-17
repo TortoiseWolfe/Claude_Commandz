@@ -14,6 +14,21 @@ expect_dialog() { # expect_dialog <match|none> <label> <pane text>
   if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got"; failures=$((failures + 1)); fi
 }
 
+expect_done_time() { # expect_done_time <expected time> <label> <pane text>
+  local want=$1 label=$2 got
+  got=$(printf '%s\n' "$3" | turn_done_time)
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want '$want', got '$got'"; failures=$((failures + 1)); fi
+}
+
+done_pane=$(printf '%s\n' '⏺ Answered the questions' '✻ Worked for 6m 9s · done 1:05 PM')
+expect_done_time "1:05" "completed turn returns its done time" "$done_pane"
+
+no_done_pane=$(printf '%s\n' '⏺ Reading files' 'plain text')
+expect_done_time "" "pane with no done line returns empty" "$no_done_pane"
+
+working=$(printf '%s\n' '⏺ Reading lane_watch.sh' '✻ Thinking… (12s · esc to interrupt)' '')
+expect_done_time "" "working pane without a done line returns empty" "$working"
+
 permission_prompt=$(printf '%s\n' \
   'Bash command' '  git push origin main' '' \
   'Do you want to proceed?' \
@@ -26,7 +41,6 @@ expect_dialog match "permission prompt matches" "$permission_prompt"
 menu=$(printf '%s\n' 'Select a model' '❯ 1. Sonnet' '  2. Opus' 'Enter to select · ↑/↓ to navigate')
 expect_dialog match "Enter to select menu matches" "$menu"
 
-working=$(printf '%s\n' '⏺ Reading lane_watch.sh' '✻ Thinking… (12s · esc to interrupt)' '')
 expect_dialog none "working screen does not match" "$working"
 
 # A prompt above more than 4 lines of output is still a dialog; the old tail -4 check missed it.

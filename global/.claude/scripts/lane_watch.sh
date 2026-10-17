@@ -5,6 +5,7 @@
 #
 # Exits (printing one line per event) as soon as any of these happens:
 #   - a named lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
+#   - a named lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
 #   - a named lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a named lane's tmux window disappears
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
@@ -21,6 +22,11 @@ dialog_waiting() {
   tail -15 | grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'
 }
 
+# Return the done time from the last completed-turn line visible in this pane.
+turn_done_time() {
+  tail -15 | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p' | tail -1
+}
+
 # When sourced (by the test script), stop here with the functions defined.
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
@@ -33,10 +39,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 lanes=("$@")
-declare -A seen
+declare -A seen seen_turn
 report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
-for l in "${lanes[@]}"; do seen[$l]=$(stamp "$l"); done
+for l in "${lanes[@]}"; do
+  seen[$l]=$(stamp "$l")
+  seen_turn[$l]=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null | turn_done_time)
+done
 # Jonathan asking the hub from OpenClaw: openclaw_pickup.py --act touches this file when it files a "Jonathan via OpenClaw:" line
 # in muse-inbox.md. It holds only a time and an id, never the message.
 ask_wake="$HOME/.claude/state/openclaw-ask.wake"
@@ -54,8 +63,15 @@ while :; do
     fi
     if ! tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null | grep -qx "$l"; then
       echo "gone: $l"; hit=1
-    elif tmux capture-pane -p -t "lanes:$l" 2>/dev/null | dialog_waiting; then
-      echo "waiting on a dialog: $l"; hit=1
+    else
+      pane=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null)
+      if printf '%s\n' "$pane" | dialog_waiting; then
+        echo "waiting on a dialog: $l"; hit=1
+      fi
+      done_time=$(printf '%s\n' "$pane" | turn_done_time)
+      if [ -n "$done_time" ] && [ "$done_time" != "${seen_turn[$l]}" ]; then
+        echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1
+      fi
     fi
   done
   a=$(ask_stamp)
