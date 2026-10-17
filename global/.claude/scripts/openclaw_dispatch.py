@@ -113,8 +113,8 @@ MAIL_METADATA = "THREAD_VIEW_METADATA_ONLY"
 MAIL_MINIMAL = "THREAD_VIEW_MINIMAL"
 # A check he asked for ("diagnose / triage / look into / find out why ...") is a job, and his asking is the go. The question pass may not
 # answer one with "needs your go" (say refuses it); it promotes the ask to a job instead. A question that names a write stays his call.
-DIAGNOSE_RE = re.compile(r"\b(?:diagnos\w*|triage\w*|investigat\w*|look(?:ing)?\s+into|find\s+out\s+why|figure\s+out\s+why|check(?:ing)?|debug\w*|root\s+cause)", re.I)
-WRITE_RE = re.compile(r"\b(?:merg\w*|deploy\w*|releas\w*|refund\w*|publish\w*|ship\w*|restart\w*|delet\w*|reply|send)\b", re.I)
+DIAGNOSE_RE = re.compile(r"\b(?:diagnos\w*|triage\w*|investigat\w*|look(?:ing)?\s+into|find\s+out\s+why|figure\s+out\s+why|check(?:ing)?|debug\w*|root\s+cause)\b", re.I)
+WRITE_RE = re.compile(r"\b(?:merg\w*|deploy\w*|releas\w*|refund\w*|publish\w*|ship\w*|restart\w*|delet\w*|reply|send|fix\w*|push\w*|commit\w*|patch\w*|updat\w*|edit\w*|clos\w*|revert\w*|roll\w*back)\b", re.I)
 NEEDS_GO_RE = re.compile(r"needs?\s+your\s+(?:go|ok|okay|approval|permission|decision|say[- ]so)|your\s+call|"
                          r"(?:wait(?:s|ing)?\s+(?:on|for)|awaiting)\s+your\s+(?:go|ok|okay|approval|permission)|"
                          r"(?:once|if|when)\s+you\s+(?:say|approve|ok|okay|confirm)", re.I)

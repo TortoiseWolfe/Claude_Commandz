@@ -1470,7 +1470,7 @@ class Diagnose(PassBase):
         self.assertFalse(dp.defer(self.ctx, self.host, ASK, "late", NOW + 9)[0])
 
     def test_promote_is_only_for_a_read_only_check(self):
-        for q in ("merge the own-app pull request", "what is the weather in Portland", "triage the failure and then deploy the fix"):
+        for q in ("merge the own-app pull request", "what is the weather in Portland", "triage the failure and then deploy the fix", "diagnose it and fix the bug", "investigate then push a patch", "checkout the branch"):
             self.asked(q)
             ok, msg = self.promote()
             self.assertFalse(ok, q)
