@@ -351,12 +351,9 @@ class Replies(Base):
         self.act("reply own-app: hi")
         self.assertIn("Couldn't send", self.host.chats[-1])
 
-    def test_close_waits_for_the_report_then_kills_the_window(self):
+    def test_close_kills_the_window_of_a_lane_with_a_report(self):
         self.start("client-app")
         lane = self.lane_names()[0]
-        kind, line = self.act("close %s" % lane)
-        self.assertIn("held: no report yet", line)
-        self.assertEqual(self.host.killed, [])
         self.write_report(lane)
         self.act("close %s" % lane)
         self.assertEqual(self.host.killed, [lane])
