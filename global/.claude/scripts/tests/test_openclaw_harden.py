@@ -146,7 +146,7 @@ class Harden(unittest.TestCase):
         self.assertEqual(json.dumps(after["modelPolicy"], separators=(",", ":")), before["modelPolicy"])
         self.assertEqual(json.dumps(after["models"], separators=(",", ":")), before["models"])
         self.assertEqual(json.dumps(updated["models"]["providers"], separators=(",", ":")), before["providers"])
-        self.assertEqual(patch["agents"]["defaults"], {})
+        self.assertNotIn("defaults", patch["agents"])
         self.assertNotIn("models", patch)
 
 

@@ -87,19 +87,21 @@ if not model_configured:
         "models": {m: {} for m in chain},
         "modelPolicy": {"allow": chain},
     }
+agents_patch = {
+    # The one agent in the app is the Main chat. No model pin: it follows the Default chain above.
+    "entries": {"main": {"name": "Receptionist"}, **({rid: {
+        "name": "Outside gate",
+        "description": "Gate for outside channels: reads, classifies, replies. No acting tool. The hub acts.",
+        "workspace": state + "/workspace-" + rid,
+        # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
+        # minimal profile or the runtime would still declare (session_status, gateway, presence).
+        "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
+    }} if gate else {})},
+}
+if default_patch:
+    agents_patch["defaults"] = default_patch
 patch = {
-    "agents": {
-        "defaults": default_patch,
-        # The one agent in the app is the Main chat. No model pin: it follows the Default chain above.
-        "entries": {"main": {"name": "Receptionist"}, **({rid: {
-            "name": "Outside gate",
-            "description": "Gate for outside channels: reads, classifies, replies. No acting tool. The hub acts.",
-            "workspace": state + "/workspace-" + rid,
-            # No acting tool, and no tool at all: the profile caps it, the deny list removes the three the
-            # minimal profile or the runtime would still declare (session_status, gateway, presence).
-            "tools": {"profile": "minimal", "allow": [], "deny": ["gateway", "session_status", "presence"]},
-        }} if gate else {})},
-    },
+    "agents": agents_patch,
     # The Main chat starts fresh daily (checked lazily when the next message arrives; the old transcript stays in
     # the agent's store). Memory Dreaming writes only a diary nothing loads, and the skill reviews make a weekly
     # session nobody reads.
