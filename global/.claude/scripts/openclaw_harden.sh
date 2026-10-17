@@ -173,6 +173,8 @@ res = []
 res.append(out("chain.default", d["model"]["primary"] == P and d["model"]["fallbacks"] == F, " > ".join([d["model"]["primary"]] + d["model"]["fallbacks"])))
 res.append(out("chain.main_unpinned", "model" not in c["agents"]["entries"].get("main", {}), "Main follows the Default chain"))
 if GATE:
+    # A channel (or binding) with no gate agent behind it would hand outside input to the Main chat.
+    res.append(out("gate.present_with_channel", "receptionist" in c["agents"]["entries"], "a channel or binding is configured, so the tool-less gate agent must exist"))
     res.append(out("chain.receptionist", r.get("model") == {"primary": P, "fallbacks": F}))
 n = sum(1 for _ in json.dumps(c).split("claude/")) - 1
 res.append(out("chain.claude_entries", n == 0, "claude/ strings in config: %d" % n))
