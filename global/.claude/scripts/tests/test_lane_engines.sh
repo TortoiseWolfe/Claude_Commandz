@@ -316,6 +316,9 @@ run_lane triage-mail "$REPO" sonnet "$PROMPT"
 assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a -mail name keeps the connectors'
 run_lane --connectors lean-flag "$REPO" sonnet "$PROMPT"
 assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' '--connectors keeps the connectors'
+run_lane --no-connectors lean-no-connectors-mail "$REPO" sonnet "$PROMPT_MAIL"
+assert_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' '--no-connectors overrides the lane name and prompt'
+assert_contains "$LAST_OUTPUT" 'connectors off' '--no-connectors reports connectors off'
 conn_of() { awk -F'\t' -v n="$1" '$2==n{c=$11} END{print c}' "$INDEX"; }
 [ "$(conn_of lean-opus)" = off ] || fail 'index records connectors off'
 [ "$(conn_of lean-mail)" = on ] || fail 'index records connectors on'
