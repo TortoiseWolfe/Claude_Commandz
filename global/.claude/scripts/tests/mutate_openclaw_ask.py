@@ -5,6 +5,7 @@ A mutant that leaves the suite green is a gap.
 
   python3 mutate_openclaw_ask.py
 """
+import os
 import re
 import shutil
 import subprocess
@@ -176,7 +177,7 @@ MUTANTS = [
     (DISPATCH, "pass: tokens not recorded", '"tokens": toks', '"tokens": 0'),
     (DISPATCH, "pass: runs for an ask already settled", 'if ask is None or ask.get("status") != "pending":', "if ask is None:"),
     (DISPATCH, "pass: the lock is never taken", "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "pass"),
-    (DISPATCH, "prompt: any lane name may be written", 'or not lane_name.startswith("oc-"):', ":"),
+    (DISPATCH, "prompt: any lane name may be written", 'or not lane_name.startswith("oc-"):\n        return False, "prompt:', ':\n        return False, "prompt:'),
     (DISPATCH, "prompt: lane name unchecked", "if not LANE_NAME_RE.fullmatch(lane_name or \"\") or not lane_name.startswith", "if not lane_name.startswith"),
     (DISPATCH, "prompt: size unchecked", "or len(text) > PROMPT_MAX:", ":"),
     (DISPATCH, "pass: the task is not quoted as data", "task=json.dumps(ask[\"task\"], ensure_ascii=False), repo=ask[\"repo\"]", "task=ask[\"task\"], repo=ask[\"repo\"]"),
@@ -246,7 +247,9 @@ MUTANTS = [
 def main():
     red = 0
     rows = []
-    for rel, name, old, new in MUTANTS:
+    only = os.environ.get("MUTANT_ONLY", "")  # a recheck: run just the mutants whose name holds this text
+    mutants = [m for m in MUTANTS if only in m[1]]
+    for rel, name, old, new in mutants:
         src = (SCRIPTS / rel).read_text()
         if old not in src:
             rows.append((name, "PATTERN NOT FOUND", "-"))
@@ -271,8 +274,8 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
     for name, verdict, n in rows:
         print(f"{verdict:24} red={n:>3}  {name}")
-    print(f"\n{red} of {len(MUTANTS)} mutants killed")
-    return 0 if red == len(MUTANTS) else 1
+    print(f"\n{red} of {len(mutants)} mutants killed")
+    return 0 if red == len(mutants) else 1
 
 
 if __name__ == "__main__":
