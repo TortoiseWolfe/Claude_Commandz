@@ -270,3 +270,80 @@ describe('blast radius, unattended lane', () => {
     expect(asked).toBe(true)
   })
 })
+
+// Jonathan, 9:10 PM: "I need to understand what it's effecting any time you call it". Every prompt and every
+// refusal says what the command does and what it would touch (or that it cannot tell, and why).
+describe('blast radius always says what it would touch', () => {
+  const RULES: [string, string][] = [
+    ['rm -rf', 'rm -rf /home/t/afa-mods-test'],
+    ['docker system prune', 'docker system prune -af'],
+    ['docker image prune', 'docker image prune -a'],
+    ['docker volume prune', 'docker volume prune -f'],
+    ['docker volume rm', 'docker volume rm pgdata'],
+    ['docker compose down -v', 'docker compose down -v'],
+    ['git push --force', 'git push --force origin main'],
+    ['production deploy', 'vercel --prod'],
+  ]
+  const TOUCH = /\(dir,|\(not found\)|\(volume|branch \S+ on remote|service: |host named|disk use|containers that would|images|unused volumes|volumes this stack/
+  const CANT = "can't tell what this touches: "
+  const says = (text: string) => {
+    expect(text).toContain('It would touch: ')
+    const part = text.slice(text.indexOf('It would touch: '))
+    expect(TOUCH.test(part) || part.includes(CANT)).toBe(true)
+    expect(/=>|\/\^|\\s\+|\bexpect\(/.test(part)).toBe(false)
+  }
+  for (const [kind, command] of RULES) {
+    test(`${kind}, interactive: the question says what it does and what it would touch`, async ($, on) => {
+      setup(on)
+      let asked = ''
+      on('session.surfaces', () => ({ value: ['terminal'] }))
+      on('fs.stat', () => ({ value: { kind: 'directory', size: 4096, mtimeMs: 0, isLink: false } }))
+      on('fs.list', () => ({ value: [{ name: 'a' }] }))
+      on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+        asked = JSON.stringify(e)
+        return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+      })
+      await $.tool.call({ tool: 'Bash', command })
+      expect(asked).toContain('Blast Radius stopped a command before it ran')
+      expect(asked).toContain(`${kind}`)
+      expect(asked).toContain('Held because')
+      expect(asked).toContain('It would touch:')
+      expect(asked.length).toBeGreaterThan(200)
+      expect(TOUCH.test(asked) || asked.includes(CANT)).toBe(true)
+    })
+    test(`${kind}, unattended lane: the refusal says what it would touch`, async ($, on) => {
+      setup(on, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/x` })
+      on('session.surfaces', () => ({ value: ['terminal'] }))
+      on('fs.stat', () => ({ value: { kind: 'directory', size: 4096, mtimeMs: 0, isLink: false } }))
+      on('fs.list', () => ({ value: [] }))
+      on('process.run', (_$: any, e: any) => ({
+        value: { exitCode: 0, stdout: e.argv[0] === 'realpath' ? `${e.argv.at(-1)}\n` : '', stderr: '' },
+      }))
+      on('fs.write', () => ({ value: undefined }))
+      const r: any = await $.tool.call({ tool: 'Bash', command })
+      expect(r.deny).toContain('did not wait')
+      expect(r.deny).toContain('Held because')
+      says(r.deny)
+    })
+  }
+  for (const [kind, command] of RULES.filter(([k]) => k === 'git push --force' || k === 'production deploy')) {
+    test(`${kind}, non-interactive: the hard refusal says what it would touch`, async ($, on) => {
+      setup(on)
+      on('session.surfaces', () => ({ value: [] }))
+      on('fs.write', () => ({ value: undefined }))
+      const r: any = await $.tool.call({ tool: 'Bash', command })
+      expect(r.deny).toContain('non-interactive')
+      says(r.deny)
+    })
+  }
+  test('a rule whose lookup fails still says it cannot tell and why, never nothing', async ($, on) => {
+    setup(on, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/x` })
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('process.run', () => {
+      throw new Error('no docker here')
+    })
+    on('fs.write', () => ({ value: undefined }))
+    const r: any = await $.tool.call({ tool: 'Bash', command: 'docker volume prune -f' })
+    expect(r.deny).toContain(CANT)
+  })
+})
