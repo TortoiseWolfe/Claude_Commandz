@@ -93,13 +93,47 @@ class Refusals(unittest.TestCase):
         self.assertLess(len(LIVE), 8000)
 
 
+class FrontdeskSeven(unittest.TestCase):
+    """frontdesk-7: the receptionist lists, names and stops jobs through the hub, never from memory."""
+    def test_the_menu_lists_lanes_and_stop(self):
+        self.assertIn('- "lanes" lists the open workers', LIVE)
+        self.assertIn('- "stop" stops the newest worker he started.', LIVE)
+
+    def test_whats_running_is_answered_by_the_lanes_marker_and_quoted_word_for_word(self):
+        self.assertIn('send "Sending to the hub: lanes"', LIVE)
+        self.assertIn('quote the "[hub]" answer word for word', LIVE)
+        self.assertIn("never from memory or from the status page", LIVE)
+        for ask in ("what's running?", "what lanes are open?"):
+            self.assertIn(ask, LIVE)
+
+    def test_a_plain_stop_is_sent_unless_he_names_a_lane(self):
+        self.assertIn('names no worker, the line is "Sending to the hub: stop"', LIVE)
+        self.assertIn('When he names one, it is "close <lane>"', LIVE)
+        self.assertNotIn("the hub handles it: do not write", LIVE)  # the old rule: no marker for a stop
+        self.assertNotIn("he can say \"stop\" to cancel a start", LIVE)
+
+    def test_reply_and_close_use_the_exact_name_from_a_hub_line(self):
+        self.assertIn('Every reply or close line uses the exact lane name from a "[hub]" line.', LIVE)
+
+    def test_the_two_new_marker_lines_run_through_the_poller(self):
+        import openclaw_pickup as pk
+        import openclaw_dispatch as dp
+        self.assertEqual(pk.parse_menu("lanes", {}, {}), ("lanes",))
+        self.assertEqual(pk.parse_menu("stop", {}, {}), ("stop",))
+        self.assertEqual(dp.parse("lanes"), ("lanes",))
+        self.assertEqual(dp.parse("stop"), ("stop",))
+
+    def test_lanes_still_close_themselves(self):
+        self.assertIn("Lanes close themselves; never tell him to close one.", LIVE)
+
+
 class Examples(unittest.TestCase):
     """The example replies in the live section: a menu action is never refused, and each one ends with a marker the poller can run."""
     def examples(self):
         body = LIVE.split("Examples of a whole reply", 1)[1].split("\n\n", 2)[1]
         lines = body.splitlines()
         pairs = [(lines[i][2:], lines[i + 1].strip()) for i in range(len(lines) - 1) if lines[i].startswith("- ") and lines[i + 1].startswith("  Sending to the hub:")]
-        self.assertEqual(len(pairs), 6, body)
+        self.assertEqual(len(pairs), 8, body)
         return pairs
 
     def test_no_menu_action_example_says_it_cannot(self):
@@ -118,7 +152,7 @@ class Examples(unittest.TestCase):
             menu = pk.parse_menu(m.group("job"), sites, {})
             self.assertIsNotNone(menu, marker)
             verbs.add(menu[0])
-        self.assertEqual(verbs, {"open_model", "status", "start", "reply", "close"})
+        self.assertEqual(verbs, {"open_model", "status", "start", "reply", "close", "stop", "lanes"})
 
     def test_open_the_model_with_no_site_is_on_the_menu_and_the_text_says_never_to_ask_which(self):
         import openclaw_pickup as pk

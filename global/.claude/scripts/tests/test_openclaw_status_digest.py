@@ -193,7 +193,7 @@ class FilterUnits(Base):
     def test_names_come_from_the_people_files_and_are_masked(self):
         for w in ("zelda", "quimby", "bartholomew", "fitch", "zquimby", "othmar", "vex"):
             self.assertIn(w, self.names)
-        out = self.flt.clean("Zelda's tap and Bartholomew with fitch")
+        out = self.flt.clean("Zelda's tap and Bartholomew with Fitch")
         self.assertEqual(out, "[person] tap and [person] with [person]")
 
     def test_owner_and_fleet_names_survive_and_english_words_are_not_masked(self):
@@ -206,6 +206,45 @@ class FilterUnits(Base):
         self.assertEqual(self.flt.clean("fitch-roof.skp", names=False), "fitch-roof.skp")  # explicit opt-out only
         out = self.digest(lane_status="fitch-rewrite       report:yes idle    x\n")
         self.assertNotIn("fitch", out.lower())
+
+    def test_names_match_as_whole_words_with_their_capitals(self):
+        extra = dg.NameSet(self.names | {"green"})
+        flt = dg.Filter(extra)
+        for src in ("CI is red on all six", "CI is green on all six", "the green light, then CI turns red"):
+            with self.subTest(src=src):
+                self.assertEqual(flt.clean(src), src)
+        self.assertEqual(flt.clean("Green asked about the tap"), "[person] asked about the tap")
+        self.assertEqual(flt.clean("GREEN asked"), "[person] asked")
+        self.assertEqual(flt.clean("Fitch and Zelda arrive"), "[person] and [person] arrive")
+        self.assertEqual(flt.clean("Greenhouse tap"), "Greenhouse tap")  # a name inside a longer word is a different word
+        self.assertEqual(flt.clean("the green-roof lane"), "the [person]-roof lane")  # glued into an identifier it is still masked
+
+    def test_a_listed_client_name_is_still_scrubbed_in_the_digest_of_a_status_line(self):
+        self.assertEqual(self.flt.clean("CI is green; Quimby wants the keg"), "CI is green; [person] wants the keg")
+
+    def test_a_github_handle_is_masked_as_written(self):
+        self.assertIn("zquimby", self.names.handles)
+        self.assertEqual(self.flt.clean("pushed by zquimby today"), "pushed by [person] today")
+
+    def test_lane_names_pass_through_whole(self):
+        for tok in ("oc-workspace-40816152", "oc-own-app-1016-2103", "oc-own-app-1016-2103-2", "oc-40816152", "oc-a1b2c3d4", "frontdesk-7", "frontdesk-12"):
+            with self.subTest(tok=tok):
+                self.assertEqual(self.flt.clean(tok + " started"), tok + " started")
+                self.assertEqual(self.flt.clean("Stopped %s." % tok), "Stopped %s." % tok)
+                self.assertEqual(self.flt.clean("%s | repo x | running" % tok), "%s | repo x | running" % tok)
+
+    def test_a_bare_long_number_is_still_scrubbed_next_to_a_lane_name(self):
+        self.assertEqual(self.flt.clean("40816152 is not oc-workspace-40816152"), "[num] is not oc-workspace-40816152")
+        self.assertEqual(self.flt.clean("order 40816152 today"), "order [num] today")
+        self.assertEqual(self.flt.clean("oc-workspace-40816152-and-40816152"), "oc-workspace-40816152-and-[num]")
+
+    def test_a_person_inside_a_lane_name_is_still_masked(self):
+        self.assertEqual(self.flt.clean("lane oc-fitch-40816152 started"), "lane oc-[person]-40816152 started")
+
+    def test_the_protected_text_cannot_smuggle_a_forbidden_thing_through(self):
+        self.assertEqual(self.flt.clean("oc-workspace-40816152 wrote to a@b.co $5"), "oc-workspace-40816152 wrote to [email] [amount]")
+        self.assertIsNone(self.flt.clean("oc-workspace-40816152 owes the invoice"))  # the drops still run
+        self.assertEqual(self.flt.clean("oc-workspace-40816152 wrote to a@b.co"), "oc-workspace-40816152 wrote to [email]")
 
     def test_truncation_is_on_a_word_boundary_and_scrubbed_after(self):
         out = self.flt.clean("word " * 20 + "contact fred@exam", limit=60)

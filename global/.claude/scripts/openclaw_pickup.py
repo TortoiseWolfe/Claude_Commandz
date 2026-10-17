@@ -19,8 +19,8 @@ With --act (the poller, shell only, never a model) a second stage runs on the it
   - ONLY an item whose source is "tray" (Jonathan typing in OpenClaw's own dashboard) can reach the fixed
     action table below. Twitch, Discord, YouTube and drop items never do, whatever their text says.
   - the table is: `open the newest <site> model` (or just `open the model`: the newest model on disk) -> open_model, `status` -> status, and the lane menu of
-    openclaw_dispatch.py (`start <repo>: <task>`, `reply <lane>: <text>`, `close <lane>`, and a plain `stop` / `cancel that`,
-    which closes the newest lane he started). The whole message has to fit one of those sentences; a site is looked up in a
+    openclaw_dispatch.py (`start <repo>: <task>`, `reply <lane>: <text>`, `close <lane>` (any name the lane has), `lanes` (the live
+    list of open lanes), and a plain `stop` / `cancel that`, which closes the newest lane he started). The whole message has to fit one of those sentences; a site is looked up in a
     set built from the folders on disk (plus a private alias file), a repo in a table from hub/repos.tsv and a lane in the
     dispatcher's state file, so text never becomes a path or an argument. Answers are posted into Jonathan's Main session
     (agent:main:main) and nowhere else.
@@ -469,12 +469,9 @@ def marker_job(run):
 
 
 def parse_menu(job, sites, aliases):
-    """The menu again, for a sentence the chat model wrote: open model, status, start, reply, close. Never stop (his word only)."""
-    ask = parse_ask(job, sites, aliases)
-    if ask:
-        return ask
-    d = dispatch.parse(job)
-    return d if d and d[0] != "stop" else None
+    """The menu again, for a sentence the chat model wrote: open model, status, start, reply, close, lanes and stop. The same guards as a
+    typed one apply (a direct reply to his own tray message, one marker, the dispatcher's tables); a plain stop only closes the newest lane."""
+    return parse_ask(job, sites, aliases) or dispatch.parse(job)
 
 
 def load_pending(path):
@@ -573,6 +570,8 @@ def execute(menu, host, ctx, sites, now, stamp, sha, via_chat=False):
         line, chat = dispatch.do_reply(ctx, host, menu[1], menu[2], now)
     elif verb == "stop":
         line, chat = dispatch.do_stop(ctx, host, now)
+    elif verb == "lanes":
+        line, chat = dispatch.do_lanes(ctx, host, now)  # read live, no model: the answer is the state file, the index and tmux
     else:
         line, chat = dispatch.do_close(ctx, host, menu[1], now)
     if chat:
