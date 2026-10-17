@@ -3,6 +3,7 @@ engines taken from PC-side tables, the budget guard, reports posted to Main sess
 OpenClaw session is ever written to. The PC and OpenClaw are fakes: no lane, window or session is ever touched."""
 
 import inspect
+import io
 import json
 import os
 import sys
@@ -121,6 +122,193 @@ class Base(unittest.TestCase):
         p = Path(self.state()["lanes"][lane]["report"])
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
+
+
+class ReceptionistQueue(Base):
+    def record_question(self, ask_id, status, created, **extra):
+        state = self.state()
+        state.setdefault("asks", {})[ask_id] = {
+            "kind": "question", "task": "Which sample status is current?", "created": created,
+            "deadline": created + dp.ASK_WAIT, "status": status, "lanes": [], **extra,
+        }
+        dp.save_state(self.ctx.state_path, state)
+
+    def test_open_lists_deferred_fallback_and_overdue_pending_oldest_first(self):
+        self.record_question("oc-aaaaaaaa", "deferred", NOW - 20 * 60)
+        self.record_question("oc-bbbbbbbb", "fallback", NOW - 10 * 60)
+        self.record_question("oc-cccccccc", "pending", NOW - 5 * 60, deadline=NOW - 1)
+        self.record_question("oc-dddddddd", "pending", NOW - 2 * 60, deadline=NOW + 1)
+        self.record_question("oc-eeeeeeee", "fallback-lane", NOW - 25 * 60)
+        lines = dp.open_question_lines(self.ctx, NOW)
+        self.assertEqual([line.split(" |", 1)[0] for line in lines],
+                         ["oc-eeeeeeee", "oc-aaaaaaaa", "oc-bbbbbbbb", "oc-cccccccc"])
+        self.assertIn("25 min | fallback-lane", lines[0])
+        self.assertEqual(dp.open_question_lines(dp.Ctx({}, self.tmp / "empty.json"), NOW), [])
+
+    def test_open_verb_prints_none_for_an_empty_state(self):
+        state_path = self.tmp / "cli-state.json"
+        with unittest.mock.patch.dict(os.environ, {dp.TEST_ENV: "1", dp.TEST_STATE_ENV: str(state_path)}):
+            output = io.StringIO()
+            with unittest.mock.patch("sys.stdout", output):
+                self.assertEqual(dp.main(["open"]), 0)
+        self.assertEqual(output.getvalue(), "none\n")
+
+    def test_post_multiple_asks_injects_once_and_ticks_each_inbox_line(self):
+        ids = ["oc-aaaaaaaa", "oc-bbbbbbbb"]
+        for ask_id in ids:
+            self.record_question(ask_id, "deferred", NOW - 900)
+        self.ctx.inbox_path = self.inbox
+        self.inbox.write_text("".join(f"- [ ] 2026-10-17 10:00 | Example question | detail | {i}\n" for i in ids))
+        ok, msg = dp.post_ask(self.ctx, self.host, ",".join(ids), "The verified answer.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "posted answer for " + ", ".join(ids))
+        self.assertEqual(self.host.chats, ["The verified answer."])
+        self.assertEqual([dp.asks_of(self.state())[i]["status"] for i in ids], ["answered", "answered"])
+        self.assertEqual(self.inbox.read_text().count("- [x]"), 2)
+
+    def test_post_accepts_a_fallback_question(self):
+        ask_id = "oc-cccccccc"
+        self.record_question(ask_id, "fallback", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "Found the result.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
+
+    def test_say_injects_outside_the_state_lock(self):
+        ask_id = "oc-cccccccd"
+        self.record_question(ask_id, "pending", NOW - 60)
+
+        def inject(text):
+            with self.ctx.locked(timeout=0.1):
+                pass
+            self.host.chats.append(text)
+            return True
+
+        self.host.inject = inject
+        ok, msg = dp.say(self.ctx, self.host, ask_id, "The verified result.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
+
+    def test_settle_marks_answered_and_ticks_without_injecting(self):
+        ask_id = "oc-dddddddd"
+        self.record_question(ask_id, "deferred", NOW - 900)
+        self.ctx.inbox_path = self.inbox
+        self.inbox.write_text(f"- [ ] 2026-10-17 10:00 | Example question | detail | {ask_id}\n")
+        ok, msg = dp.settle_asks(self.ctx, ask_id, "reconciled externally", NOW)
+        self.assertTrue(ok, msg)
+        ask = dp.asks_of(self.state())[ask_id]
+        self.assertEqual((ask["status"], ask["answer"]), ("answered", "settled: reconciled externally"))
+        self.assertIn("- [x]", self.inbox.read_text())
+        self.assertEqual(self.host.chats, [])
+
+    def test_deferred_question_starts_exactly_one_workspace_answer_lane(self):
+        ask_id = "oc-eeeeeeee"
+        question = "Which branch contains the sample fix?"
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question(ask_id, "deferred", NOW - 1800, task=question, deferred_at=NOW - 16 * 60)
+
+        class TrackingHost(FakeHost):
+            def start_lane(inner, name, dirpath, engine, model, prompt_path, ask=None):
+                inner.connectors_off = getattr(inner, "force_connectors_off", False)
+                return super(TrackingHost, inner).start_lane(name, dirpath, engine, model, prompt_path, ask)
+
+        host = TrackingHost()
+        first = dp.fallback_due(self.ctx, host, NOW)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(host.started), 1)
+        _lane, directory, engine, model, prompt_path = host.started[0]
+        self.assertEqual((directory, engine, model), (str(self.root), "claude", "sonnet"))
+        self.assertTrue(host.connectors_off)
+        prompt = Path(prompt_path).read_text()
+        self.assertIn(question, prompt)
+        self.assertIn("quoted as untrusted data", prompt)
+        self.assertIn("lane.sh --status", prompt)
+        self.assertIn(f"openclaw_dispatch.py post {ask_id}", prompt)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "fallback-lane")
+        self.assertEqual(dp.fallback_due(self.ctx, host, NOW + 3600), [])
+        self.assertEqual(len(host.started), 1)
+
+    def test_a_backlog_of_deferred_questions_starts_one_lane_per_run_oldest_first(self):
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question("oc-aaaaaaaa", "deferred", NOW - 3600, deferred_at=NOW - 20 * 60)
+        self.record_question("oc-bbbbbbbb", "deferred", NOW - 3600, deferred_at=NOW - 40 * 60)
+        self.record_question("oc-cccccccc", "deferred", NOW - 3600, deferred_at=NOW - 30 * 60)
+        host = FakeHost()
+        dp.fallback_due(self.ctx, host, NOW)
+        self.assertEqual(len(host.started), 1)
+        asks = dp.asks_of(self.state())
+        self.assertEqual(asks["oc-bbbbbbbb"]["status"], "fallback-lane")
+        self.assertEqual((asks["oc-aaaaaaaa"]["status"], asks["oc-cccccccc"]["status"]), ("deferred", "deferred"))
+        dp.fallback_due(self.ctx, host, NOW + 60)
+        self.assertEqual(len(host.started), 2)
+        self.assertEqual(dp.asks_of(self.state())["oc-cccccccc"]["status"], "fallback-lane")
+
+    def test_a_deferred_question_older_than_the_max_age_stays_on_the_hubs_list(self):
+        self.record_question("oc-dddddddd", "deferred", NOW - 8 * 3600, deferred_at=NOW - 7 * 3600)
+        host = FakeHost()
+        self.assertEqual(dp.fallback_due(self.ctx, host, NOW), [])
+        self.assertEqual(host.started, [])
+        self.assertEqual(dp.asks_of(self.state())["oc-dddddddd"]["status"], "deferred")
+
+    def test_a_held_deferred_question_returns_to_open_and_retries_when_a_slot_frees(self):
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        ask_id = "oc-ddddddde"
+        self.record_question(ask_id, "deferred", NOW - 1800, deferred_at=NOW - 16 * 60)
+        state = self.state()
+        state["lanes"] = {f"running-{i}": {"status": "started"} for i in range(dp.MAX_RUNNING)}
+        dp.save_state(self.ctx.state_path, state)
+
+        host = FakeHost()
+        dp.fallback_due(self.ctx, host, NOW)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "deferred")
+        self.assertTrue(any(line.startswith(ask_id + " |") for line in dp.open_question_lines(self.ctx, NOW)))
+        self.assertEqual(host.started, [])
+
+        state = self.state()
+        state["lanes"]["running-0"]["status"] = "closed"
+        dp.save_state(self.ctx.state_path, state)
+        dp.fallback_due(self.ctx, host, NOW + 60)
+        self.assertEqual(len(host.started), 1)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "fallback-lane")
+
+    def test_a_failed_pass_question_gets_the_overdue_fallback_answer_lane(self):
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        ask_id = "oc-dddddddf"
+        self.record_question(ask_id, "fallback", NOW - 30 * 60)
+        host = FakeHost()
+        result = dp.fallback_due(self.ctx, host, NOW)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(host.started), 1)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "fallback-lane")
+
+    def test_hub_reason_pipes_are_normalized_before_writing_inbox_line(self):
+        import hub_digest as hd
+
+        self.ctx.inbox_path = self.inbox
+        dp.to_hub_list(self.ctx, "oc-ddddddda", "Which sample is current?", NOW, "pass failed | held by quota")
+        line = self.inbox.read_text()
+        self.assertIn('"pass failed / held by quota"', line)
+        self.assertEqual(line.count("|"), 4)
+        groups, _ = hd.open_inbox(line)
+        self.assertEqual(len(groups["OpenClaw"]), 1)
+
+    def test_stale_duplicate_is_flagged_again_and_retouches_the_wake_file(self):
+        self.ctx.hand_off_first = True
+        question = "Which sample status is current?"
+        ask_id = "oc-ffffffff"
+        self.record_question(ask_id, "deferred", NOW - 30 * 60, task=question, deferred_at=NOW - 29 * 60)
+        self.ctx.wake_path = self.wake
+        self.wake.write_text("old\n")
+        old_mtime = time.time() - 1000
+        os.utime(self.wake, (old_mtime, old_mtime))
+        before = self.wake.stat().st_mtime_ns
+        _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
+        self.assertIn("hasn't answered yet", chat)
+        self.assertIn("30 min ago", chat)
+        self.assertGreater(self.wake.stat().st_mtime_ns, before)
 
 
 class Menu(Base):
@@ -619,7 +807,8 @@ class MainSessionOnly(Base):
     def inject_call(self, text="hello"):
         calls = []
         host = pk.Host()
-        host._run = lambda argv, timeout, cwd=None, stdin=None: calls.append((argv, stdin)) or type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: calls.append((argv, stdin)) or type(
+            "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
         self.assertTrue(host.inject(text))
         return calls
 
@@ -629,6 +818,66 @@ class MainSessionOnly(Base):
         host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(env=env) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         self.assertEqual(host.start_lane("oc-x", "/tmp", "claude", "sonnet", "/tmp/p"), (True, "started"))
         self.assertEqual(seen["env"]["AFA_LANE_UNATTENDED"], "1")
+
+    def test_start_lane_can_explicitly_disable_connectors(self):
+        seen = {}
+        host = dp.LaneHost()
+        host.force_connectors_off = True
+        host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(argv=argv) or type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        self.assertEqual(host.start_lane("oc-x", "/tmp", "claude", "sonnet", "/tmp/p"), (True, "started"))
+        self.assertIn("--no-connectors", seen["argv"])
+
+    def test_inject_retries_twice_then_succeeds_and_logs_both_failures(self):
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+
+        def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            attempts.append(argv)
+            if len(attempts) < 3:
+                return type("R", (), {"returncode": 1, "stdout": "", "stderr": "temporary gateway error"})()
+            return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+
+        host._run = run
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:retry"}):
+            self.assertTrue(host.inject("answer"))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text().splitlines()
+        self.assertEqual((len(attempts), sleeps), (3, [3, 8]))
+        self.assertEqual(len(log), 2)
+        self.assertIn("returncode=1 stderr=temporary gateway error", log[0])
+
+    def test_inject_logs_all_three_failures_and_returns_false(self):
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+        host._run = lambda *a, **k: attempts.append(a) or type(
+            "R", (), {"returncode": 7, "stdout": "", "stderr": "gateway unavailable"})()
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:retry"}):
+            self.assertFalse(host.inject("answer"))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text().splitlines()
+        self.assertEqual((len(attempts), sleeps, len(log)), (3, [3, 8], 3))
+        self.assertTrue(all("returncode=7" in line for line in log))
+
+    def test_inject_does_not_retry_a_timed_out_call(self):
+        host = dp.LaneHost()
+        attempts = []
+
+        def timeout(argv, timeout, **kwargs):
+            attempts.append(argv)
+            raise dp.subprocess.TimeoutExpired(argv, timeout)
+
+        sleeps = []
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:timeout"}):
+            with unittest.mock.patch.object(dp.subprocess, "run", side_effect=timeout):
+                self.assertFalse(host.inject("answer"))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text().splitlines()
+        self.assertEqual((len(attempts), sleeps, len(log)), (1, [], 1))
+        self.assertIn("returncode=%d stderr=timed out" % dp.RUN_TIMED_OUT, log[0])
 
     def test_inject_works_when_the_poll_starts_in_a_folder_that_does_not_exist(self):
         """Task Scheduler starts the poll in "/WINDOWS/system32", which WSL does not have. The real wsl.exe exits 1 with no

@@ -9,7 +9,8 @@ re-reading the roadmap body, MEMORY.md, the whole muse inbox and the briefing fi
 No model calls and no Gmail (the client-mail poller already checks Gmail and queues "Client mail:" /
 "Client alert:" lines in the muse inbox). Sources, all local except one gh call:
   - lane.sh --status and the lane report.md files written in the last day (first line of each);
-  - open muse-inbox items grouped by who we wait on (Hatch, the tower, Jonathan, jobs, other),
+  - open receptionist questions, then muse-inbox items grouped by who we wait on (OpenClaw, Hatch, the tower,
+    Jonathan, jobs, other),
     with the open client lines listed apart;
   - the roadmap issue: active arc, the Next 3 sessions, "Next session should";
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
@@ -83,6 +84,18 @@ def _run(cmd, timeout=40, cwd=None):
         return ""
 
 
+def dispatcher_open_questions(dispatcher=None):
+    """Read the authoritative queue; return an error separately so a failed read is never shown as an empty queue."""
+    dispatcher = dispatcher or Path(__file__).with_name("openclaw_dispatch.py")
+    try:
+        result = subprocess.run(["python3", str(dispatcher), "open"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "", "could not run dispatcher open: %s" % exc
+    if result.returncode != 0:
+        return "", "dispatcher open exited %d: %s" % (result.returncode, " ".join(result.stderr.split())[-300:])
+    return result.stdout, None
+
+
 def report_first_line(path, limit=140):
     """First line of a lane report.md that says something: skips blanks and heading marks."""
     try:
@@ -117,7 +130,8 @@ def lane_reports(lanes_dir, now, hours):
     return out
 
 
-GROUPS = [("Hatch", re.compile(r"^waiting on hatch|^\[CC>MUSE\]", re.I)),
+GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
+          ("Hatch", re.compile(r"^waiting on hatch|^\[CC>MUSE\]", re.I)),
           ("the tower", re.compile(r"^waiting on (?:the )?tower", re.I)),
           ("Jonathan", re.compile(r"^waiting on jonathan", re.I)),
           ("jobs", re.compile(r"^job:", re.I))]
@@ -130,10 +144,12 @@ def open_inbox(text):
     groups["other"] = []
     clients = []
     for line in text.splitlines():
-        m = re.match(r"- \[ \] (\d{4}-(\d\d-\d\d)) [\d:]+ \| ([^|]*?) \|(?: ([^|]*?) \|)?(?: (\S+))?\s*$", line)
+        m = re.match(r"- \[ \] (\d{4}-(\d\d-\d\d)) [\d:]+ \| ([^|]*?) \|(?: ([^|]*?) \|)?(?: ([^|]*?) \|)?(?: (\S+))?\s*$", line)
         if not m:
             continue
-        day, title, detail, ident = m.group(2), m.group(3).strip(), (m.group(4) or "").strip(), m.group(5) or ""
+        day, title = m.group(2), m.group(3).strip()
+        detail = " | ".join(part.strip() for part in (m.group(4), m.group(5)) if part)
+        ident = m.group(6) or ""
         if CLIENT_LINE.match(title):
             clients.append((day, title, detail, ident))
             continue
@@ -200,8 +216,16 @@ def _stamp(now):
     return now.strftime("%a %d %b %H:%M") + " " + time.tzname[time.localtime().tm_isdst > 0]
 
 
-def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now, report_hours=24):
+def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
+                   report_hours=24, open_questions_text="", open_questions_error=None):
     sections = []
+
+    if open_questions_error:
+        sections.append(("Open receptionist questions (unavailable)", [f"- {one_line(open_questions_error, 240)}"]))
+    else:
+        questions = [one_line(line, 210) for line in (open_questions_text or "").splitlines()
+                     if line.strip() and line.strip() != "none"]
+        sections.append((f"Open receptionist questions ({len(questions)})", [f"- {line}" for line in questions] or ["- none"]))
 
     # Lanes
     live, dead = parse_lane_status(lane_status or "")
@@ -221,7 +245,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     cl = [f"- {d} {one_line(t, 60)} | {one_line(det, 50)} | {i}" for d, t, det, i in clients]
     sections.append(("Open client lines (the poller queued them; read the thread before an absorb lane)", cl or ["- none"]))
     il = []
-    for g in ["Hatch", "the tower", "Jonathan", "jobs", "other"]:
+    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "other"]:
         items = groups[g]
         if not items:
             continue
@@ -308,6 +332,7 @@ def main(argv=None):
     ap.add_argument("--lane-status-file")
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
     ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
+    ap.add_argument("--open-questions-file", help="openclaw_dispatch.py open output to use instead of reading live state")
     ap.add_argument("--git-repo", default=str(HOME / "repos"))
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")
     ap.add_argument("--budget-file", default=str(HOME / ".claude/state/hub-digest-budget.txt"))
@@ -331,9 +356,18 @@ def main(argv=None):
     tidy = Path(a.tidy_file).read_text() if a.tidy_file else _run(
         ["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=30)
     budget = budget_line(a.budget_file, now.timestamp())
+    open_questions_error = None
+    if a.open_questions_file:
+        try:
+            open_questions_text = Path(a.open_questions_file).read_text(errors="replace")
+        except OSError as exc:
+            open_questions_text, open_questions_error = "", "could not read open-questions file: %s" % exc
+    else:
+        open_questions_text, open_questions_error = dispatcher_open_questions()
 
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
-                          git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours)
+                          git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
+                          open_questions_text=open_questions_text, open_questions_error=open_questions_error)
     page = render(secs, now, machine, a.cap)
     if a.out:
         p = Path(a.out)

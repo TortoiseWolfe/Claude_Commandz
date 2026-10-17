@@ -61,5 +61,35 @@ else
   echo "FAIL no lane names: rc=$rc out=$out"; failures=$((failures + 1))
 fi
 
+fake_open="$TMP/open.py"
+cat > "$fake_open" <<'PY'
+import sys
+print("oc-aaaaaaaa | 18 min | deferred | Which sample status?")
+print("oc-bbbbbbbb | 12 min | fallback-lane | Where is the sample change?")
+PY
+rc=0; out=$(HOME="$home" OPENCLAW_DISPATCH="$fake_open" bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && [ "$out" = "ask: open receptionist questions:
+oc-aaaaaaaa | 18 min | deferred | Which sample status?
+oc-bbbbbbbb | 12 min | fallback-lane | Where is the sample change?" ]; then
+  echo "ok   open receptionist questions print every ask and exit"
+else
+  echo "FAIL open receptionist questions: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+
+call_count="$TMP/open-count"
+cat > "$fake_open" <<'PY'
+import os
+from pathlib import Path
+p = Path(os.environ["OPEN_COUNT"])
+p.write_text(p.read_text() + "x" if p.exists() else "x")
+print("none")
+PY
+rc=0; out=$(HOME="$home" OPENCLAW_DISPATCH="$fake_open" OPEN_COUNT="$call_count" bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && [ "$out" = "heartbeat: nothing new in 0 min" ] && [ "$(cat "$call_count")" = "xx" ]; then
+  echo "ok   empty question queue is checked at arm and on heartbeat"
+else
+  echo "FAIL empty question queue: rc=$rc out=$out calls=$(cat "$call_count" 2>/dev/null || echo missing)"; failures=$((failures + 1))
+fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
