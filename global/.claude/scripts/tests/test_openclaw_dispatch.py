@@ -195,6 +195,48 @@ class ReceptionistQueue(Base):
         self.assertEqual(content, answer)
         self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
 
+    def test_an_unbroken_token_is_hard_cut_without_losing_characters(self):
+        text = "x" * 2500
+        parts = dp._chat_parts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+
+    def test_a_long_token_mixed_with_words_is_relayed_whole(self):
+        text = "before words " + ("x" * 4000) + " after words"
+        parts = dp._chat_parts(text)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+
+    def test_an_over_cap_answer_names_the_ask_holding_its_full_text(self):
+        ask_id = "oc-ccccccca"
+        answer = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))
+        self.record_question(ask_id, "deferred", NOW - 900)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
+        self.assertEqual(len(self.host.chats), dp.MAX_CHAT_PARTS + 1)
+        self.assertIn(ask_id, self.host.chats[-1])
+        self.assertIn("stored with ask", self.host.chats[-1])
+
+    def test_post_line_over_cap_stores_and_names_the_full_text_file(self):
+        text = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"):
+            ok, msg = dp.post_line(self.host, text)
+        self.assertTrue(ok, msg)
+        notice = self.host.chats[-1]
+        self.assertIn("Full text is stored at:", notice)
+        path = Path(notice.split("Full text is stored at: ", 1)[1])
+        self.assertEqual(path.read_text(), text)
+
+    def test_a_blank_line_split_keeps_its_marker_on_the_text_line(self):
+        text = "first paragraph" + (" x" * 600) + "\n\nsecond paragraph" + (" y" * 600)
+        parts = dp._chat_parts(text)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        self.assertIn("(part 1 of ", parts[0])
+        self.assertFalse(parts[0].endswith("\n"))
+        self.assertEqual("".join(re.sub(r" ?\(part \d+ of \d+\)", "", part) for part in parts), text)
+
     def test_post_keeps_a_short_answer_unmarked(self):
         ask_id = "oc-cccccccf"
         self.record_question(ask_id, "deferred", NOW - 900)
@@ -754,6 +796,20 @@ class Sweep(Base):
             chat,
         )
         self.assertNotIn("\x1b", chat)
+
+    def test_a_report_with_an_unbroken_token_is_relayed_and_closes_the_lane(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        report = "x" * 2000
+        self.write_report(lane, report)
+        before = len(self.host.chats)
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        sent = self.host.chats[before:]
+        self.assertIn(report, chat)
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertTrue(self.state()["lanes"][lane]["delivered"])
 
     def test_a_report_over_the_part_limit_points_to_its_full_report_path(self):
         self.start("client-app")
