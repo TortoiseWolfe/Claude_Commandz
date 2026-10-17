@@ -68,6 +68,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -359,6 +360,15 @@ class LaneHost:
         argv = ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c",
                 'cd /home/openclaw && read -r P && openclaw gateway call chat.inject --json --params "$P"']
         text = CONTROL_RE.sub(" ", text)
+        if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+            if not _chat_ref(text):
+                try:
+                    path = _store_chat_overflow(text)
+                except OSError as e:
+                    _append(STATE / "openclaw-inject.log", "%s could not store oversized message: %s" %
+                            (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
+                    return False
+                text += "\nFull text: %s" % path
         try:
             parts = _chat_parts(text)
         except ValueError as e:
@@ -727,13 +737,58 @@ def _boundary(text, limit):
 
 
 def _chunks(text, limit):
+    if limit <= 0:
+        return [text] if text else []
     chunks = []
     while len(text) > limit:
         point = _boundary(text, limit)
         if point is None:
-            raise ValueError("a word is longer than the chat message limit")
+            point = limit
         chunks.append(text[:point])
         text = text[point:]
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def _chat_ref(text):
+    report = re.search(r"(?:^|\n)Full report: ([^\n]+)$", text)
+    if report:
+        return "report", report.group(1)
+    full_text = re.search(r"(?:^|\n)Full text: ([^\n]+)$", text)
+    if full_text:
+        ref = full_text.group(1)
+        if ref.startswith("stored with ask "):
+            return "ask", ref[len("stored with ask "):]
+        return "file", ref
+    return None
+
+
+def _store_chat_overflow(text):
+    folder = STATE / "lanes"
+    folder.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                     prefix="chat-", suffix=".txt", delete=False) as f:
+        f.write(text)
+    return str(Path(f.name).resolve())
+
+
+def _chat_chunks(text, limit):
+    chunks = []
+    while len(text) > limit:
+        point = _boundary(text, limit)
+        if point is None:
+            point = limit
+        chunk, rest = text[:point], text[point:]
+        trimmed = chunk.rstrip()
+        if trimmed:
+            rest = chunk[len(trimmed):] + rest
+            chunk = trimmed
+        else:
+            point = limit
+            chunk, rest = text[:point], text[point:]
+        chunks.append(chunk)
+        text = rest
     if text:
         chunks.append(text)
     return chunks
@@ -744,33 +799,45 @@ def _chat_parts(text):
     if len(text) <= CHAT_MAX:
         return [text]
     rough = _chunks(text, CHAT_MAX)
-    report = re.search(r"(?:^|\n)Full report: ([^\n]+)$", text)
-    report_path = report.group(1) if report else None
+    ref = _chat_ref(text)
+    def marked(chunks, count):
+        parts = []
+        for i, chunk in enumerate(chunks, 1):
+            trailing = chunk[len(chunk.rstrip()):]
+            content = chunk.rstrip()
+            marker = "(part %d of %d)" % (i, count)
+            separator = " " if content else ""
+            parts.append(content + separator + marker + (trailing if i == len(chunks) else ""))
+        return parts
+
     if len(rough) > MAX_CHAT_PARTS:
         count = MAX_CHAT_PARTS
         marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
-        chunks = _chunks(text, CHAT_MAX - marker_size)[:count]
-        notice = ("Full text is in the full report: %s" % report_path if report_path else
-                  "Full text exceeds the chat part limit; see the report path.")
-        if len(notice) > CHAT_MAX:
-            raise ValueError("the full report path exceeds the chat message limit")
-        return [chunk + " (part %d of %d)" % (i, count) for i, chunk in enumerate(chunks, 1)] + [notice]
+        chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)[:count]
+        return marked(chunks, count) + [_chat_overflow_notice(ref)]
     count = len(rough)
     while True:
         marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
-        chunks = _chunks(text, CHAT_MAX - marker_size)
+        chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)
         if len(chunks) > MAX_CHAT_PARTS:
             count = MAX_CHAT_PARTS
             marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
-            chunks = _chunks(text, CHAT_MAX - marker_size)[:count]
-            notice = ("Full text is in the full report: %s" % report_path if report_path else
-                      "Full text exceeds the chat part limit; see the report path.")
-            if len(notice) > CHAT_MAX:
-                raise ValueError("the full report path exceeds the chat message limit")
-            return [chunk + " (part %d of %d)" % (i, count) for i, chunk in enumerate(chunks, 1)] + [notice]
+            chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)[:count]
+            return marked(chunks, count) + [_chat_overflow_notice(ref)]
         if len(chunks) == count:
-            return [chunk + " (part %d of %d)" % (i, count) for i, chunk in enumerate(chunks, 1)]
+            return marked(chunks, count)
         count = len(chunks)
+
+
+def _chat_overflow_notice(ref):
+    if ref:
+        kind, value = ref
+        if kind == "report":
+            return "Full text is in the full report: %s" % value
+        if kind == "ask":
+            return "Full text is stored with ask %s." % value
+        return "Full text is stored at: %s" % value
+    return "Full text exceeds the chat part limit and was not included."
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -2054,6 +2121,12 @@ def post_line(host, text):
     text = re.sub(r"^\s*\[hub\]\s*", "", (text or "").strip())
     if not text:
         return False, "post: empty"
+    if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+        try:
+            path = _store_chat_overflow(text)
+        except OSError as e:
+            return False, "post: could not store full text: %s" % e
+        text += "\nFull text: %s" % path
     return (True, "posted") if host.inject(text) else (False, "post: could not post to the chat")
 
 
@@ -2132,7 +2205,10 @@ def post_ask(ctx, host, ask_ids, text, now=None):
                 return False, "post: no such ask %s" % ask_id
             if ask.get("status") not in ("deferred", "pending", "fallback", "fallback-lane"):
                 return False, "post: ask %s is already %s" % (ask_id, ask.get("status"))
-    if not host.inject(text):
+    chat_text = text
+    if len(_chat_parts(text)) > MAX_CHAT_PARTS:
+        chat_text += "\nFull text: stored with ask %s" % ", ".join(ids)
+    if not host.inject(chat_text):
         return False, "post: could not post to the chat"
     with ctx.locked():
         state = load_state(ctx.state_path)
