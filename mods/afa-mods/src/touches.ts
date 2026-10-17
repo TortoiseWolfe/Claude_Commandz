@@ -236,6 +236,12 @@ export const RULE_SAMPLES: Record<string, string[]> = {
   'docker compose down -v': ['docker compose down -v', 'docker compose -f ci.yml -p demo down --volumes'],
   'git push --force': ['git push --force origin main', 'git push -f', 'git push origin +feat/x'],
   'production deploy': ['vercel --prod', 'npm run deploy --production', 'redeploy prod now', 'mystery-tool --prod'],
+  'tmux shared lanes': [
+    'tmux kill-server',
+    'tmux kill-session -t lanes',
+    'tmux kill-session -tlanes',
+    'tmux kill-session -t=lanes',
+  ],
 }
 
 // The lines for one hold: the command, then what it would touch. Never just the command.
@@ -264,6 +270,13 @@ export async function touches($: Probe, hold: Hold, home: string): Promise<strin
         break
       case 'production deploy':
         lines = await deployLines($, hold.segment)
+        break
+      case 'tmux shared lanes':
+        lines = [
+          hold.segment.includes('kill-server')
+            ? "closes every lane window (the tmux session 'lanes'), with no undo; also closes every other session and window on the default tmux server"
+            : "closes every lane window (the tmux session 'lanes'), with no undo",
+        ]
         break
       default:
         lines = [cantTell('"' + hold.kind + '" is a held rule that has no description of its targets yet')]
