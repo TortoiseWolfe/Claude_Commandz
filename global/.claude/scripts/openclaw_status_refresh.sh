@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rebuild the OpenClaw status digest and put it where OpenClaw loads it at session start:
 # a marked block at the top of MEMORY.md in its main workspace (OpenClaw injects MEMORY.md into every
-# main session, 20,000 chars per file). Data flows hub -> OpenClaw only: the remote side prints one
-# "ok <bytes>" line and nothing is read back.
+# main session, 20,000 chars per file). Data flows hub -> OpenClaw: the remote side prints one
+# "ok <bytes>" line, and the only other thing read back is the receptionist's model name (the digest's client guard).
 #
 #   openclaw_status_refresh.sh            build and deliver (what the scheduled task and lane_watch.sh call)
 #   openclaw_status_refresh.sh --build    build only, print the digest path
@@ -22,7 +22,18 @@ flock -n 9 || exit 0
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2
 
-python3 "$here/openclaw_status_digest.py" --out "$out.new" || { rm -f "$out.new"; exit 1; }
+# The receptionist's live model, one name and nothing else: client repos get PR titles in the digest only when it is a claude/ model.
+# The digest checks the shape and treats anything else (empty, an error, another provider) as not Claude: counts only.
+model=$(timeout 30 wsl.exe -d OpenClawGateway -u openclaw -e python3 -c '
+import json
+c = json.load(open("/home/openclaw/.openclaw/openclaw.json"))
+a = c.get("agents") or {}
+m = next((x.get("model") for x in a.get("list") or [] if isinstance(x, dict) and x.get("id") == "main" and x.get("model")), None)
+m = m or (a.get("defaults") or {}).get("model")
+print(m.get("primary", "") if isinstance(m, dict) else m or "")
+' 2>/dev/null | tr -d '\r\0' | head -1 | cut -c1-120)
+
+python3 "$here/openclaw_status_digest.py" --receptionist-model "$model" --out "$out.new" || { rm -f "$out.new"; exit 1; }
 first=$(head -1 "$out.new"); last=$(tail -1 "$out.new"); size=$(wc -c < "$out.new")
 if [ "$first" != "<!-- openclaw-status:begin -->" ] || [ "$last" != "<!-- openclaw-status:end -->" ] || [ "$size" -gt 12000 ]; then
   echo "openclaw_status_refresh: digest failed its shape check (size $size); not delivering" >&2
