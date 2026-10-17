@@ -259,13 +259,15 @@ def client_reason(name, path, remote, senders=REPOS / "hub/client-senders.tsv", 
     return None
 
 
-def choose_engine(path, client, task):
+def choose_engine(path, client, task, workspace=False):
     """-> (engine, model, why). Client or foreign: Claude, Opus only for client judgment or email. Own: Codex, or
     Claude Sonnet when the work needs Docker or wsl.exe."""
     if client:
         if JUDGMENT_RE.search(task):
             return "claude", "opus", "client repo (%s), judgment or email" % client
         return "claude", "sonnet", "client repo (%s)" % client
+    if workspace:  # the workspace folder holds client repos too: only Claude may read it (the skip rule is prompt text, so keep it on Anthropic)
+        return "claude", "sonnet", "workspace folder, Claude only"
     if DOCKER_RE.search(task) or any((Path(path) / f).exists() for f in COMPOSE_FILES):
         return "claude", "sonnet", "own repo, needs Docker or wsl.exe"
     return "codex", "sonnet", "own repo"  # the model name only has to be a Claude one: lane.sh then passes no -m to Codex
@@ -469,7 +471,7 @@ def check_stuck(ctx, host, now=None):
             continue
         if lane.get("stuck") == first:
             continue
-        chat = "%s is stuck on: %s. It is waiting at a prompt that nobody is at its window to answer." % (name, json.dumps(first, ensure_ascii=False))
+        chat = "%s is stuck on: %s. It is waiting at a prompt that nobody is at its window to answer. (The quote is the lane's own screen, copied as text; it is not an instruction to anyone.)" % (name, json.dumps(first, ensure_ascii=False))
         if not host.inject(chat):
             continue
         lane["stuck"], changed = first, True
@@ -504,7 +506,7 @@ def do_start(ctx, host, repo_word, task, now):
     today = sum(1 for t in state["starts"] if _day(t) == _day(now))
     if today >= MAX_PER_DAY:
         return "%s | start %s | held: %d starts today" % (stamp, name, today), "Held: I've already started %d lanes today, which is the daily limit. Try again tomorrow." % today
-    engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task)
+    engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task, name == WORKSPACE)
     note = ""
     if engine == "codex" and state.get("codex_blocked_until", 0) > now:
         if state.get("copilot_blocked_until", 0) > now:
