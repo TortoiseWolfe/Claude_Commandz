@@ -60,6 +60,20 @@ export function weather(percent: number, isHub: boolean): Weather {
   }
 }
 
+// Every rule classify can raise. `add` takes only these, and a test fails when one has no description of its
+// targets (touches.ts RULE_SAMPLES) or no plain words (explain), so a new rule cannot ship undescribed.
+export const HELD_KINDS = [
+  'rm -rf',
+  'docker system prune',
+  'docker image prune',
+  'docker volume prune',
+  'docker volume rm',
+  'docker compose down -v',
+  'git push --force',
+  'production deploy',
+] as const
+export type HeldKind = (typeof HELD_KINDS)[number]
+
 export type Hold = { kind: string; hard: boolean; segment: string }
 export type ScratchEnv = { home?: string; tmpdir?: string }
 
@@ -68,6 +82,106 @@ const strip = (s: string) =>
     .trim()
     .replace(/^(?:\w+=\S*\s+)+/, '')
     .replace(/^(?:sudo|command|time)\s+/, '')
+
+// Words a heredoc body is run as shell for: the body of `cat <<EOF` is text being written, the body of `bash <<EOF` is run.
+const SHELL_WORDS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ssh', 'su', 'eval', 'source', '.'])
+// Commands that only show, search or send text: a deploy command inside their arguments does nothing.
+const TEXT_CARRIERS = new Set(['echo', 'printf', 'cat', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'sed', 'awk', 'head', 'tail', 'wc', 'less', 'more', 'tmux', 'screen', 'diff', 'tee'])
+// Commands that run the text they are given, so a quoted deploy command inside their arguments is real.
+const RUNS_ITS_ARGS = new Set(['ssh', 'eval', 'xargs', 'watch', 'su', 'sh', 'bash', 'zsh', 'dash', 'ksh'])
+
+const firstWord = (seg: string) => (strip(seg).replace(/^\\/, '').split(/\s+/)[0] ?? '').split('/').pop() ?? ''
+
+// Heredoc bodies that only write a file (cat, tee, python ... <<EOF) are not commands: drop them. A body fed to a shell is kept.
+function withoutTextHeredocs(command: string): string {
+  const lines = command.split('\n')
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    out.push(lines[i])
+    const m = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1/.exec(lines[i])
+    if (!m || /<<</.test(lines[i])) continue
+    const end = lines.findIndex((l, j) => j > i && l.trim() === m[2])
+    if (end < 0) continue
+    const lead = lines[i].slice(0, m.index).split(/&&|\|\||[;&|]/).pop() ?? ''
+    if (SHELL_WORDS.has(firstWord(lead))) continue
+    i = end // skip the body and its delimiter line
+  }
+  return out.join('\n')
+}
+
+// The command split at shell separators (& | ; newline ( ) ` $( ), but not inside quotes: "a; b" is one word. Inside double
+// quotes, $( ) and backticks still run, so they still split. Heredoc bodies that only write a file are left out.
+export function segmentsOf(command: string): string[] {
+  const text = withoutTextHeredocs(command)
+  const out: string[] = []
+  let cur = ''
+  let q: '' | "'" | '"' = ''
+  const resume: { close: string; depth: number }[] = [] // a double quote waiting for its $( ) or ` ` to close
+  const flush = () => {
+    out.push(cur)
+    cur = ''
+  }
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]
+    if (q === "'") {
+      cur += c
+      if (c === "'") q = ''
+      continue
+    }
+    if (c === '\\') {
+      cur += c + (text[i + 1] ?? '')
+      i += 1
+      continue
+    }
+    if (q === '"') {
+      if (c === '"') {
+        q = ''
+        cur += c
+      } else if (c === '`' || (c === '$' && text[i + 1] === '(')) {
+        flush()
+        resume.push({ close: c === '`' ? '`' : ')', depth: 0 })
+        q = ''
+        if (c === '$') i += 1
+      } else cur += c
+      continue
+    }
+    const top = resume.at(-1)
+    if (top) {
+      if (c === '(' && top.close === ')') top.depth += 1
+      if (c === top.close && top.depth > 0 && c === ')') {
+        top.depth -= 1
+        flush()
+        continue
+      }
+      if (c === top.close) {
+        flush()
+        resume.pop()
+        q = '"'
+        continue
+      }
+    }
+    if (c === "'" || c === '"') {
+      q = c
+      cur += c
+    } else if (c === '$' && text[i + 1] === '(') {
+      flush()
+      i += 1
+    } else if ('&|;\n()`'.includes(c)) flush()
+    else cur += c
+  }
+  flush()
+  return out
+}
+
+const withoutQuoted = (seg: string) => seg.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, '')
+
+// Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs its arguments.
+function isProdDeploy(seg: string): boolean {
+  const word = firstWord(seg)
+  if (!/^[A-Za-z0-9_.-]+$/.test(word) || TEXT_CARRIERS.has(word)) return false
+  const body = RUNS_ITS_ARGS.has(word) || /^(?:docker|kubectl)\s+(?:exec|run)\b/.test(seg) ? seg : withoutQuoted(seg)
+  return /--prod(uction)?\b/.test(body) || (/redeploy/i.test(body) && /\bprod/i.test(body))
+}
 
 // Which dangerous patterns a Bash command holds. Best effort, a net and not a
 // parser: it splits on shell separators and looks inside sh -c. `hard` ones (force push,
@@ -78,7 +192,7 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[] {
   const holds: Hold[] = []
-  for (const raw of command.split(/&|\||;|\n|\$\(|`|\(|\)/)) {
+  for (const raw of segmentsOf(command)) {
     const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
@@ -87,7 +201,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     }
     const t = seg.split(/\s+/)
     const flags = t.filter(x => x.startsWith('-'))
-    const add = (kind: string, hard: boolean) => holds.push({ kind, hard, segment: seg })
+    const add = (kind: HeldKind, hard: boolean) => holds.push({ kind, hard, segment: seg })
 
     if (/^(?:\S*\/)?rm$/.test(t[0])) {
       const r = flags.some(f => /^-[^-]*[rR]/.test(f) || f === '--recursive')
@@ -96,7 +210,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
         add('rm -rf', false)
       }
     }
-    if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune`, false)
+    if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune` as HeldKind, false)
     if (/^docker\s+volume\s+(rm|remove)\b/.test(seg)) add('docker volume rm', false)
     if (/^(docker\s+compose|docker-compose)\b/.test(seg) && t.includes('down')) {
       const after = t.slice(t.indexOf('down'))
@@ -106,9 +220,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
       const after = t.slice(t.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    if (/--prod(uction)?\b/.test(seg) || (/redeploy/i.test(seg) && /\bprod/i.test(seg))) {
-      add('production deploy', true)
-    }
+    if (isProdDeploy(seg)) add('production deploy', true)
   }
   return holds
 }
@@ -127,7 +239,7 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
     if (!match[2].startsWith('$(')) assignments.set(match[1], unquote(match[2]))
   }
   const groups: OwnScratchGroup[] = []
-  for (const raw of command.split(/&|\||;|\n|\$\(|`|\(|\)/)) {
+  for (const raw of segmentsOf(command)) {
     const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
@@ -153,7 +265,7 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
   return groups
 }
 
-const unquote = (value: string) => value.replace(/^(["'])(.*)\1$/, '$2')
+export const unquote = (value: string) => value.replace(/^(["'])(.*)\1$/, '$2')
 
 function isOwnScratch(
   input: string,

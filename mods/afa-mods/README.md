@@ -27,8 +27,20 @@ area are allowed without a prompt and logged as `allowed (own scratch)`.
 A lane the dispatcher started (`AFA_LANE_UNATTENDED=1`, set by `lane.sh`) never waits either: a delete
 inside its own folder, a worktree or its scratchpad, by a full path, runs and is logged as
 `allowed (lane folder)`; anything else held is refused with a plain reason the lane can act on.
-The question and every refusal say in words what the command does and why it was held.
+The question and every refusal (the lane refusals, the non-interactive denial, and the guard-failure
+denial too) say in words what the command does, why it was held, and **what it would touch**: each
+path with `(dir, N bytes, ...)`, `(file, N bytes)` or `(not found)`; the branch and remote host of a
+force push (never a token); the stopped containers, unused volumes, images and disk use of a prune;
+the volumes of a compose stack; the service of a deploy. When the words cannot say, the line reads
+`can't tell what this touches: <why>`; it is never empty and never a code fragment. The lines are built in
+`src/touches.ts`; `HELD_KINDS` in `src/lib.ts` lists every rule, and `src/touches.test.ts` fails if a rule has no
+description or a sample command gives no targets.
+The classifier judges what the command itself would run: it does not match text inside quoted
+message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file, or
+files a test runner loads (`claude plugin test` is not a deploy). `sh -c`, `ssh host "..."` and a
+heredoc fed to `bash` are still read.
 If the guard itself throws, the command is denied. The match is best effort (a net, not a shell parser). Existing hooks and permission rules still apply.
+Changes load only in new `claude` processes, not in sessions already running.
 
 ## Install
 
