@@ -249,7 +249,7 @@ MUTANTS = [
     (DISPATCH, "resolve: an ambiguous word picks the first", "return hit[0] if len(hit) == 1 else None", "return hit[0] if hit else None"),
     (DISPATCH, "close: an ambiguous word closes the first", "    if len(hit) > 1:\n        return \"%s | close | couldn't:", "    if False:\n        return \"%s | close | couldn't:"),
     (DISPATCH, "close: a running lane is not stopped", 'if lane["status"] == "started" and not has_report:', "if False:"),
-    (DISPATCH, "close: a missing lane does not list the open ones", 'Open lanes: %s."', 'Open lanes."'),
+    (DISPATCH, "close: a missing lane does not list the open ones", '_open_lane_names(load_state(ctx.state_path), live))', "'none right now')"),
     (DISPATCH, "claim: the start line is not posted", "    if host is not None and started:", "    if False:"),
     (DISPATCH, "claim: the start line drops how to stop", "Say stop to cancel. (%s on %s; I'll post its report here.)\" % (\n            lane_name,", "(%s on %s; I'll post its report here.)\" % (\n            lane_name,"),
     (DISPATCH, "lanes: a closed lane is listed", 'if l.get("status") != "closed"} | set(wins or ())', "} | set(wins or ())"),

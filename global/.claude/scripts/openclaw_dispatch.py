@@ -285,12 +285,28 @@ class LaneHost:
             return False, (r.stderr.strip().splitlines() or ["lane.sh failed"])[-1][:200]
         return True, "started"
 
+    def live_lanes(self):
+        """-> set of every lane running now, whoever started it: the names `lane.sh --status` lists as alive that also have a window in
+        the tmux session. Empty when either cannot be read."""
+        r = self._run([str(LANE_SH), "--status"], 60)
+        wins = self.windows()
+        if r is None or r.returncode != 0 or not wins:
+            return set()
+        names = set()
+        for line in r.stdout.splitlines():
+            f = line.split(None, 1)
+            if f and not line[0].isspace() and len(f) == 2 and not f[1].startswith("dead"):
+                names.add(f[0])
+        return names & wins
+
     def send_to_lane(self, name, text):
         r = self._run([str(LANE_SH), "--send", name, text], 60)
         if r is None:
             return False, "lane.sh did not answer"
         out = (r.stdout.strip().splitlines() or [""])[-1] + (" " + r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "")
-        return r.returncode == 0 and "DID NOT TAKE" not in out, out.strip()[:200]
+        # exit 1 with "input line is empty" is a lane that took the words and finished before lane.sh saw a spinner: sent, not lost
+        taken = r.returncode == 0 or "input line is empty but no spinner seen" in out
+        return taken and "DID NOT TAKE" not in out, out.strip()[:200]
 
     def kill_window(self, name):
         r = self._run(["tmux", "kill-window", "-t", "lanes:" + name], 15)
@@ -1415,29 +1431,71 @@ def followup_head(state, old, new):
     return "%s had finished at %s, so I started %s with its report, its files and your words." % (old, _clock_of(_closed_at(lane)), new)
 
 
+def find_live_lane(word, live):
+    """A lane the hub started, by the name `lane.sh --status` shows: the exact name, else one that begins or ends with the word at a dash.
+    -> list of names like find_lanes: [] none, one = found, several = ambiguous."""
+    w = (word or "").strip().lower()
+    exact = [n for n in live if n.lower() == w]
+    if exact:
+        return exact[:1]
+    return sorted(n for n in live if n.lower().endswith("-" + w) or n.lower().startswith(w + "-"))
+
+
+def _open_lane_names(state, live):
+    return ", ".join(sorted({n for n, l in state["lanes"].items() if l.get("status") in ("started", "reported")} | set(live))) or "none right now"
+
+
+def hub_has_it(ctx, ask_id, words, now, why):
+    """Nothing the receptionist cannot do ends in a refusal: his words go on the hub's list, whole, as the question the hub answers.
+    One record per ask id, so the same message handled twice files once. Not called from inside ctx.locked()."""
+    if not ASK_ID_RE.fullmatch(ask_id or ""):
+        ask_id = ask_id_for(hashlib.sha256(("%s %s" % (words, now)).encode("utf-8")).hexdigest())
+    file_with_hub(ctx, ask_id, " ".join(words.split()), "hub, the front desk could not do it", why, now)
+    return ask_id
+
+
 def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None):
-    """Send his words to a running lane. A lane that has finished (within REPLY_WINDOW) gets a follow-up lane in its repo instead: his
+    """Send his words to a running lane: one the dispatcher started, else any lane running now that `lane.sh --status` lists (the hub's own).
+    A lane that has finished (within REPLY_WINDOW) gets a follow-up lane in its repo instead: his
     words are its task, and the finished lane's task, report, files and the chat go with it (attach_context). A Copilot or Codex lane
-    cannot take words while it runs, so they are held on it and the sweep starts the follow-up when it closes (held_followups)."""
+    cannot take words while it runs, so they are held on it and the sweep starts the follow-up when it closes (held_followups).
+    Whatever cannot be done (no such lane, too long, the send did not take, too old) goes on the hub's list with his words: no dead end."""
     stamp = _stamp(now)
     state = load_state(ctx.state_path)
     hit = find_lanes(lane_word, state)
     if len(hit) > 1:
         return "%s | reply | couldn't: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn't send that: " + ambiguous_text(lane_word, hit)
+    words = his_words(context, "reply %s: %s" % (lane_word, text.strip()))
+    live = set()
+    if not hit:
+        live = host.live_lanes()
+        hit = find_live_lane(lane_word, live)
+        if len(hit) > 1:
+            return "%s | reply | couldn't: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn't send that: " + ambiguous_text(lane_word, hit)
     name = hit[0] if hit else None
     if not name:
-        names = ", ".join(n for n, l in sorted(state["lanes"].items()) if l.get("status") in ("started", "reported")) or "none right now"
-        return "%s | reply | couldn't: no such lane" % stamp, "Couldn't send that: I don't have a lane called \"%s\". Open lanes I started: %s." % (lane_word[:60], names)
+        hub_has_it(ctx, ask_id, words, now, "front desk: no lane called %s is running, so his reply to it was not sent" % lane_word[:60])
+        return "%s | reply | no such lane: on the hub's list" % stamp, "I don't have a lane called \"%s\" that I can reach (open lanes: %s). The hub has it." % (
+            lane_word[:60], _open_lane_names(state, live))
     if len(text) > REPLY_MAX:
-        return "%s | reply %s | held: message over %d characters" % (stamp, name, REPLY_MAX), "Held: that message is over %d characters." % REPLY_MAX
+        hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was over %d characters, so it was not sent" % (name, REPLY_MAX))
+        return ("%s | reply %s | held: message over %d characters: on the hub's list" % (stamp, name, REPLY_MAX),
+                "Held: that message is over %d characters. The hub has it." % REPLY_MAX)
+    if name not in state["lanes"]:  # a lane the hub started: lane.sh --send reaches it by name
+        ok, out = host.send_to_lane(name, REPLY_FRAME + text.strip())
+        if ok:
+            return "%s | reply %s | sent (hub lane)" % (stamp, name), "Sent to %s, a lane the hub started. It will answer the hub in its report." % name
+        hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"))
+        return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), "Couldn't send that to %s: %s. The hub has it." % (name, out or "it did not take")
     lane = state["lanes"][name]
     ago = _finished_ago(lane, now)
     if ago is not None:
         repo = lane.get("repo", "")
         if not 0 <= ago <= REPLY_WINDOW:
-            return ("%s | reply %s | couldn't: finished over %d days ago" % (stamp, name, REPLY_WINDOW // 86400),
-                    "%s finished on %s, more than %d days ago, so I won't add to it. To work on it again, ask me to start a new lane in %s and say "
-                    "what it should do." % (name, time.strftime("%d %b", time.localtime(_closed_at(lane))), REPLY_WINDOW // 86400, repo))
+            hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s, which finished over %d days ago, was not sent" % (name, REPLY_WINDOW // 86400))
+            return ("%s | reply %s | couldn't: finished over %d days ago: on the hub's list" % (stamp, name, REPLY_WINDOW // 86400),
+                    "%s finished on %s, more than %d days ago, so I won't add to it. The hub has it, and can start a new lane in %s." % (
+                        name, time.strftime("%d %b", time.localtime(_closed_at(lane))), REPLY_WINDOW // 86400, repo))
         context = dict(context or {}, followup_of=name, words=text.strip())
         if ctx.hand_off_first and ask_id:
             line, chat = hand_off(ctx, host, ask_id, repo, text, now, context)
@@ -1462,7 +1520,8 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None):
     ok, out = host.send_to_lane(name, REPLY_FRAME + text.strip())  # the frame keeps a leading ! / # & from reaching the lane as a command
     if ok:
         return "%s | reply %s | sent" % (stamp, name), "Sent to %s. It will answer in its report, which I'll post here." % name
-    return "%s | reply %s | not sent: %s" % (stamp, name, out), "Couldn't send that to %s: %s" % (name, out or "it did not take")
+    hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"))
+    return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), "Couldn't send that to %s: %s. The hub has it." % (name, out or "it did not take")
 
 
 def held_followups(ctx, host, now=None):
@@ -1508,8 +1567,7 @@ def _do_close(ctx, host, lane_word, now):
     if len(hit) > 1:
         return "%s | close | couldn't: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn't close that: " + ambiguous_text(lane_word, hit)
     if not hit:
-        return "%s | close | couldn't: no such lane" % stamp, "Couldn't close that: I don't have a lane called \"%s\". Open lanes: %s." % (
-            lane_word[:60], ", ".join(n for n, l in sorted(state["lanes"].items()) if l.get("status") != "closed") or "none right now")
+        return None  # not a lane the dispatcher started: do_close hands it to the hub
     name = hit[0]
     lane = state["lanes"][name]
     if lane["status"] == "closed":
@@ -1666,9 +1724,24 @@ def do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
         return _do_start(ctx, host, repo_word, task, now, ask_id, context)
 
 
-def do_close(ctx, host, lane_word, now):
+def do_close(ctx, host, lane_word, now, ask_id=None, context=None):
+    """Close a lane the dispatcher started. A lane the hub started, or none at all, is not the receptionist's to close: his words go on the
+    hub's list (hub_has_it), outside the lock because filing takes it too."""
     with ctx.locked():
-        return _do_close(ctx, host, lane_word, now)
+        done = _do_close(ctx, host, lane_word, now)
+    if done is not None:
+        return done
+    live = host.live_lanes()
+    live_hit = find_live_lane(lane_word, live)
+    if len(live_hit) > 1:
+        return "%s | close | couldn't: %s is ambiguous" % (_stamp(now), lane_word[:60]), "Couldn't close that: " + ambiguous_text(lane_word, live_hit)
+    words = his_words(context, "close %s" % lane_word)
+    hub_has_it(ctx, ask_id, words, now, "front desk: he asked to close %s; it is %s, so it was not closed" % (
+        lane_word[:60], "a lane the hub started" if live_hit else "not a lane I know"))
+    if live_hit:
+        return "%s | close %s | hub lane: on the hub's list" % (_stamp(now), live_hit[0]), "%s is a lane the hub started, so closing it is the hub's call. The hub has it." % live_hit[0]
+    return "%s | close | no such lane: on the hub's list" % _stamp(now), "I don't have a lane called \"%s\" that I can reach (open lanes: %s). The hub has it." % (
+        lane_word[:60], _open_lane_names(load_state(ctx.state_path), live))
 
 
 def do_stop(ctx, host, now):
@@ -1860,22 +1933,32 @@ def to_hub_list(ctx, ask_id, question, now, why=None):
     _touch_wake(ctx, ask_id, now)
 
 
+def file_with_hub(ctx, ask_id, words, route, why, now):
+    """Put his words on the hub's list as a question already with the hub: an ask record (so `open` lists it) and a muse-inbox line with
+    the wake file. One record per ask id, so a retry files nothing twice. Takes the state lock: never call it from inside ctx.locked().
+    -> True when filed now, False when that ask id was filed already."""
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        asks = asks_of(state)
+        if ask_id in asks:
+            return False
+        asks[ask_id] = {"kind": "question", "task": words, "marker": words, "task_key": task_key(words), "repo": "", "created": now,
+                        "deadline": now, "status": "deferred", "lanes": [], "pass": None, "answered_at": now, "deferred_at": now,
+                        "route": route}
+        save_state(ctx.state_path, state)
+    to_hub_list(ctx, ask_id, words, now, why)
+    return True
+
+
 def unsettled_to_hub(ctx, sha, ts, text, why, now):
     """A message of his that the poller could not settle (Main session unreadable, the hand-off crashed, or it waited out its age): file it as
     a question already with the hub, with his words whole, so it is never dropped without a trace. One ask per message (sha and time), so a
     retry after a crash files nothing twice. -> (log line, ask id) or (log line, None) when it was filed already."""
     ask_id = ask_id_for(hashlib.sha256(("%s %s" % (sha, ts)).encode("utf-8")).hexdigest())
     words = " ".join((text or "").split())
-    with ctx.locked():
-        state = load_state(ctx.state_path)
-        asks = asks_of(state)
-        if ask_id in asks:
-            return "%s | unsettled | already on the hub's list (ask %s)" % (_stamp(now), ask_id), None
-        asks[ask_id] = {"kind": "question", "task": words, "marker": words, "task_key": task_key(words), "repo": "", "created": now,
-                        "deadline": now, "status": "deferred", "lanes": [], "pass": None, "answered_at": now, "deferred_at": now,
-                        "route": "hub, front desk could not settle it"}
-        save_state(ctx.state_path, state)
-    to_hub_list(ctx, ask_id, words, now, "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why)
+    if not file_with_hub(ctx, ask_id, words, "hub, front desk could not settle it",
+                         "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why, now):
+        return "%s | unsettled | already on the hub's list (ask %s)" % (_stamp(now), ask_id), None
     return "%s | unsettled | %s: put on the hub's list (ask %s)" % (_stamp(now), why, ask_id), ask_id
 
 

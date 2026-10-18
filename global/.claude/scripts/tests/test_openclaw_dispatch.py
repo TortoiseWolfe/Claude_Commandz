@@ -30,6 +30,10 @@ class FakeHost:
         self.wins, self.start_ok, self.send_result, self.proj = set(), (True, "started"), (True, "sent to x: submitted"), None
         self.proj_asked = 0
         self.panes = {}
+        self.hub_live = set()  # lanes running now that the hub started (the dispatcher's state file does not hold them)
+
+    def live_lanes(self):
+        return set(self.hub_live) | set(self.wins)
 
     def pane(self, name):
         return self.panes.get(name)
@@ -609,7 +613,7 @@ class Tables(Base):
         for word in ("lanes", "oc-own-app-9999-9999", "../x", "bash"):
             kind, line = self.act("reply %s: hi" % word)
             self.assertIn(kind, ("dispatch", "chat"))
-            self.assertIn(kind == "chat" or "couldn't" in line, (True,))
+            self.assertIn(kind == "chat" or "no such lane" in line, (True,))
             kind, line = self.act("close %s" % word)
             self.assertIn(kind, ("dispatch", "chat"))
         self.assertEqual(self.host.sent, [])
