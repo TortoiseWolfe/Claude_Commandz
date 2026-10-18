@@ -810,7 +810,7 @@ class Replies(Base):
         new, d, _e, _m, prompt_path = self.host.started[1]
         self.assertEqual(d, str(self.root / "client-app"))
         self.assertIn("%s had finished at %s, so I started %s with its report, its files and your words." % (
-            lane, time.strftime("%H:%M", time.localtime(NOW + 60)), new), self.host.chats[-1])
+            lane, time.strftime("%-I:%M %p", time.localtime(NOW + 60)), new), self.host.chats[-1])
         prompt = Path(prompt_path).read_text()
         self.assertIn(json.dumps(words), prompt)  # his words, verbatim, are the task
         self.assertIn('<<<TASK\naudit the porch photos\nTASK>>>', prompt)  # the old task, quoted
@@ -1712,7 +1712,7 @@ class FollowUp17Oct(Base):
         name, d, engine, _model, _prompt = self.host.started[1]
         self.assertEqual((d, engine), (str(self.root / "own-app"), "copilot"))
         self.assertNotIn("don't have an open lane", " ".join(self.host.chats))
-        self.assertRegex(self.host.chats[-1], r"^%s had finished at \d\d:\d\d, so I started %s with its report, its files and your words\. " % (
+        self.assertRegex(self.host.chats[-1], r"^%s had finished at \d{1,2}:\d\d [AP]M, so I started %s with its report, its files and your words\. " % (
             lane, name))
 
     def test_step4_the_follow_up_prompt_holds_the_reply_the_report_and_the_copied_files(self):

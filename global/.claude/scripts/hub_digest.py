@@ -31,10 +31,11 @@ from pathlib import Path
 
 HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from openclaw_status_digest import parse_lane_status, parse_roadmap  # noqa: E402
+from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
 CAP_DEFAULT = 5800  # the page must stay under 6 KB
 BUDGET_TTL = 3600
+GIT_DATE = "format:%a %-I:%M %p"  # git log --date value: 12-hour clock
 HUB_REPO = "TortoiseWolfe/workspace"
 
 # ---------------------------------------------------------------------------------------------
@@ -65,7 +66,7 @@ def one_line(text, limit):
     t = re.sub(r"<[^>]{1,80}>", " ", text or "")
     t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
     t = t.replace("**", "").replace("`", "")
-    t = re.sub(r"\s+", " ", t).strip()
+    t = clock12(re.sub(r"\s+", " ", t).strip())
     if len(t) > limit:
         t = t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-(") + " ..."
     return scrub(t)
@@ -171,7 +172,7 @@ def budget_headline(report_text):
     used, burn, proj = cell("Used so far"), cell("Burn, last 24"), cell("Projected at reset")
     if not used:
         return ""
-    wk = f"Week resets {week.group(1).rstrip('.')}" if week else "This week"
+    wk = f"Week resets {clock12(week.group(1).rstrip('.'))}" if week else "This week"
     return f"{wk}: used {used}, burn {burn or '?'}, projected {proj or '?'} (24 h rate)"
 
 
@@ -213,7 +214,7 @@ def tidy_summary(text):
 
 
 def _stamp(now):
-    return now.strftime("%a %d %b %H:%M") + " " + time.tzname[time.localtime().tm_isdst > 0]
+    return now.strftime("%a %d %b %-I:%M %p") + " " + time.tzname[time.localtime().tm_isdst > 0]
 
 
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
@@ -235,7 +236,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     sections.append(("Lanes running", lines or ["- none"]))
 
     reps = lane_reports(lanes_dir, now, report_hours)
-    rl = [f"- {mt.strftime('%d %H:%M')} {name}: {one_line(first, 105) or 'report written'}" for mt, name, first in reps[:8]]
+    rl = [f"- {mt.strftime('%a %-I:%M %p')} {name}: {one_line(first, 105) or 'report written'}" for mt, name, first in reps[:8]]
     if len(reps) > 8:
         rl.append(f"- and {len(reps) - 8} more reports in the last {report_hours} h")
     sections.append((f"Lane reports, last {report_hours} h (first line; the file has the rest)", rl or ["- none"]))
@@ -303,7 +304,7 @@ def render(sections, now, machine, cap):
             out.append(f"## {title}")
             out.extend(lines)
             out.append("")
-        return "\n".join(out).rstrip() + "\n"
+        return clock12("\n".join(out).rstrip() + "\n")  # last pass: whatever a source wrote, the page has no 24-hour clock
 
     s = text()
     while len(s.encode()) > cap:
@@ -352,7 +353,7 @@ def main(argv=None):
         inbox = Path(a.inbox).read_text(errors="replace")
     except OSError:
         inbox = ""
-    git_log = _run(["git", "-C", a.git_repo, "log", "-10", "--format=%h %ad %s", "--date=format:%d %H:%M"])
+    git_log = _run(["git", "-C", a.git_repo, "log", "-10", "--format=%h %ad %s", "--date=" + GIT_DATE])
     tidy = Path(a.tidy_file).read_text() if a.tidy_file else _run(
         ["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=30)
     budget = budget_line(a.budget_file, now.timestamp())
