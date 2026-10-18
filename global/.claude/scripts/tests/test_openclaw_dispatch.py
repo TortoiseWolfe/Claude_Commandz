@@ -253,6 +253,14 @@ class ReceptionistQueue(Base):
         self.assertTrue(all(line.startswith("    ") for line in lines[1:]))
         self.assertEqual(len("".join(line[4:] for line in lines[1:])), 5000)
 
+    def test_open_does_not_repeat_his_words_when_the_task_already_is_them(self):
+        # change 2 stores his words as the task, so the indented copy under the row would say the same thing twice
+        ask_id = "oc-fffffff6"
+        words = "Which sample status is current?"  # record_question's task
+        self.record_question(ask_id, "deferred", time.time() - 15 * 60)
+        dp.save_context(self.ctx, ask_id, {"his_ts": NOW, "history": [{"who": "Jonathan", "text": " " + words + " ", "ts": NOW}]})
+        self.assertEqual(self.run_open().splitlines(), ["oc-fffffff6 | 15 min | deferred | " + words])
+
     def test_open_reports_missing_saved_message_without_context_or_user_message(self):
         self.record_question("oc-fffffff3", "deferred", NOW - 120)
         self.record_question("oc-fffffff4", "deferred", NOW - 60)
@@ -379,12 +387,21 @@ class ReceptionistQueue(Base):
 
     def test_question_echo_keeps_all_300_characters(self):
         self.ctx.hand_off_first = True
-        question = "Which current sample is correct? " * 9 + "x"
-        self.assertEqual(len(question), 298)
-        question += "yz"
+        question = "Which current sample is correct on the pull request? " * 5 + "x"
+        question += "y" * (300 - len(question))
         self.assertEqual(len(question), 300)
         _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
         self.assertEqual(chat, "asked Claude: " + question)
+
+    def test_the_hub_list_carries_a_long_question_whole(self):
+        # change 5: the hub list used to cut a question at 300 characters; the hub works from the whole of it
+        question = ("Why did the checkout charge the customer twice on the third of October, and what did the logs say? " * 5).strip()
+        self.assertGreater(len(question), 450)
+        dp.to_hub_list(self.ctx, "oc-12121212", question, NOW, "front desk")
+        line = self.ctx.inbox_path.read_text()
+        self.assertIn(json.dumps(question), line)
+        self.assertNotIn("...", line)
+        self.assertNotIn("\u2026", line)
 
     def test_say_injects_outside_the_state_lock(self):
         ask_id = "oc-cccccccd"
@@ -519,8 +536,9 @@ class ReceptionistQueue(Base):
         os.utime(self.wake, (old_mtime, old_mtime))
         before = self.wake.stat().st_mtime_ns
         _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
-        self.assertIn("hasn't answered yet", chat)
-        self.assertIn("30 min ago", chat)
+        self.assertIn("Already with the hub since", chat)
+        self.assertIn("(ask oc-ffffffff)", chat)
+        self.assertIn("I flagged it to the hub again", chat)
         self.assertGreater(self.wake.stat().st_mtime_ns, before)
 
 
