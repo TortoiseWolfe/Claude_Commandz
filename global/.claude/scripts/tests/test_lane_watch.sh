@@ -91,5 +91,76 @@ else
   echo "FAIL empty question queue: rc=$rc out=$out calls=$(cat "$call_count" 2>/dev/null || echo missing)"; failures=$((failures + 1))
 fi
 
+# Change 4: a burst of questions wakes the hub once. The wake file is touched by each question; lane_watch holds until it has been
+# quiet, then prints the whole list in one wake.
+burst_home="$TMP/burst"; mkdir -p "$burst_home/.claude/state"
+wake="$burst_home/.claude/state/openclaw-ask.wake"
+burst_open="$TMP/burst-open.py"
+cat > "$burst_open" <<'PY'
+import os
+from pathlib import Path
+p = Path(os.environ["OPEN_COUNT"])
+n = len(p.read_text()) + 1 if p.exists() else 1
+p.write_text("x" * n)
+print("oc-aaaaaaaa | 1 min | deferred | first question")
+if n >= 2:
+    print("oc-bbbbbbbb | 0 min | deferred | second question, filed during the hold")
+PY
+rm -f "$TMP/burst-count"; echo oc-aaaaaaaa > "$wake"
+t0=$(date +%s); rc=0
+out=$(HOME="$burst_home" OPENCLAW_DISPATCH="$burst_open" OPEN_COUNT="$TMP/burst-count" LANE_WATCH_BATCH_QUIET=3 LANE_WATCH_BATCH_POLL=1 \
+      bash "$SCRIPT" --max-min 0) || rc=$?
+took=$(( $(date +%s) - t0 ))
+if [ "$rc" = 0 ] && [ "$took" -ge 2 ] && [ "$(printf '%s\n' "$out" | grep -c '^ask: open receptionist questions:')" = 1 ] \
+   && printf '%s\n' "$out" | grep -q 'second question, filed during the hold'; then
+  echo "ok   a fresh question is held until the burst is quiet, then one wake lists every question"
+else
+  echo "FAIL burst hold: rc=$rc took=${took}s out=$out"; failures=$((failures + 1))
+fi
+
+# A wake file that has been quiet for a while does not delay the wake at all.
+rm -f "$TMP/burst-count"; touch -d '10 minutes ago' "$wake"
+t0=$(date +%s); rc=0
+out=$(HOME="$burst_home" OPENCLAW_DISPATCH="$burst_open" OPEN_COUNT="$TMP/burst-count" LANE_WATCH_BATCH_QUIET=30 LANE_WATCH_BATCH_POLL=1 \
+      bash "$SCRIPT" --max-min 0) || rc=$?
+took=$(( $(date +%s) - t0 ))
+if [ "$rc" = 0 ] && [ "$took" -le 5 ] && printf '%s\n' "$out" | grep -q 'first question'; then
+  echo "ok   a quiet wake file wakes at once"
+else
+  echo "FAIL quiet wake: rc=$rc took=${took}s out=$out"; failures=$((failures + 1))
+fi
+
+# A burst that never goes quiet is cut off at LANE_WATCH_BATCH_MAX.
+rm -f "$TMP/burst-count"; touch "$wake"
+( for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 1; touch "$wake"; done ) &
+toucher=$!
+t0=$(date +%s); rc=0
+out=$(HOME="$burst_home" OPENCLAW_DISPATCH="$burst_open" OPEN_COUNT="$TMP/burst-count" LANE_WATCH_BATCH_QUIET=5 LANE_WATCH_BATCH_MAX=3 \
+      LANE_WATCH_BATCH_POLL=1 bash "$SCRIPT" --max-min 0) || rc=$?
+took=$(( $(date +%s) - t0 ))
+kill "$toucher" 2>/dev/null || true; wait "$toucher" 2>/dev/null || true
+if [ "$rc" = 0 ] && [ "$took" -ge 2 ] && [ "$took" -le 6 ] && printf '%s\n' "$out" | grep -q 'first question'; then
+  echo "ok   a burst that never goes quiet is cut off at the cap"
+else
+  echo "FAIL burst cap: rc=$rc took=${took}s out=$out"; failures=$((failures + 1))
+fi
+
+# A question filed while the hub is already waiting (the loop path) is held for its burst too, before the hub is woken.
+loop_open="$TMP/loop-open.py"
+printf 'print("none")\n' > "$loop_open"  # the question is not listed yet (its pass is still running), only the wake file changes
+rm -f "$wake"
+( sleep 1; echo oc-aaaaaaaa > "$wake" ) &
+filer=$!
+t0=$(date +%s); rc=0
+out=$(HOME="$burst_home" OPENCLAW_DISPATCH="$loop_open" LANE_WATCH_POLL=1 LANE_WATCH_BATCH_QUIET=3 LANE_WATCH_BATCH_POLL=1 \
+      bash "$SCRIPT" --max-min 1) || rc=$?
+took=$(( $(date +%s) - t0 ))
+wait "$filer" 2>/dev/null || true
+if [ "$rc" = 0 ] && [ "$took" -ge 3 ] && printf '%s\n' "$out" | grep -q "^ask: a new 'Jonathan via OpenClaw:' line"; then
+  echo "ok   a question filed while the hub waits is held for its burst before the wake"
+else
+  echo "FAIL loop-path burst: rc=$rc took=${took}s out=$out"; failures=$((failures + 1))
+fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

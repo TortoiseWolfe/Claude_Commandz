@@ -231,8 +231,11 @@ class Menu(Reply):
             self.setUp()
             self.go(self.flow("Sending to the hub: " + p))
             self.assertEqual((self.host.started, self.host.sent, self.host.killed), ([], [], []), p)
-            self.assertTrue(self.host.chats[-1].startswith("On the hub's list: " + p), (p, self.host.chats))
-            self.assertIn(json.dumps(p), self.ctx.inbox_path.read_text())
+            his = "can you list the files in docs"  # what he typed (him()): the hub gets that, not the receptionist's marker
+            self.assertEqual(self.host.chats[-1], "On the hub's list: " + his, (p, self.host.chats))
+            self.assertIn(json.dumps(his), self.ctx.inbox_path.read_text())
+            self.assertNotIn(json.dumps(p), self.ctx.inbox_path.read_text())
+            self.assertEqual(dp.asks_of(self.state())[dp.ask_id_for(td.SHA)]["marker"], p)  # the rewording is kept, as context
             self.assertIn(dp.ask_id_for(td.SHA), self.ctx.wake_path.read_text())
 
     def test_an_empty_marker_runs_nothing_and_says_so(self):
