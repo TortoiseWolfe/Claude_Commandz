@@ -238,7 +238,8 @@ class Cli(unittest.TestCase):
             d = Path(d)
             for name, text in (("roadmap.md", ROADMAP), ("lanes.txt", LANE_STATUS), ("inbox.md", INBOX), ("tidy.txt", TIDY),
                                ("budget.txt", "Week resets Wed: used 1%\n"),
-                               ("questions.txt", "oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n")):
+                               ("questions.txt", "oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n"
+                                                 "    Invented user words stay out of the digest.\n")):
                 (d / name).write_text(text)
             (d / "lanes").mkdir()
             out = d / "state" / "hub-digest.md"
@@ -252,6 +253,7 @@ class Cli(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             page = out.read_text()
             self.assertIn("Waiting on Hatch (2)", page)
+            self.assertNotIn("Invented user words stay out of the digest.", page)
             self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))
             self.assertLess(len(page.encode()), 6144)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
