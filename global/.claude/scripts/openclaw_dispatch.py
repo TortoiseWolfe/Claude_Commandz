@@ -1860,6 +1860,25 @@ def to_hub_list(ctx, ask_id, question, now, why=None):
     _touch_wake(ctx, ask_id, now)
 
 
+def unsettled_to_hub(ctx, sha, ts, text, why, now):
+    """A message of his that the poller could not settle (Main session unreadable, the hand-off crashed, or it waited out its age): file it as
+    a question already with the hub, with his words whole, so it is never dropped without a trace. One ask per message (sha and time), so a
+    retry after a crash files nothing twice. -> (log line, ask id) or (log line, None) when it was filed already."""
+    ask_id = ask_id_for(hashlib.sha256(("%s %s" % (sha, ts)).encode("utf-8")).hexdigest())
+    words = " ".join((text or "").split())
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        asks = asks_of(state)
+        if ask_id in asks:
+            return "%s | unsettled | already on the hub's list (ask %s)" % (_stamp(now), ask_id), None
+        asks[ask_id] = {"kind": "question", "task": words, "marker": words, "task_key": task_key(words), "repo": "", "created": now,
+                        "deadline": now, "status": "deferred", "lanes": [], "pass": None, "answered_at": now, "deferred_at": now,
+                        "route": "hub, front desk could not settle it"}
+        save_state(ctx.state_path, state)
+    to_hub_list(ctx, ask_id, words, now, "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why)
+    return "%s | unsettled | %s: put on the hub's list (ask %s)" % (_stamp(now), why, ask_id), ask_id
+
+
 def pass_kind(text):
     """"facts" when the message is a plain question about GitHub state, else None for the hub. A request to do something, or anything
     unclear, is None: the hub reads it as he wrote it."""
