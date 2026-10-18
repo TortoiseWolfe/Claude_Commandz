@@ -17,7 +17,8 @@ W() { # W: the snippet comes on stdin (arguments through wsl.exe mangle quotes);
 }
 
 ENVLINES='export OC_USER=octest OC_NEW_UID=52900 OC_NEW_GID=52900 OC_DROP_GROUP=octestdrop OC_DROP_GID=52901
-export OC_UNIT=octest-gateway OC_PORT=18999 OC_DROP_DIR=/mnt/wsl/octest-drop OC_BACKUP_ROOT=/var/backups/openclaw-uid-stage OC_LIVE=0'
+export OC_UNIT=octest-gateway OC_PORT=18999 OC_DROP_DIR=/mnt/wsl/octest-drop OC_BACKUP_ROOT=/var/backups/openclaw-uid-stage OC_LIVE=0
+export OC_SHIM=/usr/local/bin/octest-systemctl'
 run_script() { { echo "$ENVLINES"; cat "$SCRIPT"; } | timeout 900 wsl.exe -d OpenClawGateway -u root -- bash -s -- "$@" 2>&1 | tr -d '\r' | grep -v 'screen size is bogus'; return "${PIPESTATUS[1]}"; }
 
 ok=0
@@ -31,10 +32,18 @@ teardown() {
     loginctl disable-linger octest 2>/dev/null; systemctl stop user@51900.service user@52900.service 2>/dev/null
     pkill -u 51900 2>/dev/null; pkill -u 52900 2>/dev/null; sleep 1
     userdel -r octest 2>/dev/null; groupdel octest 2>/dev/null; groupdel octestdrop 2>/dev/null
-    rm -rf /mnt/wsl/octest-drop /var/backups/openclaw-uid-stage /tmp/octest-owned
+    rm -rf /mnt/wsl/octest-drop /var/backups/openclaw-uid-stage /tmp/octest-owned; rm -f /usr/local/bin/octest-systemctl
     getent passwd octest octestdrop; getent group octest octestdrop; echo teardown-done
 SNIP
 }
+
+# The live probe shim (/usr/local/bin/systemctl) is what lets Companion's web chat load. The stage must never touch it:
+# on 17 Oct 20:33 a run without OC_SHIM overwrote it and its rollback deleted it, and the web chat broke.
+live_shim() { W <<'SNIP' | tail -1
+  sha256sum /usr/local/bin/systemctl 2>/dev/null | cut -d' ' -f1 || true; [ -e /usr/local/bin/systemctl ] || echo absent
+SNIP
+}
+LIVE_SHIM_BEFORE="$(live_shim)"
 
 echo "== stage setup: user octest uid 51900 with a stub gateway as a user unit"
 teardown >/dev/null
@@ -122,6 +131,9 @@ grep -q 'home_owner=51900:51900 deep=51900:51900 tmp=51900:51900' <<<"$R2"; expe
 grep -q '^drop=1777 51900 51900' <<<"$R2"; expect "drop folder back to 1777 51900:51900" $?
 grep -q 'new_ids_left=0 dropgroup=0' <<<"$R2"; expect "nothing left at 52900/52901" $?
 grep -q '^user_enabled=enabled' <<<"$R2"; expect "user unit enabled again" $?
+
+LIVE_SHIM_AFTER="$(live_shim)"
+[ -n "$LIVE_SHIM_BEFORE" ] && [ "$LIVE_SHIM_BEFORE" = "$LIVE_SHIM_AFTER" ]; expect "live probe shim /usr/local/bin/systemctl untouched by the stage" $?
 
 echo
 if [ "$KEEP" = keep ]; then echo "stage left in place (keep)"; else echo "== teardown"; teardown; fi
