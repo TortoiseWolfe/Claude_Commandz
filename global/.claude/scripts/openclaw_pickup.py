@@ -591,7 +591,7 @@ def execute(menu, host, ctx, sites, now, stamp, sha, via_chat=False, context=Non
     elif verb == "lanes":
         line, chat = dispatch.do_lanes(ctx, host, now)  # read live, no model: the answer is the state file, the index and tmux
     else:
-        line, chat = dispatch.do_close(ctx, host, menu[1], now)
+        line, chat = dispatch.do_close(ctx, host, menu[1], now, dispatch.ask_id_for(sha), context)
     if chat:
         host.inject(chat)
     return "dispatch", "%s%s | oc-%s" % (line, " (chat)" if via_chat else "", sha)
