@@ -571,7 +571,7 @@ def facts(ctx, repo_word, what="", gh=None, now=None):
     if not m:
         return False, "facts: usage: " + FACTS_USAGE
     full = "%s/%s" % slug
-    lines = ["%s (%s), as of %s" % (hit[0], full, time.strftime("%a %d %b %H:%M", time.localtime(now)))]
+    lines = ["%s (%s), as of %s" % (hit[0], full, time.strftime("%a %d %b %-I:%M %p", time.localtime(now)))]
 
     def load(argv):
         try:
@@ -1160,7 +1160,7 @@ def _quoted(tag, text):
 
 
 def _clock_of(ts):
-    return time.strftime("%H:%M", time.localtime(ts)) if isinstance(ts, (int, float)) and ts > 0 else "--:--"
+    return time.strftime("%-I:%M %p", time.localtime(ts)) if isinstance(ts, (int, float)) and ts > 0 else "--:--"
 
 
 def _lane_hand(lane):
@@ -1827,9 +1827,9 @@ def _duplicate_chat(match, ctx=None, now=None):
         return "Worker %s is already on that." % name
     now = time.time() if now is None else now
     created = ask.get("created", 0)
-    asked = time.strftime("%H:%M", time.localtime(created))
+    asked = time.strftime("%-I:%M %p", time.localtime(created))
     if ask.get("status") == "answered":
-        answered = time.strftime("%H:%M", time.localtime(ask.get("answered_at", ask.get("created", 0))))
+        answered = time.strftime("%-I:%M %p", time.localtime(ask.get("answered_at", ask.get("created", 0))))
         prefix = "Already answered at %s: " % answered
         answer = str(ask.get("answer") or "").strip() or "(answer text not stored)"
         return prefix + answer
@@ -1990,7 +1990,7 @@ def _repeat_of_open_question(asks, key):
 
 
 def _already_with(ctx, ask_id, ask, now):
-    since = time.strftime("%H:%M", time.localtime(ask.get("created", 0)))
+    since = time.strftime("%-I:%M %p", time.localtime(ask.get("created", 0)))
     if ask.get("status") == "pending":
         return "Already with Claude's quick check since %s (ask %s). Same words, so no second copy went; the answer comes here." % (since, ask_id)
     flagged = ""
@@ -2025,7 +2025,7 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
         if repeat:
             k, a = repeat
             return ("%s | question | not run: same words as ask %s, still open since %s" % (
-                        stamp, k, time.strftime("%H:%M", time.localtime(a.get("created", 0)))),
+                        stamp, k, time.strftime("%-I:%M %p", time.localtime(a.get("created", 0)))),
                     _already_with(ctx, k, a, now))
         waiting = [k for k, a in asks.items() if a.get("kind") == "question" and a.get("status") == "pending"]
         full = kind is not None and len(waiting) >= MAX_QUESTIONS

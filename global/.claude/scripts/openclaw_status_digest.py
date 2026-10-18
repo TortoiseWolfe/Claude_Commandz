@@ -229,6 +229,7 @@ class Filter:
         t = re.sub(r"(?<![\w*])\*(?=\S)|(?<=\S)\*(?![\w*])", "", t)
         t = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?", "", t)
         t = re.sub(r"\s+", " ", t).strip()
+        t = clock12(t)
         t = _cut(t, limit)
         # drops: anything quoted, lines with an address or money talk
         if QUOTE_CHARS.search(t) or SINGLE_QUOTED.search(t):
@@ -426,8 +427,20 @@ def inbox_titles(text):
 # ---------------------------------------------------------------------------------------------
 
 
+# A clock written the 24-hour way: a two-digit hour 00-23, minutes, no seconds, no AM/PM after it. Prose that comes through the
+# digest (lane reports, roadmap lines) is rewritten to 12-hour so the receptionist has no military time to copy.
+MILITARY_CLOCK = re.compile(r"(?<![\w:.])([01]\d|2[0-3]):([0-5]\d)(?!\d|:\d|\.\d|\s?[AaPp]\.?[Mm]\b)")
+
+
+def clock12(text):
+    def one(m):
+        h = int(m.group(1))
+        return "%d:%s %s" % (h % 12 or 12, m.group(2), "AM" if h < 12 else "PM")
+    return MILITARY_CLOCK.sub(one, text)
+
+
 def _stamp(now):
-    return now.strftime("%a %d %b %Y %H:%M") + " " + time.tzname[time.localtime().tm_isdst > 0]
+    return now.strftime("%a %d %b %Y %-I:%M %p") + " " + time.tzname[time.localtime().tm_isdst > 0]
 
 
 CHAT_LANES_HOURS = 24
@@ -459,7 +472,7 @@ def chat_lanes(dispatch_state, flt, now):
             continue
         repo = flt.clean(str(l.get("repo", "")), limit=60)
         where = f" (repo {repo})" if repo else ""
-        clock = lambda t: datetime.fromtimestamp(t).strftime("%H:%M")
+        clock = lambda t: datetime.fromtimestamp(t).strftime("%-I:%M %p")
         if running:
             state = f"running since {clock(started)}" if started else "running"
         else:
@@ -492,10 +505,10 @@ def already_asked(dispatch_state, flt, now):
         task = flt.clean(str(ask.get("task") or ""), limit=90)
         if not task:
             continue
-        when = datetime.fromtimestamp(created).strftime("%H:%M")
+        when = datetime.fromtimestamp(created).strftime("%-I:%M %p")
         if ask.get("status") == "answered":
             answered = ask.get("answered_at", created)
-            answer_time = datetime.fromtimestamp(answered).strftime("%H:%M") if isinstance(answered, (int, float)) else when
+            answer_time = datetime.fromtimestamp(answered).strftime("%-I:%M %p") if isinstance(answered, (int, float)) else when
             answer = flt.clean(str(ask.get("answer") or ""), limit=160) or "(answer not stored)"
             detail = f"answered {answer_time}: {answer}"
         else:
@@ -623,7 +636,7 @@ def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, 
 
     # Projects on GitHub: second, so counts and titles survive the cap
     if projects is not None:
-        sections.append((f"Projects on GitHub (open issues and PRs, as of {now.strftime('%H:%M')})", project_lines(projects, rm, flt, claude)))
+        sections.append((f"Projects on GitHub (open issues and PRs, as of {now.strftime('%-I:%M %p')})", project_lines(projects, rm, flt, claude)))
 
     # Next up
     nxt = []
@@ -692,7 +705,7 @@ def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, 
                     if heads:
                         alias = f" (project: {heads})"
                     break
-        line = f"- site {cs}{alias}: newest model {cf}, saved {files[0][1].strftime('%d %b %H:%M')}"
+        line = f"- site {cs}{alias}: newest model {cf}, saved {files[0][1].strftime('%d %b %-I:%M %p')}"
         if len(files) > 1:
             prev = flt.clean(files[1][0], limit=80)
             if prev:
@@ -707,7 +720,7 @@ def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, 
         if not cn:
             continue
         gist = None if MAIL_LANE.search(name) else report_gist(path, flt)
-        when = mt.strftime("%d %b %H:%M")
+        when = mt.strftime("%d %b %-I:%M %p")
         rep_lines.append(f"- {cn} ({when}): {gist}" if gist else f"- {cn} ({when}): report written")
     sections.append(("Lane reports, last 2 days", rep_lines[:12]))
 

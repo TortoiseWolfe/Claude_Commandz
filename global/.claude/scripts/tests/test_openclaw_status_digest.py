@@ -380,9 +380,9 @@ class ChatLanes(Base):
             "oc-own-app-1017-0700": {"repo": "own-app", "status": "closed", "started": t - 7200, "closed_at": t - 7000, "failed": True},
             "oc-probe-1017-0800": {"repo": "own-app", "status": "closed", "started": t - 3600, "closed_at": t - 3500, "test": True}}}
         out = self.digest(now=now, dispatch_state=state)
-        self.assertIn("- oc-ada-stair-generator-33876df9 (repo ada-stair-generator): finished 08:48", out)
-        self.assertIn("- oc-own-app-1017-0850 (repo own-app): running since 08:50", out)
-        self.assertIn("- oc-own-app-1017-0700 (repo own-app): finished 07:03 (failed)", out)
+        self.assertIn("- oc-ada-stair-generator-33876df9 (repo ada-stair-generator): finished 8:48 AM", out)
+        self.assertIn("- oc-own-app-1017-0850 (repo own-app): running since 8:50 AM", out)
+        self.assertIn("- oc-own-app-1017-0700 (repo own-app): finished 7:03 AM (failed)", out)
         self.assertNotIn("oc-own-app-1016-0700", out)  # over 24 h
         self.assertNotIn("oc-probe", out)  # a live test's lane
         self.assertIn("reply <lane>: <words>", out)
@@ -412,9 +412,9 @@ class AlreadyAsked(Base):
         section = out.split("### Already asked today", 1)[1].split("###", 1)[0]
         self.assertLess(section.index("check the latest"), section.index("save a small note"))
         self.assertLess(section.index("save a small note"), section.index("count open issues"))
-        self.assertIn("- 14:50 check the latest pull request: worker oc-worker-00000002 running", section)
-        self.assertIn("- 14:30 save a small note: with the hub", section)
-        self.assertIn("- 14:00 count open issues for own-app: answered 14:55: There are 8 open issues.", section)
+        self.assertIn("- 2:50 PM check the latest pull request: worker oc-worker-00000002 running", section)
+        self.assertIn("- 2:30 PM save a small note: with the hub", section)
+        self.assertIn("- 2:00 PM count open issues for own-app: answered 2:55 PM: There are 8 open issues.", section)
         self.assertNotIn("old issue count", out)
 
     def test_section_is_kept_under_the_cap_and_limits_rows(self):
@@ -528,7 +528,7 @@ class Projects(Base):
 
     def test_build_puts_projects_second_with_the_as_of_time(self):
         out = self.digest(projects=projects(), claude=True, now=datetime(2026, 10, 17, 9, 30))
-        self.assertIn("Projects on GitHub (open issues and PRs, as of 09:30)", out)
+        self.assertIn("Projects on GitHub (open issues and PRs, as of 9:30 AM)", out)
         self.assertLess(out.index("Projects on GitHub"), out.index("Next session should"))
         self.assertIn("Sending to the hub:", out)
         self.assertNotIn("Projects on GitHub", self.digest())  # None: no section

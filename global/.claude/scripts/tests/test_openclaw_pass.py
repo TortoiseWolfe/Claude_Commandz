@@ -155,7 +155,7 @@ class Routing(PassBase):
         dp.say(self.ctx, self.host, first, "There are 7 open issues.", NOW + 10)
         line, chat = self.hand(task="summarize the recent changes; count open issues", ask=second, now=NOW + 20)
         self.assertIn("not run: duplicate task", line)
-        self.assertIn("Already answered at %s: There are 7 open issues." % time.strftime("%H:%M", time.localtime(NOW + 10)), chat)
+        self.assertIn("Already answered at %s: There are 7 open issues." % time.strftime("%-I:%M %p", time.localtime(NOW + 10)), chat)
         self.assertEqual(self.host.spawned, [first])
         self.assertNotIn(second, dp.asks_of(self.state()))
 
@@ -1508,7 +1508,7 @@ class Questions(PassBase):
             self.asked("question %d" % i, ask="oc-1000000%d" % i)
         line, chat = self.asked("one too many", ask="oc-2000000f")
         self.assertEqual(chat, "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s); the hub has your message."
-                         % (dp.MAX_QUESTIONS, time.strftime("%H:%M", time.localtime(NOW))))  # change 7: the cap is said, not silent
+                         % (dp.MAX_QUESTIONS, time.strftime("%-I:%M %p", time.localtime(NOW))))  # change 7: the cap is said, not silent
         self.assertIn("%d questions already waiting" % dp.MAX_QUESTIONS, line)
         capped = dp.asks_of(self.state())["oc-2000000f"]  # and the capped question is recorded, so its repeat is caught and it gets a finish time
         self.assertEqual((capped["status"], capped["route"], capped["task"]), ("deferred", "hub, pass full", "one too many"))
@@ -1727,7 +1727,7 @@ class Questions(PassBase):
         # 6. The very same words again, while the hub still has it: told so by name and time, not dropped silently.
         line, chat = self.asked(q4, ask="oc-70000006", now=t + 14 * 60)
         chats.append(chat)
-        asked_at = time.strftime("%H:%M", time.localtime(t + 13 * 60))
+        asked_at = time.strftime("%-I:%M %p", time.localtime(t + 13 * 60))
         self.assertEqual(chat, "Already with the hub since %s (ask %s). Same words, so no second copy went; the answer comes here." % (asked_at, b))
         self.assertIn("still open since", line)
         self.assertEqual(self.host.spawned, [a, "oc-70000005", b])
@@ -1958,7 +1958,7 @@ class FrontDeskRouting(PassBase):
         self.asked(q, ask="oc-5000000a")
         line, chat = self.asked("  Can you   LIST the files in docs ", ask="oc-5000000b", now=NOW + 120)
         self.assertEqual(chat, "Already with the hub since %s (ask oc-5000000a). Same words, so no second copy went; the answer comes here."
-                         % time.strftime("%H:%M", time.localtime(NOW)))
+                         % time.strftime("%-I:%M %p", time.localtime(NOW)))
         self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
         self.assertEqual(self.hub_list().count(json.dumps(q)), 1)
         self.assertTrue(dp.post_ask(self.ctx, self.host, "oc-5000000a", "Here are the files.", NOW + 200)[0])

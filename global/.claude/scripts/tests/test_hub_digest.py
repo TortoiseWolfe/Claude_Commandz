@@ -135,7 +135,7 @@ class Parts(unittest.TestCase):
 
     def test_budget_headline(self):
         self.assertEqual(hd.budget_headline(BUDGET_MD),
-                         "Week resets Wed 2026-10-21 12:00 EDT: used 21.6%, burn 8.5% per day, projected 60.8% (24 h rate)")
+                         "Week resets Wed 2026-10-21 12:00 PM EDT: used 21.6%, burn 8.5% per day, projected 60.8% (24 h rate)")
         self.assertEqual(hd.budget_headline("nothing useful"), "")
 
     def test_tidy_summary_counts_lines_per_heading(self):
