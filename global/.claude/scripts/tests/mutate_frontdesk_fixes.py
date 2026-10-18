@@ -18,7 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 D, W, P = "openclaw_dispatch.py", "lane_watch.sh", "openclaw_pickup.py"
-PY_TESTS = ["test_openclaw_pass", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_drops"]
+PY_TESTS = ["test_openclaw_pass", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_drops", "test_openclaw_hublanes"]
 
 MUTANTS = [
     # 1. skip the pass unless the message is plainly a GitHub-facts question
@@ -110,9 +110,43 @@ MUTANTS = [
     ("E", P, "the chat never says it was filed", '        if n:\n            host.inject("%d of your messages', '        if False:\n            host.inject("%d of your messages'),
     ("E", P, "the chat note repeats his words", 'The hub has your words." % n)', 'The hub has your words." % n + " " + queue[0]["text"] if queue else "")'),
     ("E", D, "the filed ask is not on the open list", '"deadline": now, "status": "deferred", "lanes": []', '"deadline": now, "status": "answered", "lanes": []'),
-    ("E", D, "the same message is filed twice", '        if ask_id in asks:\n            return "%s | unsettled', '        if False:\n            return "%s | unsettled'),
+    ("E", D, "the same message is filed twice", "        if ask_id in asks:\n            return False\n        asks[ask_id] = {\"kind\": \"question\", \"task\": words, \"marker\"", "        if False:\n            return False\n        asks[ask_id] = {\"kind\": \"question\", \"task\": words, \"marker\""),
     ("E", D, "two identical messages share one ask", '("%s %s" % (sha, ts))', '("%s" % sha)'),
-    ("E", D, "his words are cut on the hub list", 'words = " ".join((text or "").split())\n    with ctx.locked():\n        state = load_state(ctx.state_path)\n        asks = asks_of(state)\n        if ask_id in asks:\n            return "%s | unsettled', 'words = " ".join((text or "").split())[:40]\n    with ctx.locked():\n        state = load_state(ctx.state_path)\n        asks = asks_of(state)\n        if ask_id in asks:\n            return "%s | unsettled'),
+    ("E", D, "his words are cut on the hub list", 'words = " ".join((text or "").split())\n    if not file_with_hub(', 'words = " ".join((text or "").split())[:40]\n    if not file_with_hub('),
+    # hublanes F. reply reaches every live lane, close stays the dispatcher's, nothing dead-ends (18 Oct 12:33, he-release)
+    ("F", D, "a hub lane is never looked up", '        live = host.live_lanes()\n        hit = find_live_lane(lane_word, live)\n        if len(hit) > 1:\n            return "%s | reply', '        live = set()\n        hit = []\n        if len(hit) > 1:\n            return "%s | reply'),
+    ("F", D, "two live lanes for a word pick the first", '        if len(hit) > 1:\n            return "%s | reply | couldn\'t: %s is ambiguous" % (stamp, lane_word[:60]), "Couldn\'t send that: " + ambiguous_text(lane_word, hit)\n    name', '        if False:\n            return 0\n    name'),
+    ("F", D, "a live lane name is case sensitive", "exact = [n for n in live if n.lower() == w]", "exact = [n for n in live if n == w]"),
+    ("F", D, "a live lane is found by any part of its name", 'n.lower().endswith("-" + w) or n.lower().startswith(w + "-")', "w in n.lower()"),
+    ("F", D, "a live lane is found only by its exact name", 'n.lower().endswith("-" + w) or n.lower().startswith(w + "-")', "False"),
+    ("F", D, "a hub lane's words go without the frame", 'ok, out = host.send_to_lane(name, REPLY_FRAME + text.strip())\n        if ok:\n            return "%s | reply %s | sent (hub lane)"', 'ok, out = host.send_to_lane(name, text.strip())\n        if ok:\n            return "%s | reply %s | sent (hub lane)"'),
+    ("F", D, "a hub lane is told its report goes to the dispatcher", "a lane the hub started. It will answer the hub in its report.", "a lane the hub started."),
+    ("F", D, "a send to a hub lane that failed is not filed", 'hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"))\n        return "%s | reply %s | not sent: %s: on the hub\'s list" % (stamp, name, out), "Couldn\'t send that to %s: %s. The hub has it." % (name, out or "it did not take")\n', 'return "%s | reply %s | not sent: %s: on the hub\'s list" % (stamp, name, out), "Couldn\'t send that to %s: %s. The hub has it." % (name, out or "it did not take")\n'),
+    ("F", D, "no live lane is not filed", 'hub_has_it(ctx, ask_id, words, now, "front desk: no lane called %s is running, so his reply to it was not sent" % lane_word[:60])', "None"),
+    ("F", D, "no live lane is refused without the hub", "that I can reach (open lanes: %s). The hub has it.\" % (\n            lane_word[:60], _open_lane_names(state, live))", "that I can reach (open lanes: %s).\" % (\n            lane_word[:60], _open_lane_names(state, live))"),
+    ("F", D, "no live lane hides the open lanes", "_open_lane_names(state, live))\n    if len(text) > REPLY_MAX", "'none right now')\n    if len(text) > REPLY_MAX"),
+    ("F", D, "an over-long message is sent anyway", "    if len(text) > REPLY_MAX:\n        hub_has_it", "    if False:\n        hub_has_it"),
+    ("F", D, "an over-long message is not filed", 'hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was over %d characters, so it was not sent" % (name, REPLY_MAX))', "None"),
+    ("F", D, "a too-old lane is not filed", 'hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s, which finished over %d days ago, was not sent" % (name, REPLY_WINDOW // 86400))', "None"),
+    ("F", D, "a dispatcher lane's failed send is not filed", 'hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"))\n    return', 'return'),
+    ("F", D, "the relayed sentence goes to the hub, not his words", 'words = his_words(context, "reply %s: %s" % (lane_word, text.strip()))', 'words = "reply %s: %s" % (lane_word, text.strip())'),
+    ("F", D, "his words are cut on the hub list", 'file_with_hub(ctx, ask_id, " ".join(words.split()),', 'file_with_hub(ctx, ask_id, " ".join(words.split())[:20],'),
+    ("F", D, "an id-less filing is never given an id", "    if not ASK_ID_RE.fullmatch(ask_id or \"\"):\n        ask_id = ask_id_for(hashlib", "    if False:\n        ask_id = ask_id_for(hashlib"),
+    ("F", D, "every id-less filing shares one id", '("%s %s" % (words, now))', '("x")'),
+    ("F", D, "filing the same ask twice files twice", "        if ask_id in asks:\n            return False", "        if False:\n            return False"),
+    ("F", D, "close of a hub lane is not filed", '    hub_has_it(ctx, ask_id, words, now, "front desk: he asked to close', '    (lambda *a: 0)(ctx, ask_id, words, now, "front desk: he asked to close'),
+    ("F", D, "close of an ambiguous live word closes the first", '    if len(live_hit) > 1:\n        return', '    if False:\n        return'),
+    ("F", D, "close of a hub lane kills its window", '    if live_hit:\n        return "%s | close %s | hub lane', '    if live_hit and host.kill_window(live_hit[0]):\n        return "%s | close %s | hub lane'),
+    ("F", D, "close of a hub lane says the hub has it only for none", "so closing it is the hub's call. The hub has it.", "so closing it is the hub's call."),
+    ("F", D, "the dispatcher's own lane no longer closes", "    if done is not None:\n        return done\n", "    pass\n"),
+    ("F", P, "close is not filed under the message's ask id", "dispatch.do_close(ctx, host, menu[1], now, dispatch.ask_id_for(sha), context)", "dispatch.do_close(ctx, host, menu[1], now)"),
+    ("F", D, "a dead lane counts as live", 'and not f[1].startswith("dead"):', "and True:"),
+    ("F", D, "a listed lane without a window counts as live", "        return names & wins", "        return names"),
+    ("F", D, "a failed status counts as live lanes", "if r is None or r.returncode != 0 or not wins:", "if r is None or not wins:"),
+    ("F", D, "an indented detail line counts as a lane", "if f and not line[0].isspace() and len(f) == 2", "if f and len(f) == 2"),
+    ("F", D, "a quick lane's send counts as lost", 'taken = r.returncode == 0 or "input line is empty but no spinner seen" in out', "taken = r.returncode == 0"),
+    ("F", D, "every failed send counts as taken", 'taken = r.returncode == 0 or "input line is empty but no spinner seen" in out', "taken = True"),
+    ("F", D, "text left in the input line counts as sent", 'return taken and "DID NOT TAKE" not in out, out', "return taken, out"),
 ]
 
 
