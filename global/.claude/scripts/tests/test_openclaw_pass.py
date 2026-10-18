@@ -64,7 +64,7 @@ class PassBase(Base):
         dp.asks_of(state)[ask]["starting"] = {"lane": lane, "at": now}
         dp.save_state(self.ctx.state_path, state)
 
-    def index_row(self, lane, repo="own-app", engine="claude", model="sonnet", begin_for=None):
+    def index_row(self, lane, repo="own-app", engine="claude", model="sonnet", begin_for=None, epoch="-"):
         if begin_for is None:  # the ask of the test, when there is one and it has not begun a lane yet
             asks = dp.asks_of(self.state())
             begin_for = ASK if ASK in asks and "starting" not in asks[ASK] and asks[ASK]["status"] == "pending" else None
@@ -73,7 +73,7 @@ class PassBase(Base):
         report = self.tmp / "lanes" / ("2026-10-16-%s" % lane) / "report.md"
         with open(self.index, "a") as f:
             f.write("\t".join(["2026-10-16", lane, str(self.root / repo), model, engine if engine != "claude" else "subscription",
-                                "-", str(report), "s", "-"]) + "\n")
+                                "-", str(report), "s", str(epoch)]) + "\n")
         return report
 
     def ask(self, ask=ASK):
@@ -90,6 +90,33 @@ class Routing(PassBase):
         self.assertEqual(self.ask()["deadline"], NOW + dp.ASK_WAIT)
         self.assertEqual(self.host.chats, ["handed to Claude: count the open issues"])
         self.assertEqual(self.state()["lanes"], {})
+
+    def test_a_note_to_hatch_goes_to_the_hub_not_to_a_lane_without_mail(self):
+        """17 Oct oc-a486228e: a lane with no mail connector got the weekly-check ask and could not write the [CC>MUSE] draft."""
+        for task in ("dispatch the weekly JOC check early so Hatch can start filling in the weekly form",
+                     "tell Muse the build is green", "ask H-7CH to look at it", "write a [CC>MUSE] note about the stream",
+                     "draft an email to the board", "save a Gmail draft for Greg"):
+            self.host.spawned.clear()
+            ask_id = dp.ask_id_for(task)
+            line, chat = dp.hand_off(self.ctx, self.host, ask_id, "own-app", task, NOW)
+            self.assertEqual(self.host.spawned, [], task)
+            self.assertEqual(self.host.started, [], task)
+            ask = self.state()["asks"][ask_id]
+            self.assertEqual((ask["status"], ask["task"]), ("deferred", task), task)
+            self.assertIn("On the hub's list", chat)
+            inbox = self.ctx.inbox_path.read_text()
+            self.assertIn("mail connector", inbox.splitlines()[-1])
+            self.assertIn(ask_id, inbox)
+
+    def test_a_facts_question_that_mentions_hatch_goes_to_the_hub_not_the_pass(self):
+        self.assertEqual(dp.pass_kind("how many open PRs does own-app have?"), "facts")
+        self.assertIsNone(dp.pass_kind("how many open PRs does own-app have, for Hatch's weekly form?"))
+
+    def test_a_plain_job_that_only_mentions_email_still_gets_its_lane(self):
+        for task in ("fix the email validation in the signup form", "rename the muses table column", "count the open issues"):
+            self.host.spawned.clear()
+            dp.hand_off(self.ctx, self.host, dp.ask_id_for(task), "own-app", task, NOW)
+            self.assertEqual(len(self.host.spawned), 1, task)
 
     def test_with_the_pass_off_the_script_starts_the_lane_itself(self):
         self.ctx.hand_off_first = False
@@ -211,6 +238,41 @@ class Claiming(PassBase):
         self.assertEqual(dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT + 100), [])
         self.assertEqual(self.host.started, [])
 
+    def test_a_posted_lane_report_answers_its_ask_with_the_text_and_the_time(self):
+        """17 Oct: seven lane reports reached the chat but their asks stayed "claimed", so the hub called them dropped."""
+        self.hand()
+        report = self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        report.parent.mkdir(parents=True)
+        report.write_text("Counted 12 open issues. Nothing left.")
+        self.host.wins.discard("oc-own-app-xyz")
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 120)
+        ask = self.ask()
+        self.assertEqual((ask["status"], ask["answered_at"], ask["answer"]), ("answered", NOW + 120, chat))
+        self.assertIn("Counted 12 open issues", ask["answer"])
+        self.assertEqual(ask["finished_by"], "lane claimed")  # the first finish stands
+
+    def test_a_failed_report_also_answers_its_ask(self):
+        self.hand()
+        report = self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        report.parent.mkdir(parents=True)
+        report.write_text("Permission denied: Docker was blocked. No changes were made.")
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 120)
+        self.assertIn("failed", chat)
+        self.assertEqual(self.ask()["status"], "answered")
+
+    def test_a_report_that_could_not_be_posted_leaves_its_ask_claimed(self):
+        self.hand()
+        report = self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        report.parent.mkdir(parents=True)
+        report.write_text("Done.")
+        self.host.inject = lambda text: False
+        dp.sweep(self.ctx, self.host, NOW + 120)
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertNotIn("answer", self.ask())
+
     def test_a_claimed_lane_is_announced_by_the_sweep_like_any_other(self):
         self.hand()
         report = self.index_row("oc-own-app-xyz")
@@ -257,13 +319,79 @@ class Claiming(PassBase):
         self.index_row("oc-own-app-a")
         self.index_row("oc-own-app-b", begin_for="")
         self.assertTrue(dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)[0])
-        for lane in ("oc-own-app-b", "oc-own-app-a"):  # another lane, and the same lane again
-            ok, msg = dp.claim(self.ctx, ASK, lane, NOW + 1)
-            self.assertFalse(ok, lane)
-            self.assertIn("already claimed", msg)
+        with mock.patch.dict(os.environ, {"AFA_OC_PASS": ASK}):  # the pass: only the hub's lane.sh may add a second lane
+            for lane in ("oc-own-app-b", "oc-own-app-a"):  # another lane, and the same lane again
+                ok, msg = dp.claim(self.ctx, ASK, lane, NOW + 1)
+                self.assertFalse(ok, lane)
+                self.assertIn("already claimed", msg)
         self.assertEqual(self.ask()["lanes"], ["oc-own-app-a"])
         self.assertEqual(sorted(self.state()["lanes"]), ["oc-own-app-a"])
         self.assertEqual(len(self.state()["starts"]), 1)
+
+    def test_the_hub_can_add_a_second_lane_to_a_claimed_ask(self):
+        """17 Oct: lane.sh --ask oc-bb085874 for sh-backlog-2 only printed a warning; the new lane never joined the ask."""
+        self.hand()
+        self.index_row("oc-own-app-a")
+        dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
+        self.index_row("oc-own-app-b", begin_for="", epoch=NOW + 50)
+        ok, msg = dp.claim(self.ctx, ASK, "oc-own-app-b", NOW + 60)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.ask()["lanes"], ["oc-own-app-a", "oc-own-app-b"])
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertEqual(self.state()["lanes"]["oc-own-app-b"]["ask"], ASK)
+
+    def test_a_second_lane_on_an_answered_ask_reopens_it_and_its_report_answers_again(self):
+        self.hand()
+        a = self.index_row("oc-own-app-a")
+        dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
+        a.parent.mkdir(parents=True)
+        a.write_text("First report.")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.ask()["status"], "answered")
+        b = self.index_row("oc-own-app-b", begin_for="", epoch=NOW + 150)
+        self.assertTrue(dp.claim(self.ctx, ASK, "oc-own-app-b", NOW + 160)[0])
+        self.assertEqual(self.ask()["status"], "claimed")
+        b.parent.mkdir(parents=True)
+        b.write_text("Second report.")
+        dp.sweep(self.ctx, self.host, NOW + 300)
+        self.assertEqual(self.ask()["status"], "answered")
+        self.assertIn("Second report.", self.ask()["answer"])
+
+    def test_a_second_lane_that_is_stale_or_already_someones_is_refused_loudly(self):
+        self.hand()
+        self.index_row("oc-own-app-a")
+        dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
+        self.index_row("oc-own-app-old", begin_for="", epoch=NOW - 5000)
+        ok, msg = dp.claim(self.ctx, ASK, "oc-own-app-old", NOW + 60)
+        self.assertFalse(ok)
+        self.assertIn("last 10 minutes", msg)
+        self.index_row("oc-own-app-gone", begin_for="")  # no epoch at all
+        self.assertFalse(dp.claim(self.ctx, ASK, "oc-own-app-gone", NOW + 60)[0])
+        self.assertEqual(self.ask()["lanes"], ["oc-own-app-a"])
+
+    def test_a_lane_that_already_belongs_to_one_ask_cannot_join_another(self):
+        other = "oc-0000feed"
+        self.hand()
+        self.hand(ask=other, task="a different job")
+        self.index_row("oc-own-app-a")
+        dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
+        self.index_row("oc-own-app-b", begin_for=other, epoch=NOW)
+        dp.claim(self.ctx, other, "oc-own-app-b", NOW)
+        ok, msg = dp.claim(self.ctx, ASK, "oc-own-app-b", NOW + 5)
+        self.assertFalse(ok)
+        self.assertIn("already belongs", msg)
+        self.assertEqual(self.ask()["lanes"], ["oc-own-app-a"])
+
+    def test_an_ask_with_a_second_lane_still_working_stays_claimed_when_the_first_reports(self):
+        self.hand()
+        a = self.index_row("oc-own-app-a")
+        dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
+        self.index_row("oc-own-app-b", begin_for="", epoch=NOW + 5)
+        dp.claim(self.ctx, ASK, "oc-own-app-b", NOW + 10)
+        a.parent.mkdir(parents=True)
+        a.write_text("A done.")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.ask()["status"], "claimed")
 
     def test_a_claim_accepts_only_the_lane_start_began_for_that_ask_in_the_last_ten_minutes(self):
         self.hand()
