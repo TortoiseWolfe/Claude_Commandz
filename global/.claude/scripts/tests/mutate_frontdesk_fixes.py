@@ -24,8 +24,8 @@ MUTANTS = [
     # 1. skip the pass unless the message is plainly a GitHub-facts question
     ("1", D, "the pass runs for every question", 'kind = pass_kind(words) if ctx.hand_off_first else None', 'kind = "facts" if ctx.hand_off_first else None'),
     ("1", D, "any question shape counts as facts", 'return "facts" if FACTS_NOUN_RE.search(t) else None', 'return "facts"'),
-    ("1", D, "a request to do something still runs the pass", "if not t or HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE.search(t):", "if not t or not QUESTION_SHAPE_RE.search(t):"),
-    ("1", D, "a statement runs the pass", "if not t or HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE.search(t):", "if not t or HUB_WORK_RE.search(t):"),
+    ("1", D, "a request to do something still runs the pass", "if not t or HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE.search(t):", "if not t or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE.search(t):"),
+    ("1", D, "a statement runs the pass", "if not t or HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE.search(t):", "if not t or HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t):"),
     ("1", D, "a direct-to-hub question still waits for a pass", 'if not use_pass:  # straight to the hub: it is already waiting there', "if False:"),
     # 2. his exact words are the task
     ("2", D, "the task is the receptionist's rewording", "words = his_words(context, q)", "words = q"),
@@ -64,6 +64,23 @@ MUTANTS = [
     ("8", D, "a claimed lane records no finish", '_finish(ask, now, "lane claimed")', "pass"),
     ("8", D, "a promote records no finish", '_finish(ask, now, "promoted to a job")', "pass"),
     ("8", D, "a held promote keeps its finish", '                ask.pop("finished_at", None)', "                pass"),
+    # followup A. a posted lane report answers its ask; a second lane can join it
+    ("A", D, "a posted report leaves its ask claimed", "        _settle_lane_ask(state, name, chat, now)\n", ""),
+    ("A", D, "the ask is answered without the posted text", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"], ask["answered_at"] = "", "answered", now'),
+    ("A", D, "the ask is answered without the time", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"] = text, "answered"'),
+    ("A", D, "the first of two lanes settles the ask", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return\n', ""),
+    ("A", D, "an answered ask is never reopened by a second lane", 'reclaim = (ask["status"] in ("claimed", "answered") and', 'reclaim = (ask["status"] in ("claimed",) and'),
+    ("A", D, "a second lane is never added", 'ask["lanes"] = (ask.get("lanes") or []) + [lane_name] if reclaim else [lane_name]', 'ask["lanes"] = [lane_name]'),
+    ("A", D, "a stale second lane is accepted", "                fresh = 0 <= now - float(row[8]) <= CLAIM_WINDOW", "                fresh = True"),
+    ("A", D, "the pass may add a second lane too", 'and not os.environ.get("AFA_OC_PASS"))', ")"),
+    ("A", D, "a lane that is already someone's is re-claimed", '            if lane_name in state["lanes"]:\n                return False, "claim: lane %s already belongs', '            if False:\n                return False, "claim: lane %s already belongs'),
+    # followup B. a note to Hatch or a Gmail draft goes to the hub, which has the mail connector
+    ("B", D, "a note to Hatch still starts a pass", '    if HUB_MAIL_RE.search(task):  # a lane here has no mail connector', '    if False:  # a lane here has no mail connector'),
+    ("B", D, "Hatch is not recognised", r'\b(?:hatch|muse|h-7ch)\b|', r'\b(?:muse|h-7ch)\b|'),
+    ("B", D, "a Gmail draft is not recognised", r'|\bgmail\b|\bdraft', r'|\bdraft'),
+    ("B", D, "a drafted email is not recognised", r'\bdraft(?:s|ed|ing)?\s+(?:an?\s+|the\s+)?(?:e-?mail|reply|note)\b", re.I)', r'\bdraft(?:s|ed|ing)?\s+(?:an?\s+|the\s+)?(?:reply|note)\b", re.I)'),
+    ("B", D, "the hub reason is not about mail", '"a note to Hatch or a Gmail draft: only the hub has the mail connector, so no lane or pass ran"', '"not a plain GitHub-facts question, so no pass ran"'),
+    ("B", D, "a mail question can still start the facts pass", "HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE", "HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE"),
 ]
 
 
