@@ -22,6 +22,10 @@ flock -n 9 || exit 0
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2
 
+# Every lane's new or changed report.md goes into his chat here, so a result reaches him with no hub session open (this task is
+# the safety net; lane_watch.sh does the same the moment a report lands). One post per report version; the first run only records.
+timeout 120 python3 "$here/openclaw_dispatch.py" post-reports 2>/dev/null || echo "openclaw_status_refresh: post-reports failed" >&2
+
 # The receptionist's live model chain (primary, then fallbacks), model names and nothing else: client repos get PR titles in the
 # digest only when every one is a claude/ model, since a fallback reads the same digest. The digest checks the shape and treats
 # anything else (empty, an error, another provider, a line cut short) as not Claude: counts only.
