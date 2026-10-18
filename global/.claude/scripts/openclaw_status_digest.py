@@ -648,10 +648,36 @@ def project_lines(projects, rm, flt, claude):
     return out
 
 
+def fleet_roster(path):
+    """The fleet's agents as "- Name: what it is" lines, from the "Agents, not people" section of the people index, read at run
+    time. Agents only: the section holds no people, and the Sources row is left out. [] when the file or section is missing."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return []
+    m = re.search(r"<summary><b>Agents, not people</b>.*?</summary>\s*```[^\n]*\n(.*?)\n```", text, re.S)
+    if not m:
+        return []
+    entries = []
+    for line in m.group(1).splitlines():
+        if not line.strip():
+            continue
+        if line[0].isspace():
+            if entries:
+                entries[-1][1].append(line.strip())
+            continue
+        name, _, rest = line.partition("  ")
+        entries.append([name.strip(), [rest.strip()] if rest.strip() else []])
+    return ["- %s: %s" % (n, " ".join(d)) for n, d in entries if d and n.lower() != "sources"]
+
+
 def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, cap=CAP_DEFAULT, dispatch_state=None, projects=None,
-          claude=False):
+          claude=False, fleet=None):
     rm = parse_roadmap(roadmap_body or "")
     sections = []  # (title, [lines]) in priority order; trimmed from the back
+
+    # The fleet's names: first, so the cap trims it last. Built from the people index's agents section, never from a person's entry.
+    sections.append(("The fleet's agents (who is who; these are agents, not people)", list(fleet or [])))
 
     # The lanes he started from this chat: first, so they are the last thing the cap trims
     sections.append((f"Lanes started from this chat (dispatcher records, last {CHAT_LANES_HOURS} h)", chat_lanes(dispatch_state, flt, now)))
@@ -880,7 +906,8 @@ def main(argv=None):
         projects = gather_projects()
         if projects is None:
             print("openclaw_status_digest: GitHub unavailable; the Projects section is left out", file=sys.stderr)
-    digest = build(body, status, a.lanes_dir, a.skp_root, inbox, flt, now, a.cap, dispatch_state, projects, claude)
+    fleet = next((r for r in (fleet_roster(pf) for pf in people if Path(pf).name == "people.md") if r), [])
+    digest = build(body, status, a.lanes_dir, a.skp_root, inbox, flt, now, a.cap, dispatch_state, projects, claude, fleet)
     if a.out:
         p = Path(a.out)
         p.parent.mkdir(parents=True, exist_ok=True)
