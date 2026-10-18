@@ -148,16 +148,26 @@ def load_names(paths):
     """
     names = NameSet()
     handles = set()
+    seen_roles = {}  # token -> the roles of every block it appears in (None for a block with no Mask line)
     for p in paths:
         try:
             text = Path(p).read_text(errors="replace")
         except OSError:
             continue
+        block, role = set(), None  # the tokens of the current person block, and its Mask line
         for line in text.splitlines():
+            if re.match(r"\s*(?:<summary>|</details>)", line):
+                for t in block:
+                    seen_roles.setdefault(t, set()).add(role)
+                block, role = set(), None
             m = re.match(r"\s*<summary>(?!<b>)\s*((?:[A-Z][\w'.-]+\s+){1,3})", line)
             if m:
                 for w in _words(m.group(1)):
                     names.add(w.lower())
+                    block.add(w.lower())
+            m = re.match(r"\s*Mask\s+([A-Za-z][A-Za-z ]{1,30})\s*$", line)
+            if m:
+                role = " ".join(m.group(1).split()).lower()
             m = re.match(r"\s*(?:-\s*)?name:\s*([A-Z][\w'-]+)", line)
             if m:
                 names.add(m.group(1).lower())
@@ -169,8 +179,13 @@ def load_names(paths):
             for em in EMAIL.findall(line):
                 local = em.split("@")[0]
                 names.update(w.lower() for w in _words(local))
+                block.update(w.lower() for w in _words(local))
+        for t in block:
+            seen_roles.setdefault(t, set()).add(role)
     keep = NameSet(n for n in names if n not in KEEP_NAMES and n not in NOT_NAMES)
     keep.handles = frozenset(h for h in handles if h in keep)
+    # A token is masked by role only when every block it appears in names the same role: a shared first name stays "[person]".
+    keep.roles = {t: next(iter(r)) for t, r in seen_roles.items() if t in keep and len(r) == 1 and None not in r}
     return keep
 
 
@@ -186,11 +201,13 @@ _HOLD = re.compile("\ue000(\\d+)\ue001")
 class NameSet(set):
     """Person tokens, plus which of them are GitHub handles (those are written in lower case, so they match in lower case)."""
     handles = frozenset()
+    roles = {}  # name token -> the plain-words role people.md gives that person ("field partner"), shown as "[field partner]"
 
 
 class Filter:
     def __init__(self, names=()):
         self.names = set(names)
+        self.roles = dict(getattr(names, "roles", {}))
         handles = set(getattr(names, "handles", ()))
         self.name_res = []
         # Whole words. A name that is also an ordinary word (CAPS_ONLY: green, will, mark) is masked with its capitals only, so "Green"
@@ -214,6 +231,12 @@ class Filter:
         if handles:
             alt = "|".join(re.escape(n) for n in sorted(handles, key=len, reverse=True))
             self.name_res.append(re.compile(rf"(?<![A-Za-z])(?:{alt})(?:'s)?(?![A-Za-z])", re.I))
+
+    def mask(self, m):
+        """The stand-in for a matched name: "[role]" when people.md gives that person a Mask line, else "[person]"."""
+        word = re.sub(r"'s$", "", m.group(0), flags=re.I).lower()
+        role = self.roles.get(word)
+        return "[%s]" % role if role else "[person]"
 
     def clean(self, text, limit=160, names=True):
         """Return a safe single-line string, or None when the piece must be dropped."""
@@ -256,7 +279,7 @@ class Filter:
         t = LONG_NUM.sub("[num]", t)
         if names:
             for rx in self.name_res:
-                t = rx.sub("[person]", t)
+                t = rx.sub(self.mask, t)
         t = re.sub(r"\s+", " ", t).strip(" -|")
         shown = _HOLD.sub(lambda m: held[int(m.group(1))], t)  # a lane name on its own is a whole, readable piece
         if len(shown) < 3 or not re.search(r"[A-Za-z]", shown):
@@ -267,7 +290,7 @@ class Filter:
         def put_back(m):
             token = held[int(m.group(1))]
             if names and self.token_re:  # a person's name inside a lane name is still masked, whatever its case
-                token = self.token_re.sub("[person]", token)
+                token = self.token_re.sub(self.mask, token)
             return token
         return _HOLD.sub(put_back, t)
 
