@@ -252,15 +252,119 @@ class Claiming(PassBase):
         self.assertIn("Counted 12 open issues", ask["answer"])
         self.assertEqual(ask["finished_by"], "lane claimed")  # the first finish stands
 
-    def test_a_failed_report_also_answers_its_ask(self):
+    def failed_lane(self):
         self.hand()
         report = self.index_row("oc-own-app-xyz")
         dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
         report.parent.mkdir(parents=True)
         report.write_text("Permission denied: Docker was blocked. No changes were made.")
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 120)
+        return chat
+
+    def test_a_failed_report_is_posted_but_does_not_answer_its_ask(self):
+        chat = self.failed_lane()
         self.assertIn("failed", chat)
+        self.assertEqual(self.host.chats.count(chat), 1)
+        ask = self.ask()
+        self.assertEqual(ask["status"], "claimed")  # a failed lane answered nothing: the ask stays open
+        self.assertNotIn("answer", ask)
+        self.assertNotIn("answered_at", ask)
+        self.assertTrue(self.state()["lanes"]["oc-own-app-xyz"]["failed"])
+
+    def test_a_failed_lane_puts_its_ask_on_the_hub_list_once(self):
+        self.failed_lane()
+        inbox = self.ctx.inbox_path.read_text()
+        self.assertEqual(inbox.count(json.dumps("do the thing")), 1)
+        self.assertIn("oc-own-app-xyz failed", inbox)
+        self.assertIn(ASK, self.ctx.wake_path.read_text())
+        dp.sweep(self.ctx, self.host, NOW + 200)  # the lane is delivered: a later sweep adds nothing
+        self.assertEqual(self.ctx.inbox_path.read_text().count(json.dumps("do the thing")), 1)
+        rows = [l for l in dp.open_question_lines(self.ctx, NOW + 300) if l.startswith(ASK)]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("lane-failed", rows[0])
+
+    def test_a_good_report_still_answers_its_ask_and_adds_nothing_to_the_hub_list(self):
+        self.hand()
+        report = self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        report.parent.mkdir(parents=True)
+        report.write_text("Counted 12 open issues.")
+        dp.sweep(self.ctx, self.host, NOW + 120)
         self.assertEqual(self.ask()["status"], "answered")
+        self.assertFalse(self.ctx.inbox_path.exists() and self.ctx.inbox_path.read_text())
+        self.assertEqual([l for l in dp.open_question_lines(self.ctx, NOW + 300) if l.startswith(ASK)], [])
+
+    def test_a_dead_lane_does_not_answer_its_ask_either(self):
+        self.hand()
+        self.index_row("oc-own-app-xyz", engine="copilot", model="gpt")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        lane_dir = self.tmp / "lanes" / "2026-10-16-oc-own-app-xyz"
+        lane_dir.mkdir(parents=True)
+        (lane_dir / "exit").write_text("1\n")
+        with mock.patch.object(dp, "_log_exit", return_value=(1, ["it crashed"])):
+            (line, chat), = dp.sweep(self.ctx, self.host, NOW + 120)
+        self.assertIn("failed", chat)
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertIn("oc-own-app-xyz failed", self.ctx.inbox_path.read_text())
+
+    def test_a_failed_lane_does_not_hide_a_sibling_lane_still_working(self):
+        self.hand()
+        self.index_row("oc-own-app-xyz")
+        self.index_row("oc-own-app-two", begin_for=None)
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        state = self.state()
+        state["lanes"]["oc-own-app-two"] = dict(state["lanes"]["oc-own-app-xyz"], status="started", delivered=False,
+                                                    report=str(self.tmp / "lanes" / "2026-10-16-oc-own-app-two" / "report.md"))
+        dp.asks_of(state)[ASK]["lanes"].append("oc-own-app-two")
+        dp.save_state(self.ctx.state_path, state)
+        report = self.tmp / "lanes" / "2026-10-16-oc-own-app-xyz" / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("Permission denied: Docker was blocked. No changes were made.")
+        dp.sweep(self.ctx, self.host, NOW + 120)
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertFalse(self.ctx.inbox_path.exists() and self.ctx.inbox_path.read_text())  # another lane is still on it: not the hub's yet
+
+    def test_the_hub_can_post_the_answer_to_an_ask_whose_lane_failed(self):
+        self.failed_lane()
+        ok, msg = dp.post_ask(self.ctx, self.host, ASK, "Fixed by hand: 12 open.", NOW + 400)
+        self.assertTrue(ok, msg)
+        ask = self.ask()
+        self.assertEqual((ask["status"], ask["answer"]), ("answered", "Fixed by hand: 12 open."))
+        self.assertNotIn("followups", ask)
+
+    def test_the_hub_cannot_post_over_a_claimed_ask_whose_lane_is_still_working(self):
+        self.hand()
+        self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        ok, msg = dp.post_ask(self.ctx, self.host, ASK, "too soon", NOW + 30)
+        self.assertFalse(ok)
+        self.assertIn("claimed", msg)
+        self.assertNotIn("too soon", self.host.chats)
+
+    def test_a_later_report_to_an_answered_ask_is_a_followup_delivered_once(self):
+        self.hand()
+        self.host.inject("placeholder")
+        dp.post_ask(self.ctx, self.host, ASK, "First answer.", NOW + 10)  # pending: this closes it
+        before = list(self.host.chats)
+        ok, msg = dp.post_ask(self.ctx, self.host, ASK, "The lane report, later.", NOW + 500)
+        self.assertTrue(ok, msg)
+        self.assertIn("follow-up", msg)
+        self.assertEqual(self.host.chats[len(before):], ["The lane report, later."])
+        ask = self.ask()
+        self.assertEqual((ask["status"], ask["answer"], ask["answered_at"]), ("answered", "First answer.", NOW + 10))  # the ask is unchanged
+        self.assertEqual(ask["followups"], [{"text": "The lane report, later.", "at": NOW + 500}])
+        ok, msg = dp.post_ask(self.ctx, self.host, ASK, "And one more.", NOW + 600)
+        self.assertTrue(ok, msg)
+        self.assertEqual([f["text"] for f in self.ask()["followups"]], ["The lane report, later.", "And one more."])
+
+    def test_a_followup_cannot_be_posted_by_the_dispatch_pass_or_to_an_unknown_ask(self):
+        self.hand()
+        dp.post_ask(self.ctx, self.host, ASK, "First answer.", NOW + 10)
+        with mock.patch.dict(os.environ, {"AFA_OC_PASS": "1"}):
+            ok, _ = dp.post_ask(self.ctx, self.host, ASK, "sneaky", NOW + 20)
+        self.assertFalse(ok)
+        self.assertNotIn("followups", self.ask())
+        self.assertFalse(dp.post_ask(self.ctx, self.host, "oc-nosuchask", "x", NOW + 30)[0])
 
     def test_a_report_that_could_not_be_posted_leaves_its_ask_claimed(self):
         self.hand()
@@ -1369,7 +1473,8 @@ class Questions(PassBase):
     def test_with_the_pass_off_the_question_goes_on_the_hub_list(self):
         self.ctx.hand_off_first = False
         line, chat = self.asked()
-        self.assertEqual(chat, "On the hub's list: " + self.Q)
+        self.assertEqual(chat, "On the hub's list: the hub has your message.")
+        self.assertNotIn(self.Q, chat)
         self.assertIn(json.dumps(self.Q), self.hub_list())
         self.assertIn(ASK, self.ctx.wake_path.read_text())
         self.assertEqual(self.host.spawned, [])
@@ -1382,7 +1487,7 @@ class Questions(PassBase):
         for i in range(dp.MAX_QUESTIONS - 1):
             self.asked("question %d" % i, ask="oc-1000000%d" % i)
         line, chat = self.asked("one too many", ask="oc-2000000f")
-        self.assertEqual(chat, "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s): one too many"
+        self.assertEqual(chat, "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s); the hub has your message."
                          % (dp.MAX_QUESTIONS, time.strftime("%H:%M", time.localtime(NOW))))  # change 7: the cap is said, not silent
         self.assertIn("%d questions already waiting" % dp.MAX_QUESTIONS, line)
         capped = dp.asks_of(self.state())["oc-2000000f"]  # and the capped question is recorded, so its repeat is caught and it gets a finish time
@@ -1807,7 +1912,8 @@ class FrontDeskRouting(PassBase):
     def test_a_message_that_is_not_a_facts_question_goes_to_the_hub_and_runs_no_pass(self):
         his = "what are the 22 notes from Hatch? I need them on your list"
         line, chat = self.asked("what are the Hatch notes", his=his)
-        self.assertEqual(chat, "On the hub's list: " + his)
+        self.assertEqual(chat, "On the hub's list: the hub has your message.")
+        self.assertNotIn(his, chat)  # his words go to the hub, not back into the chat
         self.assertEqual(self.host.spawned, [])  # no Sonnet call, no wait
         self.assertIn(json.dumps(his), self.hub_list())
         self.assertIn(ASK, self.ctx.wake_path.read_text())
@@ -1837,7 +1943,7 @@ class FrontDeskRouting(PassBase):
         self.assertEqual(self.hub_list().count(json.dumps(q)), 1)
         self.assertTrue(dp.post_ask(self.ctx, self.host, "oc-5000000a", "Here are the files.", NOW + 200)[0])
         line, chat = self.asked(q, ask="oc-5000000c", now=NOW + 300)
-        self.assertEqual(chat, "On the hub's list: " + q)  # answered: the same words are a new question, never the old answer
+        self.assertEqual(chat, "On the hub's list: the hub has your message.")  # answered: the same words are a new question, never the old answer
         self.assertEqual(self.hub_list().count(json.dumps(q)), 2)
 
     def test_a_similar_but_different_question_is_never_taken_for_a_repeat(self):
@@ -1869,7 +1975,7 @@ class FrontDeskRouting(PassBase):
             self.asked("what does PR #%d do?" % (i + 1), ask="oc-1000000%d" % i)
         line, chat = self.asked("what does PR #99 do?", ask="oc-1000000f", now=NOW + 5)
         self.assertIn("already has %d questions in hand" % dp.MAX_QUESTIONS, chat)
-        self.assertIn("what does PR #99 do?", chat)
+        self.assertNotIn("what does PR #99 do?", chat)
         self.assertEqual(len(self.host.spawned), dp.MAX_QUESTIONS)
         self.assertIn("what does PR #99 do?", self.hub_list())
         self.assertEqual(self.ask("oc-1000000f")["route"], "hub, pass full")
