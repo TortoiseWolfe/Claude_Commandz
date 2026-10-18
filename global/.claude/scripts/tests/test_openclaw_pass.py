@@ -1027,6 +1027,32 @@ class StartForAnAsk(PassBase):
         self.assertEqual(self.ask()["status"], "claimed")
         self.assertEqual(len(self.state()["starts"]), 1)
 
+    def block(self, **kw):
+        state = self.state()
+        state.update(kw)
+        dp.save_state(self.ctx.state_path, state)
+
+    def test_engine_copilot_while_copilot_is_blocked_starts_claude_and_says_so(self):
+        self.block(copilot_blocked_until=NOW + 14 * 86400)
+        ok, msg = self.go(engine="copilot")
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
+        self.assertIn("Copilot is out of usage", msg)
+        self.assertIn("Copilot is out of usage", self.host.chats[-1])
+        self.assertIn("on Claude Sonnet", self.host.chats[-1])
+
+    def test_engine_codex_while_both_are_blocked_starts_claude_and_codex_alone_goes_to_copilot(self):
+        self.block(codex_blocked_until=NOW + 14 * 86400)
+        ok, msg = self.go(engine="codex")
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.started[-1][2], "copilot")
+        self.assertIn("Codex is out of usage", msg)
+
+    def test_engine_copilot_with_no_block_still_starts_copilot(self):
+        ok, msg = self.go(engine="copilot")
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.started[-1][2], "copilot")
+
     def test_a_folder_not_on_the_list_is_refused(self):
         for d in (self.tmp, "/etc", self.root / "nowhere", "relative/dir", self.root / "own-app" / ".."):
             ok, msg = self.go(dirpath=d)
@@ -1197,8 +1223,10 @@ class TheWaitingRoom(PassBase):
         self.room = self.ctx.lanes_dir / "queue"
         self.room.mkdir(parents=True)
 
-    def entry(self, name, after=None, approved=None, model="sonnet", dirpath=None, brief="# %s\n\nCount the open issues in runit.\n"):
+    def entry(self, name, after=None, approved=None, model="sonnet", dirpath=None, brief="# %s\n\nCount the open issues in runit.\n", engine=None):
         lines = ["dir: %s" % (dirpath or self.root / "own-app"), "model: %s" % model]
+        if engine:
+            lines.append("engine: %s" % engine)
         if after:
             lines.append("after: %s" % after)
         if approved:
@@ -1240,6 +1268,17 @@ class TheWaitingRoom(PassBase):
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][0], "fd-a")
         self.assertEqual(self.host.chats[-1], "started fd-a")
+
+    def test_a_waiting_room_entry_asking_for_blocked_copilot_starts_claude(self):
+        state = self.state()
+        state["copilot_blocked_until"] = NOW + 14 * 86400
+        dp.save_state(self.ctx.state_path, state)
+        self.entry("fd-a", engine="copilot")
+        self.asked("start fd-a now")
+        ok, msg = dp.approve_entry(self.ctx, self.host, ASK, "fd-a", NOW + 5)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.started[-1][2], "claude")
+        self.assertIn("Copilot is out of usage", self.host.chats[-1])
 
     def test_his_words_must_name_the_entry(self):
         self.entry("fd-a")
