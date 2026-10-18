@@ -7,14 +7,17 @@
 #   - openclaw_dispatch.py open lists an unanswered receptionist question, or a new one is filed. A burst of questions wakes the
 #     hub ONCE: it waits until no new question has come for LANE_WATCH_BATCH_QUIET seconds (default 60), at most LANE_WATCH_BATCH_MAX
 #     (default 180), then prints the whole list. Each wake after the hub's cache has gone cold costs $1.2 to $1.6 against $0.05 warm.
-#   - a named lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
-#   - a named lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
-#   - a named lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
-#   - a named lane's tmux window disappears
+#   - a watched lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
+#   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
+#   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
+#   - a watched lane's tmux window disappears
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
-# With no lane names it still wakes on the OpenClaw ask, --check and the heartbeat.
+# Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
+# have a tmux window), read again on every poll so a lane started after the watcher began is covered for reports, end of turn and
+# stuck dialogs. (18 Oct: armed with no names it watched nothing, and four reports and a stuck dialog sat unseen for hours.)
+# Every new or changed report also goes to Jonathan's chat: the dispatcher's post-reports does it, so he reads it without the hub.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 set -u
 
@@ -46,13 +49,40 @@ while [ $# -gt 0 ]; do
   esac
 done
 lanes=("$@")
+auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
+start_ts=$(date +%s)
 declare -A seen seen_turn
 report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
-for l in "${lanes[@]}"; do
+watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
+  local l=$1 f
   seen[$l]=$(stamp "$l")
+  if [ "${2:-}" = fresh ] && f=$(report_of "$l") && [ -n "$f" ] && [ "$(stat -c %Y "$f")" -ge "$start_ts" ]; then
+    seen[$l]=none   # its report was written before the first poll saw the lane: still news
+  fi
   seen_turn[$l]=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null | turn_done_line)
-done
+}
+# The live lanes now: rows of lane.sh --status that start in column one and are not "dead", and that have a tmux window.
+live_lanes() {
+  local wins; wins=$(tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null) || return 0
+  "$HOME/.claude/scripts/lane.sh" --status 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
+    while read -r n; do printf '%s\n' "$wins" | grep -qx "$n" && echo "$n"; done
+}
+refresh_watched() { # no names given: add the lanes that started since the last poll
+  [ "$auto" = 1 ] || return 0
+  local n known w
+  while read -r n; do
+    [ -n "$n" ] || continue
+    known=0; for w in "${lanes[@]}"; do [ "$w" = "$n" ] && { known=1; break; }; done
+    [ "$known" = 1 ] || { lanes+=("$n"); watch_lane "$n" fresh; }
+  done < <(live_lanes)
+}
+if [ "$auto" = 1 ]; then
+  lanes=()
+  while read -r n; do [ -n "$n" ] && { lanes+=("$n"); watch_lane "$n"; }; done < <(live_lanes)
+else
+  for l in "${lanes[@]}"; do watch_lane "$l"; done
+fi
 # Jonathan asking the hub from OpenClaw: openclaw_pickup.py --act touches this file when it files a "Jonathan via OpenClaw:" line
 # in muse-inbox.md. It holds only a time and an id, never the message.
 ask_wake="$HOME/.claude/state/openclaw-ask.wake"
@@ -83,6 +113,7 @@ check_open_questions
 end=$(( $(date +%s) + max * 60 ))
 while :; do
   check_open_questions
+  refresh_watched
   hit=0; other=0
   for l in "${lanes[@]}"; do
     s=$(stamp "$l")
@@ -90,6 +121,8 @@ while :; do
       echo "report: $l ($(report_of "$l"))"; hit=1; other=1
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
+      # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
+      setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 &
     fi
     if ! tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null | grep -qx "$l"; then
       echo "gone: $l"; hit=1; other=1

@@ -188,7 +188,10 @@ class TheLanesMarker(Lanes):
         self.assertEqual(kind, "dispatch")
         self.assertEqual(self.chat(), "No lanes are open right now.")
 
-    def test_each_open_lane_is_listed_with_name_repo_state_start_and_task(self):
+    def bullets(self):
+        return [l for l in self.chat().splitlines() if l.startswith("- ")]
+
+    def test_each_live_lane_is_a_bullet_and_dead_ones_are_one_line(self):
         self.put(LANE, repo="workspace", ask="oc-40816152", task="create or update the session-prime roadmap for each repo under ~/repos tracking what is next",
                  started=NOW - 600)
         self.put("oc-own-app-0115-0300", report_text="Did it. Saw it. Nothing left.", task="count the issues")
@@ -198,27 +201,47 @@ class TheLanesMarker(Lanes):
         self.host.wins.update({LANE, "oc-own-app-0115-0300", "oc-docs-1"})
         self.act("lanes")
         text = self.chat()
-        self.assertIn("(4)", text)
-        by = {ln.split(" | ")[0]: ln for ln in text.splitlines()[1:]}
-        self.assertEqual(sorted(by), ["oc-docs-1", "oc-old-2", LANE, "oc-own-app-0115-0300"] and sorted(by))
-        self.assertIn("repo workspace | running | started ", by[LANE])
-        self.assertIn('"create or update the session-prime roadmap for each repo und', by[LANE])
-        self.assertIn("| report written |", by["oc-own-app-0115-0300"])
-        self.assertIn("| failed |", by["oc-docs-1"])
-        self.assertIn("| dead |", by["oc-old-2"])
+        self.assertNotIn("|", text)
+        self.assertNotIn("(trimmed)", text)
+        self.assertIn("Open lanes (3)", text)
+        by = {b.split("**")[1]: b for b in self.bullets()}
+        self.assertEqual(sorted(by), sorted([LANE, "oc-own-app-0115-0300", "oc-docs-1"]))
+        self.assertIn("workspace", by[LANE])
+        self.assertIn("running", by[LANE])
+        self.assertRegex(by[LANE], r"\b\d{1,2}:\d{2} (AM|PM)\b")
+        self.assertIn("create or update the session-prime roadmap for each repo", by[LANE])
+        self.assertIn("report written", by["oc-own-app-0115-0300"])
+        self.assertIn("failed", by["oc-docs-1"])
+        self.assertNotIn("oc-old-2", text)  # a dead lane is counted, never listed
+        self.assertIn("1 older lane has ended.", text)
         self.assertNotIn("oc-shut-3", text)
 
-    def test_the_task_is_cut_to_about_sixty_characters(self):
-        self.put(LANE, task="x" * 300)
+    def test_many_dead_lanes_are_one_counted_line(self):
+        for i in range(14):
+            self.put("oc-gone-%d" % i)
+        self.put(LANE)
         self.host.wins.add(LANE)
         self.act("lanes")
-        line = [l for l in self.chat().splitlines() if l.startswith(LANE)][0]
-        self.assertLess(len(line.split(" | ")[-1]), 80)
+        self.assertIn("14 older lanes have ended.", self.chat())
+        self.assertEqual(len(self.bullets()), 1)
+        self.assertNotIn("oc-gone", self.chat())
 
-    def test_a_lane_with_no_window_and_no_report_is_dead_not_running(self):
+    def test_a_long_task_is_cut_at_a_word_with_no_trimmed_tail(self):
+        self.put(LANE, task="word " * 100)
+        self.host.wins.add(LANE)
+        self.act("lanes")
+        bullet = self.bullets()[0]
+        self.assertLess(len(bullet), 220)
+        self.assertNotIn("(trimmed)", bullet)
+        self.assertTrue(bullet.rstrip().endswith("\u2026") or bullet.rstrip().endswith("."), bullet)
+        self.assertNotIn("wor\u2026", bullet)
+
+    def test_a_lane_with_no_window_and_no_report_is_counted_dead_not_listed(self):
         self.put(LANE)
         self.act("lanes")
-        self.assertIn("| dead |", self.chat())
+        self.assertEqual(self.bullets(), [])
+        self.assertIn("No lanes are running right now.", self.chat())
+        self.assertIn("1 older lane has ended.", self.chat())
 
     def test_a_hub_lane_in_tmux_comes_from_the_index_and_its_prompt(self):
         prompt = self.tmp / "hub-prompt.md"
@@ -229,9 +252,12 @@ class TheLanesMarker(Lanes):
                                str(int(NOW - 60)), "high", "off"]) + "\n")
         self.host.wins.add("frontdesk-7")
         self.act("lanes")
-        line = [l for l in self.chat().splitlines() if l.startswith("frontdesk-7")][0]
-        self.assertIn("repo own-app | running |", line)
-        self.assertIn('"the receptionist can name, list and stop its own jobs"', line)
+        line = self.bullets()[0]
+        self.assertTrue(line.startswith("- **frontdesk-7**"), line)
+        self.assertIn("own-app", line)
+        self.assertIn("running", line)
+        self.assertIn("the receptionist can name, list and stop its own jobs", line)
+        self.assertNotIn("frontdesk-7:", line.split("**", 2)[2])
 
     def test_a_hub_lane_that_wrote_its_report_is_report_written(self):
         report = self.tmp / "lanes/2026-10-16-frontdesk-7/report.md"
@@ -242,21 +268,23 @@ class TheLanesMarker(Lanes):
                                str(int(NOW - 60)), "high", "off"]) + "\n")
         self.host.wins.add("frontdesk-7")
         self.act("lanes")
-        self.assertIn("frontdesk-7 | repo own-app | report written |", self.chat())
+        self.assertIn("**frontdesk-7**", self.chat())
+        self.assertIn("report written", self.chat())
 
     def test_a_window_nobody_indexed_is_still_listed(self):
         self.host.wins.add("scratch")
         self.act("lanes")
-        self.assertIn("scratch | repo ? | running |", self.chat())
+        self.assertTrue(self.bullets()[0].startswith("- **scratch**"))
+        self.assertIn("running", self.bullets()[0])
 
-    def test_more_than_ten_are_cut_with_a_count(self):
-        for i in range(13):
+    def test_more_than_twenty_are_cut_with_a_count(self):
+        for i in range(23):
             self.put("oc-many-%d" % i, started=NOW + i)
             self.host.wins.add("oc-many-%d" % i)
-        self.act("lanes")
-        self.assertIn("(13)", self.chat())
-        self.assertIn("...and 3 more.", self.chat())
-        self.assertLessEqual(len(self.chat()), dp.CHAT_MAX)
+        _line, text = dp.do_lanes(self.ctx, self.host, NOW)
+        self.assertIn("(23)", text)
+        self.assertEqual(len([l for l in text.splitlines() if l.startswith("- ")]), 20)
+        self.assertIn("and 3 more", text)
 
     def test_the_listing_changes_nothing(self):
         self.put(LANE)
