@@ -886,6 +886,7 @@ class Ctx:
         # the hub's list, where a question the pass could not answer goes (the same files pickup's "hub:" messages use)
         self.inbox_path = self.state_path.with_name("muse-inbox.md")
         self.wake_path = self.state_path.with_name("openclaw-ask.wake")
+        self.reports_posted_path = self.state_path.with_name("openclaw-reports-posted.json")  # {report path: mtime already in his chat}
 
 
     @contextlib.contextmanager
@@ -1600,8 +1601,8 @@ def _do_stop(ctx, host, now):
     return line, chat
 
 
-LANES_TASK_CHARS = 60
-LANES_MAX_LINES = 10
+LANES_TASK_CHARS = 90
+LANES_MAX_LINES = 20
 LANES_DEAD_DAYS = 3  # like lane.sh --status: a lane with no window and no report shows as dead for this long
 TASK_BLOCK_RE = re.compile(r"<<<TASK\n(.*?)\nTASK>>>", re.S)
 
@@ -1620,8 +1621,8 @@ def _index_rows(ctx):
 
 
 def _lane_task(prompt_path):
-    """The first ~LANES_TASK_CHARS characters of what a lane was asked: the quoted task of a dispatcher prompt, else the first heading
-    or line of a hub prompt. "" when it cannot be read."""
+    """What a lane was asked: the quoted task of a dispatcher prompt, else the first heading or line of a hub prompt, on one line.
+    "" when it cannot be read."""
     try:
         text = Path(prompt_path).read_text(errors="replace")
     except (OSError, TypeError):
@@ -1638,7 +1639,23 @@ def _lane_task(prompt_path):
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         head = next((l for l in lines if l.startswith("# ")), lines[0] if lines else "")
         task = re.sub(r"^Lane [\w.-]+:\s*", "", re.sub(r"^#+\s*", "", head))
-    return _trim(CONTROL_RE.sub(" ", " ".join(task.split())), LANES_TASK_CHARS) if task else ""
+    return CONTROL_RE.sub(" ", " ".join(task.split())) if task else ""
+
+
+def _plain_words(text, limit=LANES_TASK_CHARS):
+    """text cut at a word to about `limit` characters, with a plain ellipsis (no "(trimmed)" tail)."""
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-(") + "\u2026"
+
+
+def _lane_bullet(name, repo, state, started, task, now):
+    """One live lane in plain words: **name** (repo): state, started 3:12 PM. Working on: the task."""
+    where = " (%s)" % repo if repo and repo != "?" else ""
+    since = ", started %s" % _clock(started, now) if started else ""
+    doing = " Working on: %s%s" % (task, "" if task.endswith("\u2026") else ".") if task else ""
+    return "- **%s**%s: %s%s.%s" % (name, where, state, since, doing)
 
 
 def _clock(epoch, now):
@@ -1695,17 +1712,22 @@ def do_lanes(ctx, host, now):
             st = "dead" if wins is not None and name not in wins else "running"
         task = _lane_task(f[5] if f and len(f) > 5 else Path(report).parent / "prompt.md" if report else None)
         if not task and lane.get("ask"):
-            task = _trim(" ".join(str(asks_of(state).get(lane["ask"], {}).get("task", "")).split()), LANES_TASK_CHARS)
+            task = " ".join(str(asks_of(state).get(lane["ask"], {}).get("task", "")).split())
+        task = _plain_words(re.sub(r"^(?:lane\s+)?%s:\s*" % re.escape(name), "", task, flags=re.I))
         found.append((started, name, repo, st, task))
     found.sort(key=lambda e: (e[0], e[1]))
     if not found:
         return "%s | lanes | none open" % stamp, "No lanes are open right now."
-    lines = ["%s | repo %s | %s | started %s | %s" % (n, r, st, _clock(s, now) if s else "?", '"%s"' % t if t else "no task text")
-             for s, n, r, st, t in found[:LANES_MAX_LINES]]
-    more = len(found) - LANES_MAX_LINES
-    chat = "Open lanes right now (%d), read live from the lane list and tmux:\n%s%s" % (
-        len(found), "\n".join(lines), "\n...and %d more." % more if more > 0 else "")
-    return "%s | lanes | %d open" % (stamp, len(found)), chat
+    live = [e for e in found if e[3] != "dead"]
+    dead = len(found) - len(live)
+    ended = "%d older lane%s ha%s ended." % (dead, "" if dead == 1 else "s", "s" if dead == 1 else "ve") if dead else ""
+    if not live:
+        return "%s | lanes | none open" % stamp, "No lanes are running right now. " + ended
+    lines = [_lane_bullet(n, r, st, s, t, now) for s, n, r, st, t in live[:LANES_MAX_LINES]]
+    more = len(live) - LANES_MAX_LINES
+    chat = "**Open lanes (%d)**\n\n%s%s%s" % (len(live), "\n".join(lines), "\n\n...and %d more." % more if more > 0 else "",
+                                              "\n\n" + ended if ended else "")
+    return "%s | lanes | %d open" % (stamp, len(live)), chat
 
 
 def sweep(ctx, host, now=None):
@@ -2319,7 +2341,11 @@ def mailhook(raw, counter):
 
 
 def post_line(host, text, ctx=None):
-    """The hub puts a line into Jonathan's chat with no ask: for an answer that reached the hub another way. The pass cannot (AFA_OC_PASS)."""
+    """The hub puts a line into Jonathan's chat with no ask: for an answer that reached the hub another way. The pass cannot (AFA_OC_PASS).
+
+    Pictures: the web chat draws a markdown image only as inline base64 data (data:image/png;base64,...); a local path or a web link
+    shows as "not loaded", and a post is cut into 1,900-character parts, which would cut a picture apart. So a post never embeds one:
+    it carries image_line(path, description), a plain description and the Windows path he can open. The receptionist has no image tool."""
     if os.environ.get("AFA_OC_PASS"):
         return False, "post: the dispatch pass may not post"
     text = re.sub(r"^\s*\[hub\]\s*", "", (text or "").strip())
@@ -2339,6 +2365,76 @@ def post_line(host, text, ctx=None):
             state["last_hub_post_at"] = time.time()
             save_state(ctx.state_path, state)
     return True, "posted"
+
+
+def image_line(path, description, distro=None):
+    """A picture for a [hub] post: what it shows in plain words, and the Windows path to open it (see post_line for why it is not embedded)."""
+    distro = distro or os.environ.get("WSL_DISTRO_NAME") or "Debian"
+    win = "\\\\wsl.localhost\\%s%s" % (distro, str(path).replace("/", "\\"))
+    return "Picture: %s. Open it on your PC: `%s`" % (" ".join(str(description).split()).rstrip("."), win)
+
+
+REPORT_QUIET = 10  # seconds a report must have been still before it is posted, so one still being written goes whole
+LANE_FOLDER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(.+)$")
+
+
+def _reports_on_disk(lanes_dir):
+    """-> {report path: (lane name, mtime)} for every <lanes dir>/<date>-<lane>/report.md."""
+    found = {}
+    try:
+        folders = sorted(Path(lanes_dir).iterdir())
+    except OSError:
+        return found
+    for d in folders:
+        m, f = LANE_FOLDER_RE.match(d.name), d / "report.md"
+        try:
+            if m and f.is_file():
+                found[str(f)] = (m.group(1), f.stat().st_mtime)
+        except OSError:
+            continue
+    return found
+
+
+def post_new_reports(ctx, host, now=None, seed=False):
+    """Put every lane's new or changed report.md into Jonathan's chat, whole, so a result reaches him with no hub session open.
+    One post per report version (path and mtime are recorded in ctx.reports_posted_path): the lane name as a heading, a 12-hour
+    stamp, the report as written, in numbered parts when long. The first run (no record yet) and seed=True only record what is
+    there. Lanes the dispatcher started are recorded and skipped: its own sweep posts their reports. A post that cannot land is
+    tried again on the next run. -> the lane names posted."""
+    now = time.time() if now is None else now
+    path = ctx.reports_posted_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    reports = _reports_on_disk(ctx.lanes_dir)
+    with open(str(path) + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = json.loads(path.read_text())
+            posted = {k: v for k, v in (data.get("posted") or {}).items() if k in reports}
+            first = False
+        except (OSError, ValueError, AttributeError):
+            posted, first = {}, True
+        names = []
+        if seed or first:
+            posted = {p: m for p, (_n, m) in reports.items()}
+        else:
+            own = set(load_state(ctx.state_path)["lanes"])
+            for p, (name, mtime) in sorted(reports.items(), key=lambda kv: (kv[1][1], kv[0])):
+                if posted.get(p) == mtime or now - mtime < REPORT_QUIET:
+                    continue
+                if name in own:
+                    posted[p] = mtime
+                    continue
+                body = _report_text(p)
+                if not body:
+                    continue
+                ok, _msg = post_line(host, "### %s\n*Report written %s*\n\n%s" % (name, _clock(mtime, now), body))
+                if ok:
+                    posted[p] = mtime
+                    names.append(name)
+        tmp = path.with_name(path.name + ".new")
+        tmp.write_text(json.dumps({"posted": posted}, indent=0))
+        os.replace(str(tmp), str(path))
+    return names
 
 
 def _ask_ids(raw):
@@ -3079,6 +3175,11 @@ def main(argv=None):
         ok, msg = approve_entry(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
     elif len(argv) == 1 and argv[0] == "lanes":
         ok, msg = True, do_lanes(Ctx(load_repos()), LaneHost(), time.time())[1]
+    elif argv and argv[0] == "post-reports" and argv[1:] in ([], ["--seed"]):
+        names = post_new_reports(Ctx({}, state_path=state_file()), LaneHost(), seed=bool(argv[1:]))
+        ok, msg = True, ("seeded" if argv[1:] else "posted %d report(s)%s" % (len(names), ": " + ", ".join(names) if names else ""))
+    elif len(argv) == 3 and argv[0] == "image":
+        ok, msg = True, image_line(argv[1], argv[2])
     elif len(argv) == 2 and argv[0] == "post":
         ctx = Ctx({}, state_path=state_file())
         pending = unanswered_question_ids(ctx)
@@ -3106,7 +3207,7 @@ def main(argv=None):
     elif len(argv) == 2 and argv[0] == "pass":
         return run_pass(Ctx(load_repos()), LaneHost(), argv[1])
     else:
-        print("usage: openclaw_dispatch.py open | start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | defer <ask> <why> | promote <ask> <repo> | facts <repo> [pr N | issue N | issues | prs] | post <text> | post <ask[,ask...]> <text> | settle <ask[,ask...]> <why> | lanes | pass <ask>", file=sys.stderr)
+        print("usage: openclaw_dispatch.py open | start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | defer <ask> <why> | promote <ask> <repo> | facts <repo> [pr N | issue N | issues | prs] | post <text> | post <ask[,ask...]> <text> | settle <ask[,ask...]> <why> | lanes | post-reports [--seed] | image <path> <description> | pass <ask>", file=sys.stderr)
         return 2
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
