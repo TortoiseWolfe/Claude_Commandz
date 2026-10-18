@@ -97,6 +97,7 @@ EVENT_MAX = 1500  # how much of a hub post the front desk's next turn is shown (
 REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
+MONTHLY_QUOTA_RE = re.compile(r"monthly\s+quota", re.I)  # a monthly quota frees on the 1st, not in 12 hours
 ASK_WAIT = 5 * 60  # how long the dispatch pass has to claim or answer an ask before the script starts it
 PASS_TIMEOUT = 240  # seconds one dispatch pass may run (shorter than ASK_WAIT, so a hung pass cannot start a lane after the fallback did)
 PASS_MAX_TURNS = 10
@@ -669,6 +670,31 @@ def choose_engine(path, client, task, workspace=False):
     return "codex", "sonnet", "own repo"  # the model name only has to be a Claude one: lane.sh then passes no -m to Codex
 
 
+def resolve_engine(state, engine, now):
+    """The one place a usage block is honored, for every way a lane starts (the script's start, the pass's start, the waiting room).
+    Codex blocked goes to Copilot, or to Claude when Copilot is blocked too; Copilot blocked goes to Claude. -> (engine, why | None, note)."""
+    codex = state.get("codex_blocked_until", 0) > now
+    copilot = state.get("copilot_blocked_until", 0) > now
+    if engine == "codex" and codex:
+        if copilot:
+            return "claude", "own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"
+        return "copilot", "own repo, Codex is out of usage", " (Codex is out of usage)"
+    if engine == "copilot" and copilot:
+        return "claude", "own repo, Copilot is out of usage", " (Copilot is out of usage)"
+    return engine, None, ""
+
+
+def block_until(state, key, tail, now, seconds):
+    """Set state[key] after an engine reported a limit: a monthly-quota message blocks until 00:00 on the 1st of next month (local time),
+    any other limit for `seconds`. An existing later block stands."""
+    until = now + seconds
+    if MONTHLY_QUOTA_RE.search(tail):
+        t = time.localtime(now)
+        y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
+        until = time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1))
+    state[key] = max(state.get(key, 0), until)
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Parsing.
 
@@ -991,11 +1017,11 @@ def _sweep(ctx, host, now=None):
             if verdict == "dead":
                 lane["detail"], lane["failed"] = detail, True
                 tail = " ".join(_log_exit(Path(lane["report"]).parent)[1])
-                if lane["engine"] == "codex" and re.search(r"usage limit", tail, re.I):
-                    state["codex_blocked_until"] = now + CODEX_BLOCK_SECONDS
+                if lane["engine"] == "codex" and re.search(r"usage limit|monthly\s+quota", tail, re.I):
+                    block_until(state, "codex_blocked_until", tail, now, CODEX_BLOCK_SECONDS)
                     lane["note"] = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
-                elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit", tail, re.I):
-                    state["copilot_blocked_until"] = now + COPILOT_BLOCK_SECONDS
+                elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit|monthly\s+quota", tail, re.I):
+                    block_until(state, "copilot_blocked_until", tail, now, COPILOT_BLOCK_SECONDS)
                     lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
         if lane.get("status") not in ("reported", "dead") or lane.get("delivered"):
             continue
@@ -1399,12 +1425,8 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
     if today >= MAX_PER_DAY:
         return "%s | start %s | held: %d starts today" % (stamp, name, today), held_day_text(now)
     engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task, name == WORKSPACE)
-    note = ""
-    if engine == "codex" and state.get("codex_blocked_until", 0) > now:
-        if state.get("copilot_blocked_until", 0) > now:
-            engine, why, note = "claude", "own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"
-        else:
-            engine, why, note = "copilot", "own repo, Codex is out of usage", " (Codex is out of usage)"
+    engine, blocked_why, note = resolve_engine(state, engine, now)
+    why = blocked_why or why
     if engine == "claude" and model == "opus":
         pct = host.projection_pct()
         if pct is not None and pct > PROJECTION_LIMIT:
@@ -2244,8 +2266,8 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
         lane = state["lanes"][lane_name]
         head = (followup_head(state, ask["followup_of"], lane_name) if ask.get("followup_of") in state["lanes"]
                 else "%s started: %s." % (lane_name, ask.get("task", "")))
-        started = "%s Say stop to cancel. (%s on %s; I'll post its report here.)" % (
-            head, lane["repo"],
+        started = "%s%s Say stop to cancel. (%s on %s; I'll post its report here.)" % (
+            head, begun.get("note", "") if isinstance(begun, dict) and begun.get("lane") == lane_name else "", lane["repo"],
             "Claude " + str(lane["model"]).capitalize() if lane["engine"] == "claude" else lane["engine"].capitalize())
     if host is not None and started:
         host.inject(started)
@@ -2312,7 +2334,10 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
         beginning = sorted(k for k, a in asks_of(state).items() if k != ask_id and a.get("status") == "pending" and a.get("starting"))
         if len(running) + len(beginning) >= MAX_RUNNING:
             return False, "start: refused: " + held_running_text(len(running) + len(beginning))
+        engine, _why, note = resolve_engine(state, engine, now)  # the pass may ask for an engine that is out of usage: Claude starts instead
         ask["starting"] = {"lane": lane_name, "at": now, "dir": str(path), "engine": engine}
+        if note:
+            ask["starting"]["note"] = note
         save_state(ctx.state_path, state)
     context = load_context(ctx, ask_id) or {}
     if ask.get("followup_of"):
@@ -2337,7 +2362,7 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
         done, why = claim(ctx, ask_id, lane_name, now, host)
         if not done:
             return False, "start: the lane is running but could not be registered (%s)" % why
-    return True, "started %s in %s for %s" % (lane_name, name, ask_id)
+    return True, "started %s in %s for %s%s" % (lane_name, name, ask_id, note)
 
 
 def clamp_mail(tool_input, calls_so_far):
@@ -2735,6 +2760,7 @@ def room_start(ctx, host, entry, now):
                 pass
             return None, None
         started[name] = {"at": now, "after": h.get("after")}
+        engine, _why, blocked_note = resolve_engine(state, engine, now)
         save_state(ctx.state_path, state)
     hand = ctx.lanes_dir / ("%s-%s" % (time.strftime("%F", time.localtime(now)), name))
     hand.mkdir(parents=True, exist_ok=True)
@@ -2750,7 +2776,7 @@ def room_start(ctx, host, entry, now):
             save_state(ctx.state_path, state)
         entry["path"].write_text("\n".join("%s: %s" % kv for kv in h.items() if kv[0] != "start-failed") + "\nstart-failed: %s\n\n" % CONTROL_RE.sub(" ", msg)[:200] + entry["brief"])
         return "%s | room %s | not started: %s" % (stamp, name, msg), "%s did not start: %s. It stays in the waiting room." % (name, msg)
-    return "%s | room %s | started%s" % (stamp, name, behind), "started %s%s" % (name, behind)
+    return "%s | room %s | started%s%s" % (stamp, name, behind, blocked_note), "started %s%s%s" % (name, behind, blocked_note)
 
 
 def room_due(ctx, host, now=None):

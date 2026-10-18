@@ -4,6 +4,7 @@ OpenClaw session is ever written to. The PC and OpenClaw are fakes: no lane, win
 
 import inspect
 import io
+import datetime
 import json
 import os
 import random
@@ -1038,6 +1039,63 @@ class Sweep(Base):
 
         self.start("own-app", "Copilot is available again", started + 101 + dp.COPILOT_BLOCK_SECONDS)
         self.assertEqual(self.host.started[-1][2], "copilot")
+
+    def block(self, **kw):
+        state = self.state()
+        state.update(kw)
+        dp.save_state(self.ctx.state_path, state)
+
+    def test_copilot_chosen_directly_while_blocked_starts_claude_and_says_so(self):
+        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS)
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("copilot", "sonnet", "own repo")):
+            self.start("own-app")
+        self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
+        self.assertIn("on Claude Sonnet", self.host.chats[-1])
+        self.assertIn("Copilot is out of usage", self.host.chats[-1])
+
+    def test_one_choice_honors_every_block(self):
+        now = NOW
+        out = {"codex_blocked_until": now + 100, "copilot_blocked_until": now + 100}
+        self.assertEqual(dp.resolve_engine({}, "codex", now)[0], "codex")
+        self.assertEqual(dp.resolve_engine({}, "copilot", now)[0], "copilot")
+        self.assertEqual(dp.resolve_engine({"codex_blocked_until": now + 1}, "codex", now)[0], "copilot")
+        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "copilot", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "codex", now)[0], "codex")
+        self.assertEqual(dp.resolve_engine(out, "codex", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine(out, "copilot", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine(out, "claude", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now}, "copilot", now)[0], "copilot")  # lapsed
+
+    def out_of_usage(self, text, started):
+        self.start("own-app", "task at %d" % started, started)
+        lane = self.host.started[-1][0]
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\nexit 1\n")
+        return dp.sweep(self.ctx, self.host, started + 100)
+
+    @staticmethod
+    def first_of_next_month(t):
+        d = datetime.datetime.fromtimestamp(t)
+        return (d.replace(day=28, hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=4)).replace(day=1).timestamp()
+
+    def test_a_monthly_quota_message_blocks_until_the_first_of_next_month_local(self):
+        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS)
+        (line, chat), = self.out_of_usage("Error: You have exceeded your monthly quota", NOW)
+        self.assertIn("Copilot says it is out of usage", chat)
+        want = self.first_of_next_month(NOW + 100)
+        self.assertGreater(want - (NOW + 100), dp.COPILOT_BLOCK_SECONDS)
+        self.assertEqual(self.state()["copilot_blocked_until"], want)
+
+    def test_an_existing_later_block_is_never_shortened(self):
+        later = self.first_of_next_month(NOW + 100) + 30 * 86400
+        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS, copilot_blocked_until=later)
+        # an ordinary 12 hour usage-limit message, and then a monthly one, both reported while the later block stands
+        self.out_of_usage("Copilot usage limit reached", NOW)
+        self.assertEqual(self.state()["copilot_blocked_until"], later)
+        self.block(copilot_blocked_until=later)
+        self.out_of_usage("You have exceeded your monthly quota", NOW + 1000)
+        self.assertEqual(self.state()["copilot_blocked_until"], later)
 
     def test_codex_and_copilot_both_blocked_fall_back_to_claude_sonnet(self):
         state = self.state()
