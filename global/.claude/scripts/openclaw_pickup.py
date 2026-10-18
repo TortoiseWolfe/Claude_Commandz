@@ -30,7 +30,8 @@ With --act (the poller, shell only, never a model) a second stage runs on the it
     the reply must be the first thing after it (a [hub] line or lane report in between, or a reply from the openclaw provider,
     means nothing runs), exactly one marker on the last line, then the same tables, budget caps and client routing as a typed
     sentence; an identical task cannot run twice in 15 minutes unless the earlier lane failed. The model's text is data. See find_reply(). The message waits in
-    ~/.claude/state/openclaw-pending.json (at most 15 minutes) until the model's reply shows up in Main session.
+    ~/.claude/state/openclaw-pending.json (at most 15 minutes) until the model's reply shows up in Main session. If Main session cannot be read for 5 minutes, the hand-off crashes, or the
+    message outlives 15 minutes, it goes on the hub's list with his words and wakes the hub (unsettled_to_hub): never a silent drop.
   - a job (`start <repo>: <task>`, typed or from the marker) is not started by this script: it becomes an "ask" for a fresh, short
     Claude dispatch pass (openclaw_dispatch.py hand_off / run_pass) that starts the lane with lane.sh --ask or answers with `say`.
     The chat hears "handed to Claude: <task>". The hub session is never woken. If the pass fails or nothing claims the ask in 5 minutes,
@@ -646,17 +647,39 @@ def chat_context(history, item, run):
     return {"his_ts": item["ts"], "reply": "\n\n".join(m["text"].strip() for m in run if m["text"].strip()), "history": hist}
 
 
+def _file_unsettled(ctx, e, why, now, log, filed):
+    """One of his messages the poller cannot settle goes on the hub's list with his words and wakes the hub: never a silent drop."""
+    line, ask_id = dispatch.unsettled_to_hub(ctx, e["sha"], e["ts"], e["text"], why, now)
+    _append_line(log, line)
+    if ask_id:
+        filed.append(("hub-list", line))
+
+
 def settle_pending(queue, host, sites, aliases, ctx, now, log):
     """For each of his chat messages waiting on the model: read Main session once, find the reply to THAT message, and run the
     one marker sentence it ends with. -> (still waiting, [(kind, line)]). An entry leaves the queue when it is settled
-    (acted on, no marker, not a reply to him) or older than ACT_MAX_AGE."""
+    (acted on, no marker, not a reply to him) or filed on the hub's list: one that waits REPLY_WAIT with Main session unreadable, one
+    whose hand-off crashed, and one older than ACT_MAX_AGE all go to the hub with his words (18 Oct 09:10: wsl.exe failed, and five
+    messages aged out of this list with nothing run and nothing said)."""
+    filed = []
+    for e in [e for e in queue if now - e["ts"] > ACT_MAX_AGE]:
+        _file_unsettled(ctx, e, "no reply was settled within %d minutes" % (ACT_MAX_AGE // 60), now, log, filed)
     live = [e for e in queue if now - e["ts"] <= ACT_MAX_AGE]
     if not live:
-        return [], []
-    history = host.main_history()
+        return [], filed
+    try:
+        history = host.main_history()
+    except Exception:  # a broken read is an unreadable session, never a crash that loses the whole waiting list
+        history = None
     if history is None:
-        return live, []  # unreadable: try again next poll
-    waiting, done = [], []
+        waiting = []
+        for e in live:
+            if now - e["ts"] >= REPLY_WAIT:
+                _file_unsettled(ctx, e, "Main session could not be read for %d minutes, so the receptionist's reply to this was never seen" % (REPLY_WAIT // 60), now, log, filed)
+            else:
+                waiting.append(e)  # unreadable: try again next poll
+        return waiting, filed
+    waiting, done = [], filed
     for e in live:
         status, got = find_reply(history, e, now)
         if status == "wait":
@@ -664,33 +687,44 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
             continue
         if status == "none":
             continue
-        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
-        sha = e["sha"][:8]
-        job, why = marker_job(got)
-        if job is None and why is None:
-            continue  # an ordinary answer: nothing to run
-        menu = parse_menu(job, sites, aliases) if job is not None else None
-        if menu is None and why is None and job.strip():
-            # not a menu sentence: a question for the hub. A short Claude pass answers it with GitHub facts as a [hub] line, or puts it
-            # on the hub's list; it never starts a lane (dispatch.ask_question)
-            line, chat = dispatch.ask_question(ctx, host, dispatch.ask_id_for(sha), job, now, chat_context(history, e, got))
-            if chat:
-                host.inject(chat)
-            line = "%s (chat) | oc-%s" % (line, sha)
-            kind = "dispatch"
-        elif menu is None:
-            host.inject("Nothing sent to the hub: %s." % (why or "the marker line was empty"))
-            line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
-            kind = "dispatch"
-        else:
-            kind, line = execute(menu, host, ctx, sites, now, stamp, sha, via_chat=True, context=chat_context(history, e, got))
-            if kind == "action" and _chat_for(kind, line):
-                host.inject(_chat_for(kind, line))
-        _append_line(log, line)
-        if kind == "dispatch":
-            host.refresh_digest()
-        done.append((kind, line))
+        try:
+            result = _run_marker(e, got, history, host, sites, aliases, ctx, now, log)
+        except Exception as exc:
+            _file_unsettled(ctx, e, "the hand-off to the hub failed (%s: %s)" % (type(exc).__name__, " ".join(str(exc).split())[:120]), now, log, filed)
+            continue
+        if result:
+            done.append(result)
     return waiting, done
+
+
+def _run_marker(e, got, history, host, sites, aliases, ctx, now, log):
+    """The marker sentence at the end of the model's reply to one of his messages, run. -> (kind, line), or None for an ordinary answer."""
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
+    sha = e["sha"][:8]
+    job, why = marker_job(got)
+    if job is None and why is None:
+        return None  # an ordinary answer: nothing to run
+    menu = parse_menu(job, sites, aliases) if job is not None else None
+    if menu is None and why is None and job.strip():
+        # not a menu sentence: a question for the hub. A short Claude pass answers it with GitHub facts as a [hub] line, or puts it
+        # on the hub's list; it never starts a lane (dispatch.ask_question)
+        line, chat = dispatch.ask_question(ctx, host, dispatch.ask_id_for(sha), job, now, chat_context(history, e, got))
+        if chat:
+            host.inject(chat)
+        line = "%s (chat) | oc-%s" % (line, sha)
+        kind = "dispatch"
+    elif menu is None:
+        host.inject("Nothing sent to the hub: %s." % (why or "the marker line was empty"))
+        line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
+        kind = "dispatch"
+    else:
+        kind, line = execute(menu, host, ctx, sites, now, stamp, sha, via_chat=True, context=chat_context(history, e, got))
+        if kind == "action" and _chat_for(kind, line):
+            host.inject(_chat_for(kind, line))
+    _append_line(log, line)
+    if kind == "dispatch":
+        host.refresh_digest()
+    return kind, line
 
 
 def _wake(wake, sha, stamp):
@@ -744,6 +778,9 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
         queue, settled = settle_pending(queue, host, sites, aliases, ctx, now, log)
         done.extend(settled)
         save_pending(ctx.pending_path, queue)
+        n = sum(1 for k, _ in settled if k == "hub-list")
+        if n:
+            host.inject("%d of your messages did not get through the usual way (the front desk could not read this chat), so they are on the hub's list. The hub has your words." % n)
     lines = [l for k, l in done if l]
     if lines:
         try:

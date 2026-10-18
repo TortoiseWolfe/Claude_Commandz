@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation probe for the eight front-desk fixes (17 Oct), the follow-up fixes and the dupes fixes (D): break each change in a temp copy of the scripts folder and confirm a
+"""Mutation probe for the eight front-desk fixes (17 Oct), the follow-up fixes and the dupes fixes (D) and the drops alarm (E): break each change in a temp copy of the scripts folder and confirm a
 test goes red. A mutant that leaves the tests green is a gap.
 
   python3 mutate_frontdesk_fixes.py              all mutants
@@ -17,8 +17,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
-D, W = "openclaw_dispatch.py", "lane_watch.sh"
-PY_TESTS = ["test_openclaw_pass", "test_openclaw_dispatch", "test_openclaw_reply"]
+D, W, P = "openclaw_dispatch.py", "lane_watch.sh", "openclaw_pickup.py"
+PY_TESTS = ["test_openclaw_pass", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_drops"]
 
 MUTANTS = [
     # 1. skip the pass unless the message is plainly a GitHub-facts question
@@ -99,6 +99,20 @@ MUTANTS = [
     ("D", D, "the dispatch pass may post a follow-up", '        return False, "post: the dispatch pass may not post"\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids', '        pass\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids'),
     ("D", D, "settle refuses a claimed or lane-failed ask", '"fallback", "fallback-lane", "claimed"):  # claimed: incl. lane-failed', '"fallback", "fallback-lane"):  # claimed: incl. lane-failed'),
     ("D", D, "settle accepts an answered ask", '"fallback", "fallback-lane", "claimed"):  # claimed: incl. lane-failed', '"fallback", "fallback-lane", "claimed", "answered"):  # claimed: incl. lane-failed'),
+    # drops E. a message of his the poller cannot settle goes on the hub's list with his words, never silently dropped (18 Oct 09:10)
+    ("E", P, "an unreadable session never raises the alarm", 'if now - e["ts"] >= REPLY_WAIT:\n                _file_unsettled', 'if False:\n                _file_unsettled'),
+    ("E", P, "the alarm fires the moment he types", 'if now - e["ts"] >= REPLY_WAIT:\n                _file_unsettled', 'if now - e["ts"] >= 0:\n                _file_unsettled'),
+    ("E", P, "a message past the giving-up age is dropped again", 'for e in [e for e in queue if now - e["ts"] > ACT_MAX_AGE]:\n        _file_unsettled', 'for e in []:\n        _file_unsettled'),
+    ("E", P, "a failing history read crashes the poll", "    except Exception:  # a broken read is an unreadable session", "    except ZeroDivisionError:  # a broken read is an unreadable session"),
+    ("E", P, "a crashing hand-off is not filed", "        except Exception as exc:\n            _file_unsettled", "        except ZeroDivisionError as exc:\n            _file_unsettled"),
+    ("E", P, "a crashing hand-off stops the others", "            continue\n        if result:", "            raise\n        if result:"),
+    ("E", P, "a filed message is not counted for the chat note", '    if ask_id:\n        filed.append(("hub-list", line))', "    if False:\n        filed.append(0)"),
+    ("E", P, "the chat never says it was filed", '        if n:\n            host.inject("%d of your messages', '        if False:\n            host.inject("%d of your messages'),
+    ("E", P, "the chat note repeats his words", 'The hub has your words." % n)', 'The hub has your words." % n + " " + queue[0]["text"] if queue else "")'),
+    ("E", D, "the filed ask is not on the open list", '"deadline": now, "status": "deferred", "lanes": []', '"deadline": now, "status": "answered", "lanes": []'),
+    ("E", D, "the same message is filed twice", '        if ask_id in asks:\n            return "%s | unsettled', '        if False:\n            return "%s | unsettled'),
+    ("E", D, "two identical messages share one ask", '("%s %s" % (sha, ts))', '("%s" % sha)'),
+    ("E", D, "his words are cut on the hub list", 'words = " ".join((text or "").split())\n    with ctx.locked():\n        state = load_state(ctx.state_path)\n        asks = asks_of(state)\n        if ask_id in asks:\n            return "%s | unsettled', 'words = " ".join((text or "").split())[:40]\n    with ctx.locked():\n        state = load_state(ctx.state_path)\n        asks = asks_of(state)\n        if ask_id in asks:\n            return "%s | unsettled'),
 ]
 
 
