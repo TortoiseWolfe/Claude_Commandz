@@ -97,6 +97,8 @@ MUTANTS = [
     ("D", D, "a follow-up reopens the ask", 'ask.setdefault("followups", []).append({"text": text, "at": now})', 'ask.setdefault("followups", []).append({"text": text, "at": now}); ask["status"] = "claimed"'),
     ("D", D, "a follow-up is posted twice", '    if not host.inject(chat_text):\n        return False, "post: could not post to the chat"', '    if not (host.inject(chat_text) and host.inject(chat_text)):\n        return False, "post: could not post to the chat"'),
     ("D", D, "the dispatch pass may post a follow-up", '        return False, "post: the dispatch pass may not post"\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids', '        pass\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids'),
+    ("D", D, "settle refuses a claimed or lane-failed ask", '"fallback", "fallback-lane", "claimed"):  # claimed: incl. lane-failed', '"fallback", "fallback-lane"):  # claimed: incl. lane-failed'),
+    ("D", D, "settle accepts an answered ask", '"fallback", "fallback-lane", "claimed"):  # claimed: incl. lane-failed', '"fallback", "fallback-lane", "claimed", "answered"):  # claimed: incl. lane-failed'),
 ]
 
 

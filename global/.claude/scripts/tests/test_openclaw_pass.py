@@ -324,6 +324,26 @@ class Claiming(PassBase):
         self.assertEqual(self.ask()["status"], "claimed")
         self.assertFalse(self.ctx.inbox_path.exists() and self.ctx.inbox_path.read_text())  # another lane is still on it: not the hub's yet
 
+    def test_settle_closes_a_lane_failed_ask_without_posting_to_the_chat(self):
+        self.failed_lane()
+        chats = list(self.host.chats)
+        self.assertTrue(any(l.startswith(ASK) for l in dp.open_question_lines(self.ctx, NOW + 300)))
+        ok, msg = dp.settle_asks(self.ctx, ASK, "test ask (probe)", NOW + 300)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.host.chats, chats)  # nothing posted
+        ask = self.ask()
+        self.assertEqual((ask["status"], ask["answer"]), ("answered", "settled: test ask (probe)"))
+        self.assertEqual([l for l in dp.open_question_lines(self.ctx, NOW + 400) if l.startswith(ASK)], [])
+
+    def test_settle_closes_a_claimed_ask_and_still_refuses_an_answered_one(self):
+        self.hand()
+        self.index_row("oc-own-app-xyz")
+        dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
+        self.assertTrue(dp.settle_asks(self.ctx, ASK, "by hand", NOW + 30)[0])
+        ok, msg = dp.settle_asks(self.ctx, ASK, "again", NOW + 40)
+        self.assertFalse(ok)
+        self.assertIn("answered", msg)
+
     def test_the_hub_can_post_the_answer_to_an_ask_whose_lane_failed(self):
         self.failed_lane()
         ok, msg = dp.post_ask(self.ctx, self.host, ASK, "Fixed by hand: 12 open.", NOW + 400)
