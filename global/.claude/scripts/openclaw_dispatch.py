@@ -51,7 +51,7 @@ chat says "Already with the hub since <time>". A pass that ends without answerin
     openclaw_dispatch.py post <ask[,ask...]> "<text>" answer and close one or more asks; on an ask already answered, post it as a
                                                follow-up (recorded on the ask, delivered once, the ask unchanged). A lane that failed
                                                or died never closes its ask: it stays open (`open` lists it as lane-failed)
-    openclaw_dispatch.py settle <ask[,ask...]> "<why>" close asks answered another way
+    openclaw_dispatch.py settle <ask[,ask...]> "<why>" close asks answered another way (also a claimed or lane-failed ask); posts nothing
     openclaw_dispatch.py say <ask> "<text>"    post a direct answer to the chat and close the ask
     openclaw_dispatch.py defer <ask> "<why>"   put the question on the hub's list with a hub-only reason
     openclaw_dispatch.py facts <repo> [pr N | issue N | issues | prs]   read-only GitHub facts for the question pass (gh, no model)
@@ -2380,7 +2380,7 @@ def settle_asks(ctx, ask_ids, why, now=None):
             ask = asks.get(ask_id)
             if ask is None:
                 return False, "settle: no such ask %s" % ask_id
-            if ask.get("status") not in ("deferred", "pending", "fallback", "fallback-lane"):
+            if ask.get("status") not in ("deferred", "pending", "fallback", "fallback-lane", "claimed"):  # claimed: incl. lane-failed
                 return False, "settle: ask %s is already %s" % (ask_id, ask.get("status"))
         posted = state.get("last_hub_post_at")  # the hub's own plain post is when it was answered; settling comes later
         for ask_id in ids:
