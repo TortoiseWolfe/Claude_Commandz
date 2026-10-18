@@ -1080,8 +1080,9 @@ class MainSessionOnly(Base):
     def inject_call(self, text="hello"):
         calls = []
         host = pk.Host()
-        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: calls.append((argv, stdin)) or type(
-            "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: (
+            None if "system-event" in " ".join(argv) else calls.append((argv, stdin))) or type(
+            "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()  # the system-event call is held in test_hoshi_context
         self.assertTrue(host.inject(text))
         return calls
 
@@ -1106,6 +1107,8 @@ class MainSessionOnly(Base):
         attempts, sleeps = [], []
 
         def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            if "system-event" in " ".join(argv):
+                return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
             attempts.append(argv)
             if len(attempts) < 3:
                 return type("R", (), {"returncode": 1, "stdout": "", "stderr": "temporary gateway error"})()
@@ -1252,7 +1255,8 @@ class MainSessionOnly(Base):
     def test_the_note_is_cleaned_and_split_without_truncation(self):
         calls = []
         host = pk.Host()
-        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: calls.append((argv, stdin)) or type(
+        host._run = lambda argv, timeout, cwd=None, stdin=None, timeout_result=False: (
+            None if "system-event" in " ".join(argv) else calls.append((argv, stdin))) or type(
             "R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
         self.assertTrue(host.inject("a\x1b[2Jb " + "word " * 1000))
         messages = [json.loads(stdin)["message"] for _argv, stdin in calls]
