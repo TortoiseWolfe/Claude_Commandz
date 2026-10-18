@@ -162,5 +162,94 @@ else
   echo "FAIL loop-path burst: rc=$rc took=${took}s out=$out"; failures=$((failures + 1))
 fi
 
+# 18 Oct: the hub armed the watcher with no lane names and four reports and a stuck dialog sat unseen. With no names it now
+# watches every live lane (from lane.sh --status, not the dead rows), re-reading the list each poll.
+auto="$TMP/auto"; mkdir -p "$auto/.claude/scripts" "$auto/.claude/state/lanes" "$TMP/fakebin"
+export LIVE_FILE="$TMP/live-lanes" PANE_DIR="$TMP/panes"; mkdir -p "$PANE_DIR"
+cat > "$auto/.claude/scripts/lane.sh" <<'SH'
+#!/usr/bin/env bash
+# fake lane.sh --status: two rows per live lane, then a dead one
+while read -r n; do [ -n "$n" ] && { echo "$n  report:no  working"; echo "    dir:/x model:sonnet"; }; done < "$LIVE_FILE"
+echo "oldlane  dead, resume with: lane.sh --resume oldlane   (/x)"
+SH
+chmod +x "$auto/.claude/scripts/lane.sh"
+cat > "$TMP/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) cat "$LIVE_FILE" ;;
+  capture-pane) for last; do :; done; cat "$PANE_DIR/${last#lanes:}" 2>/dev/null || true ;;
+esac
+SH
+chmod +x "$TMP/fakebin/tmux"
+fake_dispatch="$TMP/auto-dispatch.py"
+cat > "$fake_dispatch" <<'PY'
+import os, sys
+if sys.argv[1:2] == ["post-reports"]:
+    open(os.environ["POSTED_MARK"], "a").write("x")
+else:
+    print("none")
+PY
+echo early > "$LIVE_FILE"
+mkdir -p "$auto/.claude/state/lanes/2026-10-18-late" "$auto/.claude/state/lanes/2026-10-18-oldlane"
+
+# A lane that starts after the watcher writes its report: the watcher wakes with "report: late".
+out="$TMP/auto-out"; : > "$out"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" POSTED_MARK="$TMP/posted-mark" LANE_WATCH_SETTLE=0 LANE_WATCH_POLL=1 \
+    timeout 25 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 2.5; echo late >> "$LIVE_FILE"
+sleep 2.5; echo "Done." > "$auto/.claude/state/lanes/2026-10-18-late/report.md"
+wait "$watcher" || true
+if grep -q '^report: late ' "$out"; then
+  echo "ok   no lane names: a lane started after the watcher is watched, and its report wakes it"
+else
+  echo "FAIL late lane report: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+sleep 1
+if [ -s "$TMP/posted-mark" ]; then
+  echo "ok   a report asks the dispatcher to post new reports to the chat"
+else
+  echo "FAIL report did not call post-reports"; failures=$((failures + 1))
+fi
+
+# A lane started after the watcher that stops on a dialog wakes it too.
+: > "$out"; echo early > "$LIVE_FILE"; rm -f "$auto/.claude/state/lanes/2026-10-18-late/report.md"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 25 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 2.5; echo late >> "$LIVE_FILE"
+printf '%s\n' 'Run it?' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' > "$PANE_DIR/late"
+wait "$watcher" || true
+if grep -q '^waiting on a dialog: late' "$out"; then
+  echo "ok   no lane names: a late lane stuck on a dialog wakes the watcher"
+else
+  echo "FAIL late lane dialog: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+rm -f "$PANE_DIR/late"
+
+# Dead lanes are not watched: a report from the dead row's lane wakes nothing.
+: > "$out"; echo early > "$LIVE_FILE"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 6 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 2; echo "Done." > "$auto/.claude/state/lanes/2026-10-18-oldlane/report.md"
+wait "$watcher" || true
+if [ ! -s "$out" ]; then
+  echo "ok   no lane names: a dead lane's report does not wake the watcher"
+else
+  echo "FAIL dead lane woke the watcher: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+
+# Named lanes work as before: only the named lane is watched.
+: > "$out"; echo "early" > "$LIVE_FILE"; echo late >> "$LIVE_FILE"; rm -f "$auto/.claude/state/lanes/2026-10-18-late/report.md"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 25 bash "$SCRIPT" --max-min 5 early > "$out" 2>&1 ) &
+watcher=$!
+sleep 2; echo "Done." > "$auto/.claude/state/lanes/2026-10-18-late/report.md"   # not named: ignored
+sleep 2; mkdir -p "$auto/.claude/state/lanes/2026-10-18-early"; echo "Done." > "$auto/.claude/state/lanes/2026-10-18-early/report.md"
+wait "$watcher" || true
+if grep -q '^report: early ' "$out" && ! grep -q 'late' "$out"; then
+  echo "ok   named lanes: only the named lane is watched"
+else
+  echo "FAIL named lanes: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
