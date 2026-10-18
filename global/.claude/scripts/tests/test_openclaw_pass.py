@@ -1209,6 +1209,12 @@ REPO_GQL = {"issues": {"totalCount": 7}, "pullRequests": {"totalCount": 2, "node
 class Questions(PassBase):
     Q = "how many open issues does own-app have?"
 
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(dp, "pass_kind", lambda text: "facts")  # these tests are about the pass; FrontDeskRouting tests the routing
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def asked(self, q=Q, ask=ASK, now=NOW, context=None):
         return dp.ask_question(self.ctx, self.host, ask, q, now, context)
 
@@ -1247,10 +1253,14 @@ class Questions(PassBase):
         self.assertEqual(chat, "asked Claude: " + self.Q)  # three lanes waiting, the question still goes
         for i in range(dp.MAX_QUESTIONS - 1):
             self.asked("question %d" % i, ask="oc-1000000%d" % i)
-        _, chat = self.asked("one too many", ask="oc-2000000f")
-        self.assertIn("on the hub's list", chat)
-        self.assertNotIn("oc-2000000f", dp.asks_of(self.state()))
+        line, chat = self.asked("one too many", ask="oc-2000000f")
+        self.assertEqual(chat, "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s): one too many"
+                         % (dp.MAX_QUESTIONS, time.strftime("%H:%M", time.localtime(NOW))))  # change 7: the cap is said, not silent
+        self.assertIn("%d questions already waiting" % dp.MAX_QUESTIONS, line)
+        capped = dp.asks_of(self.state())["oc-2000000f"]  # and the capped question is recorded, so its repeat is caught and it gets a finish time
+        self.assertEqual((capped["status"], capped["route"], capped["task"]), ("deferred", "hub, pass full", "one too many"))
         self.assertIn("one too many", self.hub_list())
+        self.assertEqual(self.host.spawned[-3:], [ASK, "oc-10000000", "oc-10000001"])  # the capped one started no pass
         # and the questions do not hold a lane back
         for k in [k for k, a in dp.asks_of(self.state()).items() if a.get("kind") != "question"]:
             dp.say(self.ctx, self.host, k, "done", NOW)
@@ -1263,7 +1273,7 @@ class Questions(PassBase):
         prompt = self.host.prompts[0][0]
         self.assertEqual(self.host.verbs, dp.QUESTION_VERBS)
         self.assertIn("question pass", prompt)
-        self.assertIn(json.dumps(self.Q), prompt)
+        self.assertIn(json.dumps("what about own-app"), prompt)  # his words, not the receptionist's rewording
         self.assertIn("Jonathan: what about own-app", prompt)
         self.assertIn("own-app | TortoiseWolfe/own-app | own", prompt)
         self.assertIn("client-app | TortoiseWolfe/client-app | client/foreign", prompt)
@@ -1377,27 +1387,29 @@ class Questions(PassBase):
         _, first = self.asked(ask="oc-5000000a")
         line, again = self.asked("  How many OPEN issues does own-app have? ", ask="oc-5000000b", now=NOW + 19)
         self.assertEqual(first, "asked Claude: " + self.Q)
-        self.assertIn("not run: the same question was asked 19 s ago (ask oc-5000000a)", line)
-        self.assertIn("[hub] line", again)
+        self.assertIn("not run: same words as ask oc-5000000a, still open since", line)
+        self.assertTrue(again.startswith("Already with Claude's quick check since"), again)
         self.assertEqual(self.host.spawned, ["oc-5000000a"])
         self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
         self.assertNotIn("oc-5000000b", self.hub_list())
 
-    def test_a_fuzzy_question_matching_an_answered_ask_quotes_the_stored_answer(self):
+    def test_a_question_matching_an_answered_ask_is_asked_afresh_never_answered_from_the_old_one(self):
         self.asked(ask="oc-5000000a")
-        answer = "own-app has 7 open issues."
-        dp.say(self.ctx, self.host, "oc-5000000a", answer, NOW + 30)
+        dp.say(self.ctx, self.host, "oc-5000000a", "own-app has 7 open issues.", NOW + 30)
         self.host.chats.clear()
-        line, chat = self.asked("Tell me how many open issues own-app has", ask="oc-5000000b", now=NOW + 60)
-        self.assertIn("not run: duplicate task", line)
-        self.assertIn("Already answered at %s: %s" % (time.strftime("%H:%M", time.localtime(NOW + 30)), answer), chat)
-        self.assertEqual(self.host.spawned, ["oc-5000000a"])
-        self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
+        for n, q in enumerate(("Tell me how many open issues own-app has", self.Q)):  # reworded, then the very same words
+            line, chat = self.asked(q, ask="oc-5000000b%d" % n, now=NOW + 60 + n)
+            self.assertIn("handed to Claude", line)
+            self.assertNotIn("Already answered", chat)
+        self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b0", "oc-5000000b1"])
 
-    def test_again_skips_fuzzy_deduplication(self):
+    def test_a_reworded_question_is_its_own_ask_and_only_an_exact_repeat_is_caught(self):
         self.asked(ask="oc-5000000a")
         line, chat = self.asked("how many open issues does own-app have again", ask="oc-5000000b", now=NOW + 30)
         self.assertIn("handed to Claude", line)
+        self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b"])
+        line, chat = self.asked("HOW MANY open issues   does own-app have again", ask="oc-5000000c", now=NOW + 40)
+        self.assertIn("still open since", line)  # same words in other case and spacing is the same words
         self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b"])
 
     def test_an_answered_question_never_blocks_the_job_itself(self):
@@ -1407,17 +1419,15 @@ class Questions(PassBase):
         self.assertIn("handed to Claude", line)
         self.assertIn("oc-5000000b", self.host.spawned)
 
-    def test_a_question_matching_a_running_lane_names_the_worker(self):
+    def test_a_question_that_resembles_a_running_lane_is_still_asked(self):
         job = "oc-5000000a"
         self.hand(task="find out why the plans page jumps after the preview", ask=job)
         self.index_row("oc-worker-12345678", begin_for=job)
         dp.claim(self.ctx, job, "oc-worker-12345678", NOW + 20)
         self.host.chats.clear()
         line, chat = self.asked("why does the plans page jump after the preview?", ask="oc-5000000b", now=NOW + 30)
-        self.assertIn("not run: duplicate task", line)
-        self.assertEqual(chat, "Worker oc-worker-12345678 is already on that.")
-        self.assertEqual(self.host.spawned, [job])
-        self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
+        self.assertIn("handed to Claude", line)  # the fuzzy match is for jobs only; a question gets its own ask
+        self.assertEqual(self.host.spawned, [job, "oc-5000000b"])
 
     def test_frontdesk_12_sanitized_replay(self):
         """Replay the sanitized 17 Oct sequence; each returned line is the receptionist's one chat message."""
@@ -1439,15 +1449,13 @@ class Questions(PassBase):
         chats.append(self.host.chats[-1])
         self.assertEqual((self.ask(a)["status"], self.ask(a)["answer"]), ("answered", answer))
 
-        # 3. A reworded equivalent returns that answer without spawning or recording another ask.
+        # 3. A reworded version is a new question: the old answer is never handed back for it.
         q3 = "list every repo we committed to in the last six weeks with open issues, open PRs and last activity dates"
         line, chat = self.asked(q3, ask="oc-70000005", now=t + 5 * 60)
         chats.append(chat)
-        answered_at = time.strftime("%H:%M", time.localtime(t + 4 * 60))
-        self.assertEqual(chat, "Already answered at %s: %s" % (answered_at, answer))
-        self.assertIn("duplicate task", line)
-        self.assertEqual(self.host.spawned, [a])
-        self.assertNotIn("oc-70000005", dp.asks_of(self.state()))
+        self.assertIn("handed to Claude", line)
+        self.assertNotIn("Already answered", chat)
+        self.assertEqual(self.host.spawned, [a, "oc-70000005"])
 
         # 4-5. A work request starts once, then defer records only a hub inbox reason, with no chat post.
         q4 = ("for the client app, check for any record of a trial length decision (five-minute preview only, or a planned longer "
@@ -1463,38 +1471,38 @@ class Questions(PassBase):
         self.assertIn("hub reason", self.hub_list())
         self.assertEqual(self.ask(b)["status"], "deferred")
 
-        # 6. The related question is already with the hub and gets one status line, not another pass.
-        q6 = ("for the client app, is there any record of a trial length decision (five-minute preview only, or a planned longer "
-              "trial)? Report what the record says and do not change anything.")
-        line, chat = self.asked(q6, ask="oc-70000006", now=t + 14 * 60)
+        # 6. The very same words again, while the hub still has it: told so by name and time, not dropped silently.
+        line, chat = self.asked(q4, ask="oc-70000006", now=t + 14 * 60)
         chats.append(chat)
         asked_at = time.strftime("%H:%M", time.localtime(t + 13 * 60))
-        self.assertEqual(chat, "The hub already has that (asked %s); the answer comes here." % asked_at)
-        self.assertIn("duplicate task", line)
-        self.assertEqual(self.host.spawned, [a, b])
+        self.assertEqual(chat, "Already with the hub since %s (ask %s). Same words, so no second copy went; the answer comes here." % (asked_at, b))
+        self.assertIn("still open since", line)
+        self.assertEqual(self.host.spawned, [a, "oc-70000005", b])
 
         # 7. An unrelated question creates its own ask.
         q7 = "report today's token use as a percent of the daily budget, and what drove it."
         line, chat = self.asked(q7, ask=c, now=t + 15 * 60)
         chats.append(chat)
         self.assertIn("handed to Claude", line)
-        self.assertEqual(self.host.spawned, [a, b, c])
+        self.assertEqual(self.host.spawned, [a, "oc-70000005", b, c])
 
-        # 8. "again" deliberately bypasses fuzzy deduplication.
+        # 8. A different wording is its own question.
         line, chat = self.asked("list the six-week repo commitments again", ask=d, now=t + 18 * 60)
         chats.append(chat)
         self.assertIn("handed to Claude", line)
-        self.assertEqual(self.host.spawned, [a, b, c, d])
+        self.assertEqual(self.host.spawned, [a, "oc-70000005", b, c, d])
 
-        # 9. An active worker wins over ask matching and is named in the one response.
+        # (the pass has answered the reworded repo list, which frees a slot under the three-question cap)
+        self.assertTrue(dp.say(self.ctx, self.host, "oc-70000005", "23 repos.", t + 18 * 60 + 30)[0])
+
+        # 9. A running worker with a similar task does not stop a question from being asked.
         state = self.state()
         state["lanes"]["oc-x-12345678"] = {"task": "find out why the plans page jumps after the preview",
                                            "status": "started", "started": t + 19 * 60}
         dp.save_state(self.ctx.state_path, state)
         line, chat = self.asked("why does the plans page jump after the preview?", ask="oc-70000007", now=t + 19 * 60 + 1)
         chats.append(chat)
-        self.assertEqual(chat, "Worker oc-x-12345678 is already on that.")
-        self.assertIn("duplicate task", line)
+        self.assertIn("handed to Claude", line)
 
         # 10. A limit-style answer is refused; the ask remains pending and nothing is posted.
         self.assertFalse(dp.say(self.ctx, self.host, c, "I can't see the budget from this chat.", t + 20 * 60)[0])
@@ -1502,13 +1510,19 @@ class Questions(PassBase):
         self.assertNotIn("I can't see the budget from this chat.", self.host.chats)
         self.assertFalse(re.search(r"couldn't|can't|GitHub or a mail search", "\n".join(chats + self.host.chats), re.I))
 
-    def test_fuzzy_questions_remain_deduped_after_two_minutes_but_different_questions_are_new(self):
+    def test_a_repeat_of_a_question_the_hub_still_holds_is_flagged_to_it_again_after_ten_minutes(self):
         self.asked(ask="oc-5000000a")
-        self.asked("a different question", ask="oc-5000000b", now=NOW + 5)
-        line, chat = self.asked(ask="oc-5000000c", now=NOW + dp.QUESTION_DEDUP + 1)
-        self.assertIn("duplicate task", line)
-        self.assertIn("hub already has that", chat)
-        self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b"])
+        dp.defer(self.ctx, self.host, "oc-5000000a", "needs the hub", NOW + 1)
+        line, chat = self.asked(ask="oc-5000000b", now=NOW + 5 * 60)
+        self.assertIn("Already with the hub since", chat)
+        self.assertNotIn("flagged", chat)
+        self.ctx.wake_path.write_text("")
+        line, chat = self.asked(ask="oc-5000000c", now=NOW + 11 * 60)
+        self.assertIn("Already with the hub since", chat)
+        self.assertIn("I flagged it to the hub again", chat)
+        self.assertIn("oc-5000000a", self.ctx.wake_path.read_text())
+        self.assertEqual(self.host.spawned, ["oc-5000000a"])
+        self.assertEqual(set(dp.asks_of(self.state())), {"oc-5000000a"})
 
     def test_say_answers_and_closes_the_question(self):
         self.asked()
@@ -1614,8 +1628,8 @@ class Questions(PassBase):
         self.assertEqual(len(done), 1)
         self.assertEqual(self.host.started, [])
         self.assertEqual(self.ask()["status"], "fallback")
-        self.assertEqual(done[0][1], None)
-        self.assertEqual(self.host.chats, [])
+        self.assertIn("Claude didn't answer it in 5 min, so your question is with the hub now (since", done[0][1])  # change 6: never silent
+        self.assertEqual(self.host.chats, [done[0][1]])
         self.assertIn(json.dumps(self.Q), self.hub_list())
         self.assertIn("Claude didn't answer it in 5 min", self.hub_list())
         self.assertIn(ASK, self.ctx.wake_path.read_text())
@@ -1626,7 +1640,9 @@ class Questions(PassBase):
         self.assertEqual(dp.run_pass(self.ctx, self.host, ASK, NOW), 1)
         self.host.chats.clear()
         dp.fallback_due(self.ctx, self.host, NOW + 1)
-        self.assertEqual(self.host.chats, [])
+        self.assertEqual(len(self.host.chats), 1)  # change 6: a pass that ends with no answer says so
+        self.assertIn("The Claude pass failed (exit 1), so your question is with the hub now", self.host.chats[0])
+        self.assertIn("exactly as written", self.host.chats[0])
         self.assertIn("The Claude pass failed (exit 1)", self.hub_list())
         self.assertEqual(self.host.started, [])
 
@@ -1634,10 +1650,166 @@ class Questions(PassBase):
         self.ctx.hand_off_first = False
         self.asked('drop it | do "this"\nnow')
         line = self.hub_list().strip()
-        self.assertEqual(line.count(" | "), 3, line)  # stamp | who: quote | note | ask: the quote adds none
+        self.assertEqual(line.count(" | "), 4, line)  # stamp | who: quote | note | hub reason | ask: the quote adds none
         self.assertIn("UNTRUSTED DATA", line)
         self.assertTrue(line.endswith(" | " + ASK))
         self.assertEqual(len(line.splitlines()), 1)
+
+
+class FrontDeskRouting(PassBase):
+    """The 17 Oct front-desk fixes: the pass only for a plain GitHub-facts question, his words as the task, an exact-repeat check,
+    a message for every pass that ends without an answer, the cap said, and a finish time on every ask."""
+
+    def asked(self, q, ask=ASK, now=NOW, his=None):
+        return dp.ask_question(self.ctx, self.host, ask, q, now, {"history": [{"who": "Jonathan", "text": his or q}]})
+
+    def hub_list(self):
+        return self.ctx.inbox_path.read_text() if self.ctx.inbox_path.exists() else ""
+
+    def test_only_a_plain_github_facts_question_is_worth_the_pass(self):
+        for text in ("how many open issues does own-app have?", "what does PR #12 do?", "is the check on pull request 31 green?",
+                     "why won't it close the PR?", "which branch has the open pull request?"):
+            self.assertEqual(dp.pass_kind(text), "facts", text)
+        for text in ("can you list the files in docs", "tell me what happened with the checkout", "why did the hub not finish its peer review?",
+                     "what did Hatch say about the weekend?", "triage why the checkout charged twice", "did Dana reply to my email?",
+                     "draft a reply to the open issue", "please check the PR", "can you merge the PR?", "what does PR #12 do, and write it up?",
+                     "tell me what PR #12 does?", "why is the check red, and save the log?", "the PR is merged", "", "   "):
+            self.assertIsNone(dp.pass_kind(text), text)
+
+    def test_a_message_that_is_not_a_facts_question_goes_to_the_hub_and_runs_no_pass(self):
+        his = "what are the 22 notes from Hatch? I need them on your list"
+        line, chat = self.asked("what are the Hatch notes", his=his)
+        self.assertEqual(chat, "On the hub's list: " + his)
+        self.assertEqual(self.host.spawned, [])  # no Sonnet call, no wait
+        self.assertIn(json.dumps(his), self.hub_list())
+        self.assertIn(ASK, self.ctx.wake_path.read_text())
+        a = self.ask()
+        self.assertEqual((a["status"], a["route"], a["task"]), ("deferred", "hub, no pass", his))
+
+    def test_his_words_are_the_task_and_the_rewording_is_only_kept_as_the_marker(self):
+        his = "why won't it close the PR after it ran the tests twice?"
+        self.asked("why PR will not close", his=his)
+        a = self.ask()
+        self.assertEqual((a["task"], a["marker"]), (his, "why PR will not close"))
+        self.assertEqual(a["task_key"], dp.task_key(his))
+        dp.run_pass(self.ctx, self.host, ASK, NOW)
+        self.assertIn(json.dumps(his), self.host.prompts[0][0])  # the pass is shown his words too
+
+    def test_without_his_message_in_the_context_the_receptionists_words_are_the_fallback(self):
+        line, chat = dp.ask_question(self.ctx, self.host, ASK, "what does PR #12 do?", NOW, None)
+        self.assertEqual(self.ask()["task"], "what does PR #12 do?")
+
+    def test_a_repeat_while_it_is_open_is_told_so_and_a_repeat_after_the_answer_is_asked_again(self):
+        q = "can you list the files in docs"
+        self.asked(q, ask="oc-5000000a")
+        line, chat = self.asked("  Can you   LIST the files in docs ", ask="oc-5000000b", now=NOW + 120)
+        self.assertEqual(chat, "Already with the hub since %s (ask oc-5000000a). Same words, so no second copy went; the answer comes here."
+                         % time.strftime("%H:%M", time.localtime(NOW)))
+        self.assertNotIn("oc-5000000b", dp.asks_of(self.state()))
+        self.assertEqual(self.hub_list().count(json.dumps(q)), 1)
+        self.assertTrue(dp.post_ask(self.ctx, self.host, "oc-5000000a", "Here are the files.", NOW + 200)[0])
+        line, chat = self.asked(q, ask="oc-5000000c", now=NOW + 300)
+        self.assertEqual(chat, "On the hub's list: " + q)  # answered: the same words are a new question, never the old answer
+        self.assertEqual(self.hub_list().count(json.dumps(q)), 2)
+
+    def test_a_similar_but_different_question_is_never_taken_for_a_repeat(self):
+        self.asked("can you list the files in docs", ask="oc-5000000a")
+        line, chat = self.asked("can you list the files in docs and the tests", ask="oc-5000000b", now=NOW + 30)
+        self.assertTrue(chat.startswith("On the hub's list"), chat)
+        self.assertIn("oc-5000000b", dp.asks_of(self.state()))
+
+    def test_a_pass_that_ends_without_an_answer_says_so_in_the_chat(self):
+        for n, (flag, why) in enumerate((("fail", "The Claude pass failed (exit 1)"), ("skip", "Claude didn't answer it in 5 min"))):
+            self.setUp()
+            ask = "oc-6000000%d" % n
+            self.asked("what does PR #12 do?", ask=ask)
+            if flag == "fail":
+                self.ctx.flag_path.write_text("fail")
+                dp.run_pass(self.ctx, self.host, ask, NOW)
+                due = dp.fallback_due(self.ctx, self.host, NOW + 1)
+            else:
+                due = dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT)
+            self.assertEqual(len(due), 1)
+            self.assertEqual(len(self.host.chats), 1, flag)
+            self.assertIn(why + ", so your question is with the hub now (since", self.host.chats[0])
+            self.assertIn("Your words went with it exactly as written.", self.host.chats[0])
+            self.assertIn("what does PR #12 do?", self.hub_list())
+            self.assertIsNotNone(self.ask(ask).get("hub_list_at"))
+
+    def test_the_cap_is_said_and_the_question_is_filed_not_dropped(self):
+        for i in range(dp.MAX_QUESTIONS):
+            self.asked("what does PR #%d do?" % (i + 1), ask="oc-1000000%d" % i)
+        line, chat = self.asked("what does PR #99 do?", ask="oc-1000000f", now=NOW + 5)
+        self.assertIn("already has %d questions in hand" % dp.MAX_QUESTIONS, chat)
+        self.assertIn("what does PR #99 do?", chat)
+        self.assertEqual(len(self.host.spawned), dp.MAX_QUESTIONS)
+        self.assertIn("what does PR #99 do?", self.hub_list())
+        self.assertEqual(self.ask("oc-1000000f")["route"], "hub, pass full")
+
+
+class FinishTimes(PassBase):
+    """Change 8: every ask that closes records finished_at and finished_by, by whichever route closed it; the first finish stands."""
+
+    def question(self, q="can you list the files in docs", ask=ASK, now=NOW):
+        return dp.ask_question(self.ctx, self.host, ask, q, now, {"history": [{"who": "Jonathan", "text": q}]})
+
+    def done(self, ask=ASK):
+        a = dp.asks_of(self.state())[ask]
+        return a.get("finished_at"), a.get("finished_by")
+
+    def test_a_direct_to_hub_question_is_finished_when_the_hub_posts_its_answer(self):
+        self.question()
+        self.assertEqual(self.done(), (None, None))  # filed, not yet answered
+        self.assertTrue(dp.post_ask(self.ctx, self.host, ASK, "Done.", NOW + 700)[0])
+        self.assertEqual(self.done(), (NOW + 700, "hub post"))
+
+    def test_a_pass_answer_is_finished_by_the_pass(self):
+        self.question("what does PR #12 do?")
+        self.assertTrue(dp.say(self.ctx, self.host, ASK, "It adds a test.", NOW + 9)[0])
+        self.assertEqual(self.done(), (NOW + 9, "pass say"))
+
+    def test_settling_uses_the_time_of_the_hubs_own_post_when_there_was_one(self):
+        self.question()
+        before = time.time()
+        dp.post_line(self.host, "A plain answer.", self.ctx)  # the hub's post with no ask id is remembered with its time
+        recorded = dp.load_state(self.ctx.state_path)["last_hub_post_at"]
+        self.assertTrue(before <= recorded <= time.time())
+        posted = NOW + 100  # the test clock is not the wall clock: put the post inside this ask's life
+        state = self.state()
+        state["last_hub_post_at"] = posted
+        dp.save_state(self.ctx.state_path, state)
+        self.assertTrue(dp.settle_asks(self.ctx, ASK, "answered above", posted + 600)[0])
+        self.assertEqual(self.done(), (posted, "hub post, settled later"))
+
+    def test_settling_with_no_post_on_record_is_finished_by_the_settle_itself(self):
+        self.question()
+        self.assertTrue(dp.settle_asks(self.ctx, ASK, "answered by hand", NOW + 50)[0])
+        self.assertEqual(self.done(), (NOW + 50, "settled"))
+
+    def test_a_job_is_finished_when_its_lane_is_claimed(self):
+        self.hand()
+        self.index_row("oc-lane-aaaa1111")
+        self.assertTrue(dp.claim(self.ctx, ASK, "oc-lane-aaaa1111", NOW + 20)[0])
+        self.assertEqual(self.done(), (NOW + 20, "lane claimed"))
+
+    def test_a_promoted_question_is_finished_and_a_held_promote_leaves_it_open(self):
+        self.question("why won't the checkout page load? check the logs")
+        for i in range(dp.MAX_RUNNING):
+            self.hand(task="job %d" % i, ask="oc-0000000%d" % i)
+        ok, _ = dp.promote(self.ctx, self.host, ASK, "own-app", NOW + 5)
+        self.assertFalse(ok)
+        self.assertEqual(self.done(), (None, None))  # held by the cap: nothing was finished
+        for i in range(dp.MAX_RUNNING):
+            dp.say(self.ctx, self.host, "oc-0000000%d" % i, "done", NOW + 6)
+        ok, msg = dp.promote(self.ctx, self.host, ASK, "own-app", NOW + 7)
+        self.assertTrue(ok, msg)
+        self.assertEqual(self.done(), (NOW + 7, "promoted to a job"))
+
+    def test_the_first_finish_stands(self):
+        ask = {}
+        dp._finish(ask, 100, "hub post")
+        dp._finish(ask, 900, "settled")
+        self.assertEqual((ask["finished_at"], ask["finished_by"]), (100, "hub post"))
 
 
 class Diagnose(PassBase):
@@ -1646,8 +1818,14 @@ class Diagnose(PassBase):
     "needs your go". The pass's mail search is capped."""
     T = "triage why the checkout charged the customer twice, and report back before any action"
 
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(dp, "pass_kind", lambda text: "facts")  # these tests are about the pass; FrontDeskRouting tests the routing
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def asked(self, q=T, ask=ASK, now=NOW):
-        return dp.ask_question(self.ctx, self.host, ask, q, now, {"history": [{"who": "Jonathan", "text": "look into it"}]})
+        return dp.ask_question(self.ctx, self.host, ask, q, now, {"history": [{"who": "Jonathan", "text": q}]})
 
     def promote(self, repo="own-app", ask=ASK, now=NOW + 5):
         return dp.promote(self.ctx, self.host, ask, repo, now)
@@ -1717,10 +1895,11 @@ class Diagnose(PassBase):
 
     def test_a_promote_of_a_task_already_running_is_refused(self):
         self.hand(task=self.T, ask="oc-6000000b")
-        line, chat = self.asked(ask="oc-6000000c")
-        self.assertIn("duplicate task", line)
-        self.assertTrue(chat.startswith("The hub already has that"), chat)
-        self.assertNotIn("oc-6000000c", dp.asks_of(self.state()))
+        self.asked(ask="oc-6000000c")
+        ok, msg = dp.promote(self.ctx, self.host, "oc-6000000c", "own-app", NOW + 5)
+        self.assertFalse(ok)
+        self.assertIn("already running", msg)
+        self.assertEqual(dp.asks_of(self.state())["oc-6000000c"]["status"], "pending")
 
     def test_a_promoted_client_job_still_runs_only_on_claude_through_start(self):
         self.asked()

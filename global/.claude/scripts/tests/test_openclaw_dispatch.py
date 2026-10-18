@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
+import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 
 NOW = 1_800_000_000
@@ -204,6 +205,13 @@ class ReceptionistQueue(Base):
         }
         dp.save_state(self.ctx.state_path, state)
 
+    def run_open(self):
+        output = io.StringIO()
+        with unittest.mock.patch.object(dp, "Ctx", return_value=self.ctx):
+            with unittest.mock.patch("sys.stdout", output):
+                self.assertEqual(dp.main(["open"]), 0)
+        return output.getvalue()
+
     def test_open_lists_deferred_fallback_and_overdue_pending_oldest_first(self):
         self.record_question("oc-aaaaaaaa", "deferred", NOW - 20 * 60)
         self.record_question("oc-bbbbbbbb", "fallback", NOW - 10 * 60)
@@ -211,10 +219,73 @@ class ReceptionistQueue(Base):
         self.record_question("oc-dddddddd", "pending", NOW - 2 * 60, deadline=NOW + 1)
         self.record_question("oc-eeeeeeee", "fallback-lane", NOW - 25 * 60)
         lines = dp.open_question_lines(self.ctx, NOW)
-        self.assertEqual([line.split(" |", 1)[0] for line in lines],
+        rows = [line for line in lines if not line.startswith("    ")]
+        self.assertEqual([line.split(" |", 1)[0] for line in rows],
                          ["oc-eeeeeeee", "oc-aaaaaaaa", "oc-bbbbbbbb", "oc-cccccccc"])
-        self.assertIn("25 min | fallback-lane", lines[0])
+        self.assertIn("25 min | fallback-lane", rows[0])
         self.assertEqual(dp.open_question_lines(dp.Ctx({}, self.tmp / "empty.json"), NOW), [])
+
+    def test_open_prints_latest_saved_user_message_beneath_unchanged_row(self):
+        ask_id = "oc-fffffff1"
+        self.record_question(ask_id, "deferred", time.time() - 15 * 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [
+                {"who": "Jonathan", "text": "First invented question.", "ts": NOW - 120},
+                {"who": "Receptionist", "text": "Invented acknowledgement.", "ts": NOW - 60},
+                {"who": "Jonathan", "text": "Actually, use the second invented detail.", "ts": NOW},
+            ],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines[0], "oc-fffffff1 | 15 min | deferred | Which sample status is current?")
+        self.assertEqual(lines[1], "    Actually, use the second invented detail.")
+
+    def test_open_prints_every_line_of_a_5000_character_user_message_indented(self):
+        ask_id = "oc-fffffff2"
+        first, second = "A" * 2500, "B" * 2500
+        self.record_question(ask_id, "deferred", NOW - 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [{"who": "Jonathan", "text": first + "\n" + second, "ts": NOW}],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines[1:], ["    " + first, "    " + second])
+        self.assertTrue(all(line.startswith("    ") for line in lines[1:]))
+        self.assertEqual(len("".join(line[4:] for line in lines[1:])), 5000)
+
+    def test_open_does_not_repeat_his_words_when_the_task_already_is_them(self):
+        # change 2 stores his words as the task, so the indented copy under the row would say the same thing twice
+        ask_id = "oc-fffffff6"
+        words = "Which sample status is current?"  # record_question's task
+        self.record_question(ask_id, "deferred", time.time() - 15 * 60)
+        dp.save_context(self.ctx, ask_id, {"his_ts": NOW, "history": [{"who": "Jonathan", "text": " " + words + " ", "ts": NOW}]})
+        self.assertEqual(self.run_open().splitlines(), ["oc-fffffff6 | 15 min | deferred | " + words])
+
+    def test_open_reports_missing_saved_message_without_context_or_user_message(self):
+        self.record_question("oc-fffffff3", "deferred", NOW - 120)
+        self.record_question("oc-fffffff4", "deferred", NOW - 60)
+        dp.save_context(self.ctx, "oc-fffffff4", {
+            "his_ts": NOW,
+            "history": [{"who": "Receptionist", "text": "Invented reply.", "ts": NOW}],
+        })
+        lines = self.run_open().splitlines()
+        self.assertEqual(lines.count("    (no saved message)"), 2)
+
+    def test_digest_uses_only_open_question_rows_from_open_output(self):
+        ask_id = "oc-fffffff5"
+        self.record_question(ask_id, "deferred", NOW - 60)
+        dp.save_context(self.ctx, ask_id, {
+            "his_ts": NOW,
+            "history": [{"who": "Jonathan", "text": "Invented words that belong only in open.", "ts": NOW}],
+        })
+        output = "\n".join(dp.open_question_lines(self.ctx, NOW))
+        sections = hd.build_sections(
+            roadmap_body="", lane_status="", lanes_dir=self.tmp / "lanes", inbox_text="", git_log="", tidy_text="",
+            budget="", now=hd.datetime(2026, 10, 17, 18, 0), open_questions_text=output)
+        self.assertEqual(sections[0], (
+            "Open receptionist questions (1)",
+            ["- oc-fffffff5 | 1 min | deferred | Which sample status is current?"],
+        ))
 
     def test_open_verb_prints_none_for_an_empty_state(self):
         state_path = self.tmp / "cli-state.json"
@@ -316,12 +387,21 @@ class ReceptionistQueue(Base):
 
     def test_question_echo_keeps_all_300_characters(self):
         self.ctx.hand_off_first = True
-        question = "Which current sample is correct? " * 9 + "x"
-        self.assertEqual(len(question), 298)
-        question += "yz"
+        question = "Which current sample is correct on the pull request? " * 5 + "x"
+        question += "y" * (300 - len(question))
         self.assertEqual(len(question), 300)
         _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
         self.assertEqual(chat, "asked Claude: " + question)
+
+    def test_the_hub_list_carries_a_long_question_whole(self):
+        # change 5: the hub list used to cut a question at 300 characters; the hub works from the whole of it
+        question = ("Why did the checkout charge the customer twice on the third of October, and what did the logs say? " * 5).strip()
+        self.assertGreater(len(question), 450)
+        dp.to_hub_list(self.ctx, "oc-12121212", question, NOW, "front desk")
+        line = self.ctx.inbox_path.read_text()
+        self.assertIn(json.dumps(question), line)
+        self.assertNotIn("...", line)
+        self.assertNotIn("\u2026", line)
 
     def test_say_injects_outside_the_state_lock(self):
         ask_id = "oc-cccccccd"
@@ -456,8 +536,9 @@ class ReceptionistQueue(Base):
         os.utime(self.wake, (old_mtime, old_mtime))
         before = self.wake.stat().st_mtime_ns
         _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
-        self.assertIn("hasn't answered yet", chat)
-        self.assertIn("30 min ago", chat)
+        self.assertIn("Already with the hub since", chat)
+        self.assertIn("(ask oc-ffffffff)", chat)
+        self.assertIn("I flagged it to the hub again", chat)
         self.assertGreater(self.wake.stat().st_mtime_ns, before)
 
 
