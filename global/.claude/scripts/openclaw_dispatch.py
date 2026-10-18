@@ -141,6 +141,8 @@ FACTS_NOUN_RE = re.compile(r"\b(?:prs?|pull\s+requests?|issues?|ci|checks?|workf
 HUB_WORK_RE = re.compile(r"\b(?:tell|send|write|draft|save|record|add|queue|remind|schedule|post|set|update|fix|delete|deploy|restart|"
                          r"publish|push|forward|copy|move|delegate|create|ask|please|diagnos\w*|triage\w*|investigat\w*|"
                          r"look\s+into|find\s+out|figure\s+out|report\s+back)\b|\b(?:can|could|would|will)\s+you\b", re.I)
+HUB_MAIL_RE = re.compile(r"\b(?:hatch|muse|h-7ch)\b|\bgmail\b|\bdraft(?:s|ed|ing)?\s+(?:an?\s+|the\s+)?(?:e-?mail|reply|note)\b", re.I)
+# ^ a job whose output is a note to Hatch or any Gmail draft: only the hub has the mail connector, so the front desk never starts a lane for it
 FACTS_MAX = 3500  # characters of one facts printout
 GH_SLUG_RE = re.compile(r"github\.com[:/](?P<owner>[A-Za-z0-9-]{1,39})/(?P<name>[A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$")
 ASK_ID_RE = re.compile(r"^oc-[0-9a-f]{8}$")
@@ -904,6 +906,19 @@ def _lane_finished(lane, host, now):
     return None, None
 
 
+def _settle_lane_ask(state, lane_name, text, now):
+    """A lane's note reached the chat: the ask it answers is answered, with the posted text and the time (as `post` does).
+    An ask that has another lane still working stays claimed until that lane's note is posted."""
+    ask_id = state["lanes"][lane_name].get("ask")
+    ask = asks_of(state).get(ask_id) if ask_id else None
+    if ask is None or ask.get("status") != "claimed":
+        return
+    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):
+        return
+    ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now
+    _finish(ask, now, "lane report")
+
+
 def _sweep(ctx, host, now=None):
     """Post the report (or the ending) of every lane Jonathan started that has one into Main session, then close the lane
     (window killed, state "closed"): he never has to. A note that could not be posted leaves the lane open for the next sweep.
@@ -947,6 +962,7 @@ def _sweep(ctx, host, now=None):
             changed = True  # status change above is kept; the note is retried next sweep
             continue
         lane["delivered"], changed = True, True
+        _settle_lane_ask(state, name, chat, now)
         wins = host.windows()
         if wins and name in wins:
             host.kill_window(name)
@@ -1791,6 +1807,8 @@ def hand_off(ctx, host, ask_id, repo_word, task, now, context=None, ignore_asks=
     if not hit or len(task) > TASK_MAX:
         return do_start(ctx, host, repo_word, task, now)  # the same refusal wording as ever
     name = hit[0]
+    if HUB_MAIL_RE.search(task):  # a lane here has no mail connector, so the note to Hatch would never be written: the hub takes it
+        return ask_question(ctx, host, ask_id, task, now, context)
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
@@ -1836,7 +1854,7 @@ def pass_kind(text):
     """"facts" when the message is a plain question about GitHub state, else None for the hub. A request to do something, or anything
     unclear, is None: the hub reads it as he wrote it."""
     t = " ".join((text or "").split())
-    if not t or HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE.search(t):
+    if not t or HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE.search(t):
         return None
     return "facts" if FACTS_NOUN_RE.search(t) else None
 
@@ -1909,7 +1927,8 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
         save_state(ctx.state_path, state)
     save_context(ctx, ask_id, context)
     if not use_pass:
-        why = "the question pass was full" if full else "not a plain GitHub-facts question, so no pass ran"
+        why = ("a note to Hatch or a Gmail draft: only the hub has the mail connector, so no lane or pass ran" if HUB_MAIL_RE.search(words)
+               else "the question pass was full" if full else "not a plain GitHub-facts question, so no pass ran")
         to_hub_list(ctx, ask_id, words, now, "front desk: %s; the question is his words as written" % why)
         if full:
             return ("%s | question | %d questions already waiting: put on the hub's list (ask %s)" % (stamp, len(waiting), ask_id),
@@ -2012,13 +2031,16 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
             return False, "claim: no such ask %s" % ask_id
         if ask.get("kind") == "question":
             return False, "claim: ask %s is a question; a question never starts a lane" % ask_id
-        if ask["status"] != "pending":
+        reclaim = (ask["status"] in ("claimed", "answered") and ask.get("lanes") and lane_name not in ask["lanes"]
+                   and not os.environ.get("AFA_OC_PASS"))  # the pass keeps one ask, one lane; only the hub's lane.sh adds another
+        if ask["status"] != "pending" and not reclaim:
             return False, "claim: ask %s is already %s%s" % (ask_id, ask["status"], " by " + ", ".join(ask.get("lanes", [])) if ask.get("lanes") else "")
         begun = ask.get("starting")
-        if not isinstance(begun, dict) or begun.get("lane") != lane_name:
-            return False, "claim: lane %s was not started for ask %s (only `start` begins a lane for an ask)" % (lane_name, ask_id)
-        if not 0 <= now - begun.get("at", 0) <= CLAIM_WINDOW:
-            return False, "claim: the start of %s is not from the last %d minutes" % (lane_name, CLAIM_WINDOW // 60)
+        if not reclaim:
+            if not isinstance(begun, dict) or begun.get("lane") != lane_name:
+                return False, "claim: lane %s was not started for ask %s (only `start` begins a lane for an ask)" % (lane_name, ask_id)
+            if not 0 <= now - begun.get("at", 0) <= CLAIM_WINDOW:
+                return False, "claim: the start of %s is not from the last %d minutes" % (lane_name, CLAIM_WINDOW // 60)
         row = None
         try:
             for line in Path(ctx.index_path).read_text().splitlines():
@@ -2029,6 +2051,15 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
             pass
         if row is None:
             return False, "claim: lane %s is not in the lane index" % lane_name
+        if reclaim:  # a second lane for an ask already claimed (the hub's own `lane.sh --ask`): fresh, and not already some ask's lane
+            try:
+                fresh = 0 <= now - float(row[8]) <= CLAIM_WINDOW
+            except (IndexError, ValueError):
+                fresh = False
+            if not fresh:
+                return False, "claim: the start of %s is not from the last %d minutes" % (lane_name, CLAIM_WINDOW // 60)
+            if lane_name in state["lanes"]:
+                return False, "claim: lane %s already belongs to ask %s" % (lane_name, state["lanes"][lane_name].get("ask", "?"))
         real = os.path.realpath(row[2])
         repo = next((v[0] for v in ctx.repos.values() if os.path.realpath(str(v[1])) == real), os.path.basename(real))
         if lane_name not in state["lanes"]:
@@ -2039,7 +2070,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
             else:
                 state["starts"].append(now)
         ask["status"] = "claimed"
-        ask["lanes"] = [lane_name]
+        ask["lanes"] = (ask.get("lanes") or []) + [lane_name] if reclaim else [lane_name]
         ask["claimed_at"] = now
         _finish(ask, now, "lane claimed")
         save_state(ctx.state_path, state)
