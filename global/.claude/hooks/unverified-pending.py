@@ -13,7 +13,25 @@ PR_ASK = re.compile(r"\bmerge\b[^.\n]{0,60}?(?:[\w.-]+/)?[\w.-]*#\d+|(?:[\w.-]+/
 # "Send:" as an instruction, or "for you to send", about an email/reply/draft, even without an id
 SEND_ASK = re.compile(r"(^\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?\s*Send\b.{0,80}\b(?:email|reply|draft|note)|"
                       r"\b(?:for you to send|still to send|left to send)\b)", re.I)
-GMAIL_CHECK = re.compile(r"search_threads|list_drafts|get_draft|get_thread")
+# A reply can point him at a draft without an id or a leading "Send": "your one step is still the
+# Gail reply in your drafts" (18 Oct). These phrasings count as handing him a draft.
+DRAFT_POINT = re.compile(
+    r"\b(?:in|from) (?:your|the) drafts\b|\bin drafts\b|\bwaiting in (?:your )?(?:drafts|gmail)\b|"
+    r"\byour one (?:step|thing|move)\b[^.\n]{0,60}\b(?:reply|draft|email|note)\b|"
+    r"\bread it,? then send it\b|\bstill the\b[^.\n]{0,40}\b(?:reply|draft|email)\b", re.I)
+# A line that only reports a draft went out. "not sent" / "unsent" / "never sent" are not reports.
+NEGATED_SENT = re.compile(r"\b(?:not|never|isn't|wasn't|hasn't been|yet to be|un)\s?sent\b", re.I)
+SENT_REPORT = re.compile(r"\b(?:went out|was sent|were sent|is sent|are sent|has been sent|have been sent|"
+                         r"already sent|got sent|sent at|you sent|was delivered)\b", re.I)
+# A draft that is a note between agents (Hatch/Muse, the CC>MUSE / NX-01>NCC-74656 tags), not his to send.
+AGENT_NOTE = re.compile(r"\b(?:Hatch|Muse|H-7CH)(?:['\u2019]s)?\s+(?:note|notes|draft)\b|"
+                        r"\b(?:Hatch|Muse|H-7CH)\s+(?:left|wrote|sent)\b|"
+                        r"\bnotes?\s+(?:for|to|from)\s+(?:Hatch|Muse|H-7CH)\b|CC>MUSE|MUSE>CC|"
+                        r"NX-01>NCC-74656|NCC-74656>NX-01", re.I)
+GMAIL_OP = re.compile(r"(?:^|__)(search_threads|list_drafts|get_draft|get_thread|get_message)$")
+# Subjects of agent-to-agent notes. A lookup of only these cannot show whether a client draft went out.
+NOTE_TAG = re.compile(r"MUSE>CC|CC>MUSE|NCC-74656|NX-01", re.I)
+NOTE_FILLER = re.compile(r"subject:|in:(?:drafts|inbox|anywhere)|label:\S+|is:\w+|(?:newer|older)_than:\S+|\bOR\b|\bAND\b", re.I)
 PR_CHECK = re.compile(r"\bgh\s+pr\s+(view|list|status|checks)\b|repos/[^ ]+/pulls")
 
 
@@ -48,12 +66,38 @@ def turn(lines):
     return last, calls
 
 
+def gmail_check(call):
+    """True if this tool call could have shown whether a client draft was sent."""
+    name, _, raw = call.partition(" ")
+    m = GMAIL_OP.search(name)
+    if not m:
+        return False
+    op = m.group(1)
+    if op in ("get_draft", "get_thread", "get_message"):
+        return True
+    try:
+        q = str(json.loads(raw).get("query") or "")
+    except Exception:
+        q = ""
+    if re.search(r"\bin:sent\b", q, re.I):
+        return True
+    if not NOTE_TAG.search(q):
+        return True
+    # tagged: counts only if something other than the tags and search filler is left to look for
+    rest = re.sub(r"[\s\\\"'()\[\]<>\-]+", " ", NOTE_FILLER.sub(" ", NOTE_TAG.sub(" ", q))).strip()
+    return bool(rest) and not re.fullmatch(r"(?:to:\S+\s*)+", rest)
+
+
 def scan(last, calls):
     out = []
-    gmail_checked = any(GMAIL_CHECK.search(c) for c in calls)
+    gmail_checked = any(gmail_check(c) for c in calls)
     pr_checked = any(PR_CHECK.search(c) for c in calls)
     for ln in last.split("\n"):
-        if ((DRAFT_ID.search(ln) and SEND_CUE.search(ln)) or SEND_ASK.search(ln)) and not gmail_checked:
+        plain = NEGATED_SENT.sub(" ", ln)
+        reports_sent = bool(SENT_REPORT.search(plain))
+        pointed = DRAFT_POINT.search(ln) and not reports_sent
+        if ((DRAFT_ID.search(ln) and SEND_CUE.search(ln)) or SEND_ASK.search(ln) or pointed) \
+                and not AGENT_NOTE.search(ln) and not gmail_checked:
             out.append("draft: " + ln.strip()[:120])
         elif PR_ASK.search(ln) and not pr_checked:
             out.append("PR: " + ln.strip()[:120])
@@ -68,6 +112,11 @@ def self_test():
         ("pr-checked", "quiet", "3. **Merge RescueDogs#436** (the keep-alive fix)", ['Bash {"command": "gh pr view 436 -R x/y"}']),
         ("send-no-id", "fire", "- **Send:** Gail's email, and Greg's reply after retyping its three links.", []),
         ("sent-narration", "quiet", "Gail's email went out at 4:53 PM, before I posted the roadmap.", []),
+        ("18oct-notes-lookup-only", "fire", "Your one step is still the Gail reply in your drafts. After that, the next card.",
+         ['mcp__claude_ai_Gmail__list_drafts {"query": "subject:\\"MUSE>CC\\""}']),
+        ("18oct-real-lookup", "quiet", "Your one step is still the Gail reply in your drafts.", ['mcp__claude_ai_Gmail__search_threads {"query": "in:sent"}']),
+        ("sent-went-out", "quiet", "Gail's reply went out at 1:25 PM.", []),
+        ("hatch-note-id", "quiet", "Hatch's note r-4178758221985557888 is in your drafts, nothing for you to do.", []),
         ("narration", "quiet", "#436 merged as 1f54eec; the keep-alive run succeeded.", []),
         ("plain", "quiet", "The roadmap is updated with this afternoon's work.", []),
     ]
