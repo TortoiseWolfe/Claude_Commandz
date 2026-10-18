@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation probe for the eight front-desk fixes (17 Oct): break each change in a temp copy of the scripts folder and confirm a
+"""Mutation probe for the eight front-desk fixes (17 Oct), the follow-up fixes and the dupes fixes (D): break each change in a temp copy of the scripts folder and confirm a
 test goes red. A mutant that leaves the tests green is a gap.
 
   python3 mutate_frontdesk_fixes.py              all mutants
@@ -65,10 +65,10 @@ MUTANTS = [
     ("8", D, "a promote records no finish", '_finish(ask, now, "promoted to a job")', "pass"),
     ("8", D, "a held promote keeps its finish", '                ask.pop("finished_at", None)', "                pass"),
     # followup A. a posted lane report answers its ask; a second lane can join it
-    ("A", D, "a posted report leaves its ask claimed", "        _settle_lane_ask(state, name, chat, now)\n", ""),
+    ("A", D, "a posted report leaves its ask claimed", "        needs_hub = _settle_lane_ask(state, name, chat, now)\n", "        needs_hub = None\n"),
     ("A", D, "the ask is answered without the posted text", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"], ask["answered_at"] = "", "answered", now'),
     ("A", D, "the ask is answered without the time", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"] = text, "answered"'),
-    ("A", D, "the first of two lanes settles the ask", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return\n', ""),
+    ("A", D, "the first of two lanes settles the ask", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return None\n', ""),
     ("A", D, "an answered ask is never reopened by a second lane", 'reclaim = (ask["status"] in ("claimed", "answered") and', 'reclaim = (ask["status"] in ("claimed",) and'),
     ("A", D, "a second lane is never added", 'ask["lanes"] = (ask.get("lanes") or []) + [lane_name] if reclaim else [lane_name]', 'ask["lanes"] = [lane_name]'),
     ("A", D, "a stale second lane is accepted", "                fresh = 0 <= now - float(row[8]) <= CLAIM_WINDOW", "                fresh = True"),
@@ -81,6 +81,22 @@ MUTANTS = [
     ("B", D, "a drafted email is not recognised", r'\bdraft(?:s|ed|ing)?\s+(?:an?\s+|the\s+)?(?:e-?mail|reply|note)\b", re.I)', r'\bdraft(?:s|ed|ing)?\s+(?:an?\s+|the\s+)?(?:reply|note)\b", re.I)'),
     ("B", D, "the hub reason is not about mail", '"a note to Hatch or a Gmail draft: only the hub has the mail connector, so no lane or pass ran"', '"not a plain GitHub-facts question, so no pass ran"'),
     ("B", D, "a mail question can still start the facts pass", "HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE", "HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE"),
+    # dupes D. a failed lane never closes its ask; the hub can follow up on an answered one; the hub-list line is short
+    ("D", D, "a failed lane's report closes its ask", '    if state["lanes"][lane_name].get("failed"):\n        return ask_id\n', ""),
+    ("D", D, "a failed lane's ask never reaches the hub list", '    if state["lanes"][lane_name].get("failed"):\n        return ask_id\n', '    if state["lanes"][lane_name].get("failed"):\n        return None\n'),
+    ("D", D, "a failed lane with a sibling still working goes to the hub", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return None\n    if state["lanes"][lane_name].get("failed"):', '    if state["lanes"][lane_name].get("failed"):'),
+    ("D", D, "the hub list line repeats his words", '"On the hub\'s list: the hub has your message."', '"On the hub\'s list: %s" % words'),
+    ("D", D, "the cap line repeats his words", "(since %s); the hub has your message.\" % (\n                        len(waiting), _clock_of(now)))", "(since %s): %s\" % (\n                        len(waiting), _clock_of(now), words))"),
+    ("D", D, "the open list hides a failed job ask", '                status = "lane-failed"  # its lane failed', '                continue  # its lane failed'),
+    ("D", D, "the hub cannot post to an ask whose lane failed", '        ask.get("status") == "claimed" and _ask_failed(state, ask))', '        False)'),
+    ("D", D, "the hub can post over a claimed ask with a lane working", '        ask.get("status") == "claimed" and _ask_failed(state, ask))', '        ask.get("status") == "claimed")'),
+    ("D", D, "an answered ask refuses a follow-up", 'if not (_post_closes(state, ask) or ask.get("status") == "answered"):', 'if not _post_closes(state, ask):'),
+    ("D", D, "a follow-up overwrites the answer", 'ask.setdefault("followups", []).append({"text": text, "at": now})', 'ask["answer"] = text'),
+    ("D", D, "a follow-up is not recorded", 'ask.setdefault("followups", []).append({"text": text, "at": now})', 'pass'),
+    ("D", D, "a follow-up is recorded without its time", '{"text": text, "at": now}', '{"text": text}'),
+    ("D", D, "a follow-up reopens the ask", 'ask.setdefault("followups", []).append({"text": text, "at": now})', 'ask.setdefault("followups", []).append({"text": text, "at": now}); ask["status"] = "claimed"'),
+    ("D", D, "a follow-up is posted twice", '    if not host.inject(chat_text):\n        return False, "post: could not post to the chat"', '    if not (host.inject(chat_text) and host.inject(chat_text)):\n        return False, "post: could not post to the chat"'),
+    ("D", D, "the dispatch pass may post a follow-up", '        return False, "post: the dispatch pass may not post"\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids', '        pass\n    text = re.sub(r"^\\s*\\[hub\\]\\s*", "", (text or "").strip())\n    ids = _ask_ids'),
 ]
 
 

@@ -48,7 +48,9 @@ chat says "Already with the hub since <time>". A pass that ends without answerin
     openclaw_dispatch.py approve <ask> <entry> the pass's way to act on a waiting-room entry the ask names (see "The waiting room")
     openclaw_dispatch.py open                  list unanswered receptionist questions, with his words under each
     openclaw_dispatch.py post "<text>"         the hub puts a [hub] line into the chat with no ask
-    openclaw_dispatch.py post <ask[,ask...]> "<text>" answer and close one or more asks
+    openclaw_dispatch.py post <ask[,ask...]> "<text>" answer and close one or more asks; on an ask already answered, post it as a
+                                               follow-up (recorded on the ask, delivered once, the ask unchanged). A lane that failed
+                                               or died never closes its ask: it stays open (`open` lists it as lane-failed)
     openclaw_dispatch.py settle <ask[,ask...]> "<why>" close asks answered another way
     openclaw_dispatch.py say <ask> "<text>"    post a direct answer to the chat and close the ask
     openclaw_dispatch.py defer <ask> "<why>"   put the question on the hub's list with a hub-only reason
@@ -908,15 +910,19 @@ def _lane_finished(lane, host, now):
 
 def _settle_lane_ask(state, lane_name, text, now):
     """A lane's note reached the chat: the ask it answers is answered, with the posted text and the time (as `post` does).
-    An ask that has another lane still working stays claimed until that lane's note is posted."""
+    An ask that has another lane still working stays claimed until that lane's note is posted. A lane that failed or died
+    answered nothing: its ask stays open, and -> the ask id when that ask now needs the hub (no lane left working on it)."""
     ask_id = state["lanes"][lane_name].get("ask")
     ask = asks_of(state).get(ask_id) if ask_id else None
     if ask is None or ask.get("status") != "claimed":
-        return
+        return None
     if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):
-        return
+        return None
+    if state["lanes"][lane_name].get("failed"):
+        return ask_id
     ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now
     _finish(ask, now, "lane report")
+    return None
 
 
 def _sweep(ctx, host, now=None):
@@ -962,7 +968,11 @@ def _sweep(ctx, host, now=None):
             changed = True  # status change above is kept; the note is retried next sweep
             continue
         lane["delivered"], changed = True, True
-        _settle_lane_ask(state, name, chat, now)
+        needs_hub = _settle_lane_ask(state, name, chat, now)
+        if needs_hub:
+            ask = asks_of(state)[needs_hub]
+            to_hub_list(ctx, needs_hub, ask.get("task", ""), now,
+                        "lane %s %s; its report did not answer the ask, which stays open" % (name, "failed" if lane.get("failed") else "ended"))
         wins = host.windows()
         if wins and name in wins:
             host.kill_window(name)
@@ -1932,9 +1942,9 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
         to_hub_list(ctx, ask_id, words, now, "front desk: %s; the question is his words as written" % why)
         if full:
             return ("%s | question | %d questions already waiting: put on the hub's list (ask %s)" % (stamp, len(waiting), ask_id),
-                    "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s): %s" % (
-                        len(waiting), _clock_of(now), words))
-        return "%s | question | no pass: put on the hub's list (ask %s)" % (stamp, ask_id), "On the hub's list: %s" % words
+                    "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s); the hub has your message." % (
+                        len(waiting), _clock_of(now)))
+        return "%s | question | no pass: put on the hub's list (ask %s)" % (stamp, ask_id), "On the hub's list: the hub has your message."
     if not host.spawn_pass(ask_id):
         with ctx.locked():
             state = load_state(ctx.state_path)
@@ -2265,12 +2275,15 @@ def open_question_lines(ctx, now=None):
     state = load_state(ctx.state_path)
     rows = []
     for ask_id, ask in asks_of(state).items():
-        if ask.get("kind") != "question":
-            continue
         status = ask.get("status")
+        if ask.get("kind") != "question":
+            if status == "claimed" and _ask_failed(state, ask):
+                status = "lane-failed"  # its lane failed or died: the ask is still open and the hub's to answer
+            else:
+                continue
         if status == "pending" and now < ask.get("deadline", 0):
             continue
-        if status not in OPEN_ASK_STATUSES and status != "pending":
+        if status not in OPEN_ASK_STATUSES and status not in ("pending", "lane-failed"):
             continue
         created = ask.get("created", now)
         age = max(0, int((now - created) // 60))
@@ -2297,8 +2310,15 @@ def unanswered_question_ids(ctx):
                   if ask.get("kind") == "question" and ask.get("status") not in ("answered", "promoted"))
 
 
+def _post_closes(state, ask):
+    """True when a hub post answers this ask: it is still waiting on the hub, or its only lanes failed."""
+    return ask.get("status") in ("deferred", "pending", "fallback", "fallback-lane") or (
+        ask.get("status") == "claimed" and _ask_failed(state, ask))
+
+
 def post_ask(ctx, host, ask_ids, text, now=None):
-    """Post one hub answer, then save and tick every still-open ask it answers."""
+    """Post one hub answer, then save and tick every still-open ask it answers. An ask that was already answered takes it as a
+    follow-up: recorded on the ask (`followups`), posted once, the ask itself unchanged."""
     now = time.time() if now is None else now
     if os.environ.get("AFA_OC_PASS"):
         return False, "post: the dispatch pass may not post"
@@ -2313,7 +2333,7 @@ def post_ask(ctx, host, ask_ids, text, now=None):
             ask = asks.get(ask_id)
             if ask is None:
                 return False, "post: no such ask %s" % ask_id
-            if ask.get("status") not in ("deferred", "pending", "fallback", "fallback-lane"):
+            if not (_post_closes(state, ask) or ask.get("status") == "answered"):
                 return False, "post: ask %s is already %s" % (ask_id, ask.get("status"))
     chat_text = text
     if len(_chat_parts(text)) > MAX_CHAT_PARTS:
@@ -2323,17 +2343,22 @@ def post_ask(ctx, host, ask_ids, text, now=None):
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
-        settled = []
+        settled, followed = [], []
         for ask_id in ids:
             ask = asks.get(ask_id)
-            if ask and ask.get("status") in ("deferred", "pending", "fallback", "fallback-lane"):
+            if ask and _post_closes(state, ask):
                 ask["answer"] = text
                 ask["status"], ask["answered_at"] = "answered", now
                 _finish(ask, now, "hub post")
                 settled.append(ask_id)
+            elif ask and ask.get("status") == "answered":
+                ask.setdefault("followups", []).append({"text": text, "at": now})
+                followed.append(ask_id)
         save_state(ctx.state_path, state)
     ok, error = _tick_inbox(ctx, settled)
-    msg = "posted answer for %s" % ", ".join(ids)
+    msg = "posted answer for %s" % ", ".join(i for i in ids if i not in followed)
+    if followed:
+        msg = ("%s; " % msg if settled else "") + "posted follow-up on %s" % ", ".join(followed)
     if not ok:
         return False, "%s, but could not tick the inbox: %s" % (msg, error)
     return True, msg
