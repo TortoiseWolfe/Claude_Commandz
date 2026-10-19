@@ -39,7 +39,14 @@ printf '%s\0' "$@" >>"$TMUX_CALLS"
 case "$1" in
   has-session) [ "${TMUX_HAS_SESSION:-0}" = 1 ] ;;
   list-windows) for window in ${TMUX_WINDOWS:-}; do printf '%s\n' "$window"; done ;;
-  capture-pane) printf 'ready\n' ;;
+  capture-pane)
+    if [ -n "${TMUX_PANE_FILE:-}" ]; then
+      # Like real tmux: colour escapes only come out when -e is passed.
+      case " $* " in
+        *' -e '*) cat "$TMUX_PANE_FILE" ;;
+        *) sed -E 's/\x1b\[[0-9;:]*m//g' "$TMUX_PANE_FILE" ;;
+      esac
+    else printf 'ready\n'; fi ;;
   send-keys)
     if [ "${2:-}" = -t ] && [ -n "${4:-}" ]; then
       printf '%s\n' "$4" >"$TMUX_SENT"
@@ -87,7 +94,7 @@ run_lane() {
   rm -f "$sent"
   set +e
   (cd "$TMP" && HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/tmux-calls" TMUX_SENT="$sent" \
-    TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" \
+    TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" TMUX_PANE_FILE="${TMUX_PANE_FILE:-}" \
     CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" \
     TEST_CWD="$REPO" RUN_LANE_COMMANDS=1 \
     bash "$SCRIPT" "$@") >"$output" 2>&1
@@ -416,5 +423,36 @@ assert_exit 1 "$LAST_STATUS" 'a malformed ask id is refused'
 run_lane --ask oc-1a2b3c4d --status
 assert_exit 1 "$LAST_STATUS" '--ask is refused outside a start'
 unset AFA_OPENCLAW_DISPATCH
+
+# Claude Code's grey prompt suggestion (SGR 2) is not typed text. Real panes look like the 19 Oct
+# capture-pane -e of a lane's empty prompt: the arrow in grey, then a no-break space, then the text.
+ESC=$'\033'; NBSP=$'\302\240'
+printf '%s\n' 'something the lane said' "${ESC}[38;5;246m❯${NBSP}${ESC}[39m${ESC}[2mpush it${ESC}[22m" '  ⏵⏵ auto mode on' >"$TMP/pane-dim"
+printf '%s\n' 'something the lane said' "${ESC}[38;5;246m❯${NBSP}${ESC}[39mpush it" '  ⏵⏵ auto mode on' >"$TMP/pane-typed"
+printf '%s\n' 'something the lane said' "${ESC}[38;5;246m❯${NBSP}${ESC}[39m" '  ⏵⏵ auto mode on' >"$TMP/pane-bare"
+# A colour whose parameters contain a 2 (38;5;2 and 38;2;...) is not dim.
+printf '%s\n' "${ESC}[38;5;246m❯${NBSP}${ESC}[39m${ESC}[38;5;2mtyped${ESC}[39m ${ESC}[38;2;2;2;2mtoo${ESC}[39m" >"$TMP/pane-colour2"
+# tmux carries attributes across lines, so a dim set earlier holds until a reset.
+printf '%s\n' "${ESC}[2mfooter" "❯${NBSP}push it" >"$TMP/pane-carry"
+
+TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'input line is empty but no spinner seen' 'dim "push it" in the input line counts as empty for --send'
+assert_not_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'a dim suggestion is not reported as text that did not take'
+TMUX_PANE_FILE="$TMP/pane-typed" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'the same text in normal colour still counts as typed'
+TMUX_PANE_FILE="$TMP/pane-colour2" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'a colour with a 2 in its parameters is not read as dim'
+TMUX_PANE_FILE="$TMP/pane-carry" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'input line is empty' 'dim carried over from an earlier line still applies'
+
+status_with_pane() {
+  TMUX_PANE_FILE="$1" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane HOME="$HOME_TEST" PATH="$BIN:$PATH" \
+    TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1
+}
+STATUS_DIM="$(status_with_pane "$TMP/pane-dim")"
+assert_contains "$STATUS_DIM" 'suggestion: "push it"' '--status shows the dim suggestion on the idle lane row'
+assert_contains "$STATUS_DIM" 'something the lane said' '--status still shows the lane last line'
+assert_not_contains "$(status_with_pane "$TMP/pane-typed")" 'suggestion:' '--status does not call normal-colour text a suggestion'
+assert_not_contains "$(status_with_pane "$TMP/pane-bare")" 'suggestion:' '--status shows no suggestion for an empty prompt'
 
 printf 'ok - %s checks passed\n' "$checks"
