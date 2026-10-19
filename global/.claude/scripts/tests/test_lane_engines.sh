@@ -115,6 +115,10 @@ assert_exit 0 "$LAST_STATUS" 'default Claude lane starts'
 assert_contains "$LAST_COMMAND" 'claude --model sonnet' 'default command uses Claude'
 assert_contains "$LAST_COMMAND" '$(cat ' 'default command reads the prompt file'
 assert_not_contains "$LAST_COMMAND" 'touch injected' 'default prompt is not interpolated into the shell command'
+# A Claude lane start also refreshes the hub's lean project settings (hub_lean.py), so the tower gets them too.
+HUB_LEAN_FILE="$HOME_TEST/repos/.claude/settings.json"
+[ -f "$HUB_LEAN_FILE" ] || fail 'a Claude lane start installs the hub lean settings'
+assert_contains "$(cat "$HUB_LEAN_FILE")" '"Artifact"' 'hub lean settings withhold the Artifact tools'
 
 # Codex gets the required workspace flags and omits Claude model names.
 run_lane --engine codex codex-lane "$REPO" opus "$PROMPT"

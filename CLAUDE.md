@@ -64,6 +64,7 @@ cp ~/.claude/scripts/class_resolver.py ~/.claude/scripts/route_log.py ~/.claude/
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
 cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh global/.claude/scripts/
 cp ~/.claude/scripts/hub_digest.py ~/.claude/scripts/session_prime_facts.py global/.claude/scripts/
+cp ~/.claude/scripts/hub_lean.py global/.claude/scripts/
 # openclaw_harden.sh, openclaw_uid.sh, openclaw_pickup.py, openclaw_dispatch.py, openclaw_local.py, openclaw_frontdesk_cost.py, openclaw_handoff_install.sh, openclaw_handoff_hook/ and tests/{test_openclaw_harden.py,test_openclaw_handoff.py,test_openclaw_handoff_install.py,openclaw_fake_gemini.py,test_openclaw_uid_stage.sh,
 # test_openclaw_pickup.py,test_openclaw_dispatch.py,test_openclaw_pass.py,test_openclaw_local.py,test_openclaw_frontdesk_cost.py} are authored here and run inside the OpenClawGateway distro or against its drop folder
 # (not from ~/.claude): do not cp over them, and run them only from this repo.

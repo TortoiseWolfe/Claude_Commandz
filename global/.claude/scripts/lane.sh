@@ -71,6 +71,9 @@
 #     the slim rule file LANE_RULES (default ~/repos/hub/lane-rules.md). Both happen only when that
 #     file exists; a repo's own CLAUDE.md files load as usual.
 #
+# The hub (claude started in ~/repos) gets the same lean launch from hub_lean.py through a project settings file, so it
+# needs no flags. Every Claude lane start refreshes that file, so a machine that mostly runs lanes keeps it current.
+#
 # Folder trust: a new folder makes Claude Code ask "Yes, I trust this folder". For a folder
 # under ~/repos this script answers it. Anywhere else the window waits for the user.
 # The same poll also answers, by dialog text: with --console, the "use this API key?"
@@ -364,6 +367,8 @@ lane_connectors() {  # <name> <prompt-file>
 # The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
 claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name]
   local json p s r
+  # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
+  [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
   json='{"autoCompactWindow":200000'
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
