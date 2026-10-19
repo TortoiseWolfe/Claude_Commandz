@@ -529,6 +529,10 @@ describe('blast radius, rm inside docker run', () => {
       const { r } = await run($, on, `docker volume create --opt type=none --opt o=bind --opt device=${HOME}/p data && docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!none')
       expect(r.deny).toContain('did not wait')
     })
+    test('a volume made by another docker command is not new', async ($, on) => {
+      const { r } = await run($, on, `d=docker; $d volume create data; docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!none')
+      expect(r.deny).toContain('did not wait')
+    })
     test('every named volume is asked about, however many a command mounts', async ($, on) => {
       const mounts = Array.from({ length: 9 }, (_, i) => `-v v${i}:/m${i}`).join(' ')
       const { r } = await run($, on, `docker run --rm ${mounts} alpine sh -c 'rm -rf /m8/x'`, '!fail')

@@ -426,6 +426,13 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
   return { mounts: out, incomplete: incomplete || !imageSeen }
 }
 
+// May a volume docker has never heard of be taken as new? Only when the command is plainly one docker run: a second docker word, a
+// substitution, an eval or the docker socket could make the volume before the rm runs, and text matching cannot rule that out.
+export function newVolumeIsPlain(command: string): boolean {
+  const dockers = command.match(/\b(?:docker|docker-compose|podman)\b/g) ?? []
+  return dockers.length === 1 && /\b(?:docker|podman)\s+(?:container\s+)?run\b/.test(command) && !/\$\(|`|\beval\b|docker\.sock|DOCKER_HOST|\bsource\b|\bvolume\b|--opt|-opt\b/.test(command)
+}
+
 // The names of the Docker volumes a command mounts into a docker run, so the caller can ask docker whether one is really a host folder
 export function namedVolumesOf(command: string, depth = 0): string[] {
   const names = new Set<string>()
