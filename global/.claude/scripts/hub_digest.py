@@ -139,14 +139,30 @@ GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
 CLIENT_LINE = re.compile(r"^client (?:mail|alert):", re.I)
 
 
+OPEN_LINE = re.compile(r"- \[ \] (\d{4}-(\d\d-\d\d)) [\d:]+ \| ([^|]*?) \|(?: ([^|]*?) \|)?(?: ([^|]*?) \|)?"
+                       r"(?: ([\w-]+(?: [\w-]+)*))?\s*$")
+OPEN_ANY = re.compile(r"- \[ \] (?:\d{4}-(\d\d-\d\d) [\d:]+ \| )?(.*)$")
+CLIENT_SCAN = re.compile(r"^- \[ \] .*\bClient (?:mail|alert):")
+
+
+def count_open_client_lines(text):
+    """Plain scan, no line pattern: unticked lines that mention a client mail or alert anywhere."""
+    return sum(1 for line in text.splitlines() if CLIENT_SCAN.match(line))
+
+
 def open_inbox(text):
-    """-> (groups {name: [(date, title)]}, client [(date, title, detail, id)]). Only unticked items."""
+    """-> (groups {name: [(date, title)]}, client [(date, title, detail, ids)]). Only unticked items.
+    The last field takes one or more space-separated IDs. An unticked line the pattern cannot read is
+    never dropped: it goes into "other" with its raw text."""
     groups = {g: [] for g, _ in GROUPS}
     groups["other"] = []
     clients = []
     for line in text.splitlines():
-        m = re.match(r"- \[ \] (\d{4}-(\d\d-\d\d)) [\d:]+ \| ([^|]*?) \|(?: ([^|]*?) \|)?(?: ([^|]*?) \|)?(?: (\S+))?\s*$", line)
+        m = OPEN_LINE.match(line)
         if not m:
+            raw = OPEN_ANY.match(line)
+            if raw:
+                groups["other"].append((raw.group(1) or "?", raw.group(2).strip()))
             continue
         day, title = m.group(2), m.group(3).strip()
         detail = " | ".join(part.strip() for part in (m.group(4), m.group(5)) if part)
@@ -244,6 +260,9 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     # Inbox
     groups, clients = open_inbox(inbox_text or "")
     cl = [f"- {d} {one_line(t, 60)} | {one_line(det, 50)} | {i}" for d, t, det, i in clients]
+    seen = count_open_client_lines(inbox_text or "")
+    if seen != len(clients):
+        cl.insert(0, f"WARNING: {seen} open client lines in the inbox, {len(clients)} parsed: grep muse-inbox.md")
     sections.append(("Open client lines (the poller queued them; read the thread before an absorb lane)", cl or ["- none"]))
     il = []
     for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "other"]:

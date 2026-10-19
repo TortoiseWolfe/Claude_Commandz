@@ -11,7 +11,7 @@
 # A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Names live only in the TSV and Gmail; this script and its prompt
-# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies),
+# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
 S=$HOME/.claude/scripts
@@ -19,7 +19,7 @@ TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
 SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
 INBOX=${MUSE_CLIENT_INBOX:-$HOME/.claude/state/muse-inbox.md}
 LOG=$HOME/.claude/state/muse-poll.log
-CLAUDE=$HOME/.local/bin/claude
+CLAUDE=${MUSE_CLIENT_CLAUDE:-$HOME/.local/bin/claude}
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}
 # Client mail is NX-01's job only; the second tower exits quietly so the same mail is not absorbed twice.
 [[ "$(cat "$HOME/.config/afa/machine" 2>/dev/null)" == NX-01 ]] || exit 0
@@ -37,7 +37,12 @@ touch "$SEEN"
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
 pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
-printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{8,20} \|' | while IFS= read -r line; do
+# A real Gmail message ID is 16 hex characters; a 13-digit internalDate once slipped through as an ID and hid a
+# client reply, so a MSG line that fails the ID check is logged, never silently ignored.
+printf '%s\n' "$out" | grep '^MSG ' | grep -vE '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r bad; do
+  printf '%s client check: dropped malformed line: %s\n' "$(date '+%F %T')" "${bad:0:200}" >>"$LOG"
+done
+printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r line; do
   id=${line#MSG }; id=${id%% *}
   IFS='|' read -r _ _ _ _ labels _ <<<"${line#MSG }"
   labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z')

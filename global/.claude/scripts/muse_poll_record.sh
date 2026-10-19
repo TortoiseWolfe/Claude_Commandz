@@ -43,7 +43,7 @@ case "${1:-}" in
     client="${client//$'\n'/ }"; client="${client//|/ }"
     keep=()
     for id in $ids; do
-      [[ "$id" =~ ^[0-9a-f]{8,20}$ ]] || { echo "bad id $id" >&2; exit 1; }
+      [[ "$id" =~ ^[0-9a-f]{15,16}$ ]] || { echo "bad id $id" >&2; exit 1; }
       grep -qxF "$id" "$STATE/client-mail-seen.txt" 2>/dev/null && continue
       grep -q -- "$id" "$STATE/muse-inbox.md" 2>/dev/null && continue
       keep+=("$id")
@@ -59,7 +59,7 @@ case "${1:-}" in
     ids="${2:?ids}"
     touch "$STATE/client-mail-seen.txt"
     for id in $ids; do
-      [[ "$id" =~ ^[0-9a-f]{8,20}$ ]] || { echo "bad id $id" >&2; exit 1; }
+      [[ "$id" =~ ^[0-9a-f]{15,16}$ ]] || { echo "bad id $id" >&2; exit 1; }
       grep -qxF "$id" "$STATE/client-mail-seen.txt" || echo "$id" >>"$STATE/client-mail-seen.txt"
     done
     # tick open client lines whose IDs are all absorbed now
