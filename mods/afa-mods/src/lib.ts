@@ -131,9 +131,13 @@ function withoutTextHeredocs(command: string): string {
     const after = lines[i].slice(m.index + m[0].length).replace(/\d*>&-?\d*|&>>?/g, '')
     // a shell anywhere in the lead (`sudo bash`, `env bash`), or a pipe/and/semicolon after the marker (`cat <<EOF | bash`): the body is run
     const plain = (w: string) => (w.replace(/^(?:\$\(|[<>]?\(|`|\{)+/, '').replace(/["'\\]/g, '').split('/').pop() ?? '')
-    const shellIn = (s: string) => s.split(/\s+/).some(w => SHELL_WORDS.has(plain(w)))
+    const runs = (w: string) => SHELL_WORDS.has(plain(w)) || RUNS_ITS_ARGS.has(plain(w)) || WRAPPERS.has(plain(w))
+    const shellIn = (s: string) => s.split(/\s+/).some(runs) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(s.trim())
+    // `git commit -m "$(cat <<'EOF' ... EOF )"`: a cat inside double quotes hands the body over as one message word, not as a command
+    const quotedMessage = /\$\(\s*(?:cat|tee)\s*$/.test(lead) && ((lead.replace(/\\./g, '').match(/"/g) ?? []).length % 2 === 1)
+    const leadRest = quotedMessage ? lead.replace(/\$\(\s*(?:cat|tee)\s*$/, '') : lead
     // fail closed: the body is dropped only when nothing around the marker could run it (no shell word, pipe, substitution or backtick)
-    if (shellIn(lead) || shellIn(after) || /[|;&`]|[$<>]\(/.test(after) || /[`]|[$<>]\(/.test(lead)) continue
+    if (shellIn(lead) || shellIn(after) || /[|;&`]|[$<>]\(/.test(after) || /[`]|[$<>]\(/.test(leadRest)) continue
     i = end // skip the body and its delimiter line
   }
   return out.join('\n')
@@ -214,12 +218,22 @@ const runsQuoted = (seg: string) =>
   RUNS_ITS_ARGS.has(firstWord(seg)) || WRAPPERS.has(firstWord(seg)) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(strip(seg))
 const quotedPieces = (seg: string): string[] => Array.from(seg.matchAll(QUOTED), m => m[1] ?? m[2] ?? '').filter(s => s.trim() !== '')
 
-// Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs its arguments.
+// Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs
+// its arguments, and a word with a "/" is a path (a folder called App--prod-lock or /srv/redeploy/prod is not a flag).
+const PROD_FLAG = /^--prod(?:uction)?(?:=.*)?$/i
+const PROD_WORD = /^(?:--[\w-]+=)?(?:--)?prod(?:uction)?$/i
 function isProdDeploy(seg: string): boolean {
   const word = firstWord(seg)
   if (!/^[A-Za-z0-9_.-]+$/.test(word) || TEXT_CARRIERS.has(word)) return false
   const body = RUNS_ITS_ARGS.has(word) || /^(?:docker|kubectl)\s+(?:exec|run)\b/.test(seg) ? seg : withoutQuoted(seg)
-  return /--prod(uction)?\b/.test(body) || (/redeploy/i.test(body) && /\bprod/i.test(body))
+  const words = body
+    .replace(/(^|\s)#.*$/, '')
+    .split(/\s+/)
+    .map(w => w.replace(/^["']+|["']+$/g, ''))
+    .filter(Boolean)
+  const args = words.filter(w => !w.includes('/'))
+  if (args.some(w => PROD_FLAG.test(w))) return true
+  return /redeploy/i.test(word) || args.some(w => /redeploy/i.test(w)) ? args.some(w => PROD_WORD.test(w)) : false
 }
 
 // Which dangerous patterns a Bash command holds. Best effort, a net and not a
@@ -242,6 +256,8 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     }
     const t = seg.split(/\s+/)
     const flags = t.filter(x => x.startsWith('-'))
+    // the words the command itself gets: a quoted message with spaces (`git commit -m "fix push -f"`) is text, not words
+    const bare = withoutQuoted(seg).split(/\s+/).filter(Boolean)
     const add = (kind: HeldKind, hard: boolean) => holds.push({ kind, hard, segment: seg })
 
     if (/^(?:\S*\/)?tmux$/.test(t[0])) {
@@ -265,12 +281,12 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     }
     if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune` as HeldKind, false)
     if (/^docker\s+volume\s+(rm|remove)\b/.test(seg)) add('docker volume rm', false)
-    if (/^(docker\s+compose|docker-compose)\b/.test(seg) && t.includes('down')) {
-      const after = t.slice(t.indexOf('down'))
+    if (/^(docker\s+compose|docker-compose)\b/.test(seg) && bare.includes('down')) {
+      const after = bare.slice(bare.indexOf('down'))
       if (after.some(x => x === '--volumes' || /^-[^-]*v/.test(x))) add('docker compose down -v', false)
     }
-    if (/^git\b/.test(seg) && t.includes('push')) {
-      const after = t.slice(t.indexOf('push'))
+    if (/^git\b/.test(seg) && bare.includes('push')) {
+      const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
     if (isProdDeploy(seg)) add('production deploy', true)

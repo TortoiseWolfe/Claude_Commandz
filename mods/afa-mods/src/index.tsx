@@ -57,6 +57,19 @@ async function refreshBand($: Engine) {
 
 const LOG = '.claude/state/mods/blast-radius.log'
 
+const RUN_IT = '1 - Run it'
+const REFUSE = '2 - Refuse'
+
+// The dialog returns a label, or the text typed under "Other" ("Type something."). Only the exact Run it label runs the
+// command; anything else is a refusal, and a typed reason goes back to the session so it can adjust instead of retrying blind.
+const refusal = (choice: string) => {
+  const base = 'Blast Radius: refused at the prompt. The command did not run.'
+  const reason = choice.trim()
+  return reason === '' || reason === REFUSE
+    ? base
+    : `${base} Jonathan's reason, in his words: "${reason}". Do not resend this command or a reworded copy; change what you are doing or explain it to him in chat.`
+}
+
 const run = async ($: Engine, argv: string[]) => {
   try {
     const r = await $.process.run(argv, { timeoutMs: 10_000 })
@@ -221,9 +234,9 @@ export const register: Register = on => {
     }
     const choice = await $.ui.ask(
       `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
-      ['1 - Run it', '2 - Refuse'],
+      [RUN_IT, REFUSE],
     )
-    if (!choice.startsWith('1')) return { deny: 'Blast Radius: refused at the prompt. The command did not run.' }
+    if (choice !== RUN_IT) return { deny: refusal(choice) }
     await noteScratch()
     return next(e)
   }).catch(($, e, next) =>
