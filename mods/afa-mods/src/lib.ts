@@ -393,9 +393,11 @@ export const runTargetOf = (seg: string): string | undefined => {
 }
 
 // What a compose file says about a service's CPU: 'capped' (cpus, cpu_quota or cpuset as a direct key, or deploy.resources.limits.cpus,
-// with a positive value; `${X:-4}` counts by its default), 'none' (a CPU key whose value is no cap, such as 0), 'absent'. Read as text:
+// with a positive value: a `${X}` value never counts), 'none' (a CPU key whose value is no cap, such as 0), 'absent'. Read as text:
 // anchors, `extends` and includes are not followed, so a limit set that way is 'absent' and the run stays held.
 export function composeServiceLimit(yaml: string, service: string): 'capped' | 'none' | 'absent' {
+  // text the reader cannot follow: an include, or a service that merges, extends or resets keys. Such a file is 'none', so the run is held.
+  if (/^include\s*:/m.test(yaml)) return 'none'
   const lines = yaml.split('\n')
   const live = (l: string) => l.trim() !== '' && !l.trim().startsWith('#')
   const indentOf = (l: string) => l.length - l.trimStart().length
@@ -418,14 +420,15 @@ export function composeServiceLimit(yaml: string, service: string): 'capped' | '
     if (!live(l)) continue
     const indent = indentOf(l)
     if (indent <= svcIndent) break
+    if (/<<\s*:|\bextends\s*:|!reset|!override/.test(l)) return 'none'
     while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop()
     const m = /^\s*["']?([\w.-]+)["']?\s*:\s*(.*?)\s*(?:#.*)?$/.exec(l)
     if (!m) continue
     const path = [...stack.map(x => x.key), m[1]].join('.')
     stack.push({ indent, key: m[1] })
     if (!['cpus', 'cpu_quota', 'cpuset', 'deploy.resources.limits.cpus'].includes(path)) continue
-    let v = unquote(m[2])
-    v = /^\$\{[A-Za-z_]\w*:?-([^}]*)\}$/.exec(v)?.[1] ?? v
+    // a ${VAR} value is unknown (the variable may be set elsewhere), so it never counts as a cap
+    const v = unquote(m[2])
     found = true
     if (path === 'cpuset' ? /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(v) : /^\d+(?:\.\d+)?$/.test(v) && Number(v) > 0) return 'capped'
   }

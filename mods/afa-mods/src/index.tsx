@@ -178,11 +178,11 @@ export const register: Register = on => {
     // A compose service with a cpus limit in its file is capped (docker compose run has no --cpus flag). The files are read here, as
     // text, the way compose picks them: the -f files in order, else the first default file in the folder plus its override file; the
     // last file that says anything about the service's CPU wins. Held instead when it is unclear: no folder the guard can know (a
-    // relative path with no plain cd before it), COMPOSE_FILE or an --env-file or project env file that could change the files, a
+    // relative path with no plain cd before it), COMPOSE_FILE or an --env-file, a source/eval/export before it, or a project env file that could change the files, a
     // file that cannot be read, or a limit the text reading does not see.
     const composeLimited: string[] = []
     const projectEnv = '.' + 'env'
-    if (/\bcompose\b|docker-compose/.test(e.command) && !/COMPOSE_FILE|--env-file|COMPOSE_PROJECT_DIR|--profile/.test(e.command) && !(await $.env.get('COMPOSE_FILE'))) {
+    if (/\bcompose\b|docker-compose/.test(e.command) && !/COMPOSE_FILE|--env-file|COMPOSE_PROJECT_DIR|--profile|\b(?:source|eval|export)\b|(?:^|[;&|(]\s*)\.\s/.test(e.command) && !(await $.env.get('COMPOSE_FILE'))) {
       for (const c of composeRunsOf(e.command)) {
         const base = c.cwd
         if (c.needsCwd && !base) continue

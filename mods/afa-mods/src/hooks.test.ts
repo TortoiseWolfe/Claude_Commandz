@@ -642,6 +642,10 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     const { seen } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, ['/srv/app/.' + 'env']: 'COMPOSE_FILE=other.yml\n' })
     expect(seen.asked).toContain('docker run without limits')
   })
+  test('review of #75: a source, eval or export before the compose call holds the run', async ($, on) => {
+    const { seen } = await go($, on, 'cd /srv/app && export COMPOSE_FILE=other.yml; docker compose run --rm web x', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
   test('review of #75: a relative compose file with no cd before it is held, because the guard cannot know the folder', async ($, on) => {
     const { seen } = await go($, on, 'docker compose -f ci.yml run --rm web x', {}, { '/srv/app/ci.yml': WEB4 })
     expect(seen.asked).toContain('docker run without limits')
