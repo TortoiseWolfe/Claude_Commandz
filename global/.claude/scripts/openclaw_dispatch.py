@@ -15,13 +15,14 @@ menu, each form being the WHOLE message:
 A lane closes itself: once its report is posted into Main session, sweep() kills its window and marks it closed.
 
 What text may become: a word of the verb, a task (quoted data inside a fixed prompt template) and a message for a
-lane. A repo is looked up in a table built on the PC from hub/repos.tsv (kind=repo, folder exists); a lane is looked
+lane. A repo is looked up in a table built on the PC from hub/repos.tsv (kind=repo, folder exists; a row one folder down, CD/cd-status, is started as cd-status); a lane is looked
 up in this module's own state file. Neither is ever a path, an argv word or a shell word taken from text.
 
 The engine follows ~/repos/CLAUDE.md "Rules for every repo": a client repo (hub/client-senders.tsv, hub/client-repos.txt,
 ~/repos/CD) or any repo not owned by TortoiseWolfe gets Claude (Sonnet; Opus for client judgment or email); Jonathan's own
 repos get Codex, or Claude Sonnet when the work needs Docker or wsl.exe. When Codex is out of usage, own repos use Copilot;
-when Copilot is out of usage too, they use Claude Sonnet.
+when Copilot is out of usage too, they use Claude Sonnet. A block lasts until the "try again at <date>" the engine
+prints, else until the 1st (monthly quota), else 12 hours.
 
 Budget: at most MAX_RUNNING dispatched lanes at once and MAX_PER_DAY starts a day (past that: "held: <reason>"; the held
 text names this script's own cap, never an API limit). Only real work counts toward the day: a start made with AFA_OC_TEST set
@@ -108,6 +109,10 @@ REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
 MONTHLY_QUOTA_RE = re.compile(r"monthly\s+quota", re.I)  # a monthly quota frees on the 1st, not in 12 hours
+TRY_AGAIN_RE = re.compile(r"try\s+again\s+at\s+(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?"
+                          r"(?:,?\s+(?P<hour>\d{1,2}):(?P<min>\d{2})\s*(?P<ampm>[AaPp])\.?[Mm]\.?)?")
+MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+TRY_AGAIN_MAX_SECONDS = 62 * 86400  # a date further out than this is a misread, not a limit: the 12 hour fallback applies
 ASK_WAIT = 5 * 60  # how long the dispatch pass has to claim or answer an ask before the script starts it
 PASS_TIMEOUT = 240  # seconds one dispatch pass may run (shorter than ASK_WAIT, so a hung pass cannot start a lane after the fallback did)
 PASS_MAX_TURNS = 10
@@ -180,6 +185,7 @@ TEST_SESSION_ENV = "AFA_OC_SESSION"  # live tests only (with AFA_OC_TEST): post 
 TEST_SESSION_RE = re.compile(r"^agent:(?!main:)[a-z0-9-]{1,40}:[A-Za-z0-9._-]{1,80}$")  # never another session of agent main
 TEST_STATE_ENV = "AFA_OC_STATE_FILE"  # live tests only: a state file of their own, so the hub's list and the poller never see them
 REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+NESTED_REPO_RE = re.compile(r"^(?P<parent>[A-Za-z0-9][A-Za-z0-9._-]{0,63})/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$")  # CD/cd-status
 LANE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 START_RE = re.compile(r"^start\s+(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\s*:\s*(?P<task>.+)$", re.I | re.S)
 REPLY_RE = re.compile(r"^reply\s+(?P<lane>[A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*:\s*(?P<text>.+)$", re.I | re.S)
@@ -508,13 +514,25 @@ def load_repos(tsv=REPOS / "hub/repos.tsv", root=REPOS):
         rows = Path(tsv).read_text().splitlines()
     except OSError:
         return out
+    nested = []
     for line in rows[1:]:
         f = line.split("\t")
-        if len(f) < 5 or f[4] != "repo" or not REPO_NAME_RE.match(f[0]) or f[0].lower() == WORKSPACE:
+        if len(f) < 5 or f[4] != "repo" or f[0].lower() == WORKSPACE:
             continue
-        d = Path(root) / f[0]
-        if d.is_dir() and not d.is_symlink() and (d / ".git").exists():
-            out[f[0].lower()] = (f[0], d, f[1])
+        if REPO_NAME_RE.match(f[0]):
+            d = Path(root) / f[0]
+            if d.is_dir() and not d.is_symlink() and (d / ".git").exists():
+                out[f[0].lower()] = (f[0], d, f[1])
+        elif NESTED_REPO_RE.match(f[0]):
+            nested.append(f)
+    for f in nested:  # a repo one folder down (CD/cd-status) is started by its own folder name, and never shadows a top-level repo
+        m = NESTED_REPO_RE.match(f[0])
+        parent, d = Path(root) / m.group("parent"), Path(root) / f[0]
+        key = m.group("name").lower()
+        if (key in out or key == WORKSPACE or parent.is_symlink() or d.is_symlink() or not d.is_dir() or not (d / ".git").exists()
+                or os.path.realpath(d) != os.path.join(os.path.realpath(root), m.group("parent"), m.group("name"))):
+            continue
+        out[key] = (m.group("name"), d, f[1])
     return out
 
 
@@ -706,14 +724,42 @@ def resolve_engine(state, engine, now):
     return engine, None, ""
 
 
+def try_again_at(tail, now):
+    """The time in an engine's "try again at Oct 31st, 2026 2:38 PM" (local time; no year means the next such date, no time means
+    midnight that day), or None when there is none, it does not parse, is already past, or is further out than TRY_AGAIN_MAX_SECONDS."""
+    m = TRY_AGAIN_RE.search(tail)
+    if not m:
+        return None
+    if m.group("mon")[:3].lower() not in MONTHS:
+        return None
+    month, day = MONTHS.index(m.group("mon")[:3].lower()) + 1, int(m.group("day"))
+    hour, minute = 0, 0
+    if m.group("hour"):
+        hour, minute = int(m.group("hour")), int(m.group("min"))
+        if not (1 <= hour <= 12 and minute < 60):
+            return None
+        hour = hour % 12 + (12 if m.group("ampm").lower() == "p" else 0)
+    this_year = time.localtime(now).tm_year
+    for year in ([int(m.group("year"))] if m.group("year") else [this_year, this_year + 1]):
+        try:
+            when = datetime.datetime(year, month, day, hour, minute).timestamp()
+        except ValueError:
+            return None
+        if when > now:
+            return when if when - now <= TRY_AGAIN_MAX_SECONDS else None
+    return None
+
+
 def block_until(state, key, tail, now, seconds):
-    """Set state[key] after an engine reported a limit: a monthly-quota message blocks until 00:00 on the 1st of next month (local time),
-    any other limit for `seconds`. An existing later block stands."""
-    until = now + seconds
-    if MONTHLY_QUOTA_RE.search(tail):
-        t = time.localtime(now)
-        y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
-        until = time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1))
+    """Set state[key] after an engine reported a limit: the engine's own "try again at <date>" when it gives one, else a monthly-quota
+    message blocks until 00:00 on the 1st of next month (local time), any other limit for `seconds`. An existing later block stands."""
+    until = try_again_at(tail, now)
+    if until is None:
+        until = now + seconds
+        if MONTHLY_QUOTA_RE.search(tail):
+            t = time.localtime(now)
+            y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
+            until = time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1))
     state[key] = max(state.get(key, 0), until)
 
 
