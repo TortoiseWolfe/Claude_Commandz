@@ -128,6 +128,18 @@ Claude lanes start lean, because a lane re-reads everything it starts with on ev
 
 `--no-connectors` explicitly disables connectors even when the lane name or prompt would otherwise enable them.
 
+### The hub starts lean too
+
+The hub (`claude` started in `~/repos`) used to carry about 80K tokens before its first reply, against about 47K for a lane. `global/.claude/scripts/hub_lean.py` closes most of that gap with no new flags: it writes a project settings file in `~/repos/.claude/` (untracked, the workspace `.gitignore` is an allowlist) that Claude Code reads whenever a session starts there. The file switches off the plugins in lane.sh's `LANE_PLUGINS_OFF`, withholds the Artifact tools (`LANE_TOOLS_OFF`, via `permissions.deny`) and disconnects every claude.ai connector except Gmail, Google Calendar and Google Drive, the only three the hub called in its 16-19 Oct transcripts. Plugins and tools are read out of lane.sh, so there is one list. The hub keeps its own `CLAUDE.md`, user skills, slash commands and agents.
+
+```bash
+python3 ~/.claude/scripts/hub_lean.py --install   # write the file (silent when current); lane.sh runs this on every Claude lane start
+python3 ~/.claude/scripts/hub_lean.py --check     # exit 1 when missing or stale
+python3 ~/.claude/scripts/hub_lean.py --print     # show what it manages
+```
+
+On a new or second machine, run `--install` once after syncing the scripts (any lane start does it too). A claude.ai connector added to the account later loads in the hub until its name is added to `HUB_CONNECTORS_OFF` (`allowedMcpServers` ignores claude.ai connectors, so an allow-list is not possible). Measured on NX-01 with a one-line prompt in an interactive opus session in `~/repos`: first reply 80.4K tokens before, 53.5K after.
+
 For Codex and Copilot, the dispatcher checks repository roots in column 2 of `~/repos/hub/client-senders.tsv`, paths listed in `~/repos/hub/client-repos.txt`, and everything under `~/repos/CD/`. The text file has one path per line; blank lines and lines starting with `#` are ignored. Both list files must be readable or those engines are refused. `--allow-client` bypasses this check. The model argument is forwarded to Codex or Copilot only when it is not a Claude model name (`opus`, `sonnet`, `haiku`, or `fable`).
 
 ## Refresh (back up from live system)
