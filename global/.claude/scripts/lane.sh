@@ -42,7 +42,8 @@
 # Hand-off across hub sessions (lanes outlive the hub terminal; only WSL shutting down stops them):
 #   lane.sh --status                    one line per window in "lanes" (report yes/no, working/idle/error,
 #                                       last pane line, dir, model, engine/billing, session id) plus lanes with no window
-#                                       and no report from the last 3 days
+#                                       and no report from the last 3 days. "report:yes" is not "done": a lane stays open
+#                                       until its context is full (his rule, 19 Oct), so a report never means close the window.
 #   lane.sh --send <name> <text>        type <text> into the window, Enter, confirm it was submitted
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>

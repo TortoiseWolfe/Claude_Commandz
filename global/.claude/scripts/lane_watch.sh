@@ -124,7 +124,7 @@ while :; do
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ]; then
       note=$(stale_note "$l")
-      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it}"; hit=1; other=1
+      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open until its context is full"; hit=1; other=1
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
