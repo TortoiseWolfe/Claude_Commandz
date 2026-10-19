@@ -276,15 +276,39 @@ const DOCKER_WORDS = new Set(['docker', 'podman', 'docker-compose'])
 const baseName = (w: string) => w.split('/').pop() ?? w
 const COMPOSE_GLOBAL_VALUE = new Set(['-f', '--file', '-p', '--project-name', '--project-directory', '--profile', '--env-file', '--ansi', '--progress', '-H', '--host', '--context'])
 const DOCKER_GLOBAL_VALUE = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level'])
-const CPU_CAP = /^--(?:cpus|cpu-quota|cpuset-cpus)(?:=|$)/
+// a flag only caps the container when its value does: --cpus 0 and --cpu-quota -1 mean no limit, and $X is not known to be a number
+const CPU_FLAG = /^--(cpus|cpu-quota|cpuset-cpus)(?:=(.*))?$/
+const capValue = (flag: string, value: string | undefined): boolean => {
+  const v = unquote(value ?? '')
+  if (flag === 'cpus') return /^\d+(?:\.\d+)?$/.test(v) && Number(v) > 0
+  if (flag === 'cpu-quota') return /^\d+$/.test(v) && Number(v) > 0
+  return /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(v)
+}
 const isTimeout = (w: string) => /^g?timeout$/.test(baseName(w))
+// `timeout [options] DURATION` among the words in front of what runs: the duration must be a positive number of seconds, minutes, hours
+// or days, at most a day (`timeout 0` means no limit). Stops at the first shell or docker word.
+function timeoutIn(words: string[]): boolean {
+  for (let k = 0; k < words.length; k += 1) {
+    if (isTimeout(words[k])) {
+      let j = k + 1
+      while (j < words.length && words[j].startsWith('-')) j += ['-s', '-k', '--signal', '--kill-after'].includes(words[j]) ? 2 : 1
+      const m = /^(\d+(?:\.\d+)?)([smhd]?)$/.exec(unquote(words[j] ?? ''))
+      if (!m) return false
+      const seconds = Number(m[1]) * ({ s: 1, '': 1, m: 60, h: 3600, d: 86400 } as Record<string, number>)[m[2]]
+      return seconds > 0 && seconds <= 86400
+    }
+    if (SHELL_WORDS.has(baseName(words[k])) || DOCKER_WORDS.has(baseName(words[k]))) return false
+  }
+  return false
+}
 
 export const UNLIMITED_FIX =
   'add --cpus N (and a timeout in front), or run it through ~/.claude/scripts/docker-heavy.sh -- docker run ...'
 
 export type RunCall = { mode: 'run' | 'compose'; timeout: boolean; capped: boolean; service?: string; image?: string; files: string[]; projectDir?: string }
 
-export const composeKey = (c: Pick<RunCall, 'files' | 'projectDir' | 'service'>) => `${c.files.join('|')}::${c.projectDir ?? ''}::${c.service ?? ''}`
+// the files, project directory, service and the folder the command is in: the same service in another folder is another key
+export const composeKey = (c: Pick<RunCall, 'files' | 'projectDir' | 'service'>, cwd?: string) => `${c.files.join('|')}::${c.projectDir ?? ''}::${c.service ?? ''}::${cwd ?? ''}`
 
 // A segment that starts a container with `docker run` / `docker compose run` (also podman, docker-compose), looking only at the
 // options before the image. undefined: not one, or one run through docker-heavy.sh (it adds the limits, the lock and a timeout).
@@ -299,7 +323,7 @@ function parseRunCall(seg: string): RunCall | undefined {
   }
   const prefix = t.slice(0, at)
   if (prefix.some(w => baseName(w) === 'docker-heavy.sh')) return undefined
-  const timeout = prefix.some(isTimeout)
+  const timeout = timeoutIn(prefix)
   let i = at + 1
   let mode: 'run' | 'compose'
   const files: string[] = []
@@ -348,7 +372,8 @@ function parseRunCall(seg: string): RunCall | undefined {
       break
     }
     if (!w.startsWith('-')) break
-    if (CPU_CAP.test(w)) capped = true
+    const flag = CPU_FLAG.exec(w)
+    if (flag && capValue(flag[1], flag[2] ?? t[i + 1])) capped = true
     if (w.startsWith('--')) {
       if (!w.includes('=') && RUN_VALUE_ALL.has(w)) i += 1
     } else if (w.length === 2) {
@@ -367,14 +392,15 @@ export const runTargetOf = (seg: string): string | undefined => {
   return c?.image ?? c?.service
 }
 
-// Does this compose file give the service a cpus limit (cpus, deploy.resources.limits.cpus, cpu_quota, cpuset)? A line reading
-// only: anchors, `extends` and includes are not followed, so a limit set that way is not seen and the run stays held.
-export function composeServiceCapped(yaml: string, service: string): boolean {
+// What a compose file says about a service's CPU: 'capped' (cpus, cpu_quota or cpuset as a direct key, or deploy.resources.limits.cpus,
+// with a positive value; `${X:-4}` counts by its default), 'none' (a CPU key whose value is no cap, such as 0), 'absent'. Read as text:
+// anchors, `extends` and includes are not followed, so a limit set that way is 'absent' and the run stays held.
+export function composeServiceLimit(yaml: string, service: string): 'capped' | 'none' | 'absent' {
   const lines = yaml.split('\n')
   const live = (l: string) => l.trim() !== '' && !l.trim().startsWith('#')
   const indentOf = (l: string) => l.length - l.trimStart().length
   const top = lines.findIndex(l => live(l) && /^services\s*:\s*(#.*)?$/.test(l))
-  if (top < 0) return false
+  if (top < 0) return 'absent'
   let svcIndent = -1
   let start = -1
   for (let k = top + 1; k < lines.length && start < 0; k += 1) {
@@ -384,18 +410,31 @@ export function composeServiceCapped(yaml: string, service: string): boolean {
     if (svcIndent < 0) svcIndent = indentOf(l)
     if (indentOf(l) === svcIndent && /^["']?([^"':\s]+)["']?\s*:/.exec(l.trim())?.[1] === service) start = k
   }
-  if (start < 0) return false
+  if (start < 0) return 'absent'
+  const stack: { indent: number; key: string }[] = []
+  let found = false
   for (let k = start + 1; k < lines.length; k += 1) {
     const l = lines[k]
     if (!live(l)) continue
-    if (indentOf(l) <= svcIndent) break
-    const m = /^\s*(?:cpus|cpu_quota|cpuset|cpu_count|cpu_percent)\s*:\s*(.*?)\s*(?:#.*)?$/.exec(l)
-    if (m && !['', '0', '""', "''"].includes(m[1])) return true
+    const indent = indentOf(l)
+    if (indent <= svcIndent) break
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop()
+    const m = /^\s*["']?([\w.-]+)["']?\s*:\s*(.*?)\s*(?:#.*)?$/.exec(l)
+    if (!m) continue
+    const path = [...stack.map(x => x.key), m[1]].join('.')
+    stack.push({ indent, key: m[1] })
+    if (!['cpus', 'cpu_quota', 'cpuset', 'deploy.resources.limits.cpus'].includes(path)) continue
+    let v = unquote(m[2])
+    v = /^\$\{[A-Za-z_]\w*:?-([^}]*)\}$/.exec(v)?.[1] ?? v
+    found = true
+    if (path === 'cpuset' ? /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(v) : /^\d+(?:\.\d+)?$/.test(v) && Number(v) > 0) return 'capped'
   }
-  return false
+  return found ? 'none' : 'absent'
 }
 
-export type ComposeRun = { key: string; service: string; files: string[]; projectDir?: string; cwd?: string; cwdUnknown: boolean }
+export const composeServiceCapped = (yaml: string, service: string): boolean => composeServiceLimit(yaml, service) === 'capped'
+
+export type ComposeRun = { key: string; service: string; files: string[]; projectDir?: string; cwd?: string; needsCwd: boolean }
 
 // The `docker compose run` calls in a command that have no timeout in front, so the caller can read each one's compose file for a cpus limit.
 export function composeRunsOf(command: string, depth = 0, timeoutFront = false, scope: Scope = newScope(command, {})): ComposeRun[] {
@@ -406,7 +445,16 @@ export function composeRunsOf(command: string, depth = 0, timeoutFront = false, 
     trackCd(seg, command, scope)
     const call = parseRunCall(seg)
     if (call?.mode === 'compose' && call.service && !call.timeout && !timeoutFront) {
-      out.push({ key: composeKey(call), service: call.service, files: call.files, projectDir: call.projectDir, cwd: scope.cwd, cwdUnknown: scope.cwd === undefined && /\b(?:cd|pushd|popd)\b/.test(command) })
+      const absolute = (p: string) => p.startsWith('/') || p.startsWith('~/')
+      out.push({
+        key: composeKey(call, scope.cwd),
+        service: call.service,
+        files: call.files,
+        projectDir: call.projectDir,
+        cwd: scope.cwd,
+        // a relative -f or project directory, or the default files of the folder, depend on where the shell is
+        needsCwd: call.files.length === 0 || call.files.some(f => !absolute(f)) || (call.projectDir !== undefined && !absolute(call.projectDir)),
+      })
     }
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     const front = timeoutFront || segmentTimeout(seg)
@@ -418,11 +466,7 @@ export function composeRunsOf(command: string, depth = 0, timeoutFront = false, 
 
 // a timeout among the words in front of what the segment runs (`timeout 600 bash -c '...'`), which then covers the quoted text it runs
 function segmentTimeout(seg: string): boolean {
-  for (const w of seg.split(/\s+/)) {
-    if (isTimeout(w)) return true
-    if (SHELL_WORDS.has(baseName(w)) || DOCKER_WORDS.has(baseName(w))) return false
-  }
-  return false
+  return timeoutIn(seg.split(/\s+/).filter(Boolean))
 }
 
 // `cd /full/path` before the command gives it a known $PWD. Anything that may have run in another shell (a "(" in the
@@ -740,7 +784,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       }
     }
     const call = parseRunCall(seg)
-    if (call && !call.timeout && !scope.timeout && !(call.mode === 'run' ? call.capped : (env.composeLimited ?? []).includes(composeKey(call)))) add('docker run without limits', false)
+    if (call && !call.timeout && !scope.timeout && !(call.mode === 'run' ? call.capped : (env.composeLimited ?? []).includes(composeKey(call, scope.cwd)))) add('docker run without limits', false)
     if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune` as HeldKind, false)
     if (/^docker\s+volume\s+(rm|remove)\b/.test(seg)) add('docker volume rm', false)
     if (/^(docker\s+compose|docker-compose)\b/.test(seg) && bare.includes('down')) {

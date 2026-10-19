@@ -611,6 +611,46 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     expect(seen.asked).toContain('docker run without limits')
     expect(r.deny).toContain('refused at the prompt')
   })
+  const WEB4 = 'services:\n  web:\n    image: n\n    cpus: 4\n'
+  const RUN = 'cd /srv/app && docker compose run --rm web npm test'
+  test('review of #75: an override file that sets cpus: 0 uncaps the service, so the run is held', async ($, on) => {
+    const { seen } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/compose.override.yaml': 'services:\n  web:\n    cpus: 0\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: an override that only adds other keys leaves the base cap standing', async ($, on) => {
+    const { seen, r } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/compose.override.yaml': 'services:\n  web:\n    image: m\n' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('review of #75: -f names the files, so the default file is not read', async ($, on) => {
+    const { seen } = await go($, on, 'cd /srv/app && docker compose -f ci.yml run --rm web x', {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/ci.yml': 'services:\n  web:\n    image: n\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: COMPOSE_FILE in the command or the environment holds the run', async ($, on) => {
+    const a = await go($, on, 'cd /srv/app && COMPOSE_FILE=other.yml docker compose run --rm web x', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(a.seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: COMPOSE_FILE in the environment holds the run', async ($, on) => {
+    const { seen } = await go($, on, RUN, { COMPOSE_FILE: 'other.yml' }, { '/srv/app/compose.yaml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: --env-file, --profile and a project env file that sets COMPOSE_FILE hold the run', async ($, on) => {
+    const a = await go($, on, 'cd /srv/app && docker compose --env-file x run --rm web y', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(a.seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: a project env file that sets COMPOSE_FILE holds the run', async ($, on) => {
+    const { seen } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, ['/srv/app/.' + 'env']: 'COMPOSE_FILE=other.yml\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: a relative compose file with no cd before it is held, because the guard cannot know the folder', async ($, on) => {
+    const { seen } = await go($, on, 'docker compose -f ci.yml run --rm web x', {}, { '/srv/app/ci.yml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: an absolute compose file needs no cd', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker compose -f /srv/app/ci.yml run --rm web x', {}, { '/srv/app/ci.yml': WEB4 })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
   test('a compose run whose file cannot be found, or a cd the guard cannot follow, is held', async ($, on) => {
     const { seen } = await go($, on, 'cd "$X" && docker compose run --rm web npm test', {}, { '/srv/app/compose.yaml': 'services:\n  web:\n    cpus: 4\n' })
     expect(seen.asked).toContain('docker run without limits')

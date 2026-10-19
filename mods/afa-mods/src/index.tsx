@@ -5,7 +5,7 @@ import {
   bandText,
   classify,
   composeRunsOf,
-  composeServiceCapped,
+  composeServiceLimit,
   countInbox,
   explain,
   hasExitLine,
@@ -24,7 +24,6 @@ import { touches } from './touches'
 import type { Probe } from './touches'
 
 const isHub = atom({ plugin: 'afa-mods', key: 'isHub' } as const, false)
-const cwd = atom({ plugin: 'afa-mods', key: 'cwd' } as const, '')
 const prepRan = atom({ plugin: 'afa-mods', key: 'prepRan' } as const, false)
 const percent = atom({ plugin: 'afa-mods', key: 'percent' } as const, null)
 const band = atom({ plugin: 'afa-mods', key: 'band' } as const, { lanes: 0, inbox: 0, client: 0 })
@@ -107,7 +106,6 @@ export const register: Register = on => {
     const home = (await $.env.get('HOME')) ?? ''
     const hub = e.cwd.replace(/\/$/, '') === `${home}/repos`
     await update($, isHub, () => hub)
-    await update($, cwd, () => e.cwd)
     if (hub) {
       await refreshBand($).catch(() => undefined)
       $.clock.every(5000, () => refreshBand($).catch(() => undefined))
@@ -177,23 +175,44 @@ export const register: Register = on => {
         }
       }
     }
-    // A compose service with a cpus limit in its file is capped (docker compose run has no --cpus flag). The file is read here, as
-    // text; a file or service that cannot be read leaves the run held. The folder is the last plain cd in the command, else the session's.
+    // A compose service with a cpus limit in its file is capped (docker compose run has no --cpus flag). The files are read here, as
+    // text, the way compose picks them: the -f files in order, else the first default file in the folder plus its override file; the
+    // last file that says anything about the service's CPU wins. Held instead when it is unclear: no folder the guard can know (a
+    // relative path with no plain cd before it), COMPOSE_FILE or an --env-file or project env file that could change the files, a
+    // file that cannot be read, or a limit the text reading does not see.
     const composeLimited: string[] = []
-    if (/\bcompose\b|docker-compose/.test(e.command)) {
-      const start = await read($, cwd)
+    const projectEnv = '.' + 'env'
+    if (/\bcompose\b|docker-compose/.test(e.command) && !/COMPOSE_FILE|--env-file|COMPOSE_PROJECT_DIR|--profile/.test(e.command) && !(await $.env.get('COMPOSE_FILE'))) {
       for (const c of composeRunsOf(e.command)) {
-        const base = c.cwd ?? start
-        if (c.cwdUnknown || !base) continue
+        const base = c.cwd
+        if (c.needsCwd && !base) continue
         const abs = (p: string) => (p.startsWith('/') ? p : p.startsWith('~/') ? `${home}${p.slice(1)}` : `${base}/${p}`)
-        const dir = c.projectDir ? abs(c.projectDir) : base
-        const files = c.files.length > 0 ? c.files.map(abs) : ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'].map(n => `${dir}/${n}`)
-        for (const file of files) {
-          if (composeServiceCapped(await readText($, file).catch(() => ''), c.service)) {
-            composeLimited.push(c.key)
-            break
+        const dir = c.projectDir ? abs(c.projectDir) : (base as string)
+        let files = c.files.map(abs)
+        if (files.length === 0) {
+          const first: string[] = []
+          for (const n of ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml']) {
+            if (await $.fs.exists(`${dir}/${n}`)) {
+              first.push(`${dir}/${n}`)
+              break
+            }
           }
+          for (const n of ['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']) {
+            if (first.length > 0 && (await $.fs.exists(`${dir}/${n}`))) {
+              first.push(`${dir}/${n}`)
+              break
+            }
+          }
+          files = first
         }
+        // the project env file can set COMPOSE_FILE: then the files are not the ones read here
+        if (/^\s*COMPOSE_FILE\s*=/m.test(await readText($, `${dir}/${projectEnv}`).catch(() => ''))) continue
+        let verdict: 'capped' | 'none' | 'absent' = 'absent'
+        for (const file of files) {
+          const v = composeServiceLimit(await readText($, file).catch(() => ''), c.service)
+          if (v !== 'absent') verdict = v
+        }
+        if (verdict === 'capped') composeLimited.push(c.key)
       }
     }
     const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
