@@ -319,7 +319,8 @@ def render(sections, now, machine, cap):
         out = [f"# Hub status, built {_stamp(now)} on {machine}",
                "Private: stays on this machine, never sent to OpenClaw. A script built it with no model; the sources are "
                "lane.sh, lane reports, the muse inbox, the roadmap issue, git, tidy-report and the budget report. "
-               "Read this instead of the roadmap body; open a source only for the item you are working on.", ""]
+               "Read this instead of the roadmap body; open a source only for the item you are working on. "
+               "A lane report does not end its lane: lanes stay open until their context is full.", ""]
         for title, lines in sections:
             out.append(f"## {title}")
             out.extend(lines)
