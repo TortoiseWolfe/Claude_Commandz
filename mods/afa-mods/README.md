@@ -47,7 +47,10 @@ judged like a host `rm` of it: held, unless it is own scratch, and a lane nobody
 folder or a worktree. A mount of `~`, `$HOME` or `~/repos` therefore still holds. The source resolves through `~`, `$HOME`,
 variables the command sets to a plain path, and `$PWD` after a plain `cd /full/path` (not after a subshell or `pushd`). A source
 that does not resolve (`$X`, `$(pwd)`, backticks) still holds and the question names the mount. A path no mount covers, a
-climb out of a mount with `..`, and a relative path still hold. `docker exec` has no mounts to read and is unchanged.
+climb out of a mount with `..`, and a relative path still hold. Only the options before the image are read, so a `-v` in the
+container's own arguments is not a mount. When the list may be incomplete (compose run, `--volumes-from`, a flag not read) a
+path no mount covers is held, not assumed to be the container's own scratch. A named volume that `docker volume inspect` reports
+as bound to a host folder is judged as that folder. `docker exec` has no mounts to read and is unchanged.
 The classifier judges what the command itself would run: it does not match text inside quoted
 message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file (including
 `git commit -m "$(cat <<'EOF' ...)"`), or

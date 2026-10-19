@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { classify, hostRmSegment } from './lib'
+import { classify, hostRmSegment, namedVolumesOf } from './lib'
 import type { Hold } from './lib'
 import { touches } from './touches'
 import type { Probe } from './touches'
@@ -164,6 +164,57 @@ describe('rm -rf inside docker run: the mounts say what it touches', () => {
     expect(hostRmSegment(held(`docker run --rm -v data:/w alpine sh -c 'rm -rf /w/a /etc/b'`)[0])).toMatchObject({ reason: expect.stringContaining('/etc/b') })
     expect(hostRmSegment(held(`docker run --rm -v $X:/w alpine sh -c 'rm -rf /w/a'`)[0])).toMatchObject({ reason: expect.stringContaining('"$X:/w"') })
     expect(hostRmSegment(held('rm -rf /home/t/x')[0])).toEqual({ segment: 'rm -rf /home/t/x' })
+  })
+})
+
+// Automated security review of #74
+describe('review of #74: the mount reading fails closed', () => {
+  test('only the options before the image are mounts: a -v in the container\'s own arguments is not one', () => {
+    const holds = held(`docker run --rm -v ${HOME}:/w alpine tool -v data:/w/deep sh -c 'rm -rf /w/deep/x'`)
+    expect(holds.map(h => h.kind)).toEqual(['rm -rf'])
+    expect(holds[0].container?.[0]).toMatchObject({ kind: 'host', host: `${HOME}/deep/x` })
+    expect(held(`docker run --rm -v ${HOME}:/w alpine -- -v data:/w/deep sh -c 'rm -rf /w/deep/x'`)[0].container?.[0].kind).toBe('host')
+  })
+  test('value flags before -v are skipped, not read as the image', () => {
+    for (const before of ['-e A=b', '--name n', '-p 80:80', '-w /w', '--network host', '-u 0', '--env=A=b', '-it', '--rm -d']) {
+      const holds = held(`docker run ${before} -v ${HOME}:/h alpine sh -c 'rm -rf /h/x'`)
+      expect(holds[0]?.container?.[0].kind, before).toBe('host')
+    }
+  })
+  test('grouped short flags that end in v, and -v with its value attached, are read', () => {
+    for (const flags of ['-dv', '-itv', '-iv', '-v' + HOME + ':/h', '-it -v' + HOME + ':/h']) {
+      const text = flags.includes(':') ? `docker run ${flags}` : `docker run ${flags} ${HOME}:/h`
+      const holds = held(`${text} alpine sh -c 'rm -rf /h/x'`)
+      expect(holds[0]?.container?.[0], flags).toMatchObject({ kind: 'host', host: `${HOME}/x` })
+    }
+  })
+  test('when the mount list may be incomplete, a path no mount covers is not treated as the container\'s own scratch', () => {
+    for (const command of [
+      `docker compose run app sh -c 'rm -rf /tmp/x'`,
+      `docker-compose run --rm app sh -c 'rm -rf /tmp/x'`,
+      `docker run --rm --volumes-from data alpine sh -c 'rm -rf /tmp/x'`,
+      `docker run --rm --weird-flag -v data:/w alpine sh -c 'rm -rf /tmp/x'`,
+      `docker run --rm --mount type=bind,target=/w alpine sh -c 'rm -rf /tmp/x'`,
+      `docker run --rm -v data alpine sh -c 'rm -rf /tmp/x'`,
+    ]) {
+      expect(held(command).map(h => h.kind), command).toEqual(['rm -rf'])
+    }
+    // a complete list: the container's own /tmp is still scratch
+    expect(held(`docker run --rm -v data:/w alpine sh -c 'rm -rf /tmp/x'`)).toEqual([])
+    expect(held(`docker run --rm alpine sh -c 'rm -rf /tmp/x'`)).toEqual([])
+  })
+  test('a named volume that docker says is a host folder is that folder', () => {
+    const env = { home: HOME, volumeDevices: { data: `${HOME}/p` } }
+    const holds = classify(`docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, 0, env)
+    expect(holds.map(h => h.kind)).toEqual(['rm -rf'])
+    expect(holds[0].container?.[0]).toMatchObject({ kind: 'host', folder: `${HOME}/p`, host: `${HOME}/p/x` })
+    expect(classify(`docker run --rm -v other:/w alpine sh -c 'rm -rf /w/x'`, 0, env)).toEqual([])
+  })
+  test('namedVolumesOf lists the volume names a command mounts, through sh -c and substitutions', () => {
+    expect(namedVolumesOf(`docker run -v data:/w -v ${HOME}:/h --mount source=cache,target=/c alpine true`).sort()).toEqual(['cache', 'data'])
+    expect(namedVolumesOf(`bash -c "docker run -v data:/w alpine true"`)).toEqual(['data'])
+    expect(namedVolumesOf(`docker run -v "$(pwd):/h" -v data:/w alpine true`)).toEqual(['data'])
+    expect(namedVolumesOf('ls -la')).toEqual([])
   })
 })
 
