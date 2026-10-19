@@ -98,6 +98,10 @@ class RunShRefusals(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
 
 
+# Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in. It pulls a Debian image, downloads a whisper model and runs a
+# full transcription in Docker, which is heavy batch work on the one shared engine (it belongs behind docker-heavy.sh, not in every
+# suite run), and it writes ~/meetings/test. The argument and path checks above run every time. Run it by hand after changing
+# meeting_transcribe: MEETING_SMOKE=1 python3 -m pytest tests/test_meeting_transcribe.py
 @unittest.skipUnless(os.environ.get("MEETING_SMOKE") == "1", "set MEETING_SMOKE=1")
 class Smoke(unittest.TestCase):
     def test_two_track_end_to_end(self):

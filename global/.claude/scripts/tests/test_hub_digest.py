@@ -265,6 +265,15 @@ class Page(unittest.TestCase):
         self.assertIn("## Lanes running", page)
         self.assertIn("Next session should", page)
 
+    def test_a_busy_page_keeps_the_next_session_line(self):
+        # 19 Oct 6:05 PM: seven open questions and seventeen lanes filled the page, and the cap cut the roadmap from its end, which
+        # was the "Next session should" line the prime prompt tells the hub to start from.
+        qs = "".join("oc-%08x | %d min | deferred | %s\n" % (i, i, "a long question about the porch columns " * 4) for i in range(30))
+        lanes = "\n".join("lane-%02d: idle, report written" % i for i in range(60))
+        page = self.build(open_questions_text=qs, lane_status=lanes)
+        self.assertLessEqual(len(page.encode()), hd.CAP_DEFAULT)
+        self.assertIn("Next session should: Read the reports and merge lane-a.", page)
+
     def test_no_secret_shaped_text_reaches_the_page(self):
         secret = fake("sk-")
         inbox = f"- [ ] 2026-10-14 10:00 | Job: use {secret} for it | https://example.test/reset/abc | r-1\n"
