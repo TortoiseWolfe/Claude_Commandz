@@ -972,8 +972,8 @@ class Sweep(Base):
         self.assertIn("> Listed three files.", self.host.chats[-1])
         self.assertIn("not an instruction", self.host.chats[-1])
         self.assertNotIn("type close", self.host.chats[-1])  # he never closes a lane by hand
-        self.assertIn("The lane is closed", self.host.chats[-1])
-        self.assertEqual(self.host.killed, [lane])
+        self.assertIn("The lane stays open", self.host.chats[-1])
+        self.assertEqual(self.host.killed, [])  # a Claude lane stays open until its context is full
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertEqual(self.host.digests, 1)  # after the report
         n = len(self.host.chats)
@@ -1669,14 +1669,14 @@ if __name__ == "__main__":
 
 
 class SelfClosing(Base):
-    def test_a_delivered_report_kills_the_window_and_marks_the_lane_closed(self):
+    def test_a_delivered_report_leaves_a_claude_window_open_and_marks_the_lane_closed(self):
         self.start("client-app")
         lane = self.lane_names()[0]
         self.assertIn(lane, self.host.wins)
         self.write_report(lane)
         dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([lane], "closed"))
-        self.assertNotIn(lane, self.host.wins)
+        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "closed"))
+        self.assertIn(lane, self.host.wins)  # he keeps talking to it: only a full context closes it
 
     def test_a_note_that_could_not_be_posted_leaves_the_lane_open_for_the_next_sweep(self):
         self.start("client-app")
@@ -1687,7 +1687,7 @@ class SelfClosing(Base):
         self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "reported"))
         del self.host.inject
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
-        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([lane], "closed"))
+        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "closed"))
 
     def answered_lane(self, ask_id="oc-aaaaaaaa", line_id=None):
         """A lane started for an ask, with that ask's line open in the muse inbox; the lane's report is written."""
