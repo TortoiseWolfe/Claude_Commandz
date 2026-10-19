@@ -312,6 +312,13 @@ class Wiring(unittest.TestCase):
         self.assertNotRegex(sh.split("REMOTE")[1] if "REMOTE" in sh else "", r"hub-digest")
 
 
+class Decode(unittest.TestCase):
+    def test_output_that_is_not_utf8_does_not_crash_the_digest(self):
+        # 19 Oct: lane.sh --status carried wsl.exe's UTF-16 error text while the bridge was down, and the digest died on it.
+        out = hd._run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'lane \\xff\\xfe ok')"])
+        self.assertTrue(out.startswith("lane ") and out.endswith(" ok"), out)
+
+
 # Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in, so a default run reports 1 skip and is not
 # a clean pass. It runs hub_digest.py against this machine's live gh call, lane.sh, inbox and roadmap, so it needs
 # NX-01's state and network and would fail on a fresh restore or the tower. Every behaviour it checks (sections,
