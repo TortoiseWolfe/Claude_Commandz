@@ -90,10 +90,13 @@ class Alarm(Drops):
         self.assertEqual(self.inbox_lines(), [])
         self.assertEqual(self.pending(), [])
 
-    def test_a_readable_session_that_never_shows_his_message_is_an_answered_chat_not_an_alarm(self):
+    def test_a_readable_session_that_never_shows_his_message_files_it_once_it_is_old_enough(self):
         self.go([tr.msg("assistant", "unrelated")], now=NOW)
+        self.assertEqual(len(self.pending()), 1)  # young: it may still arrive
         self.poll([tr.msg("assistant", "unrelated")], ASK_TS + pk.REPLY_WAIT + 30)
-        self.assertEqual(self.inbox_lines(), [])
+        self.assertEqual(len(self.inbox_lines()), 1)  # 18 Oct: a "none" was a silent drop; now it is filed with his words
+        self.assertIn(json.dumps(self.TEXT), self.inbox_lines()[0])
+        self.assertIn("no reply to it could be found", self.inbox_lines()[0])
         self.assertEqual(self.pending(), [])
 
     def test_the_alarm_runs_when_the_folder_was_empty_too(self):
@@ -161,3 +164,44 @@ class Crash(Drops):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DroppedNone18Oct(Drops):
+    """18 Oct 20:58 and 20:00: two of his messages were lost with no ask, no log line and no confirmation. find_reply said "none"
+    and settle_pending dropped the entry. Replayed with the chat's shape (role, order, stamps, marker line; neutral words)."""
+
+    def test_a_compaction_before_the_reply_still_runs_the_marker(self):
+        h = [tr.him(self.TEXT, ASK_TS + 1), tr.msg("system", "Compaction", ASK_TS + 4.7, provider=None),
+             tr.msg("assistant", tr.REPLY, ASK_TS + 4.99)]
+        self.go(h)
+        self.assertEqual(len(self.host.started), 1)
+        self.assertEqual(self.pending(), [])
+
+    def test_a_turn_that_ended_before_a_reply_is_filed_when_the_wait_is_over(self):
+        h = [tr.him(self.TEXT, ASK_TS + 1), tr.msg("custom", "turn ended before a reply", ASK_TS + 2, provider=None)]
+        self.go(h)
+        self.assertEqual((len(self.pending()), self.inbox_lines()), (1, []))  # young: may still be answered
+        self.poll(h, ASK_TS + pk.REPLY_WAIT + 30)
+        self.assertEqual(len(self.inbox_lines()), 1)
+        self.assertIn(json.dumps(self.TEXT), self.inbox_lines()[0])
+        self.assertEqual(self.pending(), [])
+        self.assertTrue(self.ctx.wake_path.exists())
+        self.assertEqual(len(self.open_asks()), 1)
+        self.nothing()
+
+    def test_a_none_result_files_the_message_instead_of_dropping_it(self):
+        with mock.patch.object(pk, "find_reply", return_value=("none", "a stand-in reason")):
+            self.go(self.flow())
+        lines = self.inbox_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(json.dumps(self.TEXT), lines[0])
+        self.assertIn("a stand-in reason", lines[0])
+        self.assertEqual(self.pending(), [])
+        self.nothing()
+
+    def test_a_none_result_is_filed_once_however_many_polls_follow(self):
+        with mock.patch.object(pk, "find_reply", return_value=("none", "x")):
+            self.go(self.flow())
+            self.poll(self.flow(), NOW + 60)
+            self.poll(self.flow(), NOW + 120)
+        self.assertEqual(len(self.inbox_lines()), 1)
