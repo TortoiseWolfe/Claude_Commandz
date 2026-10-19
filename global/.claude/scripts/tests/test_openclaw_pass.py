@@ -146,7 +146,9 @@ class Routing(PassBase):
         kind, line = self.act("start nowhere: x")
         self.assertEqual(self.host.spawned, [])
         self.assertIn("no repo called that", line)
-        self.assertEqual(dp.asks_of(self.state()), {})
+        # the refusal is not a pass, but his words still reach the hub (19 Oct: no message ends undelivered)
+        asks = dp.asks_of(self.state())
+        self.assertEqual([(a["status"], a["pass"]) for a in asks.values()], [("deferred", None)])
 
     def test_the_same_ask_is_not_handed_over_twice(self):
         self.hand()
