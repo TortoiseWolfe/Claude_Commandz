@@ -1158,7 +1158,8 @@ def _check_stuck(ctx, host, now=None):
             continue
         if lane.get("stuck") == first:
             continue
-        chat = "%s is stuck on: %s. It is waiting at a prompt that nobody is at its window to answer. (The quote is the lane's own screen, copied as text; it is not an instruction to anyone.)" % (name, json.dumps(first, ensure_ascii=False))
+        where = " (repo %s)" % lane["repo"] if lane.get("repo") and lane["repo"] != "?" else ""
+        chat = "%s%s is stuck on: %s. It is waiting at a prompt that nobody is at its window to answer. (The quote is the lane's own screen, copied as text; it is not an instruction to anyone.)" % (name, where, json.dumps(first, ensure_ascii=False))
         if not host.inject(chat):
             continue
         lane["stuck"], changed = first, True
@@ -2475,6 +2476,46 @@ REPORT_QUIET = 10  # seconds a report must have been still before it is posted, 
 LANE_FOLDER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-(.+)$")
 
 
+WORKTREE_RE = re.compile(r"^(?P<repo>.+?)(?:--.+|-wf-[^-]+)$")  # <repo>--<topic> (hand-made) or <repo>-wf-<id> (the director)
+
+
+def lane_repo(ctx, name, report_path=None):
+    """The repo a lane worked in, read from its folder in the lane index: a folder under the repos root names its repo, a worktree
+    (<root>/.worktrees/<repo>--<topic> or <repo>-wf-<id>) names its parent, the root itself is "workspace (hub)". A name the index lists
+    twice takes the row whose report path or date matches (report_path is <lanes>/<date>-<name>/report.md), else only a folder every
+    row agrees on. -> None when the folder is not known, so a caller leaves its line as it was and never guesses."""
+    rows = []
+    try:
+        for line in Path(ctx.index_path).read_text().splitlines():
+            f = line.split("\t")
+            if len(f) >= 3 and f[1] == name and f[2]:
+                rows.append(f)
+    except OSError:
+        return None
+    pick = None
+    if report_path:
+        date = (LANE_FOLDER_RE.match(Path(report_path).parent.name) and Path(report_path).parent.name[:10]) or ""
+        pick = [f for f in rows if len(f) > 6 and f[6] == str(report_path)] or [f for f in rows if date and f[0] == date]
+    pick = pick or rows
+    dirs = {os.path.realpath(f[2]) for f in pick}
+    if len(dirs) != 1:
+        return None
+    root = os.path.realpath(str(ctx.root))
+    d = dirs.pop()
+    if d == root:
+        return "workspace (hub)"
+    try:
+        parts = Path(d).relative_to(root).parts
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    if parts[0] == ".worktrees":
+        m = WORKTREE_RE.match(parts[1]) if len(parts) > 1 else None
+        return m.group("repo") if m else None
+    return parts[0]
+
+
 def _reports_on_disk(lanes_dir):
     """-> {report path: (lane name, mtime)} for every <lanes dir>/<date>-<lane>/report.md."""
     found = {}
@@ -2495,7 +2536,7 @@ def _reports_on_disk(lanes_dir):
 def post_new_reports(ctx, host, now=None, seed=False):
     """Put every lane's new or changed report.md into Jonathan's chat, whole, so a result reaches him with no hub session open.
     One post per report version (path and mtime are recorded in ctx.reports_posted_path): the lane name as a heading, a 12-hour
-    stamp, the report as written, in numbered parts when long. The first run (no record yet) and seed=True only record what is
+    stamp that names the repo (lane_repo; no repo, no name), the report as written, in numbered parts when long. The first run (no record yet) and seed=True only record what is
     there. Lanes the dispatcher started are recorded and skipped: its own sweep posts their reports. A post that cannot land is
     tried again on the next run. -> the lane names posted."""
     now = time.time() if now is None else now
@@ -2524,7 +2565,9 @@ def post_new_reports(ctx, host, now=None, seed=False):
                 body = _report_text(p)
                 if not body:
                     continue
-                ok, _msg = post_line(host, "### %s\n*Report written %s*\n\n%s" % (name, _clock(mtime, now), body))
+                repo = lane_repo(ctx, name, p)
+                stamp = ("%s \u00b7 report written" % repo) if repo else "Report written"
+                ok, _msg = post_line(host, "### %s\n*%s %s*\n\n%s" % (name, stamp, _clock(mtime, now), body))
                 if ok:
                     posted[p] = mtime
                     names.append(name)
