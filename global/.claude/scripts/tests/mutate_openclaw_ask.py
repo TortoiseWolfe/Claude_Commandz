@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes", "test_openclaw_nodrop", "test_openclaw_hublanes", "test_openclaw_queue", "test_reports_reach_him"]
+TESTS = ["test_state_guard", "test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes", "test_openclaw_nodrop", "test_openclaw_hublanes", "test_openclaw_queue", "test_reports_reach_him"]
 
 MUTANTS = [
     # the outbox: one post at a time, never lost (19 Oct 4:59 PM and 5:03-5:24 PM)
