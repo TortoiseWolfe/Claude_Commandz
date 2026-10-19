@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { classify, hostRmSegment, namedVolumesOf } from './lib'
+import { classify, hostRmSegment, namedVolumesOf, newVolumeIsPlain } from './lib'
 import type { Hold } from './lib'
 import { touches } from './touches'
 import type { Probe } from './touches'
@@ -218,6 +218,21 @@ describe('review of #74: the mount reading fails closed', () => {
       expect(holds.map(h => h.kind), src).toEqual(['rm -rf'])
     }
     expect(namedVolumesOf(`docker run -v -data:/w alpine true`)).toEqual([])
+  })
+  test('a volume docker does not know is new only when the command is plainly one docker run', () => {
+    expect(newVolumeIsPlain(`docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`)).toBe(true)
+    expect(newVolumeIsPlain(`cd /x && docker run --rm -v data:/w alpine rm -rf /w/x`)).toBe(true)
+    for (const command of [
+      `docker volume create --opt device=/p data && docker run -v data:/w alpine rm -rf /w/x`,
+      `docker  "volume" 'create' data; docker run -v data:/w alpine rm -rf /w/x`,
+      `d=docker; $d volume create data; docker run -v data:/w alpine rm -rf /w/x`,
+      `docker compose up -d && docker run -v data:/w alpine rm -rf /w/x`,
+      `docker run -v data:/w -v /var/run/docker.sock:/s alpine rm -rf /w/x`,
+      `docker run -v data:/w alpine rm -rf /w/x; $(echo docker) volume rm data`,
+      `eval "$X"; docker run -v data:/w alpine rm -rf /w/x`,
+      `DOCKER_HOST=tcp://h docker run -v data:/w alpine rm -rf /w/x`,
+      `ls`,
+    ]) expect(newVolumeIsPlain(command), command).toBe(false)
   })
   test('a named volume that docker says is a host folder is that folder', () => {
     const env = { home: HOME, volumeDevices: { data: `${HOME}/p` } }
