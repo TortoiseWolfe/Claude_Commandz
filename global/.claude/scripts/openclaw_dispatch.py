@@ -259,6 +259,198 @@ def report_failure(body):
 
 
 # ---------------------------------------------------------------------------------------------------------
+# The outbox: everything the hub sends to his chat (post answers, say, lane reports, [hub] lines) goes through one queue.
+# 19 Oct 4:59 PM: "you need a que to give them back to me one at a time instead of overwhelm me all at once and they all get lost".
+# One post is shown at a time, oldest first, each ending with how many still wait. The next one shows when he says "next" or answers.
+# A post that does not land stays first and is tried again with a growing pause (19 Oct 5:03-5:24 PM the bridge to the gateway failed
+# on and off for twenty minutes, and four answers sat in a file by hand); once it has failed for QUEUE_WAKE_AFTER, `queue check` (run by
+# lane_watch.sh) wakes the hub. A post leaves the queue only after it was shown and he moved on: nothing is cut or dropped.
+
+QUEUE_BACKOFF = (30, 60, 120, 240, 480, 600)  # seconds before try 2, 3, ...; then every 10 minutes for as long as it takes
+QUEUE_WAKE_AFTER = 15 * 60
+QUEUE_REWAKE = 60 * 60
+QUEUE_DONE_KEEP = 500  # posts he has already seen and moved past, kept for the record
+NEXT_RE = re.compile(r"^\s*(?:ok(?:ay)?[,.\s]+)?(?:next|next one|next please|go on|continue)\s*[.!]*\s*$", re.I)
+
+
+def chat_queue_path():
+    """The live outbox, or in a live test the file beside the test's state file (so a test never touches his queue). None when there is
+    no chat to post to (a malformed test session)."""
+    if chat_session() is None:
+        return None
+    p = state_file()
+    if p == STATE / "openclaw-dispatch.json":
+        return STATE / "openclaw-chat-queue.json"
+    return p.with_name(p.stem + ".chat-queue.json")
+
+
+@contextlib.contextmanager
+def _queue_lock(path, which="lock", block=True):
+    lp = Path(str(path) + "." + which)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    with open(lp, "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def queue_load(path):
+    p = Path(path)
+    try:
+        q = json.loads(p.read_text())
+        if not isinstance(q, dict):
+            raise ValueError("not an object")
+    except FileNotFoundError:
+        q = {}
+    except (OSError, ValueError) as e:  # kept aside, never written over: its posts are still on disk for the hub
+        aside = p.with_name("%s.unreadable-%d" % (p.name, int(time.time())))
+        try:
+            p.replace(aside)
+        except OSError:
+            raise SystemExit("chat queue %s is unreadable (%s) and could not be moved aside" % (p, e))
+        _append(STATE / "openclaw-inject.log", "%s chat queue unreadable (%s): moved to %s" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e, aside))
+        q = {}
+    q.setdefault("items", [])
+    q.setdefault("done", [])
+    q.setdefault("seq", 0)
+    return q
+
+
+def queue_save(path, q):
+    p = Path(path)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(q, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def queue_add(path, text, now, source="hub"):
+    """Put one post at the end of the outbox. -> its id. Raises OSError when it cannot be written."""
+    with _queue_lock(path):
+        q = queue_load(path)
+        q["seq"] += 1
+        q["items"].append({"id": q["seq"], "text": text, "source": source, "added": now, "shown": None, "attempts": 0,
+                           "next_try": now, "failing_since": None, "woke": None})
+        queue_save(path, q)
+        return q["seq"]
+
+
+def queue_tail(waiting):
+    if waiting <= 0:
+        return "\n\n(Nothing else waiting.)"
+    return "\n\n(%d more waiting. Say next for the next one.)" % waiting
+
+
+def queue_pump(path, send, now):
+    """Show the first post when nothing is showing and its next try is due. send(text) -> True when it landed.
+    When the post showing said nothing else was waiting and something now is, one short line says so (once).
+    -> "shown" | "failed" | "showing" (one is up, waiting for him) | "nudged" | "later" (a failed one, not due yet) | "empty" | "busy"."""
+    with _queue_lock(path, "pump", block=False) as mine:
+        if not mine:
+            return "busy"  # another process is sending the first post right now
+        with _queue_lock(path):
+            q = queue_load(path)
+            if not q["items"]:
+                return "empty"
+            head = q["items"][0]
+            waiting = len(q["items"]) - 1
+            if head["shown"] and not (waiting and head.get("shown_waiting") == 0 and not head.get("nudged")):
+                return "showing"
+            if not head["shown"] and head["next_try"] > now:
+                return "later"
+            hid, text, nudge = head["id"], head["text"], bool(head["shown"])
+        if nudge:  # it said nothing else was waiting, and now something is: one short line, once, so he knows to say next
+            if send(queue_tail(waiting).strip()):
+                with _queue_lock(path):
+                    q = queue_load(path)
+                    for i in q["items"]:
+                        if i["id"] == hid:
+                            i["nudged"] = now
+                    queue_save(path, q)
+                return "nudged"
+            return "showing"
+        try:
+            ok = bool(send(text + queue_tail(waiting)))
+        except Exception as e:  # whatever went wrong, the post stays first and is tried again
+            _append(STATE / "openclaw-inject.log", "%s chat queue post %d raised %s" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), hid, repr(e)[:300]))
+            ok = False
+        with _queue_lock(path):
+            q = queue_load(path)
+            head = next((i for i in q["items"] if i["id"] == hid), None)
+            if head is None:
+                return "empty"
+            if ok:
+                head["shown"], head["shown_waiting"], head["failing_since"] = now, waiting, None
+            else:
+                head["attempts"] += 1
+                head["failing_since"] = head["failing_since"] or now
+                head["next_try"] = now + QUEUE_BACKOFF[min(head["attempts"], len(QUEUE_BACKOFF)) - 1]
+            queue_save(path, q)
+        return "shown" if ok else "failed"
+
+
+def queue_next(path, send, now, why="next"):
+    """He moved on (said next, or answered): the post he was shown is done and the next one shows. A post that has not landed yet is
+    tried again now instead. -> (moved: bool, what queue_pump returned)."""
+    with _queue_lock(path):
+        q = queue_load(path)
+        moved = bool(q["items"] and q["items"][0]["shown"])
+        if moved:
+            done = q["items"].pop(0)
+            done["done"], done["why"] = now, why
+            q["done"] = (q["done"] + [done])[-QUEUE_DONE_KEEP:]
+        elif q["items"]:
+            q["items"][0]["next_try"] = min(q["items"][0]["next_try"], now)
+        if q["items"] or moved:
+            queue_save(path, q)
+    return moved, queue_pump(path, send, now)
+
+
+def queue_check(path, now):
+    """-> one wake line when the first post has failed to land for QUEUE_WAKE_AFTER (again every QUEUE_REWAKE while it still fails),
+    else None. Marks the wake so the hub is not woken on every poll."""
+    with _queue_lock(path):
+        q = queue_load(path)
+        if not q["items"]:
+            return None
+        head = q["items"][0]
+        since = head.get("failing_since")
+        if head["shown"] or not since or now - since < QUEUE_WAKE_AFTER or (head.get("woke") and now - head["woke"] < QUEUE_REWAKE):
+            return None
+        head["woke"] = now
+        queue_save(path, q)
+    return ("outbox: %d post(s) for Jonathan have not reached his chat since %s (%d tries; the next at %s). They stay queued and are "
+            "tried again by themselves; the errors are in ~/.claude/state/openclaw-inject.log" %
+            (len(q["items"]), _clock_of(since), head["attempts"], _clock_of(head["next_try"])))
+
+
+def queue_lines(path, now):
+    """-> the outbox as lines for the hub: each waiting post with its state and the start of its text."""
+    q = queue_load(path)
+    out = []
+    for n, i in enumerate(q["items"]):
+        if i["shown"]:
+            state = "showing since %s" % _clock_of(i["shown"])
+        elif i.get("failing_since"):
+            state = "not landed, %d tries since %s, next %s" % (i["attempts"], _clock_of(i["failing_since"]), _clock_of(i["next_try"]))
+        else:
+            state = "waiting" if n else "due"
+        out.append("%d | %s | added %s | %s" % (i["id"], state, _clock_of(i["added"]), " ".join(i["text"].split())[:90]))
+    return out
+
+
+def queued(host):
+    """A host whose inject goes through the outbox. Only the live entry points use it; a bare LaneHost posts straight away."""
+    host.queue_path = chat_queue_path()
+    return host
+
+
+# ---------------------------------------------------------------------------------------------------------
 # What the PC knows. Tests replace Host; every call has a timeout and a fixed argv.
 
 class LaneHost:
@@ -417,7 +609,26 @@ class LaneHost:
                                                          AFA_OC_PASS=ask if ask and ASK_ID_RE.fullmatch(ask) else "1"))  # the ask it may act on
         return (-1, "") if r is None else (r.returncode, r.stdout or "")
 
+    queue_path = None  # set by queued(): posts then go through the outbox, one shown at a time
+
     def inject(self, text):
+        """Post to his chat. Through the outbox when this host is queued() (the live entry points): the post is saved first, so it is
+        never lost, and shown when nothing else is showing. -> True once it is saved (or, unqueued, once it landed)."""
+        if self.queue_path is None:
+            return self.inject_now(text)
+        try:
+            queue_add(self.queue_path, text, self.clock())
+        except OSError as e:
+            _append(STATE / "openclaw-inject.log", "%s chat queue could not be written (%s): posting straight away" %
+                    (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
+            return self.inject_now(text)
+        queue_pump(self.queue_path, self.inject_now, self.clock())
+        return True
+
+    def clock(self):
+        return time.time()
+
+    def inject_now(self, text):
         """Post a note into Main session (gateway chat.inject): no agent run, no channel delivery. Only that session, or in a live test
         the throwaway one chat_session names. Nothing is posted when that test name is malformed."""
         key = chat_session()
@@ -1724,7 +1935,7 @@ DELIVERY_RES = (
     ("held", re.compile(r"held for a follow-up")),
     ("hub", re.compile(r"on the hub's list|not run: same words as ask oc-|not run: ask oc-[0-9a-f]{8} was already handed over")),
     ("frontdesk", re.compile(r" \| chat \| answered by the front desk\b| \| (?:close|reply) \| couldn't: .* is ambiguous| \| lanes \| | \| stop \| no open lane| \| stopped\b| \| close \S+ \| (?:closed|already closed)\b"
-                             r"| \| open_model \S+ \| done: | \| status \| digest rebuilt")),
+                             r"| \| open_model \S+ \| done: | \| status \| digest rebuilt| \| next \| ")),
 )
 
 
@@ -3812,6 +4023,44 @@ def _append(path, line):
         f.write(line + "\n")
 
 
+def queue_cli(args):
+    """openclaw_dispatch.py queue            the outbox, one line per waiting post
+                            queue next       he moved on: show the next post (when he says next somewhere the poller cannot see)
+                            queue pump       show the first post if it is due (lane_watch.sh runs this on every poll)
+                            queue check      print a wake line when the first post has failed to land for 15 minutes
+                            queue add        put the text on stdin at the end of the outbox (posts held by hand)"""
+    path, now = chat_queue_path(), time.time()
+    if path is None:
+        print("queue: no chat to post to (malformed test session)", file=sys.stderr)
+        return 1
+    if os.environ.get("AFA_OC_PASS") and args not in ([], ["check"]):
+        print("queue: the dispatch pass may not post", file=sys.stderr)
+        return 1
+    host = queued(LaneHost())
+    if args == []:
+        print("\n".join(queue_lines(path, now)) or "empty")
+    elif args == ["next"]:
+        moved, r = queue_next(path, host.inject_now, now)
+        print("%s; %s" % ("moved past the post he was shown" if moved else "nothing was showing", r))
+    elif args == ["pump"]:
+        print(queue_pump(path, host.inject_now, now))
+    elif args == ["check"]:
+        line = queue_check(path, now)
+        if line:
+            print(line)
+    elif args == ["add"]:
+        text = sys.stdin.read(PROMPT_MAX + 1).strip()
+        if not text or len(text) > PROMPT_MAX:
+            print("queue add: empty, or longer than %d characters" % PROMPT_MAX, file=sys.stderr)
+            return 1
+        qid = queue_add(path, text, now, source="added")
+        print("queued as %d; %s" % (qid, queue_pump(path, host.inject_now, now)))
+    else:
+        print(queue_cli.__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
 ASK_VERBS = ("claim", "start", "approve", "say", "defer", "promote", "settle")
 
 
@@ -3836,7 +4085,7 @@ def main(argv=None):
         return 0
     elif len(argv) >= 3 and argv[0] == "claim":
         ctx = Ctx(load_repos())
-        ok, msg = claim(ctx, argv[1], argv[2], host=LaneHost())
+        ok, msg = claim(ctx, argv[1], argv[2], host=queued(LaneHost()))
     elif len(argv) >= 6 and argv[0] == "start":
         rest, engine = argv[2:], "claude"
         if rest[0] == "--engine":
@@ -3844,13 +4093,13 @@ def main(argv=None):
         if len(rest) != 4:
             print("usage: openclaw_dispatch.py start <ask> [--engine E] <lane> <dir> <model> <prompt-file>", file=sys.stderr)
             return 2
-        ok, msg = start_for_ask(Ctx(load_repos()), LaneHost(), argv[1], rest[0], rest[1], rest[2], rest[3], engine)
+        ok, msg = start_for_ask(Ctx(load_repos()), queued(LaneHost()), argv[1], rest[0], rest[1], rest[2], rest[3], engine)
     elif len(argv) == 3 and argv[0] == "approve":
-        ok, msg = approve_entry(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+        ok, msg = approve_entry(Ctx(load_repos()), queued(LaneHost()), argv[1], argv[2])
     elif len(argv) == 1 and argv[0] == "lanes":
-        ok, msg = True, do_lanes(Ctx(load_repos()), LaneHost(), time.time())[1]
+        ok, msg = True, do_lanes(Ctx(load_repos()), queued(LaneHost()), time.time())[1]
     elif argv and argv[0] == "post-reports" and argv[1:] in ([], ["--seed"]):
-        names = post_new_reports(Ctx({}, state_path=state_file()), LaneHost(), seed=bool(argv[1:]))
+        names = post_new_reports(Ctx({}, state_path=state_file()), queued(LaneHost()), seed=bool(argv[1:]))
         ok, msg = True, ("seeded" if argv[1:] else "posted %d report(s)%s" % (len(names), ": " + ", ".join(names) if names else ""))
     elif len(argv) == 3 and argv[0] == "image":
         ok, msg = True, image_line(argv[1], argv[2])
@@ -3859,19 +4108,21 @@ def main(argv=None):
         pending = unanswered_question_ids(ctx)
         if pending:
             print("open questions: %s" % ", ".join(pending), file=sys.stderr)
-        ok, msg = post_line(LaneHost(), argv[1], ctx)
+        ok, msg = post_line(queued(LaneHost()), argv[1], ctx)
     elif len(argv) == 3 and argv[0] == "post":
-        ok, msg = post_ask(Ctx({}, state_path=state_file()), LaneHost(), argv[1], argv[2])
+        ok, msg = post_ask(Ctx({}, state_path=state_file()), queued(LaneHost()), argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "settle":
         ok, msg = settle_asks(Ctx({}, state_path=state_file()), argv[1], argv[2])
     elif len(argv) == 2 and argv[0] == "prompt":
         ok, msg = write_prompt(Ctx(load_repos()), argv[1], sys.stdin.read(PROMPT_MAX + 1))
     elif len(argv) == 3 and argv[0] == "say":
-        ok, msg = say(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+        ok, msg = say(Ctx(load_repos()), queued(LaneHost()), argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "defer":
-        ok, msg = defer(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+        ok, msg = defer(Ctx(load_repos()), queued(LaneHost()), argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "promote":
-        ok, msg = promote(Ctx(load_repos()), LaneHost(), argv[1], argv[2])
+        ok, msg = promote(Ctx(load_repos()), queued(LaneHost()), argv[1], argv[2])
+    elif argv and argv[0] == "queue":
+        return queue_cli(argv[1:])
     elif len(argv) == 1 and argv[0] == "mailhook":
         hand = os.environ.get("AFA_LANE_HAND", "")
         print(json.dumps(mailhook(sys.stdin.read(200000), Path(hand or "/nonexistent") / "mail-calls")))
@@ -3879,9 +4130,9 @@ def main(argv=None):
     elif 2 <= len(argv) <= 4 and argv[0] == "facts":
         ok, msg = facts(Ctx(load_repos()), argv[1], " ".join(argv[2:]))
     elif len(argv) == 2 and argv[0] == "pass":
-        return run_pass(Ctx(load_repos()), LaneHost(), argv[1])
+        return run_pass(Ctx(load_repos()), queued(LaneHost()), argv[1])
     else:
-        print("usage: openclaw_dispatch.py open | start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | defer <ask> <why> | promote <ask> <repo> | facts <repo> [pr N | issue N | issues | prs] | post <text> | post <ask[,ask...]> <text> | settle <ask[,ask...]> <why> | lanes | post-reports [--seed] | image <path> <description> | pass <ask>", file=sys.stderr)
+        print("usage: openclaw_dispatch.py open | start <ask> [--engine E] <lane> <dir> <model> <prompt> | claim <ask> <lane> | approve <ask> <entry> | prompt <lane> (text on stdin) | say <ask> <text> | defer <ask> <why> | promote <ask> <repo> | facts <repo> [pr N | issue N | issues | prs] | post <text> | post <ask[,ask...]> <text> | settle <ask[,ask...]> <why> | lanes | post-reports [--seed] | image <path> <description> | pass <ask> | queue [next | pump | check | add (text on stdin)]", file=sys.stderr)
         return 2
     print(msg, file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1

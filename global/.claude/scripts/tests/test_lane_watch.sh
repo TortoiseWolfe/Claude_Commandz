@@ -61,6 +61,27 @@ else
   echo "FAIL no lane names: rc=$rc out=$out"; failures=$((failures + 1))
 fi
 
+# A post for his chat that has failed to land for 15 minutes wakes the hub; a quiet outbox does not.
+fake_box="$TMP/outbox.py"
+cat > "$fake_box" <<'PY'
+import sys
+if sys.argv[1:] == ["queue", "check"]:
+    print("outbox: 4 post(s) for Jonathan have not reached his chat since 5:21 PM (6 tries; the next at 5:52 PM).")
+PY
+rc=0; out=$(HOME="$home" OPENCLAW_OUTBOX="$fake_box" OPENCLAW_RECONCILE=/nonexistent bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$out" | head -1)" = "outbox: 4 post(s) for Jonathan have not reached his chat since 5:21 PM (6 tries; the next at 5:52 PM)." ]; then
+  echo "ok   a post that keeps failing to land wakes the hub"
+else
+  echo "FAIL outbox wake: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+printf 'import sys\n' > "$fake_box"
+rc=0; out=$(HOME="$home" OPENCLAW_OUTBOX="$fake_box" OPENCLAW_RECONCILE=/nonexistent bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^outbox'; then
+  echo "ok   a quiet outbox does not wake the hub"
+else
+  echo "FAIL quiet outbox: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+
 # A message of his that reached nobody wakes the hub with the reconciler's lines.
 fake_rec="$TMP/reconcile.py"
 cat > "$fake_rec" <<'PY'

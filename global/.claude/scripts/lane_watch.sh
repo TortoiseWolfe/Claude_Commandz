@@ -13,6 +13,8 @@
 #   - a watched lane's tmux window disappears
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
+#   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
+#     outbox again in the background (queue pump), so a post that failed while Windows could not reach WSL lands once it can.
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
@@ -125,10 +127,24 @@ check_undelivered() {
   printf '%s\n' "$u"
   exit 0
 }
+# The outbox (everything the hub sends to his chat) is retried from here as well as from the every-minute poller, because the poller is
+# started by Windows and stops when Windows cannot reach WSL (19 Oct from 5:21 PM). The pump runs in the background: a post that is
+# failing can take minutes, and the watch must not stop for it.
+outbox="${OPENCLAW_OUTBOX:-$(dirname "$dispatch")/openclaw_dispatch.py}"
+check_outbox() {
+  local w
+  [ -f "$outbox" ] || return 0
+  setsid nohup timeout 600 python3 "$outbox" queue pump >/dev/null 2>&1 &
+  w=$(timeout 60 python3 "$outbox" queue check 2>/dev/null | grep -E '^outbox: ') || return 0
+  printf '%s\n' "$w"
+  exit 0
+}
+check_outbox
 check_undelivered
 check_open_questions
 end=$(( $(date +%s) + max * 60 ))
 while :; do
+  check_outbox
   check_undelivered
   check_open_questions
   refresh_watched
