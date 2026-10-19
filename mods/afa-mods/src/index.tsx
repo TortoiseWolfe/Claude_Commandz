@@ -156,22 +156,25 @@ export const register: Register = on => {
     const tmpdir = (await $.env.get('TMPDIR')) ?? undefined
     // A named Docker volume made over a host folder (local driver, device=/path) is that folder: ask docker, only when an rm is in play.
     const volumeDevices: Record<string, string> = {}
+    const uninspectedVolumes: string[] = []
     if (/\brm\b/.test(e.command)) {
-      // Every named volume is asked about. A volume docker has never heard of is new, so it is not a host folder; any other failure
-      // (docker missing, a timeout) leaves it unknown, and an unknown volume is held like an unresolved host path.
+      // Every named volume is asked about. A volume docker has never heard of is new, so it is not a host folder, unless this command
+      // makes volumes itself (volume create, driver options): then the answer is not known yet. Any other failure (docker missing,
+      // a timeout) leaves it unknown too. An unknown volume is held; it is listed apart, never as text that could be read as a path.
+      const makesVolumes = /\bvolume\s+create\b|volume-opt|--driver-opt|--opt\b/.test(e.command)
       for (const name of namedVolumesOf(e.command)) {
         try {
           const r = await $.process.run(['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name], { timeoutMs: 10_000 })
           const device = r.stdout.trim()
           if (r.exitCode === 0) {
             if (device.startsWith('/')) volumeDevices[name] = device
-          } else if (!/no such volume/i.test(r.stderr)) volumeDevices[name] = '$UNINSPECTED_VOLUME'
+          } else if (makesVolumes || !/no such volume/i.test(r.stderr)) uninspectedVolumes.push(name)
         } catch {
-          volumeDevices[name] = '$UNINSPECTED_VOLUME'
+          uninspectedVolumes.push(name)
         }
       }
     }
-    const scratchEnv = { home, tmpdir, volumeDevices }
+    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {

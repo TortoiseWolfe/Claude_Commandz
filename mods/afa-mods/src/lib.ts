@@ -77,7 +77,8 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string> }
+// uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[] }
 
 const strip = (s: string) =>
   s
@@ -244,7 +245,7 @@ function isProdDeploy(seg: string): boolean {
 // volume ('volume': named, anonymous or tmpfs). The source is the text as written, not yet resolved.
 export type Mount = { source: string; target: string; kind: 'host' | 'volume' }
 // incomplete: the mount list may miss mounts (a compose file, --volumes-from, a flag not read), so an unlisted path is not known to be the container's own
-type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string> }
+type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[] }
 
 // One path an rm names inside a container, seen through the mounts: where it really is.
 export type Mapped =
@@ -253,7 +254,7 @@ export type Mapped =
   | { path: string; kind: 'unresolved'; mountAt: string; source: string; why: string } // a host source that cannot be worked out
   | { path: string; kind: 'uncovered'; why: string } // no mount covers it
 
-const newScope = (command: string, env: ScratchEnv): Scope => ({ home: env.home ?? '', vars: assignmentsOf(command, env), devices: env.volumeDevices ?? {} })
+const newScope = (command: string, env: ScratchEnv): Scope => ({ home: env.home ?? '', vars: assignmentsOf(command, env), devices: env.volumeDevices ?? {}, uninspected: env.uninspectedVolumes ?? [] })
 
 const SUBSTITUTION = /\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)|`[^`]*`/g
 const SUBST_WORD = '$CMDSUBST'
@@ -478,6 +479,10 @@ function mapRmTargets(targets: string[], mounts: Mount[], scope: Scope): Mapped[
     for (const m of [...(cover ? [cover] : []), ...below]) {
       const mountAt = at(m)
       const device = m.kind === 'volume' ? scope.devices[m.source] : undefined
+      if (m.kind === 'volume' && scope.uninspected.includes(m.source)) {
+        entries.push({ path, kind: 'unresolved', mountAt, source: m.source, why: 'docker could not be asked what this volume is (it may be a host folder)' })
+        continue
+      }
       if (m.kind === 'volume' && !device) {
         entries.push({ path, kind: 'volume', mountAt, volume: m.source })
         continue
