@@ -393,3 +393,113 @@ describe('blast radius always says what it would touch', () => {
     expect(r.deny).toContain(CANT)
   })
 })
+
+// 19 Oct: an rm inside `docker run -v ...` froze lanes on "can't tell what this touches". The mounts now say what it touches.
+describe('blast radius, rm inside docker run', () => {
+  const WT = `${HOME}/repos/.worktrees/ScriptHammer--skip-conformance`
+  const SCRIPTHAMMER = `cd ~/repos/.worktrees && docker run --rm -v "$PWD/ScriptHammer--skip-conformance:/w" alpine sh -c 'rm -rf /w/* /w/.[!.]* /w/..?*'`
+  const CHATTANOOGA = `docker run --rm -v cd-repro-core:/work cd-repro sh -c 'rm -rf /work/.good'`
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}) => {
+    setup(on, vars)
+    const seen = { asked: '', log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] }))
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+  test('interactive: the question names the host folder /w stands for', async ($, on) => {
+    const { seen, r } = await go($, on, SCRIPTHAMMER)
+    expect(seen.asked).toContain('/w is ~/repos/.worktrees/ScriptHammer--skip-conformance on this machine')
+    expect(seen.asked).toContain('3 entries at the top level')
+    expect(seen.asked).not.toContain("can't tell")
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('interactive: a named Docker volume runs without asking', async ($, on) => {
+    const { seen, r } = await go($, on, CHATTANOOGA)
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  for (const mount of ['$HOME:/h', '~/repos:/h']) {
+    test(`interactive: a mount of ${mount} still asks, and says it is that folder`, async ($, on) => {
+      const { seen, r } = await go($, on, `docker run --rm -v ${mount} alpine sh -c 'rm -rf /h/x'`)
+      expect(seen.asked).toContain('on this machine (a host folder mounted into the container)')
+      expect(seen.asked).toContain(mount.startsWith('~') ? '/h is ~/repos on this machine' : '/h is ~ on this machine')
+      expect(r.deny).toContain('refused at the prompt')
+    })
+  }
+  test('interactive: an unresolved mount still asks and names it', async ($, on) => {
+    const { seen, r } = await go($, on, `docker run --rm -v $WHERE:/w alpine sh -c 'rm -rf /w/x'`)
+    expect(seen.asked).toContain('/w is mounted from \\"$WHERE\\"')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('interactive: docker exec is unchanged, held with the plain host reading', async ($, on) => {
+    const { seen, r } = await go($, on, `docker exec app sh -c 'rm -rf /w/x'`)
+    expect(seen.asked).toContain('/w/x')
+    expect(seen.asked).not.toContain('on this machine')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  describe('in a lane nobody watches', () => {
+    const run = async ($: any, on: any, command: string) => {
+      const vars = { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` }
+      return go($, on, command, vars)
+    }
+    test('a named volume runs and is not held at all', async ($, on) => {
+      const { seen, r } = await run($, on, CHATTANOOGA)
+      expect(r.deny).toBeUndefined()
+      expect(seen.asked).toBe('')
+      expect(seen.log).toBe('')
+    })
+    test('a delete inside a worktree through a mount runs, logged as the lane folder', async ($, on) => {
+      const { seen, r } = await run($, on, `docker run --rm -v ${WT}:/w alpine sh -c 'rm -rf /w/build'`)
+      expect(r.deny).toBeUndefined()
+      expect(seen.asked).toBe('')
+      expect(seen.log).toContain('allowed (lane folder) | rm -rf')
+    })
+    test('the ScriptHammer pattern is refused, naming the host folder and not waiting', async ($, on) => {
+      const { seen, r } = await run($, on, SCRIPTHAMMER)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toContain('did not wait')
+      expect(r.deny).toContain(`"${WT}/*" uses a pattern`)
+      expect(r.deny).toContain('/w is ~/repos/.worktrees/ScriptHammer--skip-conformance on this machine')
+    })
+    for (const mount of [`${HOME}:/h`, `${HOME}/repos:/h`, '$HOME:/h']) {
+      test(`a mount of ${mount} is refused`, async ($, on) => {
+        const { seen, r } = await run($, on, `docker run --rm -v ${mount} alpine sh -c 'rm -rf /h/x'`)
+        expect(seen.asked).toBe('')
+        expect(r.deny).toContain('did not wait')
+        expect(r.deny).toContain('outside the places a lane may clean up')
+      })
+    }
+    test('a mount whose source cannot be resolved is refused, naming the mount', async ($, on) => {
+      const { r } = await run($, on, `docker run --rm -v $WHERE:/w alpine sh -c 'rm -rf /w/x'`)
+      expect(r.deny).toContain('the mount "$WHERE:/w" is a host folder that goes through $WHERE')
+    })
+    test('a link inside the mounted worktree that leads out of it is still refused', async ($, on) => {
+      setup(on, { AFA_LANE_UNATTENDED: '1' })
+      on('session.surfaces', () => ({ value: ['terminal'] }))
+      on('process.run', (_$: any, e: any) => {
+        const path: string = e.argv.at(-1)
+        return { value: { exitCode: 0, stdout: `${path.startsWith(`${WT}/build`) ? '/etc' : path}\n`, stderr: '' } }
+      })
+      on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+      const r: any = await $.tool.call({ tool: 'Bash', command: `docker run --rm -v ${WT}:/w alpine sh -c 'rm -rf /w/build'` })
+      expect(r.deny).toContain('really points to /etc')
+    })
+    test('docker exec is unchanged: refused with the plain reason', async ($, on) => {
+      const { r } = await run($, on, `docker exec app sh -c 'rm -rf /w/x'`)
+      expect(r.deny).toContain('did not wait')
+      expect(r.deny).toContain('is outside the places a lane may clean up')
+    })
+  })
+})

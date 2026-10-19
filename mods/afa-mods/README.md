@@ -39,6 +39,15 @@ the volumes of a compose stack; the service of a deploy. When the words cannot s
 `can't tell what this touches: <why>`; it is never empty and never a code fragment. The lines are built in
 `src/touches.ts`; `HELD_KINDS` in `src/lib.ts` lists every rule, and `src/touches.test.ts` fails if a rule has no
 description or a sample command gives no targets.
+An `rm -rf` inside `docker run` or `docker compose run` is read through the container's `-v`, `--volume` and `--mount`
+flags (`src/lib.ts`, `mapRmTargets`). A path under a Docker volume (a named one, an anonymous one, tmpfs) is not a
+host deletion and is not held; the volume's own data is outside this check, so an `rm` of a volume that holds a database
+is not held either. A path under a host folder is shown as that folder ("/w is ~/repos/.worktrees/App--x on this machine") and
+judged like a host `rm` of it: held, unless it is own scratch, and a lane nobody watches may do it only inside its own
+folder or a worktree. A mount of `~`, `$HOME` or `~/repos` therefore still holds. The source resolves through `~`, `$HOME`,
+variables the command sets to a plain path, and `$PWD` after a plain `cd /full/path` (not after a subshell or `pushd`). A source
+that does not resolve (`$X`, `$(pwd)`, backticks) still holds and the question names the mount. A path no mount covers, a
+climb out of a mount with `..`, and a relative path still hold. `docker exec` has no mounts to read and is unchanged.
 The classifier judges what the command itself would run: it does not match text inside quoted
 message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file (including
 `git commit -m "$(cat <<'EOF' ...)"`), or

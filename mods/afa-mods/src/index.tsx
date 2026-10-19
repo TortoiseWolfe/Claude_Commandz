@@ -7,6 +7,7 @@ import {
   countInbox,
   explain,
   hasExitLine,
+  hostRmSegment,
   ownScratchTargets,
   recentLanes,
   realPathVerdict,
@@ -175,16 +176,19 @@ export const register: Register = on => {
       const approval = 'Leave it out of this job and say in your report that it needs Jonathan to approve it.'
       const refusals: string[] = []
       for (const h of holds) {
-        let verdict: { ok: true } | { ok: false; reason: string } =
-          h.kind === 'rm -rf'
-            ? unattendedRmVerdict(h.segment, { home, hand, tmpdir })
-            : { ok: false as const, reason: approval }
-        if (verdict.ok && h.kind === 'rm -rf') {
+        // inside `docker run -v`, the delete is judged on the host folders the mounts lead to
+        const host = h.kind === 'rm -rf' ? hostRmSegment(h) : undefined
+        let verdict: { ok: true } | { ok: false; reason: string } = !host
+          ? { ok: false as const, reason: approval }
+          : 'reason' in host
+            ? { ok: false as const, reason: host.reason }
+            : unattendedRmVerdict(host.segment, { home, hand, tmpdir })
+        if (verdict.ok && host && 'segment' in host) {
           // The words are inside the lane's folder; now make sure no link on the way leads out of it.
           const laneEnv = { home, hand, tmpdir }
           const resolve = async (path: string) => (await run($, ['realpath', '-m', '--', path])).trim()
           const roots = await Promise.all(unattendedRoots(laneEnv).map(resolve))
-          const paths = unattendedRmPaths(h.segment, laneEnv)
+          const paths = unattendedRmPaths(host.segment, laneEnv)
           verdict = realPathVerdict(
             await Promise.all(paths.map(async path => ({ path, real: await resolve(path) }))),
             roots.filter(Boolean),
