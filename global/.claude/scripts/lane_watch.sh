@@ -38,6 +38,11 @@ turn_done_time() {
 }
 
 # When sourced (by the test script), stop here with the functions defined.
+# "report stale: ..." when lane.sh --status says the lane's report.md is not its last word (input arrived after it, or a background job is
+# still running), else nothing. 19 Oct: a lane was closed on "report:yes idle" while it was mid-work.
+stale_note() {
+  "$HOME/.claude/scripts/lane.sh" --status 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
+}
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 max=45; check=''
@@ -118,7 +123,8 @@ while :; do
   for l in "${lanes[@]}"; do
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ]; then
-      echo "report: $l ($(report_of "$l"))"; hit=1; other=1
+      note=$(stale_note "$l")
+      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it}"; hit=1; other=1
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole

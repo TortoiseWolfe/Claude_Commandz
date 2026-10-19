@@ -35,6 +35,7 @@ from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # 
 
 CAP_DEFAULT = 5800  # the page must stay under 6 KB
 BUDGET_TTL = 3600
+REPORT_WORD = {"yes": "written", "stale": "stale (new input or a job still running; not done)"}
 GIT_DATE = "format:%a %-I:%M %p"  # git log --date value: 12-hour clock
 HUB_REPO = "TortoiseWolfe/workspace"
 
@@ -246,7 +247,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
 
     # Lanes
     live, dead = parse_lane_status(lane_status or "")
-    lines = [f"- {n}: {st}, report {'written' if rep == 'yes' else 'not yet'}" for n, rep, st in live]
+    lines = [f"- {n}: {st}, report {REPORT_WORD.get(rep, 'not yet')}" for n, rep, st in live]
     if dead:
         lines.append(f"- {dead} older lanes have ended")
     sections.append(("Lanes running", lines or ["- none"]))
