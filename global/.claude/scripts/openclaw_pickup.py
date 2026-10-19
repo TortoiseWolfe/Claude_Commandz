@@ -260,6 +260,10 @@ STATUS_FORMS = ("status", "the status", "what's the status", "whats the status",
 # The marker the chat model ends a reply with. "Say yes to start:" is the old wording, still read so a reply written in it acts too.
 MARKER_LINE = re.compile(r"^[ \t>*_`-]*(?:sending to the hub|say yes to start):[ \t]*(?P<job>[^\n]*?)[ \t*_`]*$", re.I)
 MARKER_ANY = re.compile(r"sending to the hub:|say yes to start:", re.I)
+# A reply that says it is passing his message on (or could not) but has no marker line: the hand-off it promised would happen nowhere.
+PROMISED_RE = re.compile(r"\b(?:I(?:'|’)ll|I will|I(?:'|’)m going to|let me)\s+(?:pass|send|forward|hand|flag|relay)\w*\s+(?:this|that|it|your \w+)"
+                         r"(?:\s+(?:on|over|along|up))?\s+to the (?:hub|lane)\b|\b(?:passing|sending|forwarding|handing|relaying) (?:this|that|it|your \w+)"
+                         r"(?:\s+(?:on|over|along))?\s+to the (?:hub|lane)\b", re.I)
 MARKER_START = re.compile(r"^[ \t>*_`-]*(?:sending to the hub|say yes to start):", re.I)  # a line that begins as a marker
 HISTORY_WINDOW = 60  # enough of Main session to hand a lane the chat since the last lane of its repo started
 MATCH_TOL = 180  # seconds between the tray item's time and his message's time in Main session
@@ -473,19 +477,19 @@ def _posted_while_replying(line, rest, his_ms):
 
 
 def marker_job(run):
-    """-> (job, None) | (None, why) | (None, None). The text after the one marker on the last line of the model's reply.
-    (None, None) is an ordinary reply with no marker; a why is a marker that cannot be run."""
-    texts = [m["text"] for m in run]
-    n = sum(len(MARKER_ANY.findall(t)) for t in texts)
-    if n == 0 or not any(MARKER_START.match(l) for t in texts for l in t.splitlines()):
-        return None, None  # no marker, or one only mentioned inside a sentence ("the `Sending to the hub: ...` line went"): plain chat
-    if n != 1:
+    """-> (job, None) | (None, why) | (None, None). The text after the marker line of the model's reply, wherever that line sits
+    (19 Oct 3:38-3:57 PM: three replies were dropped because their marker was followed by a closing sentence). A marker line is a line
+    that begins with the marker; one only mentioned inside a sentence is plain chat. (None, None) is an ordinary reply with no marker; a
+    why is a marker that cannot be run (two different ones, or two on one line): the caller puts his words on the hub's list."""
+    lines = [l for m in run for l in m["text"].splitlines() if MARKER_START.match(l)]
+    if not lines:
+        return None, None
+    if any(len(MARKER_ANY.findall(l)) != 1 for l in lines):
+        return None, "the reply had more than one marker on a line"
+    jobs = {MARKER_LINE.fullmatch(l).group("job").lstrip(" \t*_`") for l in lines}
+    if len(jobs) != 1:
         return None, "the reply had more than one marker line"
-    lines = [l for l in texts[-1].splitlines() if l.strip()]
-    m = MARKER_LINE.fullmatch(lines[-1]) if lines else None
-    if not m:
-        return None, "the marker was not the last line of the reply"
-    return m.group("job").lstrip(" \t*_`"), None
+    return jobs.pop(), None
 
 
 def parse_menu(job, sites, aliases):
@@ -612,11 +616,11 @@ def act_on(item, host, sites, aliases, inbox, wake, now=None, ctx=None):
     fresh = "ts" in item and abs(now - item["ts"]) <= ACT_MAX_AGE
     lane_ask = dispatch.parse(item["text"]) if ctx is not None and not ask else None
     if lane_ask and fresh:
-        return execute(lane_ask, host, ctx, sites, now, stamp, sha)
-    if lane_ask and not fresh:
-        return "inbox", "%s | %s | not run: the message is older than %d minutes | oc-%s" % (stamp, lane_ask[0], ACT_MAX_AGE // 60, sha)
+        return _guard(ctx, host, item, *execute(lane_ask, host, ctx, sites, now, stamp, sha), now=now)
+    if lane_ask and not fresh:  # too old to run as typed, so the hub reads it (it used to end here, filed nowhere)
+        return _guard(ctx, host, item, "inbox", "%s | %s | not run: the message is older than %d minutes | oc-%s" % (stamp, lane_ask[0], ACT_MAX_AGE // 60, sha), now=now)
     if ask and fresh:
-        return execute(ask, host, ctx, sites, now, stamp, sha)
+        return _guard(ctx, host, item, *execute(ask, host, ctx, sites, now, stamp, sha), now=now)
     if ask and not fresh:
         _append_line(inbox, inbox_line({"text": "hub: (stale ask, not run) " + item["text"], "sha256_of_original": item["sha256_of_original"]}, stamp))
         _wake(wake, sha, stamp)
@@ -626,6 +630,16 @@ def act_on(item, host, sites, aliases, inbox, wake, now=None, ctx=None):
         _wake(wake, sha, stamp)
         return "inbox", "%s | hub list | put on the hub's list | oc-%s" % (stamp, sha)
     return "chat", None
+
+
+def _guard(ctx, host, item, kind, line, now, say=None):
+    """Every result line of one of his messages ends delivered: one that is not (a refusal, a failure, a marker that could not run) puts
+    his words on the hub's list and wakes the hub (dispatch.ensure_delivered). Without a ctx (tests, not the poller) it is left as is."""
+    if ctx is None or not line:
+        return kind, line
+    got, line = dispatch.ensure_delivered(ctx, host, line, dispatch.ask_id_for(item.get("sha256_of_original") or item.get("sha") or ""),
+                                          item.get("text", ""), now, say=say)
+    return kind, line
 
 
 def _who(m):
@@ -649,12 +663,14 @@ def chat_context(history, item, run):
     return {"his_ts": item["ts"], "reply": "\n\n".join(m["text"].strip() for m in run if m["text"].strip()), "history": hist}
 
 
-def _file_unsettled(ctx, e, why, now, log, filed):
-    """One of his messages the poller cannot settle goes on the hub's list with his words and wakes the hub: never a silent drop."""
-    line, ask_id = dispatch.unsettled_to_hub(ctx, e["sha"], e["ts"], e["text"], why, now)
+def _file_unsettled(ctx, e, why, now, log, filed, reply=None):
+    """One of his messages the poller cannot settle goes on the hub's list with his words and wakes the hub: never a silent drop. A
+    receptionist reply that was found but could not be run (a hub line came first) goes with it, so the hub can carry out its marker."""
+    line, ask_id = dispatch.unsettled_to_hub(ctx, e["sha"], e["ts"], e["text"], why, now, reply)
+    line += " | oc-%s" % e["sha"][:8]
     _append_line(log, line)
     if ask_id:
-        filed.append(("hub-list", line))
+        filed.append(("hub-list", line, why))
 
 
 def settle_pending(queue, host, sites, aliases, ctx, now, log):
@@ -688,7 +704,7 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
             waiting.append(e)
             continue
         if status == "none":
-            _file_unsettled(ctx, e, "no reply to it could be found in Main session (%s)" % got, now, log, filed)
+            _file_unsettled(ctx, e, "no reply to it could be found in Main session (%s)" % got, now, log, filed, _reply_after(history, e))
             continue
         try:
             result = _run_marker(e, got, history, host, sites, aliases, ctx, now, log)
@@ -700,30 +716,65 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
     return waiting, done
 
 
+def _plain_why(why):
+    """The reason a message went to the hub, in his words (the true reason, not always "could not read this chat")."""
+    if "could not be read" in why:
+        return "the front desk could not read this chat"
+    if "hub line" in why:
+        return "a hub post landed between your message and the front desk's reply, so the hub carries it out"
+    if "has not replied" in why or "not in Main session" in why:
+        return "the front desk did not reply to it in time"
+    if "within" in why:
+        return "it waited too long for a reply"
+    return "the front desk's hand-off failed"
+
+
+def _reply_after(history, e):
+    """The model-written text between his message and his next one, whatever came first; only for the hub to read, never run."""
+    want, out, on = _norm(e["text"]), [], False
+    for m in history or []:
+        if m["role"] == "user":
+            if on:
+                break
+            on = _norm(m["text"]) == want and abs(m["ts_ms"] / 1000 - e["ts"]) <= MATCH_TOL
+        elif on and m["role"] == "assistant" and _model_written(m) and m["text"].strip():
+            out.append(m["text"].strip())
+    return "\n\n".join(out)[:4000] or None
+
+
 def _run_marker(e, got, history, host, sites, aliases, ctx, now, log):
     """The marker sentence at the end of the model's reply to one of his messages, run. -> (kind, line), or None for an ordinary answer."""
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
     sha = e["sha"][:8]
     job, why = marker_job(got)
     if job is None and why is None:
-        return None  # an ordinary answer: nothing to run
-    menu = parse_menu(job, sites, aliases) if job is not None else None
-    if menu is None and why is None and job.strip():
-        # not a menu sentence: a question for the hub. A short Claude pass answers it with GitHub facts as a [hub] line, or puts it
-        # on the hub's list; it never starts a lane (dispatch.ask_question)
-        line, chat = dispatch.ask_question(ctx, host, dispatch.ask_id_for(sha), job, now, chat_context(history, e, got))
-        if chat:
-            host.inject(chat)
-        line = "%s (chat) | oc-%s" % (line, sha)
-        kind = "dispatch"
-    elif menu is None:
-        host.inject("Nothing sent to the hub: %s." % (why or "the marker line was empty"))
-        line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
-        kind = "dispatch"
+        reply = "\n".join(m["text"] for m in got)
+        if dispatch.NOT_FORWARDED_RE.search(reply) or PROMISED_RE.search(reply):
+            # it told him it would pass this on (or could not) and wrote no marker: the hub gets his words, never a promise kept by no one
+            line = "%s | chat | the reply promised a hand-off but had no marker | oc-%s" % (stamp, sha)
+            kind, say = "dispatch", "That reply had no line for the hub, so your message is on the hub's list with your words."
+        else:
+            _append_line(log, "%s | chat | answered by the front desk (no marker) | oc-%s" % (stamp, sha))
+            return None  # an ordinary answer: nothing to run
     else:
-        kind, line = execute(menu, host, ctx, sites, now, stamp, sha, via_chat=True, context=chat_context(history, e, got))
-        if kind == "action" and _chat_for(kind, line):
-            host.inject(_chat_for(kind, line))
+        menu = parse_menu(job, sites, aliases) if job is not None else None
+        if menu is None and why is None and job.strip():
+            # not a menu sentence: a question for the hub. A short Claude pass answers it with GitHub facts as a [hub] line, or puts it
+            # on the hub's list; it never starts a lane (dispatch.ask_question)
+            line, chat = dispatch.ask_question(ctx, host, dispatch.ask_id_for(sha), job, now, chat_context(history, e, got))
+            if chat:
+                host.inject(chat)
+            line = "%s (chat) | oc-%s" % (line, sha)
+            kind, say = "dispatch", None if chat else "Nothing ran from that, so it is on the hub's list with your words."
+        elif menu is None:
+            line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
+            kind, say = "dispatch", "Nothing ran from that (%s), so it is on the hub's list with your words." % (why or "the marker line was empty")
+        else:
+            kind, line = execute(menu, host, ctx, sites, now, stamp, sha, via_chat=True, context=chat_context(history, e, got))
+            say = None
+            if kind == "action" and _chat_for(kind, line):
+                host.inject(_chat_for(kind, line))
+    kind, line = _guard(ctx, host, {"sha": e["sha"], "text": e["text"]}, kind, line, now, say)
     _append_line(log, line)
     if kind == "dispatch":
         host.refresh_digest()
@@ -779,12 +830,13 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
         done.append((kind, line))
     if ctx is not None:
         queue, settled = settle_pending(queue, host, sites, aliases, ctx, now, log)
-        done.extend(settled)
+        done.extend(x[:2] for x in settled)
         save_pending(ctx.pending_path, queue)
-        n = sum(1 for k, _ in settled if k == "hub-list")
-        if n:
-            host.inject("%d of your messages did not get through the usual way (the front desk could not read this chat), so they are on the hub's list. The hub has your words." % n)
-    lines = [l for k, l in done if l]
+        hubbed = [x for x in settled if x[0] == "hub-list"]
+        if hubbed:
+            whys = sorted({_plain_why(x[2]) for x in hubbed})
+            host.inject("%d of your messages went on the hub's list instead of the usual way (%s). The hub has your words." % (len(hubbed), "; ".join(whys)))
+    lines = [x[1] for x in done if x[1]]
     if lines:
         try:
             tail = [l for l in Path(log).read_text().splitlines() if l][-5:]

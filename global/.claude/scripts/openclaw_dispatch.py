@@ -1719,7 +1719,7 @@ DELIVERY_RES = (
     ("pass", re.compile(r"handed to Claude \(ask ")),
     ("held", re.compile(r"held for a follow-up")),
     ("hub", re.compile(r"on the hub's list|not run: same words as ask oc-|not run: ask oc-[0-9a-f]{8} was already handed over")),
-    ("frontdesk", re.compile(r" \| lanes \| | \| stop \| no open lane| \| stopped\b| \| close \S+ \| (?:closed|already closed)\b"
+    ("frontdesk", re.compile(r" \| chat \| answered by the front desk\b| \| (?:close|reply) \| couldn't: .* is ambiguous| \| lanes \| | \| stop \| no open lane| \| stopped\b| \| close \S+ \| (?:closed|already closed)\b"
                              r"| \| open_model \S+ \| done: | \| status \| digest rebuilt")),
 )
 
@@ -1732,16 +1732,18 @@ def delivery_of(line):
     return None
 
 
-def ensure_delivered(ctx, host, line, ask_id, words, now, target_lane=None):
+def ensure_delivered(ctx, host, line, ask_id, words, now, target_lane=None, say=None):
     """The guard every message of his passes once the front desk has acted on it: a result that is not delivered (a refusal, a hold, a
-    failure, a marker that could not run) puts his words on the hub's list and wakes the hub. -> (delivery kind, line)."""
+    failure, a marker that could not run) puts his words on the hub's list and wakes the hub. say: the chat line for a result that told
+    him nothing yet (a refusal already said its own words, so it gets none). -> (delivery kind, line)."""
     kind = delivery_of(line)
     if kind:
         return kind, line
     parts = (line or "").split(" | ")
     why = "front desk: " + (" | ".join(parts[1:3]) if len(parts) > 2 else line or "nothing was done")
     filed = hub_has_it(ctx, ask_id, words or "", now, why[:200], target_lane)
-    host.inject("That one is on the hub's list with your words, so it isn't lost.")
+    if say:
+        host.inject(say)
     return "hub", "%s; on the hub's list (ask %s)" % (line, filed)
 
 
@@ -2410,14 +2412,15 @@ def file_with_hub(ctx, ask_id, words, route, why, now, extra=None):
     return True
 
 
-def unsettled_to_hub(ctx, sha, ts, text, why, now):
+def unsettled_to_hub(ctx, sha, ts, text, why, now, reply=None):
     """A message of his that the poller could not settle (Main session unreadable, the hand-off crashed, or it waited out its age): file it as
     a question already with the hub, with his words whole, so it is never dropped without a trace. One ask per message (sha and time), so a
     retry after a crash files nothing twice. -> (log line, ask id) or (log line, None) when it was filed already."""
     ask_id = ask_id_for(hashlib.sha256(("%s %s" % (sha, ts)).encode("utf-8")).hexdigest())
     words = " ".join((text or "").split())
+    extra = {"receptionist_reply": reply} if reply else None  # its marker, if any, is the hub's to carry out (it is never run blind)
     if not file_with_hub(ctx, ask_id, words, "hub, front desk could not settle it",
-                         "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why, now):
+                         "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why, now, extra):
         return "%s | unsettled | already on the hub's list (ask %s)" % (_stamp(now), ask_id), None
     return "%s | unsettled | %s: put on the hub's list (ask %s)" % (_stamp(now), why, ask_id), ask_id
 
@@ -3018,6 +3021,9 @@ def open_question_lines(ctx, now=None):
             message_lines = []  # the ask's task is already his words: the row above says it all
         else:
             message_lines = history[latest]["text"].splitlines() or [""]
+        if ask.get("receptionist_reply"):  # the reply the poller found but would not run: its marker is the hub's to carry out
+            message_lines += ["receptionist's reply (not run; carry out its marker if it is what he asked):"] + [
+                "  " + l for l in str(ask["receptionist_reply"]).splitlines()]
         rows.append((created, ask_id, [row] + ["    " + line for line in message_lines]))
     rows.sort(key=lambda row: (row[0], row[1]))
     return [line for row in rows for line in row[2]]

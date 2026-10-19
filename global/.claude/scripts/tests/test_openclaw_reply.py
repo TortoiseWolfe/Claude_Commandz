@@ -242,7 +242,9 @@ class Menu(Reply):
     def test_an_empty_marker_runs_nothing_and_says_so(self):
         self.go(self.flow("Sending to the hub:"))
         self.nothing()
-        self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"), self.host.chats)
+        self.assertTrue(self.host.chats[-1].startswith("Nothing ran from that"), self.host.chats)
+        self.assertIn("hub's list", self.host.chats[-1])
+        self.assertEqual([a["status"] for a in dp.asks_of(self.state()).values()], ["deferred"])
 
     def test_a_plain_stop_marker_stops_the_newest_lane_when_he_asked_in_other_words(self):
         # 16 Oct 22:28: he asked to stop the roadmap job in a sentence, so the typed "stop" form never fired and the marker was refused
@@ -285,15 +287,19 @@ class DoesNotAct(Reply):
         two = "Sending to the hub: start own-app: a\nSending to the hub: start own-app: b"
         self.go(self.flow(two))
         self.nothing()
-        self.assertTrue(self.host.chats[-1].startswith("Nothing sent to the hub"))
+        self.assertIn("more than one marker line", self.host.chats[-1])
+        self.assertEqual([a["status"] for a in dp.asks_of(self.state()).values()], ["deferred"])
         self.setUp()
         self.go(self.flow("Sending to the hub: start own-app: a Sending to the hub: start own-app: b"))
         self.nothing()
+        self.assertIn("more than one marker on a line", self.host.chats[-1])
+        self.assertEqual([a["status"] for a in dp.asks_of(self.state()).values()], ["deferred"])
 
-    def test_a_marker_that_is_not_the_last_line_runs_nothing(self):
+    def test_a_marker_that_is_not_the_last_line_still_runs(self):
+        # drop 2, 19 Oct 3:38-3:57 PM: three replies put words after the marker and nothing ran ("the marker was not the last line")
         self.go(self.flow(MARK + "\n\nThat should do it."))
-        self.nothing()
-        self.assertIn("not the last line", self.host.chats[-1])
+        self.assertEqual(len(self.lane_names()), 1)
+        self.assertNotIn("not the last line", " ".join(self.host.chats))
 
     def test_no_marker_runs_nothing_and_says_nothing(self):
         self.go(self.flow("I can look into that. Want me to?"))
