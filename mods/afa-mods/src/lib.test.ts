@@ -112,7 +112,7 @@ describe('blast radius classifier', () => {
   test('allows the approved own-scratch commands', async () => {
     expect(
       kinds(
-        'T=$(mktemp -d) && git checkout-index -a --prefix=$T/ && docker run --rm -v $T:/scan:ro img dir . ; rm -rf $T',
+        'T=$(mktemp -d) && git checkout-index -a --prefix=$T/ && docker run --rm --cpus 2 -v $T:/scan:ro img dir . ; rm -rf $T',
       ),
     ).toEqual([])
     expect(

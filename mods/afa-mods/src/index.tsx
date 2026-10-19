@@ -4,6 +4,8 @@ import type { Engine, Register } from 'claude-code'
 import {
   bandText,
   classify,
+  composeRunsOf,
+  composeServiceCapped,
   countInbox,
   explain,
   hasExitLine,
@@ -22,6 +24,7 @@ import { touches } from './touches'
 import type { Probe } from './touches'
 
 const isHub = atom({ plugin: 'afa-mods', key: 'isHub' } as const, false)
+const cwd = atom({ plugin: 'afa-mods', key: 'cwd' } as const, '')
 const prepRan = atom({ plugin: 'afa-mods', key: 'prepRan' } as const, false)
 const percent = atom({ plugin: 'afa-mods', key: 'percent' } as const, null)
 const band = atom({ plugin: 'afa-mods', key: 'band' } as const, { lanes: 0, inbox: 0, client: 0 })
@@ -104,6 +107,7 @@ export const register: Register = on => {
     const home = (await $.env.get('HOME')) ?? ''
     const hub = e.cwd.replace(/\/$/, '') === `${home}/repos`
     await update($, isHub, () => hub)
+    await update($, cwd, () => e.cwd)
     if (hub) {
       await refreshBand($).catch(() => undefined)
       $.clock.every(5000, () => refreshBand($).catch(() => undefined))
@@ -173,7 +177,26 @@ export const register: Register = on => {
         }
       }
     }
-    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes }
+    // A compose service with a cpus limit in its file is capped (docker compose run has no --cpus flag). The file is read here, as
+    // text; a file or service that cannot be read leaves the run held. The folder is the last plain cd in the command, else the session's.
+    const composeLimited: string[] = []
+    if (/\bcompose\b|docker-compose/.test(e.command)) {
+      const start = await read($, cwd)
+      for (const c of composeRunsOf(e.command)) {
+        const base = c.cwd ?? start
+        if (c.cwdUnknown || !base) continue
+        const abs = (p: string) => (p.startsWith('/') ? p : p.startsWith('~/') ? `${home}${p.slice(1)}` : `${base}/${p}`)
+        const dir = c.projectDir ? abs(c.projectDir) : base
+        const files = c.files.length > 0 ? c.files.map(abs) : ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'].map(n => `${dir}/${n}`)
+        for (const file of files) {
+          if (composeServiceCapped(await readText($, file).catch(() => ''), c.service)) {
+            composeLimited.push(c.key)
+            break
+          }
+        }
+      }
+    }
+    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
@@ -199,7 +222,7 @@ export const register: Register = on => {
         // inside `docker run -v`, the delete is judged on the host folders the mounts lead to
         const host = h.kind === 'rm -rf' ? hostRmSegment(h) : undefined
         let verdict: { ok: true } | { ok: false; reason: string } = !host
-          ? { ok: false as const, reason: approval }
+          ? { ok: false as const, reason: h.kind === 'docker run without limits' ? 'Run it again with the fix named above.' : approval }
           : 'reason' in host
             ? { ok: false as const, reason: host.reason }
             : unattendedRmVerdict(host.segment, { home, hand, tmpdir })
