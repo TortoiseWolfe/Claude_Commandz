@@ -15,7 +15,7 @@ Runs INSIDE the OpenClawGateway distro as user openclaw (python3 stdlib only):
   report              per day, model and kind of turn (heartbeat or chat): turns, prompt tokens, and the cost at list prices.
                       Reads the agent database read-only; prints numbers only, never a prompt, a message or a key.
   heartbeat apply     back up the config, then one validated write: the heartbeat runs on Haiku, with light context, in its own
-                      isolated session, once an hour. Nothing else in the config is touched; the heartbeat still fires.
+                      isolated session, delivering nowhere, once an hour. Nothing else in the config is touched; the heartbeat still fires.
   heartbeat verify    read the config back.
   heartbeat rollback  restore the newest backup this script made.
 
@@ -114,7 +114,8 @@ def heartbeat_patch(cfg, model=HEARTBEAT_MODEL, every=HEARTBEAT_EVERY):
     if allow is not None and model not in allow:
         raise Refused("refused: %s is not in agents.defaults.modelPolicy.allow" % model)
     beat = dict(d.get("heartbeat", {}))
-    beat.update({"every": every, "model": model, "lightContext": True, "isolatedSession": True})
+    # target "none": run, deliver nowhere. An isolated beat has no last chat route, and without a target the gateway skipped it ("no-route").
+    beat.update({"every": every, "model": model, "lightContext": True, "isolatedSession": True, "target": "none"})
     return {"agents": {"defaults": {"heartbeat": beat}}}
 
 
@@ -125,6 +126,7 @@ def verify_heartbeat(cfg, model=HEARTBEAT_MODEL, every=HEARTBEAT_EVERY):
         ("heartbeat.every", beat.get("every") == every),
         ("heartbeat.lightContext", beat.get("lightContext") is True),
         ("heartbeat.isolatedSession", beat.get("isolatedSession") is True),
+        ("heartbeat.target", beat.get("target") == "none"),
         ("heartbeat.agentId", bool(beat.get("agentId"))),
     ]
 

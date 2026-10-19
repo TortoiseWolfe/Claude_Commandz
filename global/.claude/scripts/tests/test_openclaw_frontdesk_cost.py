@@ -130,6 +130,11 @@ class Heartbeat(unittest.TestCase):
         self.assertIs(beat["isolatedSession"], True)
         self.assertEqual(beat["every"], "1h")
 
+    def test_the_isolated_beat_still_runs_instead_of_skipping_for_want_of_a_route(self):
+        # 19 Oct 12:06 PM: with isolatedSession and no target the gateway logged "skipped: no-route" and ran nothing
+        beat = merge(base_config(), C.heartbeat_patch(base_config()))["agents"]["defaults"]["heartbeat"]
+        self.assertEqual(beat["target"], "none")
+
     def test_patch_keeps_the_agent_that_owns_the_heartbeat(self):
         beat = merge(base_config(), C.heartbeat_patch(base_config()))["agents"]["defaults"]["heartbeat"]
         self.assertEqual(beat["agentId"], "main")
