@@ -87,7 +87,7 @@ MAX_PER_DAY = 12
 FAIL_REFUND = 5 * 60  # a lane whose report fails this soon after its start gives the start back (a fumble is not a day's work)
 CLAIM_WINDOW = 10 * 60  # claim accepts only a lane `start` began for that ask this recently
 TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and probes: their starts never count toward the day
-PROJECTION_LIMIT = 90.0
+PROJECTION_LIMIT = 90.0  # percent: past this projection a code lane waits (hub/lane-rules.md); Claude lanes step down to Sonnet, and the waiting room holds
 PROJECTION_CACHE_SECONDS = 30 * 60
 TASK_MAX = 1500
 REPLY_MAX = 1500
@@ -2798,11 +2798,52 @@ def room_start(ctx, host, entry, now):
     return "%s | room %s | started%s%s" % (stamp, name, behind, blocked_note), "started %s%s%s" % (name, behind, blocked_note)
 
 
+def _next_reset(now):
+    """-> "Wed 12:00 PM": the next weekly-limit reset (Wednesday 12:00 Eastern) after `now`, in 12-hour form."""
+    from zoneinfo import ZoneInfo
+    import datetime as dt
+    t = dt.datetime.fromtimestamp(now, ZoneInfo("America/New_York"))
+    reset = t.replace(hour=12, minute=0, second=0, microsecond=0) + dt.timedelta(days=(2 - t.weekday()) % 7)
+    if reset <= t:
+        reset += dt.timedelta(days=7)
+    return reset.strftime("%a %-I:%M %p")
+
+
+def _room_hold(ctx, host, count, pct, now):
+    """The week is projected past the limit, or unknown: start nothing. Say so in the chat only when the held state changes.
+    -> list of (log line, chat text) for the note posted."""
+    held = {"pct": None if pct is None else round(pct), "count": count}
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        if state.get("room_held") == held:
+            return []
+        state["room_held"] = held
+        save_state(ctx.state_path, state)
+    plural = "%d lanes are" % count if count != 1 else "1 lane is"
+    why = ("the week's projection is unknown" if pct is None
+           else "the week is projected at %d%% (limit %d%%)" % (held["pct"], PROJECTION_LIMIT))
+    chat = "%s waiting in the queue: %s. They start when it is known and under %d%% or after the %s reset." % (
+        plural, why, PROJECTION_LIMIT, _next_reset(now))
+    host.inject(chat)
+    return [("%s | room | held: %s, %d waiting" % (_stamp(now), why, count), chat)]
+
+
+def _room_release(ctx):
+    """Entries start again: forget the held state, so the next hold is announced afresh."""
+    if "room_held" not in load_state(ctx.state_path):
+        return
+    with ctx.locked():
+        state = load_state(ctx.state_path)
+        if state.pop("room_held", None) is not None:
+            save_state(ctx.state_path, state)
+
+
 def room_due(ctx, host, now=None):
     """Every pickup run: start each approved entry whose "after" lane finished well (or that has none); tell the chat, once, about one
     whose "after" lane failed. -> list of (log line, chat text) for the notes posted."""
     now = time.time() if now is None else now
     out = []
+    ready = []
     for e in room_entries(ctx):
         h = e["headers"]
         if not h.get("approved") or h.get("start-failed"):
@@ -2823,6 +2864,13 @@ def room_due(ctx, host, now=None):
                 host.inject(chat)
                 out.append(("%s | room %s | stays queued: %s failed" % (_stamp(now), e["name"], h["after"]), chat))
                 continue
+        ready.append(e)
+    if ready:
+        pct = host.projection_pct()
+        if pct is None or pct > PROJECTION_LIMIT:
+            return out + _room_hold(ctx, host, len(ready), pct, now)
+    _room_release(ctx)
+    for e in ready:
         line, chat = room_start(ctx, host, e, now)
         if line is None:
             continue
