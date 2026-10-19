@@ -7,7 +7,6 @@ import {
   countInbox,
   explain,
   hasExitLine,
-  newVolumeIsPlain,
   hostRmSegment,
   namedVolumesOf,
   ownScratchTargets,
@@ -159,18 +158,16 @@ export const register: Register = on => {
     const volumeDevices: Record<string, string> = {}
     const uninspectedVolumes: string[] = []
     if (/\brm\b/.test(e.command)) {
-      // Every named volume is asked about. A volume docker has never heard of is new, so it is not a host folder, but only when the
-      // command is plainly one docker run (newVolumeIsPlain): otherwise it may make the volume itself, and the answer is unknown.
-      // Any other failure (docker missing, a timeout) leaves it unknown too. An unknown volume is held; it is listed apart,
-      // never as text that could be read as a path.
-      const makesVolumes = !newVolumeIsPlain(e.command)
+      // Every named volume is asked about, and only an answer from docker clears it. A volume docker does not know, or cannot be asked
+      // about (docker missing, a timeout), is unknown: the same command may make it, so no text rule can call it new. It is held,
+      // and listed apart, never as text that could be read as a path.
       for (const name of namedVolumesOf(e.command)) {
         try {
           const r = await $.process.run(['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name], { timeoutMs: 10_000 })
           const device = r.stdout.trim()
           if (r.exitCode === 0) {
             if (device.startsWith('/')) volumeDevices[name] = device
-          } else if (makesVolumes || !/no such volume/i.test(r.stderr)) uninspectedVolumes.push(name)
+          } else uninspectedVolumes.push(name)
         } catch {
           uninspectedVolumes.push(name)
         }

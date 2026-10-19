@@ -517,9 +517,9 @@ describe('blast radius, rm inside docker run', () => {
       const { r } = await run($, on, `docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!fail')
       expect(r.deny).toContain('did not wait')
     })
-    test('a volume docker does not know is new, and runs', async ($, on) => {
+    test('a volume docker does not know is unknown, not new: the same command may make it', async ($, on) => {
       const { r } = await run($, on, `docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!none')
-      expect(r.deny).toBeUndefined()
+      expect(r.deny).toContain('did not wait')
     })
     test('a command that sets the old marker name as a variable cannot talk its way past an unanswered volume', async ($, on) => {
       const { r } = await run($, on, `UNINSPECTED_VOLUME=/tmp/z; docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!fail')
