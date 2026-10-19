@@ -418,10 +418,64 @@ is_headless_billing() {
   case "$1" in codex|copilot) return 0 ;; *) return 1 ;; esac
 }
 
-# True when the lane's input line (last line starting with the prompt arrow) holds no text.
+# Colour-coded pane text (tmux capture-pane -e) in, plain text out.
+strip_ansi() { sed -E 's/\x1b\[[0-9;:?]*[A-Za-z]//g'; }
+# Text on the lane's input line (last line starting with the prompt arrow), from a capture-pane -e
+# pane. "typed" is the normal-colour text; "dim" is Claude Code's grey suggestion (SGR 2), which
+# Enter does not submit and which is not Jonathan's words. Attributes carry across lines, as in tmux.
+pane_input_text() {
+  python3 -I -c '
+import re, sys
+want, pane = sys.argv[1], sys.stdin.read()
+sgr = re.compile(r"\x1b\[([0-9;:]*)m")
+csi = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
+dim, found = False, None
+for line in pane.split("\n"):
+    out = {"typed": "", "dim": ""}
+    arrow, i = None, 0
+    while i < len(line):
+        m = sgr.match(line, i)
+        if m:
+            ps = m.group(1).replace(":", ";").split(";")
+            j = 0
+            while j < len(ps):
+                p = ps[j] or "0"
+                if p in ("38", "48", "58"):
+                    j += 3 if j + 1 < len(ps) and ps[j + 1] == "5" else 5
+                    continue
+                if p == "0":
+                    dim = False
+                elif p == "2":
+                    dim = True
+                elif p == "22":
+                    dim = False
+                j += 1
+            i = m.end()
+            continue
+        m = csi.match(line, i)
+        if m:
+            i = m.end()
+            continue
+        c = line[i]
+        i += 1
+        if arrow is None:
+            if c == "\u276f":
+                arrow = True
+            elif not c.isspace():
+                arrow = False
+            continue
+        if arrow is False:
+            continue
+        out["dim" if dim else "typed"] += c
+    if arrow:
+        found = out
+print(found[want].strip() if found else "")
+' "$1" <<<"$2"
+}
+# True when the lane's input line holds no typed text; a dim suggestion counts as empty.
 pane_input_empty() {
   local line
-  line="$(command grep -a '^[[:space:]]*❯' <<<"$1" | tail -1 | sed 's/^[[:space:]]*❯//' | tr -d '[:space:]\302\240')"
+  line="$(pane_input_text typed "$1" | tr -d '[:space:]\302\240')"
   [ -z "$line" ]
 }
 # True when a spinner line like "✻ Thinking… (12s · ..." is on screen.
@@ -434,7 +488,8 @@ if [ "$mode" = status ]; then
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     while IFS= read -r w; do
       live="$live$w "
-      pane="$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null || true)"
+      pane_e="$(tmux capture-pane -e -p -t "$SESSION:$w" 2>/dev/null || true)"
+      pane="$(strip_ansi <<<"$pane_e")"
       row="$(index_row "$w")"
       IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"${row:-}"
       if [ -z "$row" ]; then
@@ -451,12 +506,17 @@ if [ "$mode" = status ]; then
         if [ -z "$code" ]; then state=working
         elif [ "$code" = 0 ]; then state=done
         else state="exit$code"; fi
-        pane="$(tail -n 5 "$outlog")"
+        pane="$(tail -n 5 "$outlog")"; pane_e=""
       elif command grep -aqE 'Credit balance too low|API Error' <<<"$pane"; then state=error
       elif pane_spinner "$pane"; then state=working
       else state=idle; fi
       last="$(command grep -av '^[[:space:]]*$' <<<"$pane" | command grep -avE '^[[:space:]]*[─━═]+[[:space:]]*$|⏵|🐢|^[[:space:]]*❯|esc to|Enter to confirm|Not now|Don.t show again|Teach auto mode|Auto mode works' | tail -1 | sed 's/^[[:space:]]*//' | cut -c1-80 || true)"
-      printf '%-18s report:%-3s %-7s %s\n' "$w" "$wrote" "$state" "$last"
+      sug=""
+      if [ "$state" = idle ]; then
+        sug="$(pane_input_text dim "$pane_e" | cut -c1-120)"
+        [ -z "$sug" ] || sug="  suggestion: \"$sug\""
+      fi
+      printf '%-18s report:%-3s %-7s %s%s\n' "$w" "$wrote" "$state" "$last" "$sug"
       ctx="?"
       case "${b:-subscription}" in codex|copilot) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
       case "${b:-subscription}" in codex|copilot) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
@@ -495,8 +555,8 @@ if [ "$mode" = send ]; then
   took() {  # poll up to ~$1 seconds for: input line empty and a spinner on screen
     local i pane
     for i in $(seq 1 $(($1 * 2))); do
-      sleep 0.5; pane="$(tmux capture-pane -p -t "$target")"
-      if pane_input_empty "$pane" && pane_spinner "$pane"; then return 0; fi
+      sleep 0.5; pane="$(tmux capture-pane -e -p -t "$target")"
+      if pane_input_empty "$pane" && pane_spinner "$(strip_ansi <<<"$pane")"; then return 0; fi
     done
     return 1
   }
@@ -506,7 +566,7 @@ if [ "$mode" = send ]; then
   if took 6; then echo "sent to $name: submitted (input empty, spinner showing)"; exit 0; fi
   tmux send-keys -t "$target" C-m
   if took 6; then echo "sent to $name: submitted after a second Enter"; exit 0; fi
-  pane="$(tmux capture-pane -p -t "$target")"
+  pane="$(tmux capture-pane -e -p -t "$target")"
   if pane_input_empty "$pane"; then
     echo "sent to $name: input line is empty but no spinner seen; it may have been taken and already finished. Check: tmux capture-pane -p -t $target"
   else
