@@ -1382,6 +1382,42 @@ class SelfClosing(Base):
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
         self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([lane], "closed"))
 
+    def answered_lane(self, ask_id="oc-aaaaaaaa", line_id=None):
+        """A lane started for an ask, with that ask's line open in the muse inbox; the lane's report is written."""
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        state = self.state()
+        state["lanes"][lane]["ask"] = ask_id
+        dp.asks_of(state)[ask_id] = {"kind": "job", "status": "claimed", "lanes": [lane], "created": NOW, "task": "do the thing"}
+        dp.save_state(self.ctx.state_path, state)
+        self.ctx.inbox_path = self.inbox
+        self.inbox.write_text("- [ ] 2026-10-18 19:00 | a question | detail | oc-bbbbbbbb\n- [ ] 2026-10-18 19:01 | the job | detail | %s\n" % (line_id or ask_id))
+        self.write_report(lane)
+        return lane
+
+    def test_an_ask_answered_by_a_lane_report_ticks_its_inbox_line(self):
+        self.answered_lane()
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(dp.asks_of(self.state())["oc-aaaaaaaa"]["status"], "answered")
+        self.assertEqual(self.inbox.read_text().splitlines(),
+                         ["- [ ] 2026-10-18 19:00 | a question | detail | oc-bbbbbbbb", "- [x] 2026-10-18 19:01 | the job | detail | oc-aaaaaaaa"])
+
+    def test_a_failed_lane_ticks_nothing(self):
+        lane = self.answered_lane()
+        self.write_report(lane, "I was blocked: permission was denied, so nothing was changed.")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertNotEqual(dp.asks_of(self.state())["oc-aaaaaaaa"]["status"], "answered")
+        self.assertNotIn("[x]", self.inbox.read_text())
+
+    def test_tick_lane_answer_ticks_the_line_of_a_report_delivered_before_the_fix(self):
+        lane = self.answered_lane()
+        state = self.state()
+        dp.asks_of(state)["oc-aaaaaaaa"]["status"] = "answered"  # as the old sweep left it: answered, line still open
+        dp.save_state(self.ctx.state_path, state)
+        self.assertEqual(dp.tick_lane_answer(self.ctx, lane), (True, ""))
+        self.assertIn("- [x] 2026-10-18 19:01 | the job | detail | oc-aaaaaaaa", self.inbox.read_text())
+        self.assertEqual(dp.tick_lane_answer(self.ctx, "no-such-lane"), (True, ""))
+
     def test_a_closed_lane_is_not_posted_again(self):
         self.start("client-app")
         lane = self.lane_names()[0]
@@ -1902,6 +1938,36 @@ class ReplyFound17Oct(Base):
         status, run = pk.find_reply(h, {"text": "then what do you think I have been asking", "ts": NOW - 10}, NOW)
         self.assertEqual(status, "reply")
         self.assertEqual(pk.marker_job(run), ("start own-app: write the findings", None))
+
+    # 18 Oct 20:58: a compaction (role system) landed between his message and the reply, which is stamped after it. 20:00: the
+    # turn ended with no reply and the gateway wrote a role custom line. Neither is a reply, neither is a hub line.
+    def test_a_compaction_line_between_his_message_and_the_reply_does_not_hide_the_reply(self):
+        h = [chat("user", "a question", NOW - 30),
+             chat("system", "Compaction", NOW - 8.3, None),
+             chat("assistant", "Yes.\n\nSending to the hub: start own-app: look into it", NOW - 8.0)]
+        status, run = pk.find_reply(h, {"text": "a question", "ts": NOW - 30}, NOW)
+        self.assertEqual(status, "reply")
+        self.assertEqual(pk.marker_job(run), ("start own-app: look into it", None))
+
+    def test_system_and_custom_lines_are_skipped_wherever_they_sit(self):
+        for role, text in (("system", "Compaction"), ("system", "Reset"), ("custom", "turn ended before a reply")):
+            h = [chat("user", "a question", NOW - 30), chat(role, text, NOW - 20, None), chat("assistant", "Sure.", NOW - 10),
+                 chat(role, text, NOW - 5, None), chat("assistant", "More.", NOW - 4)]
+            status, run = pk.find_reply(h, {"text": "a question", "ts": NOW - 30}, NOW)
+            self.assertEqual((status, [m["text"] for m in run]), ("reply", ["Sure.", "More."]), (role, text))
+
+    def test_a_turn_that_ended_before_a_reply_is_no_reply_not_a_hub_line(self):
+        h = [chat("user", "a question", NOW - 30), chat("custom", "turn ended before a reply", NOW - 25, None)]
+        item = {"text": "a question", "ts": NOW - 30}
+        self.assertEqual(pk.find_reply(h, item, NOW)[0], "wait")  # young: the model may still answer
+        status, why = pk.find_reply(h, item, NOW + pk.REPLY_WAIT + 60)
+        self.assertEqual(status, "none")
+        self.assertIn("not replied", why)
+
+    def test_a_hub_line_is_still_a_hub_line(self):
+        h = [chat("user", "a question", NOW - 30), chat("system", "Compaction", NOW - 20, None),
+             chat("assistant", "[hub]\n\nx finished.", NOW - 15, "openclaw")]
+        self.assertEqual(pk.find_reply(h, {"text": "a question", "ts": NOW - 30}, NOW + pk.REPLY_WAIT + 60)[0], "none")
 
     def test_a_young_message_with_only_a_hub_line_after_it_waits(self):
         h = [chat("user", "hello", NOW - 10), chat("assistant", "[hub]\n\nx finished.", NOW - 7, "openclaw")]

@@ -423,8 +423,8 @@ def find_reply(history, item, now):
     """-> ("reply", [messages]) | ("wait", why) | ("none", why): the model's reply to ONE tray message of Jonathan's.
 
     His message is found in Main session by its time (within MATCH_TOL of the tray item's ts) and its text, never as "the
-    newest message", so typing again before the poll runs changes nothing. The reply is the first thing after it (tool results
-    and empty tool-call turns are skipped): it has to be model-written, so a [hub] line, a lane report or an openclaw-provider
+    newest message", so typing again before the poll runs changes nothing. The reply is the first thing after it (tool results,
+    empty tool-call turns and the gateway's own system and custom lines are skipped): it has to be model-written, so a [hub] line, a lane report or an openclaw-provider
     message right after his message means this was not a reply to him and nothing runs. The model's consecutive turns are the
     reply; whatever comes after them (a later [hub] line, his next message) is not part of it."""
     want = _norm(item["text"])
@@ -445,6 +445,8 @@ def find_reply(history, item, now):
             break
         if m["role"] == "toolResult" or (m["role"] == "assistant" and m["provider"] != "openclaw" and not m["text"].strip()):
             continue
+        if m["role"] != "assistant":
+            continue  # a system or custom line (Compaction, Reset, "turn ended before a reply") is the gateway's, never a reply or a hub line
         if not _model_written(m):
             if run:
                 break
@@ -686,6 +688,7 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
             waiting.append(e)
             continue
         if status == "none":
+            _file_unsettled(ctx, e, "no reply to it could be found in Main session (%s)" % got, now, log, filed)
             continue
         try:
             result = _run_marker(e, got, history, host, sites, aliases, ctx, now, log)
