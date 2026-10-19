@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes"]
+TESTS = ["test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes", "test_openclaw_nodrop", "test_openclaw_hublanes"]
 
 MUTANTS = [
     # the guard: who may reach the action table
@@ -107,8 +107,8 @@ MUTANTS = [
     (DISPATCH, "a later block is shortened", "state[key] = max(state.get(key, 0), until)", "state[key] = until"),
     (DISPATCH, "close without a report", 'if lane["status"] == "started" and not has_report:', "if False:"),
     (DISPATCH, "reply to a closed lane", 'get("status") not in ("started", "reported"):\n        names', 'get("status") not in ("started", "reported", "closed"):\n        names'),
-    (DISPATCH, "empty report counts as reported", 'if Path(lane["report"]).exists() and Path(lane["report"]).stat().st_size > 0:\n        return "reported", None', 'if Path(lane["report"]).exists():\n        return "reported", None'),
-    (DISPATCH, "lost window never counts as dead", 'now - lane["started"] > DEAD_GRACE', "False"),
+    (DISPATCH, "empty report counts as reported", 'if rep.exists() and rep.stat().st_size > 0 and rep.stat().st_mtime', 'if rep.exists() and rep.stat().st_mtime'),
+    (DISPATCH, "lost window never counts as dead", 'now - max(lane["started"], lane.get("reopened_at", 0)) > DEAD_GRACE', "False"),
     (DISPATCH, "reply sent bare, without the frame", "REPLY_FRAME + text.strip()", "text.strip()"),
     (DISPATCH, "report posted unquoted", '"> " + ln for ln', '"" + ln for ln'),
     (DISPATCH, "answers go to another session", 'MAIN_SESSION = "agent:main:main"', 'MAIN_SESSION = "agent:main:explicit:hub"'),
@@ -135,7 +135,7 @@ MUTANTS = [
     (PICKUP, "missing message always waits", 'young = now - item["ts"] <= REPLY_WAIT', "young = True"),
     (PICKUP, "chat reply acted on without being queued by tray gate", 'if kind == "chat" and ctx is not None and type(item.get("ts")) in (int, float):', 'if kind == "chat" and ctx is not None:'),
     # self-closing lanes, honest failures, Copilot, stop
-    (DISPATCH, "delivered lane keeps its window", "        if wins and name in wins:\n            host.kill_window(name)", "        pass"),
+    (DISPATCH, "a finished Claude lane's window is killed", 'if wins and name in wins and lane.get("engine", "claude") != "claude":', "if wins and name in wins:"),
     (DISPATCH, "delivered lane stays open in state", '        lane["status"] = "closed"\n        out.append', '        out.append'),
     (DISPATCH, "failure needs only one of the two signs", "if not (BLOCKED_RE.search(flat) and NOTHING_RE.search(flat)):", "if not (BLOCKED_RE.search(flat) or NOTHING_RE.search(flat)):"),
     (DISPATCH, "failed report announced as finished", '"%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else', '"%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if False else'),
@@ -176,7 +176,7 @@ MUTANTS = [
     (DISPATCH, "dedup: keyed on case and spacing", '" ".join(task.split()).lower().encode', '" ".join(task.split()).encode'),
     (DISPATCH, "dedup: window ignored (asks)", 'now - a.get("created", 0) < DEDUP_WINDOW', "True"),
     (DISPATCH, "dedup: window ignored (lanes)", 'now - l.get("started", 0) < DEDUP_WINDOW', "True"),
-    (DISPATCH, "dedup: a failed ask can never be retried", "and not _ask_failed(state, a):", ":"),
+    (DISPATCH, "dedup: a failed ask can never be retried", "and not _ask_failed(state, a) and not a.get(\"lane_failed_of\"):", ":"),
     (DISPATCH, "dedup: a failed lane can never be retried", 'and not l.get("failed"):', ":"),
     (DISPATCH, "dedup: a stopped lane cannot be retried", '["failed"] = "closed", True, True', '["failed"] = "closed", True, False'),
     (DISPATCH, "dedup: a dead lane not marked failed", 'lane["detail"], lane["failed"] = detail, True', 'lane["detail"] = detail'),
@@ -284,7 +284,26 @@ MUTANTS = [
 ]
 
 
+def _copy():
+    """The whole scripts folder (every module a test imports, e.g. hub_digest) and its tests, in a temp folder."""
+    d = Path(tempfile.mkdtemp()) / "scripts"
+    shutil.copytree(SCRIPTS, d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
+    return d
+
+
+def _run(d):
+    return subprocess.run([sys.executable, "-m", "unittest", *TESTS], cwd=d / "tests", capture_output=True, text=True, timeout=600)
+
+
 def main():
+    # the unmutated copy must be green, or every "killed" below means nothing (19 Oct: a missing hub_digest made every test module
+    # fail to import, and all 243 mutants read "killed")
+    d = _copy()
+    base = _run(d)
+    shutil.rmtree(d.parent, ignore_errors=True)
+    if base.returncode != 0:
+        print("the unmutated copy is not green, so no mutant can be judged:\n" + base.stderr[-2000:])
+        return 2
     red = 0
     rows = []
     only = os.environ.get("MUTANT_ONLY", "")  # a recheck: run just the mutants whose name holds this text
@@ -294,24 +313,19 @@ def main():
         if old not in src:
             rows.append((name, "PATTERN NOT FOUND", "-"))
             continue
-        d = Path(tempfile.mkdtemp())
-        shutil.copy(SCRIPTS / PICKUP, d / PICKUP)
-        shutil.copy(SCRIPTS / INSTALL, d / INSTALL)
-        shutil.copy(SCRIPTS / DISPATCH, d / DISPATCH)
-        shutil.copytree(SCRIPTS / "openclaw_ask_hook", d / "openclaw_ask_hook")
-        (d / "tests").mkdir()
-        for t in TESTS:
-            shutil.copy(HERE / (t + ".py"), d / "tests" / (t + ".py"))
+        d = _copy()
         (d / rel).write_text(src.replace(old, new, 1))
-        r = subprocess.run([sys.executable, "-m", "unittest", *TESTS], cwd=d / "tests", capture_output=True, text=True, timeout=300)
+        r = _run(d)
         m = re.search(r"FAILED \((.*)\)", r.stderr)
-        if r.returncode == 0:
+        if "ImportError" in r.stderr or "ModuleNotFoundError" in r.stderr:
+            rows.append((name, "BROKEN (import error)", "?"))
+        elif r.returncode == 0:
             rows.append((name, "SURVIVED (suite green)", "0"))
         else:
             n = sum(int(x) for x in re.findall(r"=(\d+)", m.group(1))) if m else "?"
             rows.append((name, "killed", str(n)))
             red += 1
-        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(d.parent, ignore_errors=True)
     for name, verdict, n in rows:
         print(f"{verdict:24} red={n:>3}  {name}")
     print(f"\n{red} of {len(mutants)} mutants killed")

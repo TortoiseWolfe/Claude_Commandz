@@ -12,6 +12,7 @@
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
+#   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
@@ -114,9 +115,21 @@ check_open_questions() {
     exit 0
   fi
 }
+# A message of his that reached nobody: the reconciler puts it on the hub's list (so the next wake sees it as an open question, not again
+# as a drop) and the hub wakes with the list. 19 Oct 3:34-3:57 PM: six of his messages went nowhere and nothing woke anyone.
+reconcile="${OPENCLAW_RECONCILE:-$(dirname "$dispatch")/openclaw_reconcile.py}"
+check_undelivered() {
+  local u
+  u=$(timeout 60 python3 "$reconcile" --file --quiet 2>/dev/null | grep -E '^(undelivered \||filed with the hub:)') || return 0
+  echo "undelivered: messages of Jonathan's that reached no lane and not the hub (now on the hub's list):"
+  printf '%s\n' "$u"
+  exit 0
+}
+check_undelivered
 check_open_questions
 end=$(( $(date +%s) + max * 60 ))
 while :; do
+  check_undelivered
   check_open_questions
   refresh_watched
   hit=0; other=0

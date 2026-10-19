@@ -267,11 +267,15 @@ class LaneHost:
         # wsl.exe started from such a folder exits 1 and prints nothing, so every post to the chat failed without a word.
         if cwd is None:
             cwd = str(Path.home())
+        # errors="replace": wsl.exe prints its own failures in UTF-16, and a strict decode raised UnicodeDecodeError out of a post to the
+        # chat (19 Oct 5:09 PM: two of his messages never ran because of it).
         try:
-            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, input=stdin, env=env)
+            return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd,
+                                  input=stdin, env=env)
         except subprocess.TimeoutExpired as e:
             if timeout_result:
-                return subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout=e.stdout or "", stderr="timed out")
+                out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                return subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout=out, stderr="timed out")
             return None
         except OSError:
             return None
@@ -444,7 +448,7 @@ class LaneHost:
                 try:
                     r = self._run(argv, 90, stdin=params + "\n", timeout_result=True)
                 except subprocess.TimeoutExpired as e:
-                    r = subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout=e.stdout or "", stderr="timed out")
+                    r = subprocess.CompletedProcess(argv, RUN_TIMED_OUT, stdout="", stderr="timed out")
                 if r and r.returncode == 0 and re.search(r'"ok":\s*true', r.stdout or ""):
                     landed = True
                     break
@@ -1769,7 +1773,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
     if not name:
         # a lane whose window has closed: one restarted already carries on under its successor's name, else it is restarted now from its
         # hand-off folder with his words (19 Oct 3:35 PM: six replies to tigard-porch-finish bounced because its window had closed)
-        old = closed_lane_name(ctx, lane_word, live)
+        old = closed_lane_name(ctx, lane_word, live, now)
         succ = successor(state, old) if old else None
         if succ and succ != old and depth < 3:
             return do_reply(ctx, host, succ, text, now, ask_id, context, depth + 1)
@@ -1861,10 +1865,10 @@ def index_rows(ctx):
     return [dict(zip(keys, f + [""] * (len(keys) - len(f)))) for f in (l.split("\t") for l in lines) if len(f) >= 7]
 
 
-def closed_lane_name(ctx, word, live=()):
+def closed_lane_name(ctx, word, live=(), now=None):
     """A lane by the name he used that lane.sh started within REPLY_WINDOW and that is not running now: the exact name, else the one
     name that begins or ends with the word at a dash. None when there is none, or more than one."""
-    cut = time.strftime("%F", time.localtime(time.time() - REPLY_WINDOW))
+    cut = time.strftime("%F", time.localtime((time.time() if now is None else now) - REPLY_WINDOW))
     names = {r["name"] for r in index_rows(ctx) if r["date"] >= cut and LANE_NAME_RE.fullmatch(r["name"])} - set(live or ())
     hit = find_live_lane((word or "").strip(), names)
     return hit[0] if len(hit) == 1 else None
@@ -2669,7 +2673,7 @@ def worktree_parent(ctx, real):
     counts without a hub/repos.tsv refresh (3:03 PM 19 Oct: "what the fuck you mean it's not a repo ... you should fix that").
     The folder must be the worktree's own top level, and its parent repo must be on the list. -> (name, Path, remote) or None."""
     try:
-        out = subprocess.run(["git", "-C", real, "rev-parse", "--show-toplevel", "--git-common-dir"], capture_output=True, text=True,
+        out = subprocess.run(["git", "-C", real, "rev-parse", "--show-toplevel", "--git-common-dir"], capture_output=True, text=True, errors="replace",
                              timeout=15, stdin=subprocess.DEVNULL).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2684,7 +2688,7 @@ def worktree_parent(ctx, real):
         return None
     # The folder's own .git file is not proof (anyone can write one pointing at a listed repo); the listed repo has to list the folder.
     try:
-        listing = subprocess.run(["git", "-C", parent, "worktree", "list", "--porcelain"], capture_output=True, text=True,
+        listing = subprocess.run(["git", "-C", parent, "worktree", "list", "--porcelain"], capture_output=True, text=True, errors="replace",
                                  timeout=15, stdin=subprocess.DEVNULL).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return None

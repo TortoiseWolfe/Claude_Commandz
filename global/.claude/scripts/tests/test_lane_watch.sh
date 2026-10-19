@@ -61,6 +61,27 @@ else
   echo "FAIL no lane names: rc=$rc out=$out"; failures=$((failures + 1))
 fi
 
+# A message of his that reached nobody wakes the hub with the reconciler's lines.
+fake_rec="$TMP/reconcile.py"
+cat > "$fake_rec" <<'PY'
+print("undelivered | 3:35 PM | oc-d5c135d5 | his reply was meant for a lane | \"it does show the porch\"")
+print("filed with the hub: oc-d5c135d5")
+PY
+rc=0; out=$(HOME="$home" OPENCLAW_RECONCILE="$fake_rec" bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && printf '%s\n' "$out" | head -1 | grep -q "^undelivered: messages of Jonathan's" \
+   && printf '%s\n' "$out" | grep -q "^undelivered | 3:35 PM | oc-d5c135d5" && printf '%s\n' "$out" | grep -q "^filed with the hub: oc-d5c135d5"; then
+  echo "ok   an undelivered message wakes the hub with the reconciler's lines"
+else
+  echo "FAIL undelivered wake: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+printf 'print("")\n' > "$fake_rec"
+rc=0; out=$(HOME="$home" OPENCLAW_RECONCILE="$fake_rec" bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q undelivered; then
+  echo "ok   no undelivered message, no undelivered wake"
+else
+  echo "FAIL quiet reconcile: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+
 fake_open="$TMP/open.py"
 cat > "$fake_open" <<'PY'
 import sys
