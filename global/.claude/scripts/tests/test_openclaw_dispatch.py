@@ -524,6 +524,45 @@ class ReceptionistQueue(Base):
         self.assertEqual(len(host.started), 1)
         self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "fallback-lane")
 
+    def test_a_fallback_start_that_raises_puts_the_ask_back_so_a_later_run_retries_it(self):
+        # #42 item 1: the status revert ran only after do_start returned, so a raise left the ask on fallback-lane for good
+        ask_id = "oc-ffffff01"
+        self.record_question(ask_id, "deferred", NOW - 1800, deferred_at=NOW - 16 * 60)
+        with unittest.mock.patch.object(dp, "do_start", side_effect=RuntimeError("gateway fell over")):
+            try:
+                dp.fallback_due(self.ctx, FakeHost(), NOW)
+            except RuntimeError:
+                pass
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "deferred")
+
+    def test_a_say_that_arrives_after_the_ask_flipped_to_fallback_is_accepted(self):
+        # #42 item 2: post_ask accepts a fallback ask, say refused it, so the hub then answered a second time
+        ask_id = "oc-ffffff02"
+        self.record_question(ask_id, "fallback", NOW - 60)
+        ok, msg = dp.say(self.ctx, self.host, ask_id, "The verified result.", NOW)
+        self.assertTrue(ok, msg)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
+        self.assertEqual(self.host.chats, ["The verified result."])
+
+    def test_one_failing_oldest_question_does_not_block_the_next_one_this_run(self):
+        # #42 item 4: only one answer lane starts per run, and a failed start on the oldest used to use up that run
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question("oc-ffffff03", "deferred", NOW - 3600, deferred_at=NOW - 40 * 60)
+        self.record_question("oc-ffffff04", "deferred", NOW - 3600, deferred_at=NOW - 30 * 60)
+
+        class FirstStartFails(FakeHost):
+            def start_lane(inner, name, dirpath, engine, model, prompt_path, ask=None):
+                super(FirstStartFails, inner).start_lane(name, dirpath, engine, model, prompt_path, ask)
+                return (False, "no window") if len(inner.started) == 1 else (True, "started")
+
+        host = FirstStartFails()
+        dp.fallback_due(self.ctx, host, NOW)
+        asks = dp.asks_of(self.state())
+        self.assertEqual(len(host.started), 2)
+        self.assertEqual(asks["oc-ffffff03"]["status"], "deferred")
+        self.assertEqual(asks["oc-ffffff04"]["status"], "fallback-lane")
+
     def test_hub_reason_pipes_are_normalized_before_writing_inbox_line(self):
         import hub_digest as hd
 
@@ -550,6 +589,15 @@ class ReceptionistQueue(Base):
         self.assertIn("(ask oc-ffffffff)", chat)
         self.assertIn("I flagged it to the hub again", chat)
         self.assertGreater(self.wake.stat().st_mtime_ns, before)
+
+
+class NoShadowedFunctions(unittest.TestCase):
+    def test_no_top_level_function_in_the_dispatcher_is_defined_twice(self):
+        # #57 added a second _clock(t) under the first _clock(epoch, now): the later one won, and lane lines and reports crashed
+        import ast
+        tree = ast.parse(Path(dp.__file__).read_text())
+        names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+        self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [])
 
 
 class Menu(Base):
@@ -1237,6 +1285,40 @@ class MainSessionOnly(Base):
             log = (self.tmp / "state" / "openclaw-inject.log").read_text().splitlines()
         self.assertEqual((len(attempts), sleeps, len(log)), (1, [], 1))
         self.assertIn("returncode=%d stderr=timed out" % dp.RUN_TIMED_OUT, log[0])
+
+    def test_inject_does_not_retry_an_exit_0_without_ok_true(self):
+        # #42 item 3: a slow success whose reply lacked "ok": true was retried, so the post could land twice
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+
+        def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            attempts.append(argv)
+            return type("R", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+        host._run = run
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:noOk"}):
+            self.assertFalse(host.inject("answer"))
+            log = (self.tmp / "state" / "openclaw-inject.log").read_text().splitlines()
+        self.assertEqual((len(attempts), sleeps, len(log)), (1, [], 1))
+
+    def test_the_system_event_does_not_retry_an_exit_0_without_ok_true(self):
+        host = dp.LaneHost()
+        attempts, sleeps = [], []
+
+        def run(argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            if "system-event" in " ".join(argv):
+                attempts.append(argv)
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+
+        host._run = run
+        host.sleep = sleeps.append
+        with unittest.mock.patch.object(dp, "STATE", self.tmp / "state"), unittest.mock.patch.dict(
+                os.environ, {dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:noOkEvent"}):
+            self.assertTrue(host.inject("answer"))
+        self.assertEqual((len(attempts), sleeps), (1, []))
 
     def test_inject_works_when_the_poll_starts_in_a_folder_that_does_not_exist(self):
         """Task Scheduler starts the poll in "/WINDOWS/system32", which WSL does not have. The real wsl.exe exits 1 with no
