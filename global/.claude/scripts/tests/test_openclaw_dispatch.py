@@ -1069,7 +1069,7 @@ class Sweep(Base):
         lane = self.lane_names()[0]
         out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("ERROR: You've hit your usage limit. Try again at Oct 31st.\nexit 1\n")
+        out.write_text("ERROR: You've hit your usage limit. Try again later.\nexit 1\n")
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
         self.assertIn("out of usage", chat)
         self.start("own-app", "again", NOW + 200)
@@ -1163,6 +1163,87 @@ class Sweep(Base):
         self.block(copilot_blocked_until=later)
         self.out_of_usage("You have exceeded your monthly quota", NOW + 1000)
         self.assertEqual(self.state()["copilot_blocked_until"], later)
+
+    CODEX_LIMIT = "ERROR: You\u2019ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at %s."
+
+    @staticmethod
+    def local_epoch(*ymdhm):
+        return time.mktime(ymdhm + (0, 0, 0, -1))
+
+    def test_codex_usage_limit_blocks_until_the_date_in_try_again_at(self):
+        (line, chat), = self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027 2:38 PM", NOW)
+        self.assertIn("Codex says it is out of usage", chat)
+        self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 14, 38))
+
+    def test_codex_try_again_at_without_a_year_takes_this_years_date(self):
+        # NOW is 15 Jan 2027
+        self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd 9:05 AM", NOW)
+        self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 9, 5))
+
+    def test_codex_try_again_at_a_year_rollover_without_a_year_reads_next_year(self):
+        now = self.local_epoch(2026, 12, 30, 10, 0)
+        state = {}
+        dp.block_until(state, "codex_blocked_until", self.CODEX_LIMIT % "Jan 2nd 9:05 AM", now, dp.CODEX_BLOCK_SECONDS)
+        self.assertEqual(state["codex_blocked_until"], self.local_epoch(2027, 1, 2, 9, 5))
+
+    def test_codex_try_again_at_a_date_with_no_time_blocks_from_midnight_that_day(self):
+        self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027", NOW)
+        self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 0, 0))
+
+    def test_codex_block_never_shortens_an_existing_later_one(self):
+        later = self.local_epoch(2027, 3, 1, 0, 0)
+        self.start("own-app", "ran on codex")  # the lane started on Codex; the later block was set by another lane's report meanwhile
+        lane = self.host.started[-1][0]
+        self.assertEqual(self.host.started[-1][2], "codex")
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(self.CODEX_LIMIT % "Feb 3rd, 2027 2:38 PM" + "\nexit 1\n")
+        self.block(codex_blocked_until=later)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state()["codex_blocked_until"], later)
+
+    def test_codex_falls_back_to_twelve_hours_when_no_date_parses(self):
+        for i, text in enumerate(("You've hit your usage limit.", self.CODEX_LIMIT % "sometime soon",
+                                  self.CODEX_LIMIT % "Feb 31st, 2027 1:00 PM",      # not a date
+                                  self.CODEX_LIMIT % "Jan 1st, 2027 1:00 PM",       # already past
+                                  self.CODEX_LIMIT % "Jan 2nd 9:05 AM",             # no year and past: a year out, a misread
+                                  self.CODEX_LIMIT % "Feb 3rd, 2031 1:00 PM")):     # far beyond a plausible block
+            started = NOW + i * 1000
+            self.block(codex_blocked_until=0)
+            self.out_of_usage(text, started)
+            self.assertEqual(self.state()["codex_blocked_until"], started + 100 + dp.CODEX_BLOCK_SECONDS, text)
+
+    def test_nested_repo_rows_are_startable_under_their_folder_name(self):
+        (self.root / "CD/cd-thing/.git").mkdir(parents=True)
+        with open(self.root / "hub/repos.tsv", "a") as f:
+            f.write("CD/cd-thing\thttps://github.com/Chattanooga-Digital/cd-thing.git\tmain\t2026-10-10\trepo\tmain\n")
+        repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.assertEqual(repos["cd-thing"], ("cd-thing", self.root / "CD/cd-thing", "https://github.com/Chattanooga-Digital/cd-thing.git"))
+        self.ctx.repos = repos
+        self.start("cd-thing", "look at it")
+        name, folder, engine, model, _ = self.host.started[-1]
+        self.assertEqual((folder, engine), (str(self.root / "CD/cd-thing"), "claude"))
+        self.assertEqual(self.act("start CD/cd-thing: x")[0], "chat")  # the slash form is still not a start
+
+    def test_a_nested_repo_is_client_work_and_a_codex_ask_for_it_is_refused(self):
+        (self.root / "CD/cd-thing/.git").mkdir(parents=True)
+        path = self.root / "CD/cd-thing"
+        self.assertEqual(dp.client_reason("cd-thing", path, "https://github.com/Chattanooga-Digital/cd-thing.git", self.senders, self.repos_txt, self.root),
+                         "it is under the CD tree")
+        self.assertEqual(dp.choose_engine(path, "it is under the CD tree", "fix it", False)[0], "claude")
+
+    def test_nested_rows_cannot_escape_the_repos_root_or_shadow_a_top_level_repo(self):
+        (self.root / "CD/own-app/.git").mkdir(parents=True)
+        outside = self.tmp / "outside"
+        (outside / "x/.git").mkdir(parents=True)
+        os.symlink(outside, self.root / "LINK")
+        with open(self.root / "hub/repos.tsv", "a") as f:
+            for row in ("CD/own-app", "LINK/x", "CD/../own-docker", "CD/a/b", "/CD/own-app"):
+                f.write("%s\tgit@github.com:TortoiseWolfe/z.git\tmain\t2026-10-10\trepo\tmain\n" % row)
+        repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.assertEqual(repos["own-app"][1], self.root / "own-app")
+        self.assertNotIn("x", repos)
+        self.assertEqual(sorted(k for k in repos if "/" in k or ".." in k), [])
 
     def test_codex_and_copilot_both_blocked_fall_back_to_claude_sonnet(self):
         state = self.state()
