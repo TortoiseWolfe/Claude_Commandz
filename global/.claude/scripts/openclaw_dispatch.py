@@ -1001,6 +1001,22 @@ def _settle_lane_ask(state, lane_name, text, now):
     return None
 
 
+def _tick_lane_answer(ctx, state, lane_name):
+    """Tick the muse-inbox line of the ask a lane's report answered, as post_ask does for a hub answer. A lane whose ask is not
+    answered (it failed, another lane is still on it, it has none) ticks nothing. -> (ok, error)."""
+    ask_id = state["lanes"].get(lane_name, {}).get("ask")
+    ask = asks_of(state).get(ask_id) if ask_id else None
+    if ask is None or ask.get("status") != "answered":
+        return True, ""
+    return _tick_inbox(ctx, [ask_id])
+
+
+def tick_lane_answer(ctx, lane_name):
+    """Tick the inbox line of the ask this lane answered; for one whose report was delivered before the sweep ticked its own. -> (ok, error)."""
+    with ctx.locked():
+        return _tick_lane_answer(ctx, load_state(ctx.state_path), lane_name)
+
+
 def _sweep(ctx, host, now=None):
     """Post the report (or the ending) of every lane Jonathan started that has one into Main session, then close the lane
     (window killed, state "closed"): he never has to. A note that could not be posted leaves the lane open for the next sweep.
@@ -1049,6 +1065,9 @@ def _sweep(ctx, host, now=None):
             ask = asks_of(state)[needs_hub]
             to_hub_list(ctx, needs_hub, ask.get("task", ""), now,
                         "lane %s %s; its report did not answer the ask, which stays open" % (name, "failed" if lane.get("failed") else "ended"))
+        ticked, tick_error = _tick_lane_answer(ctx, state, name)
+        if not ticked:
+            line += "; could not tick the inbox: %s" % tick_error
         wins = host.windows()
         if wins and name in wins:
             host.kill_window(name)
