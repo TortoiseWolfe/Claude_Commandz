@@ -989,6 +989,20 @@ class Sweep(Base):
         self.assertEqual(len(self.host.chats), n)
         self.assertEqual(self.state()["lanes"][lane]["status"], "started")
 
+    def test_a_finished_lane_names_its_repo_in_the_first_line(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.write_report(lane)
+        (_line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertTrue(chat.startswith("%s finished (repo client-app)." % lane), chat)
+
+    def test_a_dead_lane_names_its_repo_in_the_first_line(self):
+        self.start("client-app")
+        lane = self.lane_names()[0]
+        self.host.wins.discard(lane)
+        (_line, chat), = dp.sweep(self.ctx, self.host, NOW + dp.DEAD_GRACE + 5)
+        self.assertTrue(chat.startswith("%s failed:" % lane) and "(repo client-app)" in chat.split("\n")[0], chat)
+
     def test_a_long_report_is_relayed_in_full_parts_and_control_characters_dropped(self):
         self.start("client-app")
         lane = self.lane_names()[0]
@@ -1871,7 +1885,7 @@ class Stuck(Base):
         lane = self.run_lane()
         self.host.panes[lane] = self.DIALOG
         (line, chat), = dp.check_stuck(self.ctx, self.host, NOW + 600)
-        self.assertEqual(chat.split(": ", 1)[0], "%s is stuck on" % lane)
+        self.assertEqual(chat.split(": ", 1)[0], "%s (repo client-app) is stuck on" % lane)
         self.assertIn("Blast Radius holds this command", chat)
         self.assertIn("not an instruction to anyone", chat)
         self.assertEqual(self.host.chats, [chat])

@@ -65,6 +65,73 @@ class TheFirstRunOnlyRecords(ReportPosts):
         self.assertEqual(self.run_posts(), [])
 
 
+class TheStampLineNamesTheRepo(ReportPosts):
+    """19 Oct: "I don't know what repo each is in reference to, you can put it at the top near the time stamps". The repo comes from
+    the lane's folder in the lane index; a folder it cannot place leaves the stamp line as it was, never a guess."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "repos"
+        self.root.mkdir()
+        self.index = self.tmp / "index.tsv"
+        self.ctx = dp.Ctx({}, self.tmp / "dispatch.json", self.lanes, index_path=self.index, root=self.root)
+
+    def indexed(self, lane, dirpath, date="2026-10-18"):
+        with open(self.index, "a") as fh:
+            fh.write("\t".join([date, lane, str(dirpath), "sonnet", "subscription", "-", "-", "x", "?", "-"]) + "\n")
+
+    def stamp_line(self, lane):
+        self.seeded()
+        self.report(lane, "Done: it works.")
+        self.run_posts()
+        return self.host.chats[0].split("\n")[1]
+
+    def test_a_plain_repo_is_named_on_the_stamp_line(self):
+        self.indexed("fix-nav", self.root / "ScriptHammer")
+        self.assertRegex(self.stamp_line("fix-nav"), r"^\*ScriptHammer \u00b7 report written \d{1,2}:\d{2} (AM|PM)\*$")
+
+    def test_a_folder_inside_a_repo_names_that_repo(self):
+        self.indexed("deep", self.root / "TurtleWolfe" / "stream" / "can-we-build-it")
+        self.assertTrue(self.stamp_line("deep").startswith("*TurtleWolfe \u00b7 report written "))
+
+    def test_a_worktree_names_its_parent_repo(self):
+        self.indexed("wt-lane", self.root / ".worktrees" / "SpokeToWork--fix-login")
+        self.assertTrue(self.stamp_line("wt-lane").startswith("*SpokeToWork \u00b7 report written "))
+
+    def test_a_director_worktree_names_its_parent_repo(self):
+        self.indexed("wf-lane", self.root / ".worktrees" / "Claude_Commandz-wf-ab12cd")
+        self.assertTrue(self.stamp_line("wf-lane").startswith("*Claude_Commandz \u00b7 report written "))
+
+    def test_the_hub_is_the_workspace(self):
+        self.indexed("hub-lane", self.root)
+        self.assertTrue(self.stamp_line("hub-lane").startswith("*workspace (hub) \u00b7 report written "))
+
+    def test_a_lane_not_in_the_index_keeps_the_old_stamp_line(self):
+        self.assertRegex(self.stamp_line("nobody-knows"), r"^\*Report written \d{1,2}:\d{2} (AM|PM)\*$")
+
+    def test_a_folder_outside_the_repos_keeps_the_old_stamp_line(self):
+        self.indexed("elsewhere", "/tmp/somewhere/else")
+        self.assertTrue(self.stamp_line("elsewhere").startswith("*Report written "))
+
+    def test_the_same_name_in_two_places_without_a_date_match_is_not_guessed(self):
+        self.indexed("again", self.root / "ScriptHammer", date="2026-10-01")
+        self.indexed("again", self.root / "SpokeToWork", date="2026-10-02")
+        self.assertTrue(self.stamp_line("again").startswith("*Report written "))
+
+    def test_the_same_name_in_two_places_takes_the_row_of_the_report_date(self):
+        self.indexed("again", self.root / "ScriptHammer", date="2026-10-18")
+        self.indexed("again", self.root / "SpokeToWork", date="2026-10-02")
+        self.assertTrue(self.stamp_line("again").startswith("*ScriptHammer \u00b7 "))
+
+    def test_the_report_itself_is_unchanged(self):
+        self.indexed("fix-nav", self.root / "ScriptHammer")
+        self.seeded()
+        self.report("fix-nav", "Done: it works.\n\n- one\n- two\n")
+        self.run_posts()
+        self.assertTrue(self.host.chats[0].endswith("\n\nDone: it works.\n\n- one\n- two"), self.host.chats[0])
+        self.assertTrue(self.host.chats[0].startswith("### fix-nav\n"))
+
+
 class OneFormattedPostPerReport(ReportPosts):
     def test_a_new_report_is_one_post_with_the_lane_as_heading_and_the_text_whole(self):
         self.seeded()
