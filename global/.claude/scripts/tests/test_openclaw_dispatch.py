@@ -30,6 +30,7 @@ class FakeHost:
         self.started, self.sent, self.killed, self.chats, self.digests = [], [], [], [], 0
         self.wins, self.start_ok, self.send_result, self.proj = set(), (True, "started"), (True, "sent to x: submitted"), None
         self.proj_asked = 0
+        self.used, self.reset = None, None  # the week's USED percent and its reset (epoch), as week_budget() reports them
         self.panes = {}
         self.hub_live = set()  # lanes running now that the hub started (the dispatcher's state file does not hold them)
 
@@ -61,6 +62,10 @@ class FakeHost:
     def projection_pct(self):
         self.proj_asked += 1
         return self.proj
+
+    def week_budget(self):
+        self.proj_asked += 1
+        return {"projected": self.proj, "used": self.used, "reset": self.reset}
 
     def inject(self, text):
         try:
@@ -1339,12 +1344,137 @@ class MainSessionOnly(Base):
         self.assertEqual(list(inspect.signature(FakeHost.inject).parameters), list(inspect.signature(dp.LaneHost.inject).parameters))
 
 
+def ET(y, mo, d, h, mi=0):
+    """An Eastern wall-clock time as an epoch."""
+    from zoneinfo import ZoneInfo
+    return datetime.datetime(y, mo, d, h, mi, tzinfo=ZoneInfo("America/New_York")).timestamp()
+
+
+# the week of 14-21 Oct 2026: reset Wed 21 Oct 12:00 PM EDT; phase 2 from Mon 19 Oct 6:00 AM, phase 3 from Tue 20 Oct 6:00 AM
+EDGES = [  # (when, phase)
+    (ET(2026, 10, 14, 12, 1), 1), (ET(2026, 10, 19, 5, 59), 1),
+    (ET(2026, 10, 19, 6, 1), 2), (ET(2026, 10, 20, 5, 59), 2),
+    (ET(2026, 10, 20, 6, 1), 3), (ET(2026, 10, 21, 11, 59), 3),
+    (ET(2026, 10, 21, 12, 1), 1),
+]
+
+
+class TheWeeksPhases(unittest.TestCase):
+    def test_the_phase_changes_one_minute_either_side_of_each_boundary(self):
+        for when, phase in EDGES:
+            with self.subTest(when=when):
+                self.assertEqual(dp.week_phase(when)[0], phase)
+
+    def test_the_boundaries_are_the_named_constants(self):
+        self.assertEqual((dp.WEEK_RESET, dp.PHASE2_START, dp.PHASE3_START), ((2, 12, 0), (0, 6, 0), (1, 6, 0)))
+        self.assertEqual((dp.PROJECTION_LIMIT, dp.USED_LIMIT), (90.0, 95.0))
+
+    def test_a_reset_the_report_names_is_the_one_used_and_the_week_follows_a_dst_change(self):
+        # clocks go back Sun 1 Nov 2026: Mon 2 Nov 6:00 AM is still 6:00 AM on the wall
+        reset = ET(2026, 11, 4, 12)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 2, 5, 59), reset)[0], 1)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 2, 6, 1), reset)[0], 2)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 3, 6, 1), reset)[0], 3)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 3, 6, 1), None)[0], 3)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 2, 6, 1), None)[0], 2)
+
+    def test_the_phase_names_where_it_ends_in_12_hour_time(self):
+        self.assertEqual(dp.week_phase(ET(2026, 10, 17, 9, 53)), (1, "Mon 6:00 AM", "Wed 12:00 PM"))
+        self.assertEqual(dp.week_phase(ET(2026, 10, 19, 9, 0)), (2, "Tue 6:00 AM", "Wed 12:00 PM"))
+        self.assertEqual(dp.week_phase(ET(2026, 10, 20, 9, 0)), (3, None, "Wed 12:00 PM"))
+
+    def test_each_phase_gates_on_its_own_figure(self):
+        # (when, projected, used, held?)
+        for when, proj, used, held in [
+            (ET(2026, 10, 19, 5, 59), 90.0, 99, False), (ET(2026, 10, 19, 5, 59), 90.1, 10, True),  # phase 1: projected, past 90
+            (ET(2026, 10, 19, 6, 1), 108, 94.9, False), (ET(2026, 10, 19, 6, 1), 20, 95.0, True),    # phase 2: used, at 95
+            (ET(2026, 10, 20, 5, 59), 200, 94, False), (ET(2026, 10, 20, 5, 59), 20, 96, True),
+            (ET(2026, 10, 20, 6, 1), 200, 99.9, False), (ET(2026, 10, 21, 11, 59), 200, 100, False),  # phase 3: nothing
+            (ET(2026, 10, 21, 12, 1), 91, 2, True), (ET(2026, 10, 21, 12, 1), 40, 2, False),         # the new week is phase 1 again
+        ]:
+            with self.subTest(when=when, proj=proj, used=used):
+                over = dp.budget_over({"projected": proj, "used": used, "reset": None}, when, held=True)
+                self.assertEqual(over is not None, held, over)
+
+    def test_an_unknown_figure_holds_in_phases_1_and_2_and_not_in_phase_3(self):
+        for when, held in [(ET(2026, 10, 19, 5, 59), True), (ET(2026, 10, 19, 6, 1), True), (ET(2026, 10, 20, 6, 1), False)]:
+            with self.subTest(when=when):
+                self.assertEqual(dp.budget_over({"projected": None, "used": None, "reset": None}, when, held=True) is not None, held)
+                self.assertIsNone(dp.budget_over({"projected": None, "used": None, "reset": None}, when))  # the step-down never blocks on unknown
+        # phase 2 gates on used, so a known projection does not stand in for an unknown used
+        self.assertIsNotNone(dp.budget_over({"projected": 10, "used": None, "reset": None}, ET(2026, 10, 19, 7), held=True))
+        # phase 1 gates on the projection, so a known used does not stand in for an unknown projection
+        self.assertIsNotNone(dp.budget_over({"projected": None, "used": 10, "reset": None}, ET(2026, 10, 18, 7), held=True))
+
+    def test_the_reason_names_the_phase_and_its_limit(self):
+        self.assertEqual(dp.budget_over({"projected": 108, "used": 84, "reset": None}, ET(2026, 10, 18, 9)),
+                         "the week is projected at 108% (phase 1, reset to Mon 6:00 AM, holds past 90% projected)")
+        self.assertEqual(dp.budget_over({"projected": 108, "used": 96, "reset": None}, ET(2026, 10, 19, 9)),
+                         "the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95% used)")
+
+
+class TheStepDownFollowsThePhase(Base):
+    def test_phase_1_steps_a_claude_lane_down_past_90_projected(self):
+        self.host.proj, self.host.used = 108, 84
+        self.start("client-app", "draft a reply to the email", ET(2026, 10, 18, 9))
+        self.assertEqual(self.host.started[-1][3], "sonnet")
+        self.assertIn("phase 1", self.host.chats[-1])
+        self.assertIn("projected at 108%", self.host.chats[-1])
+
+    def test_phase_2_keeps_opus_while_used_is_under_95_whatever_the_projection(self):
+        self.host.proj, self.host.used = 108, 84
+        self.start("client-app", "draft a reply to the email", ET(2026, 10, 19, 6, 1))
+        self.assertEqual(self.host.started[-1][3], "opus")
+        self.host.used = 96
+        self.start("client-app", "draft a reply to the email", ET(2026, 10, 19, 6, 2))
+        self.assertEqual(self.host.started[-1][3], "sonnet")
+        self.assertIn("phase 2", self.host.chats[-1])
+        self.assertIn("used at 96%", self.host.chats[-1])
+
+    def test_phase_3_keeps_opus_at_any_usage(self):
+        self.host.proj, self.host.used = 300, 99.5
+        self.start("client-app", "draft a reply to the email", ET(2026, 10, 20, 6, 1))
+        self.assertEqual(self.host.started[-1][3], "opus")
+        self.assertNotIn("Sonnet only", self.host.chats[-1])
+
+
+class TheHostBudget(unittest.TestCase):
+    REPORT = {"projection": {"projected_pct": 106.5, "used_pct": 83.97, "reset": "2026-10-21T12:00:00-04:00"}}
+
+    def host(self, report, calls):
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None: calls.append(argv) or type(
+            "R", (), {"returncode": 0, "stdout": json.dumps(report), "stderr": ""})()
+        return host
+
+    def test_the_budget_carries_used_and_the_reset_the_report_names(self):
+        calls = []
+        b = self.host(self.REPORT, calls).week_budget(Path(tempfile.mkdtemp()) / "p.json", NOW)
+        self.assertEqual(b, {"projected": 106.5, "used": 83.97, "reset": ET(2026, 10, 21, 12)})
+
+    def test_a_cache_from_before_the_reset_is_not_trusted_after_it(self):
+        tmp, calls = Path(tempfile.mkdtemp()) / "p.json", []
+        host = self.host(self.REPORT, calls)
+        before = ET(2026, 10, 21, 11, 50)
+        host.week_budget(tmp, before)
+        host.week_budget(tmp, before + 300)  # 11:55 AM: cached
+        self.assertEqual(len(calls), 1)
+        host.week_budget(tmp, ET(2026, 10, 21, 12, 5))  # 12:05 PM, 15 minutes old but the week has turned over
+        self.assertEqual(len(calls), 2)
+
+    def test_an_old_cache_without_used_is_a_miss(self):
+        tmp, calls = Path(tempfile.mkdtemp()) / "p.json", []
+        tmp.write_text(json.dumps({"at": NOW, "pct": 50}))
+        self.host(self.REPORT, calls).week_budget(tmp, NOW + 10)
+        self.assertEqual(len(calls), 1)
+
+
 class Projection(unittest.TestCase):
     def test_the_projection_is_cached_for_half_an_hour(self):
         tmp = Path(tempfile.mkdtemp()) / "proj.json"
         calls = []
         host = dp.LaneHost()
-        host._run = lambda argv, timeout, cwd=None, stdin=None: calls.append(argv) or type("R", (), {"returncode": 0, "stdout": json.dumps({"projection": {"projected_pct": 61.5}}), "stderr": ""})()
+        host._run = lambda argv, timeout, cwd=None, stdin=None: calls.append(argv) or type("R", (), {"returncode": 0, "stdout": json.dumps({"projection": {"projected_pct": 61.5, "used_pct": 40.0}}), "stderr": ""})()
         self.assertEqual(host.projection_pct(tmp, NOW), 61.5)
         self.assertEqual(host.projection_pct(tmp, NOW + 600), 61.5)
         self.assertEqual(len(calls), 1)
