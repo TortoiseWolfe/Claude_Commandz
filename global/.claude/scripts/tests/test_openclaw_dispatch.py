@@ -17,6 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import state_guard  # noqa: E402,F401  first: no test of this suite (or of the mutation harness) may write the live ~/.claude/state
 import openclaw_dispatch as dp  # noqa: E402
 import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
@@ -89,6 +90,17 @@ class FakeHost:
         pass
 
 
+def live_state(case, where):
+    """Point every module's state folder (chat outbox, inject log, pass flag, results log, lane index) at a temp folder for one test.
+    tests/state_guard.py refuses any write to the live ~/.claude/state, so a path this misses fails loudly instead of writing his."""
+    where.mkdir(parents=True, exist_ok=True)
+    for mod, names in ((dp, {"STATE": where, "PASS_FLAG": where / "openclaw-pass.skip", "RESULTS_LOG": where / "openclaw-ask-results.log",
+                             "LANE_INDEX": where / "lanes/index.tsv"}), (pk, {"STATE": where})):
+        p = unittest.mock.patch.multiple(mod, **names)
+        p.start()
+        case.addCleanup(p.stop)
+
+
 class Base(unittest.TestCase):
     def private_paths(self):
         """The lane index, pass flag and results log default to the live ones under ~/.claude; a test must never write those."""
@@ -96,6 +108,7 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        live_state(self, self.tmp / "state")
         self.root = self.tmp / "repos"
         for name in ("own-app", "own-docker", "client-app", "foreign", "docs"):
             (self.root / name / ".git").mkdir(parents=True)
@@ -1436,7 +1449,7 @@ class MainSessionOnly(Base):
             print(dp.LaneHost().inject("hello"))
         """) % (str(Path(dp.__file__).parent), str(gone), str(gone))
         r = subprocess.run([sys.executable, "-c", driver], capture_output=True, text=True, timeout=60,
-                           env=dict(os.environ, PATH=str(d / "bin") + os.pathsep + os.environ["PATH"]))
+                           env=dict(os.environ, HOME=str(d), PATH=str(d / "bin") + os.pathsep + os.environ["PATH"]))
         self.assertEqual(r.stdout.strip(), "True", r.stdout + r.stderr)
 
     def test_inject_posts_to_agent_main_main_and_takes_no_session_argument(self):

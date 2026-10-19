@@ -18,6 +18,7 @@ import openclaw_dispatch as dp  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 import test_openclaw_dispatch as td  # noqa: E402
 import test_openclaw_reply as tr  # noqa: E402
+import state_guard  # noqa: E402
 
 NOW = td.NOW
 
@@ -186,7 +187,7 @@ class LiveEntryPoints(td.Base):
             if stdin:
                 sent.append(json.loads(stdin))
             return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
-        live = dp.STATE / "openclaw-chat-queue.json"
+        live = Path(state_guard.LIVE) / "openclaw-chat-queue.json"
         before = live.stat().st_mtime if live.exists() else None
         with mock.patch.dict(os.environ, self.env()), mock.patch.object(dp.LaneHost, "_run", run), \
                 contextlib.redirect_stdout(io.StringIO()):

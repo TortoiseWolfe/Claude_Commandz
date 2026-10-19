@@ -281,6 +281,9 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     rl = []
     if not roadmap_body:
         rl.append("- roadmap unavailable (gh failed); run: gh issue view 1 -R " + HUB_REPO)
+    # First, not last: the size cap trims a section from its end, and this is the line the prime prompt says to start from.
+    if rm["next_session"]:
+        rl.append("Next session should: " + one_line(rm["next_session"], 380))
     arcs = [a for a in rm["arcs"] if a["open"] > 0] or rm["arcs"]
     if arcs:
         a = arcs[0]
@@ -300,8 +303,6 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
         for sess, items in shown.items():
             rl.append(f"- {sess}")
             rl.extend(f"    {it}" for it in items)
-    if rm["next_session"]:
-        rl.append("Next session should: " + one_line(rm["next_session"], 380))
     sections.append(("Roadmap (the issue body has the rest: gh issue view 1 -R " + HUB_REPO + ")", rl))
 
     # Git, tidy, budget

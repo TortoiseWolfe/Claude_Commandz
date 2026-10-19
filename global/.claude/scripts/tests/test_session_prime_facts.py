@@ -416,7 +416,6 @@ class Cli(unittest.TestCase):
         self.assertEqual(r.returncode, 4)
 
 
-@unittest.skipUnless(os.environ.get("SESSION_PRIME_REAL"), "set SESSION_PRIME_REAL=1 to run against the live hub")
 class UnattendedGuard(unittest.TestCase):
     """An unattended oc- lane is allowed `--post` by a narrow rule, so the flags that aim the script elsewhere are refused."""
     def parse(self, *argv):
@@ -489,6 +488,12 @@ class UnattendedGuard(unittest.TestCase):
             os.environ.pop("AFA_LANE_UNATTENDED", None)
 
 
+# Reviewed 19 Oct 2026 (/code-review of the skip): until today this skip sat on UnattendedGuard above (3d1a881 put that class
+# between the decorator and this one), so the five hermetic guard tests never ran and these two live ones ran on every default
+# run. These two stay opt-in: they call the live gh and read the live roadmap body, so they need NX-01's login and network and
+# would fail on a fresh restore or the tower. Editing and Cli cover the same parsing hermetically. Run them by hand after changing
+# how the body is read or replaced: SESSION_PRIME_REAL=1 python3 -m pytest tests/test_session_prime_facts.py
+@unittest.skipUnless(os.environ.get("SESSION_PRIME_REAL"), "set SESSION_PRIME_REAL=1 to run against the live hub")
 class RealState(unittest.TestCase):
     def test_facts_mode_on_the_live_hub(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "--dry-run", "--dir", str(Path.home() / "repos")],
