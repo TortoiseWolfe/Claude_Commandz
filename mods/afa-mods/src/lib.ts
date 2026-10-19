@@ -133,8 +133,9 @@ function withoutTextHeredocs(command: string): string {
     const plain = (w: string) => (w.replace(/^(?:\$\(|[<>]?\(|`|\{)+/, '').replace(/["'\\]/g, '').split('/').pop() ?? '')
     const runs = (w: string) => SHELL_WORDS.has(plain(w)) || RUNS_ITS_ARGS.has(plain(w)) || WRAPPERS.has(plain(w))
     const shellIn = (s: string) => s.split(/\s+/).some(runs) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(s.trim())
-    // `git commit -m "$(cat <<'EOF' ... EOF )"`: a cat inside double quotes hands the body over as one message word, not as a command
-    const quotedMessage = /\$\(\s*(?:cat|tee)\s*$/.test(lead) && ((lead.replace(/\\./g, '').match(/"/g) ?? []).length % 2 === 1)
+    // `git commit -m "$(cat <<'EOF' ... EOF )"`: only a known text sink (git commit, gh pr/issue/release) takes the body as one message word; anywhere else it may be run, so it is kept
+    const textSink = /^\s*(?:\w+=\S*\s+)*(?:git\s+(?:\S+\s+)*?commit|gh\s+(?:pr|issue|release)\s+\S+)\b/.test(lead)
+    const quotedMessage = textSink && /\$\(\s*(?:cat|tee)\s*$/.test(lead) && ((lead.replace(/\\./g, '').match(/"/g) ?? []).length % 2 === 1)
     const leadRest = quotedMessage ? lead.replace(/\$\(\s*(?:cat|tee)\s*$/, '') : lead
     // fail closed: the body is dropped only when nothing around the marker could run it (no shell word, pipe, substitution or backtick)
     if (shellIn(lead) || shellIn(after) || /[|;&`]|[$<>]\(/.test(after) || /[`]|[$<>]\(/.test(leadRest)) continue
@@ -226,12 +227,12 @@ function isProdDeploy(seg: string): boolean {
   const word = firstWord(seg)
   if (!/^[A-Za-z0-9_.-]+$/.test(word) || TEXT_CARRIERS.has(word)) return false
   const body = RUNS_ITS_ARGS.has(word) || /^(?:docker|kubectl)\s+(?:exec|run)\b/.test(seg) ? seg : withoutQuoted(seg)
+  // the words as the shell would unquote them: no quotes, no backslashes. A "#" is not stripped as a comment: `vercel '#' --prod` runs.
   const words = body
-    .replace(/(^|\s)#.*$/, '')
     .split(/\s+/)
-    .map(w => w.replace(/^["']+|["']+$/g, ''))
+    .map(w => w.replace(/["'\\]/g, ''))
     .filter(Boolean)
-  const args = words.filter(w => !w.includes('/'))
+  const args = words.filter(w => w.startsWith('-') || !w.includes('/'))
   if (args.some(w => PROD_FLAG.test(w))) return true
   return /redeploy/i.test(word) || args.some(w => /redeploy/i.test(w)) ? args.some(w => PROD_WORD.test(w)) : false
 }
