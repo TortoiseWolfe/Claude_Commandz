@@ -69,6 +69,7 @@ export const HELD_KINDS = [
   'docker volume prune',
   'docker volume rm',
   'docker compose down -v',
+  'docker run without limits',
   'git push --force',
   'production deploy',
   'tmux shared lanes',
@@ -78,7 +79,8 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[] }
+// composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[] }
 
 const strip = (s: string) =>
   s
@@ -245,7 +247,7 @@ function isProdDeploy(seg: string): boolean {
 // volume ('volume': named, anonymous or tmpfs). The source is the text as written, not yet resolved.
 export type Mount = { source: string; target: string; kind: 'host' | 'volume' }
 // incomplete: the mount list may miss mounts (a compose file, --volumes-from, a flag not read), so an unlisted path is not known to be the container's own
-type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[] }
+type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[]; timeout?: boolean }
 
 // One path an rm names inside a container, seen through the mounts: where it really is.
 export type Mapped =
@@ -267,6 +269,161 @@ function foldSubstitutionsInDockerRuns(command: string): string {
 }
 
 const DOCKER_RUN = /^(?:docker|podman)\s+(?:compose\s+|container\s+)?run\b|^docker-compose\s+run\b/
+
+// ---- a container started with no CPU cap and no timeout in front ----
+// 19 Oct: one `docker run` with neither took 14.6 of 16 cores and the machine thrashed. Held with the one-line fix.
+const DOCKER_WORDS = new Set(['docker', 'podman', 'docker-compose'])
+const baseName = (w: string) => w.split('/').pop() ?? w
+const COMPOSE_GLOBAL_VALUE = new Set(['-f', '--file', '-p', '--project-name', '--project-directory', '--profile', '--env-file', '--ansi', '--progress', '-H', '--host', '--context'])
+const DOCKER_GLOBAL_VALUE = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level'])
+const CPU_CAP = /^--(?:cpus|cpu-quota|cpuset-cpus)(?:=|$)/
+const isTimeout = (w: string) => /^g?timeout$/.test(baseName(w))
+
+export const UNLIMITED_FIX =
+  'add --cpus N (and a timeout in front), or run it through ~/.claude/scripts/docker-heavy.sh -- docker run ...'
+
+export type RunCall = { mode: 'run' | 'compose'; timeout: boolean; capped: boolean; service?: string; image?: string; files: string[]; projectDir?: string }
+
+export const composeKey = (c: Pick<RunCall, 'files' | 'projectDir' | 'service'>) => `${c.files.join('|')}::${c.projectDir ?? ''}::${c.service ?? ''}`
+
+// A segment that starts a container with `docker run` / `docker compose run` (also podman, docker-compose), looking only at the
+// options before the image. undefined: not one, or one run through docker-heavy.sh (it adds the limits, the lock and a timeout).
+function parseRunCall(seg: string): RunCall | undefined {
+  const t = seg.split(/\s+/).filter(Boolean).map(unquote)
+  if (t.length === 0) return undefined
+  let at = 0
+  if (!DOCKER_WORDS.has(baseName(t[0]))) {
+    if (!WRAPPERS.has(baseName(t[0]))) return undefined
+    at = t.findIndex(w => DOCKER_WORDS.has(baseName(w)))
+    if (at < 0) return undefined
+  }
+  const prefix = t.slice(0, at)
+  if (prefix.some(w => baseName(w) === 'docker-heavy.sh')) return undefined
+  const timeout = prefix.some(isTimeout)
+  let i = at + 1
+  let mode: 'run' | 'compose'
+  const files: string[] = []
+  let projectDir: string | undefined
+  if (baseName(t[at]) === 'docker-compose') mode = 'compose'
+  else {
+    while (i < t.length && t[i].startsWith('-')) i += DOCKER_GLOBAL_VALUE.has(t[i]) ? 2 : 1
+    if (t[i] === 'compose') {
+      mode = 'compose'
+      i += 1
+    } else {
+      if (t[i] === 'container') i += 1
+      if (t[i] !== 'run') return undefined
+      mode = 'run'
+      i += 1
+    }
+  }
+  if (mode === 'compose') {
+    while (i < t.length && t[i].startsWith('-')) {
+      const w = t[i]
+      if (w === '-f' || w === '--file') {
+        files.push(t[i + 1] ?? '')
+        i += 2
+      } else if (w.startsWith('--file=')) {
+        files.push(w.slice(7))
+        i += 1
+      } else if (/^-f./.test(w)) {
+        files.push(w.slice(2))
+        i += 1
+      } else if (w === '--project-directory') {
+        projectDir = t[i + 1]
+        i += 2
+      } else if (w.startsWith('--project-directory=')) {
+        projectDir = w.slice(20)
+        i += 1
+      } else i += COMPOSE_GLOBAL_VALUE.has(w) ? 2 : 1
+    }
+    if (t[i] !== 'run') return undefined
+    i += 1
+  }
+  let capped = false
+  for (; i < t.length; i += 1) {
+    const w = t[i]
+    if (w === '--') {
+      i += 1
+      break
+    }
+    if (!w.startsWith('-')) break
+    if (CPU_CAP.test(w)) capped = true
+    if (w.startsWith('--')) {
+      if (!w.includes('=') && RUN_VALUE_ALL.has(w)) i += 1
+    } else if (w.length === 2) {
+      if (SHORT_VALUE.has(w[1]) || w[1] === 'v') i += 1
+    } else {
+      const takes = (c: string) => SHORT_VALUE.has(c) || c === 'v'
+      if (takes(w[w.length - 1]) && !takes(w[1])) i += 1
+    }
+  }
+  return { mode, timeout, capped, service: mode === 'compose' ? t[i] : undefined, image: mode === 'run' ? t[i] : undefined, files, projectDir }
+}
+
+// What an uncapped run starts: its image, or its compose service
+export const runTargetOf = (seg: string): string | undefined => {
+  const c = parseRunCall(strip(seg))
+  return c?.image ?? c?.service
+}
+
+// Does this compose file give the service a cpus limit (cpus, deploy.resources.limits.cpus, cpu_quota, cpuset)? A line reading
+// only: anchors, `extends` and includes are not followed, so a limit set that way is not seen and the run stays held.
+export function composeServiceCapped(yaml: string, service: string): boolean {
+  const lines = yaml.split('\n')
+  const live = (l: string) => l.trim() !== '' && !l.trim().startsWith('#')
+  const indentOf = (l: string) => l.length - l.trimStart().length
+  const top = lines.findIndex(l => live(l) && /^services\s*:\s*(#.*)?$/.test(l))
+  if (top < 0) return false
+  let svcIndent = -1
+  let start = -1
+  for (let k = top + 1; k < lines.length && start < 0; k += 1) {
+    const l = lines[k]
+    if (!live(l)) continue
+    if (indentOf(l) === 0) break
+    if (svcIndent < 0) svcIndent = indentOf(l)
+    if (indentOf(l) === svcIndent && /^["']?([^"':\s]+)["']?\s*:/.exec(l.trim())?.[1] === service) start = k
+  }
+  if (start < 0) return false
+  for (let k = start + 1; k < lines.length; k += 1) {
+    const l = lines[k]
+    if (!live(l)) continue
+    if (indentOf(l) <= svcIndent) break
+    const m = /^\s*(?:cpus|cpu_quota|cpuset|cpu_count|cpu_percent)\s*:\s*(.*?)\s*(?:#.*)?$/.exec(l)
+    if (m && !['', '0', '""', "''"].includes(m[1])) return true
+  }
+  return false
+}
+
+export type ComposeRun = { key: string; service: string; files: string[]; projectDir?: string; cwd?: string; cwdUnknown: boolean }
+
+// The `docker compose run` calls in a command that have no timeout in front, so the caller can read each one's compose file for a cpus limit.
+export function composeRunsOf(command: string, depth = 0, timeoutFront = false, scope: Scope = newScope(command, {})): ComposeRun[] {
+  const out: ComposeRun[] = []
+  for (const raw of segmentsOf(command)) {
+    const seg = strip(raw).replace(/^\\/, '')
+    if (seg === '') continue
+    trackCd(seg, command, scope)
+    const call = parseRunCall(seg)
+    if (call?.mode === 'compose' && call.service && !call.timeout && !timeoutFront) {
+      out.push({ key: composeKey(call), service: call.service, files: call.files, projectDir: call.projectDir, cwd: scope.cwd, cwdUnknown: scope.cwd === undefined && /\b(?:cd|pushd|popd)\b/.test(command) })
+    }
+    const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
+    const front = timeoutFront || segmentTimeout(seg)
+    if (depth < 3 && wrapped) out.push(...composeRunsOf(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, front, scope))
+    else if (depth < 3 && runsQuoted(seg)) for (const piece of quotedPieces(seg)) out.push(...composeRunsOf(piece, depth + 1, front, scope))
+  }
+  return out
+}
+
+// a timeout among the words in front of what the segment runs (`timeout 600 bash -c '...'`), which then covers the quoted text it runs
+function segmentTimeout(seg: string): boolean {
+  for (const w of seg.split(/\s+/)) {
+    if (isTimeout(w)) return true
+    if (SHELL_WORDS.has(baseName(w)) || DOCKER_WORDS.has(baseName(w))) return false
+  }
+  return false
+}
 
 // `cd /full/path` before the command gives it a known $PWD. Anything that may have run in another shell (a "(" in the
 // command, pushd, popd, a path that is not plain) leaves $PWD unknown, so a source that uses it keeps holding.
@@ -340,6 +497,7 @@ const RUN_BOOL = new Set(['-d', '-i', '-t', '-q', '-P', '-T', '--detach', '--int
 const RUN_VALUE = new Set(['-a', '-c', '-e', '-h', '-l', '-m', '-p', '-u', '-w', '--add-host', '--annotation', '--attach', '--blkio-weight', '--blkio-weight-device', '--cap-add', '--cap-drop', '--cgroup-parent', '--cgroupns', '--cidfile', '--cpu-period', '--cpu-quota', '--cpu-rt-period', '--cpu-rt-runtime', '--cpu-shares', '--cpus', '--cpuset-cpus', '--cpuset-mems', '--detach-keys', '--device', '--device-cgroup-rule', '--device-read-bps', '--device-read-iops', '--device-write-bps', '--device-write-iops', '--dns', '--dns-option', '--dns-search', '--domainname', '--entrypoint', '--env', '--env-file', '--expose', '--gpus', '--group-add', '--health-cmd', '--health-interval', '--health-retries', '--health-start-period', '--health-timeout', '--hostname', '--ip', '--ip6', '--ipc', '--isolation', '--label', '--label-file', '--link', '--link-local-ip', '--log-driver', '--log-opt', '--mac-address', '--memory', '--memory-reservation', '--memory-swap', '--memory-swappiness', '--name', '--network', '--net', '--network-alias', '--oom-score-adj', '--pid', '--pids-limit', '--platform', '--publish', '--pull', '--restart', '--runtime', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--storage-opt', '--sysctl', '--tmpfs', '--ulimit', '--user', '--userns', '--uts', '--volume-driver', '--workdir', '--cap', '--entrypoint'])
 const SHORT_BOOL = new Set(['d', 'i', 't', 'q', 'P', 'T'])
 const SHORT_VALUE = new Set(['a', 'c', 'e', 'h', 'l', 'm', 'p', 'u', 'w'])
+const RUN_VALUE_ALL = new Set([...RUN_VALUE, '-v', '--volume', '--mount', '--volumes-from'])
 
 // The mounts a `docker run` / `docker compose run` gives its container: -v, --volume and --mount, in the forms docker accepts,
 // read from the options before the image only. `incomplete` says the list may miss mounts: a compose service brings its own,
@@ -545,7 +703,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
     trackCd(seg, command, scope)
     // `docker run -v SRC:DST ...`: the text it runs sees its paths through these mounts
     const parsed = DOCKER_RUN.test(seg) ? parseMounts(seg) : undefined
-    const inner: Scope = { ...scope, mounts: parsed ? parsed.mounts : scope.mounts, incomplete: parsed ? parsed.incomplete : scope.incomplete }
+    const inner: Scope = { ...scope, mounts: parsed ? parsed.mounts : scope.mounts, incomplete: parsed ? parsed.incomplete : scope.incomplete, timeout: scope.timeout || segmentTimeout(seg) }
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     if (wrapped && depth < 3) {
       holds.push(...classifyWithEnv(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, env, inner))
@@ -581,6 +739,8 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
         add('rm -rf', false)
       }
     }
+    const call = parseRunCall(seg)
+    if (call && !call.timeout && !scope.timeout && !(call.mode === 'run' ? call.capped : (env.composeLimited ?? []).includes(composeKey(call)))) add('docker run without limits', false)
     if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune` as HeldKind, false)
     if (/^docker\s+volume\s+(rm|remove)\b/.test(seg)) add('docker volume rm', false)
     if (/^(docker\s+compose|docker-compose)\b/.test(seg) && bare.includes('down')) {
@@ -755,6 +915,11 @@ export function explain(hold: Hold): { what: string; why: string } {
       return {
         what: 'stops the compose stack and deletes its volumes (its database and uploads)',
         why: 'the data in a deleted volume cannot be brought back',
+      }
+    case 'docker run without limits':
+      return {
+        what: 'starts a container with no CPU cap and no timeout in front, so it can take every core and keep them',
+        why: 'on 19 Oct one such container took 14.6 of 16 cores and the machine stopped answering',
       }
     case 'git push --force':
       return {
