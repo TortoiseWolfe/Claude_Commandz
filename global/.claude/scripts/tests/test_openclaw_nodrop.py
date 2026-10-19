@@ -214,6 +214,33 @@ class Decode(unittest.TestCase):
         self.assertIn("x", r.stderr)
 
 
+class CodexClosesMidReply(td.Base):
+    """A Codex or Copilot lane cannot take words while it runs, so his reply is held on it. If it closes between the two reads of
+    the state, holding the words on a closed lane would leave them with nobody: they start its follow-up instead."""
+
+    def test_a_lane_that_closes_between_the_reads_gets_a_follow_up_not_a_hold(self):
+        t = td.NOW
+        lane = {"repo": "own-app", "task": "tidy docs", "engine": "codex", "model": "sonnet", "started": t - 600, "status": "started",
+                "ask": None}
+        st = dp.load_state(self.ctx.state_path)
+        st["lanes"]["oc-own-app-1"] = dict(lane)
+        dp.save_state(self.ctx.state_path, st)
+        real, reads = dp.load_state, []
+
+        def load(path):
+            reads.append(path)
+            got = real(path)
+            if len(reads) == 2:  # it finishes after the first read, before the locked one
+                got["lanes"]["oc-own-app-1"].update(status="closed", closed_at=t - 5)
+                dp.save_state(path, got)
+            return got
+        with mock.patch.object(dp, "load_state", load):
+            line, chat = dp.do_reply(self.ctx, self.host, "oc-own-app-1", "also fix the header", t)
+        self.assertNotIn("held for a follow-up", line)
+        self.assertEqual(real(self.ctx.state_path)["lanes"]["oc-own-app-1"].get("held"), None, "no words held on a closed lane")
+        self.assertTrue(dp.delivery_of(line), line)
+
+
 class DedupWindow(td.Base):
     """The same words asked again are only a duplicate inside DEDUP_WINDOW: after it, his repeat is a new request and runs."""
 
