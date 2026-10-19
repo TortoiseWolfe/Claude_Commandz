@@ -10,7 +10,8 @@
 # line with no labels field (fail closed).
 # A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
-# and nothing when there is nothing new. Names live only in the TSV and Gmail; this script and its prompt
+# and nothing when there is nothing new. Senders of kind "payment" (Gusto) are kept even from no-reply addresses: their
+# handler step runs gusto_mark_paid.py, which marks the matching Stripe invoice paid. Names live only in the TSV and Gmail; this script and its prompt
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
@@ -37,6 +38,8 @@ touch "$SEEN"
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
 pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
+# kind "payment" senders (Gusto, 2026-10-18) mail from no-reply addresses, so the no-reply skip spares them
+paypats=$(awk -F'\t' 'NR>1 && $3=="payment" && $4!="" {print tolower($4)}' "$TSV")
 # A real Gmail message ID is 16 hex characters; a 13-digit internalDate once slipped through as an ID and hid a
 # client reply, so a MSG line that fails the ID check is logged, never silently ignored.
 printf '%s\n' "$out" | grep '^MSG ' | grep -vE '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r bad; do
@@ -49,7 +52,8 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   [[ -n "${labels//[[:space:]]/}" ]] || continue
   [[ "$labels" == *DRAFT* || "$labels" == *SENT* ]] && continue
   from=$(printf '%s' "${line#MSG * | }" | cut -d'|' -f1 | tr 'A-Z' 'a-z')
-  [[ "$from" == *no-reply@* || "$from" == *noreply@* ]] && continue
+  pay=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { pay=1; break; }; done <<<"$paypats"
+  [[ -z "$pay" && ( "$from" == *no-reply@* || "$from" == *noreply@* ) ]] && continue
   ok=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
   grep -qxF "$id" "$SEEN" && continue
