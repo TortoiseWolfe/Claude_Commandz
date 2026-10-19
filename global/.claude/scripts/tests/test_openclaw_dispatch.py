@@ -318,16 +318,21 @@ class ReceptionistQueue(Base):
                 self.assertEqual(dp.main(["open"]), 0)
         self.assertEqual(output.getvalue(), "none\n")
 
-    def test_post_multiple_asks_injects_once_and_ticks_each_inbox_line(self):
+    def test_post_multiple_asks_is_one_item_per_question_and_ticks_each_inbox_line(self):
         ids = ["oc-aaaaaaaa", "oc-bbbbbbbb"]
         for ask_id in ids:
             self.record_question(ask_id, "deferred", NOW - 900)
         self.ctx.inbox_path = self.inbox
         self.inbox.write_text("".join(f"- [ ] 2026-10-17 10:00 | Example question | detail | {i}\n" for i in ids))
-        ok, msg = dp.post_ask(self.ctx, self.host, ",".join(ids), "The verified answer.", NOW)
+        ok, msg = dp.post_ask(self.ctx, self.host, ",".join(ids), "One answer for both.", NOW)
+        self.assertFalse(ok)
+        self.assertIn("2 questions need 2 answers", msg)
+        self.assertEqual(self.host.chats, [])
+        ok, msg = dp.post_ask(self.ctx, self.host, ",".join(ids), "The first answer.\n---\nThe second answer.", NOW)
         self.assertTrue(ok, msg)
         self.assertEqual(msg, "posted answer for " + ", ".join(ids))
-        self.assertEqual(self.host.chats, ["The verified answer."])
+        self.assertEqual(self.host.chats, ["The first answer.", "The second answer."])
+        self.assertEqual([dp.asks_of(self.state())[i]["answer"] for i in ids], ["The first answer.", "The second answer."])
         self.assertEqual([dp.asks_of(self.state())[i]["status"] for i in ids], ["answered", "answered"])
         self.assertEqual(self.inbox.read_text().count("- [x]"), 2)
 
@@ -338,20 +343,15 @@ class ReceptionistQueue(Base):
         self.assertTrue(ok, msg)
         self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "answered")
 
-    def test_post_splits_a_long_answer_in_order_and_stores_it_whole(self):
+    def test_post_splits_an_answer_on_dashes_into_short_items_and_stores_it_whole(self):
         ask_id = "oc-ccccccce"
-        answer = " ".join(["word"] * 800)
+        parts = ["Porch: the columns are traced.", "Steps: three risers, 7 inches each.", "Roof: waiting on Kai's photo."]
         self.record_question(ask_id, "deferred", NOW - 900)
-        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "\n---\n".join(parts), NOW)
         self.assertTrue(ok, msg)
         self.assertEqual(msg, "posted answer for " + ask_id)
-        self.assertEqual(len(self.host.chats), 3)
-        self.assertEqual([len(part) <= dp.CHAT_MAX for part in self.host.chats], [True] * 3)
-        self.assertTrue(all(part.endswith("(part %d of 3)" % i) for i, part in enumerate(self.host.chats, 1)))
-        content = "".join(re.sub(r" \(part \d+ of \d+\)$", "", part) for part in self.host.chats)
-        self.assertEqual("".join(c for c in content if not c.isspace()),
-                         "".join(c for c in answer if not c.isspace()))
-        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
+        self.assertEqual(self.host.chats, parts)
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], "\n\n".join(parts))
 
     def test_an_unbroken_token_is_hard_cut_without_losing_characters(self):
         text = "x" * 2500
@@ -370,16 +370,15 @@ class ReceptionistQueue(Base):
         self.assertEqual("".join(c for c in content if not c.isspace()),
                          "".join(c for c in text if not c.isspace()))
 
-    def test_an_over_cap_answer_names_the_ask_holding_its_full_text(self):
+    def test_an_over_cap_answer_is_refused_and_the_ask_stays_open(self):
+        # 19 Oct 6:31 PM: one long post was "overwheming me again". An item is one topic, one headline; a long one is refused.
         ask_id = "oc-ccccccca"
-        answer = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))
         self.record_question(ask_id, "deferred", NOW - 900)
-        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, answer, NOW)
-        self.assertTrue(ok, msg)
-        self.assertEqual(dp.asks_of(self.state())[ask_id]["answer"], answer)
-        self.assertEqual(len(self.host.chats), dp.MAX_CHAT_PARTS + 1)
-        self.assertIn(ask_id, self.host.chats[-1])
-        self.assertIn("stored with ask", self.host.chats[-1])
+        ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "x" * (dp.ITEM_MAX + 1), NOW)
+        self.assertFalse(ok)
+        self.assertIn("over %d characters" % dp.ITEM_MAX, msg)
+        self.assertEqual(self.host.chats, [])
+        self.assertEqual(dp.asks_of(self.state())[ask_id]["status"], "deferred")
 
     def test_post_line_over_cap_stores_and_names_the_full_text_file(self):
         text = "x" * (dp.CHAT_MAX * (dp.MAX_CHAT_PARTS + 2))

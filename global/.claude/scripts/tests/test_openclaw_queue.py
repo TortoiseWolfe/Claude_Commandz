@@ -206,6 +206,62 @@ class LiveEntryPoints(td.Base):
             self.assertEqual([s["message"] for s in sent if "message" in s][-1], "second\n\n(Nothing else waiting.)")
         self.assertEqual(live.stat().st_mtime if live.exists() else None, before, "his outbox untouched")
 
+    def test_tonights_outage_releases_one_item_then_one_per_next(self):
+        # 19 Oct: the link was down from 5:21 to 6:26 PM; when it came back the hub flushed one 1,600-character post answering seven
+        # questions, then a second post, and at 6:31 PM he wrote "overwheming me again, what the fuck was all that".
+        ids = ["oc-%08x" % (0xa0 + n) for n in range(7)]
+        st = {"asks": {i: {"kind": "question", "task": "question %d" % n, "created": NOW - 3600, "deadline": NOW - 3000,
+                           "status": "deferred", "lanes": []} for n, i in enumerate(ids)}}
+        full = dp.load_state(self.tmp / "t-state.json")
+        full.update(st)
+        dp.save_state(self.tmp / "t-state.json", full)
+        link, sent, clock = {"up": False}, [], [NOW]
+
+        def run(host, argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            if not link["up"]:
+                return type("R", (), {"returncode": 1, "stdout": "", "stderr": "UtilAcceptVsock:271: accept4 failed 110"})()
+            if stdin and "message" in json.loads(stdin):
+                sent.append(json.loads(stdin)["message"])
+            return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        answers = ["Answer %d: one headline for question %d." % (n, n) for n in range(7)]
+        with mock.patch.dict(os.environ, self.env()), mock.patch.object(dp.LaneHost, "_run", run), \
+                mock.patch.object(dp.time, "time", lambda: clock[0]), mock.patch.object(dp.time, "sleep", lambda s: None), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(dp.main(["post", ",".join(ids), "\n---\n".join(answers)]), 0)
+            self.assertEqual(dp.main(["post", "Lane report: the porch columns are traced."]), 0)
+            self.assertEqual(dp.main(["post", "The 3:05 AM run is armed."]), 0)
+            self.assertEqual(sent, [])
+            box = dp.chat_queue_path()
+            self.assertEqual(len(dp.queue_load(box)["items"]), 9, "one item per question, plus the two posts")
+            clock[0] += 65 * 60
+            link["up"] = True
+            for _ in range(5):  # lane_watch pumps on every poll, the poller every minute: none of them may flush
+                self.assertEqual(dp.main(["queue", "pump"]), 0)
+                with mock.patch.object(pk, "run_act", wraps=pk.run_act), mock.patch.object(pk, "pickup", return_value=[]), \
+                        mock.patch.object(dp, "load_repos", return_value={}):
+                    self.assertEqual(pk.main(["--act"]), 0)
+                clock[0] += 60
+            self.assertEqual(sent, [answers[0] + "\n\n(8 more waiting. Say next for the next one.)"], "exactly one message out")
+            self.assertEqual(dp.main(["queue", "next"]), 0)
+            self.assertEqual(dp.main(["queue", "pump"]), 0)
+            self.assertEqual(sent[1:], [answers[1] + "\n\n(7 more waiting. Say next for the next one.)"], "one more per next")
+        self.assertTrue(all(len(m) <= dp.ITEM_MAX + 60 for m in sent))
+
+    def test_a_post_of_several_topics_is_one_outbox_item_each(self):
+        def run(host, argv, timeout, cwd=None, stdin=None, env=None, timeout_result=False):
+            return type("R", (), {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""})()
+        with mock.patch.dict(os.environ, self.env()), mock.patch.object(dp.LaneHost, "_run", run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dp.main(["post", "[hub] Porch: traced.\n---\nSteps: three risers.\n---\n"]), 0)
+            self.assertEqual([i["text"] for i in dp.queue_load(dp.chat_queue_path())["items"]], ["Porch: traced.", "Steps: three risers."])
+
+    def test_a_flood_post_is_refused_before_it_reaches_the_outbox(self):
+        with mock.patch.dict(os.environ, self.env()), contextlib.redirect_stderr(io.StringIO()) as err, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dp.main(["post", "x" * 1600]), 1)
+            self.assertFalse(dp.chat_queue_path().exists())
+        self.assertIn("over %d characters" % dp.ITEM_MAX, err.getvalue())
+
     def test_a_pass_may_not_post_through_the_queue(self):
         with mock.patch.dict(os.environ, dict(self.env(), AFA_OC_PASS="oc-0000beef")), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(dp.main(["queue", "add"]), 1)

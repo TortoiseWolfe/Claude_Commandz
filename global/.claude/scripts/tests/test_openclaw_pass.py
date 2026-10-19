@@ -604,9 +604,12 @@ class Saying(PassBase):
         self.assertFalse(dp.say(self.ctx, self.host, ASK, "hello", NOW)[0])
         self.assertEqual(self.ask()["status"], "pending")
 
-    def test_say_stores_the_full_answer(self):
+    def test_say_stores_the_full_answer_and_refuses_a_long_one(self):
         self.hand()
-        text = "A" * 700
+        ok, msg = dp.say(self.ctx, self.host, ASK, "A" * (dp.ITEM_MAX + 1), NOW)
+        self.assertFalse(ok)
+        self.assertIn("over %d characters" % dp.ITEM_MAX, msg)
+        text = "A" * dp.ITEM_MAX
         self.assertTrue(dp.say(self.ctx, self.host, ASK, text, NOW)[0])
         self.assertEqual(self.ask()["answer"], text)
 

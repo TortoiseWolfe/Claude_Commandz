@@ -21,6 +21,15 @@ TESTS = ["test_state_guard", "test_openclaw_ask", "test_openclaw_ask_hook", "tes
 
 MUTANTS = [
     # the outbox: one post at a time, never lost (19 Oct 4:59 PM and 5:03-5:24 PM)
+    # one item per question, each short, and no flush after an outage (19 Oct 6:31 PM)
+    (DISPATCH, "items: the pump flushes a backlog", '        print(queue_pump(path, host.inject_now, now))', '        print([queue_next(path, host.inject_now, now) for _ in range(20)])'),
+    (DISPATCH, "items: a post flushes the backlog", '        queue_pump(self.queue_path, self.inject_now, self.clock())\n        return True', '        [queue_next(self.queue_path, self.inject_now, self.clock()) for _ in range(20)]\n        return True'),
+    (DISPATCH, "items: a repeat of the post showing goes out again", '            if head["shown"] and not (waiting', '            if False and head["shown"] and not (waiting'),
+    (DISPATCH, "items: one answer may close many questions", '    if len(ids) > 1 and len(items) != len(ids):', '    if False:'),
+    (DISPATCH, "items: no length cap", '    long = [n for n, p in enumerate(items, 1) if len(p) > ITEM_MAX]', '    long = []'),
+    (DISPATCH, "items: say has no length cap", '    if len(text) > ITEM_MAX:\n        return False, "say: over', '    if False:\n        return False, "say: over'),
+    (DISPATCH, "items: a multi-answer post is one chat item", '    for n, item in enumerate(items):\n        if not host.inject(item):', '    for n, item in enumerate(["\\n\\n".join(items)]):\n        if not host.inject(item):'),
+    (DISPATCH, "items: the CLI post is not split", '        items = split_items(re.sub(', '        items = (lambda t: [t] if t else [])(re.sub('),
     (DISPATCH, "queue: a post that did not land is dropped", '                head["attempts"] += 1\n', '                q["items"].remove(head); head["attempts"] += 1\n'),
     (DISPATCH, "queue: a post that did not land counts as shown", "ok = bool(send(text + queue_tail(waiting)))", "ok = bool(send(text + queue_tail(waiting))) or True"),
     (DISPATCH, "queue: no pause between tries", 'head["next_try"] = now + QUEUE_BACKOFF[', 'head["next_try"] = now + 0 * QUEUE_BACKOFF['),
