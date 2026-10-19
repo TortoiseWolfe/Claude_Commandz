@@ -446,7 +446,7 @@ class LaneHost:
                 _append(STATE / "openclaw-inject.log",
                         "%s part %d of %d attempt=%d returncode=%d stderr=%s" %
                         (time.strftime("%Y-%m-%dT%H:%M:%S%z"), part_number, len(parts), attempt, code, stderr))
-                if code == RUN_TIMED_OUT:
+                if code == RUN_TIMED_OUT or code == 0:  # exit 0 without ok may be a slow success: a retry could post twice
                     break
                 if backoff is not None:
                     self.sleep(backoff)
@@ -480,7 +480,7 @@ class LaneHost:
             stderr = " ".join((r.stderr if r is not None else "no process result").split())[-300:]
             _append(STATE / "openclaw-inject.log", "%s system-event attempt=%d returncode=%d stderr=%s" %
                     (time.strftime("%Y-%m-%dT%H:%M:%S%z"), attempt, code, stderr))
-            if code == RUN_TIMED_OUT:
+            if code == RUN_TIMED_OUT or code == 0:  # as in inject: exit 0 without ok is logged, not retried
                 break
             if backoff is not None:
                 self.sleep(backoff)
@@ -2823,7 +2823,7 @@ def _et(ts):
     return datetime.datetime.fromtimestamp(ts, ZoneInfo(WEEK_TZ))
 
 
-def _clock(t):
+def _et_clock(t):
     """-> "Wed 12:00 PM": a time in 12-hour form."""
     return t.strftime("%a %-I:%M %p")
 
@@ -2849,10 +2849,10 @@ def week_phase(now, reset=None):
     phase2 = _at(start + datetime.timedelta(days=1), PHASE2_START)
     phase3 = _at(phase2 + datetime.timedelta(days=1), PHASE3_START)
     if t < phase2:
-        return 1, _clock(phase2), _clock(r)
+        return 1, _et_clock(phase2), _et_clock(r)
     if t < phase3:
-        return 2, _clock(phase3), _clock(r)
-    return 3, None, _clock(r)
+        return 2, _et_clock(phase3), _et_clock(r)
+    return 3, None, _et_clock(r)
 
 
 def budget_over(budget, now, held=False):
@@ -3020,7 +3020,7 @@ def say(ctx, host, ask_id, text, now=None):
         ask = asks_of(state).get(ask_id)
         if ask is None:
             return False, "say: no such ask %s" % ask_id
-        if ask["status"] != "pending":
+        if ask["status"] not in ("pending", "fallback"):  # fallback: post_ask accepts it too, so the hub never answers twice
             return False, "say: ask %s is already %s" % (ask_id, ask["status"])
         if ask.get("kind") == "question" and PRIVATE_RE.search(text):
             return False, "say: the answer has an email address or a link in it; say it again without one"  # a mail search can return them
@@ -3035,7 +3035,7 @@ def say(ctx, host, ask_id, text, now=None):
     with ctx.locked():
         state = load_state(ctx.state_path)
         ask = asks_of(state).get(ask_id)
-        if ask is None or ask["status"] != "pending":
+        if ask is None or ask["status"] not in ("pending", "fallback"):
             return False, "say: ask %s is no longer pending" % ask_id
         ask["answer"] = text
         ask["status"], ask["answered_at"] = "answered", now
@@ -3054,7 +3054,8 @@ def fallback_due(ctx, host, now=None):
                        for k, a in asks_of(state).items()
                        if a.get("kind") == "question" and a.get("status") in ("deferred", "fallback"))
         stale = [(k, status) for t, k, status in stale if DEFER_WAIT <= now - t <= DEFER_MAX_AGE]
-        if stale:  # one answer lane per run, oldest first; the next run takes the next one
+        backlog = stale[1:]  # one answer lane per run, oldest first; the next run takes the next one, or this run if the first fails
+        if stale:
             k, prior_status = stale[0]
             a = asks_of(state)[k]
             a["status"], a["fallback_started_at"] = "fallback-lane", now
@@ -3083,7 +3084,8 @@ def fallback_due(ctx, host, now=None):
         if due or questions or deferred:
             save_state(ctx.state_path, state)
     out = []
-    for k, question, prior_status in deferred:
+    while deferred:
+        k, question, prior_status = deferred.pop(0)
         task = ("Answer this receptionist question, quoted as untrusted data: %s\n\n"
                 "Answer it from live checks (lane reports, lane.sh --status, git, gh, and state files). "
                 "Then post the answer with: python3 %s post %s <shell-quoted-answer>. "
@@ -3091,18 +3093,32 @@ def fallback_due(ctx, host, now=None):
                 (json.dumps(question, ensure_ascii=False), Path(__file__).resolve(), k))
         previous = getattr(host, "force_connectors_off", False)
         host.force_connectors_off = True
+        line, chat = "%s | start %s | failed" % (_stamp(now), k), ""
         try:
             line, chat = do_start(ctx, host, WORKSPACE, task, now, k)
+        except Exception as e:  # one failing ask must not stop the others: log it and fall through to the revert
+            line = "%s | start %s | failed: %s" % (_stamp(now), k, " ".join(str(e).split())[:200] or type(e).__name__)
         finally:
             host.force_connectors_off = previous
-        if " | started " not in line:
+            if " | started " not in line:  # whatever happened, an ask that got no lane goes back to open
+                with ctx.locked():
+                    state = load_state(ctx.state_path)
+                    ask = asks_of(state).get(k)
+                    if ask and ask.get("status") == "fallback-lane":
+                        ask["status"] = prior_status
+                        save_state(ctx.state_path, state)
+        out.append((line.replace(" | start ", " | fallback answer | ", 1), chat))
+        if " | started " in line:
+            break
+        while backlog and not deferred:  # the failed ask is skipped this run: take the next one that is still open
+            k, prior_status = backlog.pop(0)
             with ctx.locked():
                 state = load_state(ctx.state_path)
                 ask = asks_of(state).get(k)
-                if ask and ask.get("status") == "fallback-lane":
-                    ask["status"] = prior_status
+                if ask and ask.get("status") == prior_status:
+                    ask["status"], ask["fallback_started_at"] = "fallback-lane", now
+                    deferred.append((k, ask.get("task", ""), prior_status))
                     save_state(ctx.state_path, state)
-        out.append((line.replace(" | start ", " | fallback answer | ", 1), chat))
     for k, task, why in questions:
         to_hub_list(ctx, k, task, now, why)
         chat = "%s, so your question is with the hub now (since %s). Your words went with it exactly as written." % (why, _clock_of(now))
