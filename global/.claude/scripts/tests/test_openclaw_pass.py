@@ -94,8 +94,7 @@ class Routing(PassBase):
     def test_a_note_to_hatch_goes_to_the_hub_not_to_a_lane_without_mail(self):
         """17 Oct oc-a486228e: a lane with no mail connector got the weekly-check ask and could not write the [CC>MUSE] draft."""
         for task in ("dispatch the weekly JOC check early so Hatch can start filling in the weekly form",
-                     "tell Muse the build is green", "ask H-7CH to look at it", "write a [CC>MUSE] note about the stream",
-                     "draft an email to the board", "save a Gmail draft for Greg"):
+                     "tell Muse the build is green", "ask H-7CH to look at it", "write a [CC>MUSE] note about the stream"):
             self.host.spawned.clear()
             ask_id = dp.ask_id_for(task)
             line, chat = dp.hand_off(self.ctx, self.host, ask_id, "own-app", task, NOW)
@@ -107,6 +106,13 @@ class Routing(PassBase):
             inbox = self.ctx.inbox_path.read_text()
             self.assertIn("mail connector", inbox.splitlines()[-1])
             self.assertIn(ask_id, inbox)
+
+    def test_other_mail_jobs_go_to_a_pass_that_starts_a_gmail_lane_not_to_the_hub_list(self):
+        """19 Oct 2:52 PM: if it involves email, it goes to a lane with email access."""
+        for task in ("draft an email to the board", "save a Gmail draft for Greg"):
+            self.host.spawned.clear()
+            dp.hand_off(self.ctx, self.host, dp.ask_id_for(task), "own-app", task, NOW)
+            self.assertEqual(len(self.host.spawned), 1, task)
 
     def test_a_facts_question_that_mentions_hatch_goes_to_the_hub_not_the_pass(self):
         self.assertEqual(dp.pass_kind("how many open PRs does own-app have?"), "facts")

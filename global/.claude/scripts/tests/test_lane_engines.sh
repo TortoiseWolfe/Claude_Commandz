@@ -459,4 +459,29 @@ assert_contains "$STATUS_DIM" 'something the lane said' '--status still shows th
 assert_not_contains "$(status_with_pane "$TMP/pane-typed")" 'suggestion:' '--status does not call normal-colour text a suggestion'
 assert_not_contains "$(status_with_pane "$TMP/pane-bare")" 'suggestion:' '--status shows no suggestion for an empty prompt'
 
+# 19 Oct: "report:yes idle" got tigard-trace closed while it was mid-work. A report is the last word only when it is newer than
+# every input the lane got and no background job is running; otherwise --status says report:stale.
+stale_row() {  # <name> <transcript-json-lines>...: a lane whose report.md is dated 16:20 UTC on 19 Oct, with this transcript
+  local n="$1"; shift
+  local dir="$TMP/stale-$n" slug rep
+  mkdir -p "$dir"; slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
+  mkdir -p "$HOME_TEST/.claude/projects/$slug"; printf '%s\n' "$@" >"$HOME_TEST/.claude/projects/$slug/sess-$n.jsonl"
+  rep="$TMP/stale-$n.md"; echo done >"$rep"; touch -d '2026-10-19 16:20:00 UTC' "$rep"
+  printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsess-%s\t-\thigh\toff\n' "$(date +%F)" "$n" "$dir" "$PROMPT" "$rep" "$n" >>"$INDEX"
+}
+U_OLD='{"type":"user","timestamp":"2026-10-19T14:37:18.000Z","message":{"role":"user","content":"You are a lane"}}'
+U_NEW='{"type":"user","timestamp":"2026-10-19T16:40:42.000Z","message":{"role":"user","content":"Jonathan says the blue lines do not match"}}'
+BG='{"type":"assistant","timestamp":"2026-10-19T17:05:13.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tb1","name":"Bash","input":{"command":"run tests","run_in_background":true}}]}}'
+stale_row calm "$U_OLD"
+stale_row told "$U_OLD" "$U_NEW"
+stale_row busy "$U_OLD" "$BG"
+STATUS_STALE="$(TMUX_PANE_FILE="$TMP/pane-bare" TMUX_HAS_SESSION=1 TMUX_WINDOWS='calm told busy' HOME="$HOME_TEST" PATH="$BIN:$PATH" \
+  TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1)"
+assert_contains "$STATUS_STALE" 'calm' 'status lists the calm lane'
+case "$(grep '^calm ' <<<"$STATUS_STALE")" in *report:yes*) checks=$((checks + 1)) ;; *) fail 'a report newer than all input, with no job, is report:yes' ;; esac
+case "$(grep '^told ' <<<"$STATUS_STALE")" in *report:stale*) checks=$((checks + 1)) ;; *) fail 'input after the report makes it report:stale' ;; esac
+case "$(grep '^busy ' <<<"$STATUS_STALE")" in *report:stale*) checks=$((checks + 1)) ;; *) fail 'a background job still running makes it report:stale' ;; esac
+assert_contains "$STATUS_STALE" 'report stale: the lane got input after report.md was written' 'status says why: input'
+assert_contains "$STATUS_STALE" 'report stale: a background job it started has not finished' 'status says why: job'
+
 printf 'ok - %s checks passed\n' "$checks"

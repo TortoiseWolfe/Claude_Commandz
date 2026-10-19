@@ -366,7 +366,7 @@ def parse_lane_status(text):
     for line in text.splitlines():
         if line[:1] in " \t":
             continue
-        m = re.match(r"^([\w.-]+)\s+report:(yes|no)\s+(working|idle)\b", line)
+        m = re.match(r"^([\w.-]+)\s+report:(yes|no|stale)\s+(working|idle)\b", line)
         if m:
             live.append((m.group(1), m.group(2), m.group(3)))
         elif re.match(r"^[\w.-]+\s+dead\b", line):
@@ -732,7 +732,7 @@ def build(roadmap_body, lane_status, lanes_dir, skp_root, inbox_text, flt, now, 
     for name, rep, state in live:
         c = flt.clean(name, limit=60)
         if c:
-            lane_lines.append(f"- {c}: {state}, report {'written' if rep == 'yes' else 'not yet'}")
+            lane_lines.append(f"- {c}: {state}, report {'written' if rep == 'yes' else 'stale, not done' if rep == 'stale' else 'not yet'}")
     if dead:
         lane_lines.append(f"- {dead} older lanes have ended (their reports are with Claude)")
     sections.append(("Hub lanes (tmux windows doing work)", lane_lines))
