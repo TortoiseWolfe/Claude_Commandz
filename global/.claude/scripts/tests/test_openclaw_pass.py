@@ -1222,6 +1222,7 @@ class TheWaitingRoom(PassBase):
         self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
         self.room = self.ctx.lanes_dir / "queue"
         self.room.mkdir(parents=True)
+        self.host.proj = 50  # the week is on pace; the pace guard has its own tests
 
     def entry(self, name, after=None, approved=None, model="sonnet", dirpath=None, brief="# %s\n\nCount the open issues in runit.\n", engine=None):
         lines = ["dir: %s" % (dirpath or self.root / "own-app"), "model: %s" % model]
@@ -1449,6 +1450,66 @@ class TheWaitingRoom(PassBase):
         self.assertNotIn("\x07", e["headers"]["dir"])
         self.assertNotIn("unknown", e["headers"])
         self.assertTrue(e["brief"].startswith("unknown: x"))
+
+    def test_a_week_projected_past_the_limit_holds_the_room_and_says_so_once(self):
+        for pct in (95, 90.5):
+            with self.subTest(pct=pct):
+                self.host.proj, self.host.chats = pct, []
+                self.entry("fd-a", approved="x")
+                self.entry("fd-b", approved="x")
+                out = dp.room_due(self.ctx, self.host, NOW)
+                self.assertEqual(self.host.started, [])
+                self.assertEqual(len(out), 1)
+                self.assertEqual(self.host.chats, [
+                    "2 lanes are waiting in the queue: the week is projected at %d%% (limit 90%%). "
+                    "They start when it is known and under 90%% or after the Wed 12:00 PM reset." % round(pct)])
+                self.assertEqual(self.state()["room_held"], {"pct": round(pct), "count": 2})
+                self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
+                self.assertEqual(len(self.host.chats), 1)
+                for f in self.room.glob("*.md"):
+                    f.unlink()
+                dp.room_due(self.ctx, self.host, NOW + 120)
+
+    def test_an_unknown_projection_holds_too(self):
+        self.host.proj = None
+        self.entry("fd-a", approved="x")
+        dp.room_due(self.ctx, self.host, NOW)
+        self.assertEqual(self.host.started, [])
+        self.assertEqual(len(self.host.chats), 1)
+        self.assertIn("1 lane is waiting in the queue: the week's projection is unknown", self.host.chats[0])
+        self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
+        self.assertEqual(len(self.host.chats), 1)
+
+    def test_a_projection_at_or_under_the_limit_starts_the_entry_and_clears_the_hold(self):
+        for pct in (90, 50):
+            with self.subTest(pct=pct):
+                self.host.started, self.host.chats = [], []
+                self.host.proj = 95
+                name = "fd-%d" % pct
+                self.entry(name, approved="x")
+                dp.room_due(self.ctx, self.host, NOW)
+                self.assertEqual(self.host.started, [])
+                self.assertIn("room_held", self.state())
+                self.host.proj = pct
+                dp.room_due(self.ctx, self.host, NOW + 60)
+                self.assertEqual([s[0] for s in self.host.started], [name])
+                self.assertNotIn("room_held", self.state())
+
+    def test_a_hold_that_changes_is_announced_again(self):
+        self.host.proj = 95
+        self.entry("fd-a", approved="x")
+        dp.room_due(self.ctx, self.host, NOW)
+        self.entry("fd-b", approved="x")
+        dp.room_due(self.ctx, self.host, NOW + 60)
+        self.assertEqual(len(self.host.chats), 2)
+        self.assertIn("2 lanes are waiting", self.host.chats[1])
+
+    def test_the_hold_does_not_hide_an_after_failed_note(self):
+        self.host.proj = 95
+        self.entry("fd-b", after="fd-a", approved="x")
+        self.report("fd-a", "Could not read the folder: permission denied. Nothing was changed.")
+        dp.room_due(self.ctx, self.host, NOW)
+        self.assertEqual(self.host.chats, ["fd-b stays queued: fd-a failed"])
 
     def test_the_pickup_run_calls_the_room(self):
         self.entry("fd-a", approved="x")
