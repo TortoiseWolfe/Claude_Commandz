@@ -8,6 +8,7 @@ import {
   explain,
   hasExitLine,
   hostRmSegment,
+  namedVolumesOf,
   ownScratchTargets,
   recentLanes,
   realPathVerdict,
@@ -153,7 +154,15 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
     const tmpdir = (await $.env.get('TMPDIR')) ?? undefined
-    const scratchEnv = { home, tmpdir }
+    // A named Docker volume made over a host folder (local driver, device=/path) is that folder: ask docker, only when an rm is in play.
+    const volumeDevices: Record<string, string> = {}
+    if (/\brm\b/.test(e.command)) {
+      for (const name of namedVolumesOf(e.command).slice(0, 6)) {
+        const device = (await run($, ['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name])).trim()
+        if (device.startsWith('/')) volumeDevices[name] = device
+      }
+    }
+    const scratchEnv = { home, tmpdir, volumeDevices }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
