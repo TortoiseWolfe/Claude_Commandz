@@ -312,6 +312,11 @@ class Wiring(unittest.TestCase):
         self.assertNotRegex(sh.split("REMOTE")[1] if "REMOTE" in sh else "", r"hub-digest")
 
 
+# Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in, so a default run reports 1 skip and is not
+# a clean pass. It runs hub_digest.py against this machine's live gh call, lane.sh, inbox and roadmap, so it needs
+# NX-01's state and network and would fail on a fresh restore or the tower. Every behaviour it checks (sections,
+# size cap, 0600 mode, secret scrubbing) is covered hermetically by Cli and the section tests above. Run it by hand
+# after changing how the digest reads live state: HUB_DIGEST_REAL=1 python3 -m pytest tests/test_hub_digest.py
 @unittest.skipUnless(os.environ.get("HUB_DIGEST_REAL"), "set HUB_DIGEST_REAL=1 to run against the live state")
 class RealState(unittest.TestCase):
     def test_live_page_is_small_complete_and_clean(self):
