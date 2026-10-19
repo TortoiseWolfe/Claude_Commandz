@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
-from test_openclaw_dispatch import NOW, SHA, Base, FakeHost  # noqa: E402
+from test_openclaw_dispatch import ET, NOW, SHA, Base, FakeHost  # noqa: E402
 
 ASK = dp.ask_id_for(SHA)
 
@@ -1461,14 +1461,76 @@ class TheWaitingRoom(PassBase):
                 self.assertEqual(self.host.started, [])
                 self.assertEqual(len(out), 1)
                 self.assertEqual(self.host.chats, [
-                    "2 lanes are waiting in the queue: the week is projected at %d%% (limit 90%%). "
-                    "They start when it is known and under 90%% or after the Wed 12:00 PM reset." % round(pct)])
-                self.assertEqual(self.state()["room_held"], {"pct": round(pct), "count": 2})
+                    "2 lanes are waiting in the queue: the week is projected at %d%% (phase 1, reset to Mon 6:00 AM, holds past 90%% projected). "
+                    "They start when the figure is known and within the limit, or from Mon 6:00 AM, when the limit becomes 95%% used." % round(pct)])
+                self.assertEqual(self.state()["room_held"], {"phase": 1, "pct": round(pct), "count": 2})
                 self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
                 self.assertEqual(len(self.host.chats), 1)
                 for f in self.room.glob("*.md"):
                     f.unlink()
                 dp.room_due(self.ctx, self.host, NOW + 120)
+
+    def at(self, when, proj, used):
+        """One approved entry, a pickup run at `when` with these figures. -> True if the room started it."""
+        for f in self.room.glob("*.md"):
+            f.unlink()
+        st = self.state()
+        st.pop("room_held", None)
+        dp.save_state(self.ctx.state_path, st)
+        self.host.started, self.host.chats = [], []
+        self.host.proj, self.host.used = proj, used
+        self.runs = getattr(self, "runs", 0) + 1  # a fresh name each run: a name that already started is a copy, not an entry
+        self.entry("fd-run%d" % self.runs, approved="x")
+        dp.room_due(self.ctx, self.host, when)
+        return bool(self.host.started)
+
+    def test_the_room_follows_the_weeks_phase_at_each_boundary(self):
+        # (when, projected, used, starts?)  One minute either side of Mon 6:00 AM, Tue 6:00 AM and the Wed 12:00 PM reset.
+        for when, proj, used, starts in [
+            (ET(2026, 10, 19, 5, 59), 108, 84, False),   # Mon 5:59 AM, today's numbers: phase 1 holds the projection
+            (ET(2026, 10, 19, 5, 59), 90, 99, True),     # phase 1 ignores used
+            (ET(2026, 10, 19, 6, 1), 108, 84, True),     # Mon 6:01 AM, today's numbers: phase 2 gates on used, 84 is under 95
+            (ET(2026, 10, 19, 6, 1), 20, 94.9, True),
+            (ET(2026, 10, 19, 6, 1), 20, 95, False),     # at 95% used it holds
+            (ET(2026, 10, 19, 6, 1), 20, 99, False),
+            (ET(2026, 10, 20, 5, 59), 20, 96, False),    # Tue 5:59 AM: still phase 2
+            (ET(2026, 10, 20, 6, 1), 300, 99.9, True),   # Tue 6:01 AM: phase 3, spend what is left
+            (ET(2026, 10, 21, 11, 59), 300, 100, True),  # Wed 11:59 AM: last minute of phase 3
+            (ET(2026, 10, 21, 12, 1), 95, 1, False),     # Wed 12:01 PM: a new week, phase 1 again
+            (ET(2026, 10, 21, 12, 1), 40, 1, True),
+        ]:
+            with self.subTest(when=when, proj=proj, used=used):
+                self.assertEqual(self.at(when, proj, used), starts)
+
+    def test_an_unknown_budget_holds_in_phases_1_and_2_and_starts_in_phase_3(self):
+        for when, starts in [(ET(2026, 10, 19, 5, 59), False), (ET(2026, 10, 19, 6, 1), False), (ET(2026, 10, 20, 5, 59), False),
+                             (ET(2026, 10, 20, 6, 1), True), (ET(2026, 10, 21, 12, 1), False)]:
+            with self.subTest(when=when):
+                self.assertEqual(self.at(when, None, None), starts)
+
+    def test_phase_2_gates_on_used_so_a_known_projection_cannot_stand_in_for_it(self):
+        self.assertFalse(self.at(ET(2026, 10, 19, 9), 10, None))
+
+    def test_the_hold_names_the_phase_and_its_limit_and_when_it_lifts(self):
+        self.at(ET(2026, 10, 19, 9), 20, 96)
+        self.assertEqual(self.host.chats, [
+            "1 lane is waiting in the queue: the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95% used). "
+            "They start when the figure is known and within the limit, or from Tue 6:00 AM, when there is no limit."])
+        self.assertEqual(self.state()["room_held"], {"phase": 2, "pct": 96, "count": 1})
+
+    def test_a_hold_that_crosses_into_the_next_phase_is_announced_again(self):
+        self.host.proj, self.host.used = 108, 96
+        self.entry("fd-a", approved="x")
+        dp.room_due(self.ctx, self.host, ET(2026, 10, 19, 5, 59))
+        dp.room_due(self.ctx, self.host, ET(2026, 10, 19, 6, 1))
+        self.assertEqual(len(self.host.chats), 2)
+        self.assertIn("phase 1", self.host.chats[0])
+        self.assertIn("phase 2", self.host.chats[1])
+
+    def test_a_reset_in_the_report_decides_the_phase(self):
+        self.host.reset = ET(2026, 10, 21, 12)
+        self.assertFalse(self.at(ET(2026, 10, 19, 9), 20, 96))
+        self.assertTrue(self.at(ET(2026, 10, 20, 9), 20, 96))
 
     def test_an_unknown_projection_holds_too(self):
         self.host.proj = None
@@ -1476,7 +1538,7 @@ class TheWaitingRoom(PassBase):
         dp.room_due(self.ctx, self.host, NOW)
         self.assertEqual(self.host.started, [])
         self.assertEqual(len(self.host.chats), 1)
-        self.assertIn("1 lane is waiting in the queue: the week's projection is unknown", self.host.chats[0])
+        self.assertIn("1 lane is waiting in the queue: the week's projected figure is unknown (phase 1", self.host.chats[0])
         self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
         self.assertEqual(len(self.host.chats), 1)
 

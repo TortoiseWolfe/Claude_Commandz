@@ -27,7 +27,8 @@ Budget: at most MAX_RUNNING dispatched lanes at once and MAX_PER_DAY starts a da
 text names this script's own cap, never an API limit). Only real work counts toward the day: a start made with AFA_OC_TEST set
 (live tests and probes) is never counted, and a lane whose report fails within FAIL_REFUND seconds of its start gives its
 start back. The dispatch pass path enforces MAX_RUNNING only; the daily cap applies to the script fallback. When the
-weekly projection (hub/scripts/model_quality_report.py) is past PROJECTION_LIMIT percent, Claude lanes start on Sonnet only.
+weekly budget (hub/scripts/model_quality_report.py) is over the limit of the week's current phase (see "The week's three phases"
+below), Claude lanes start on Sonnet only.
 
 Every job goes through a fresh, short "dispatch pass" first (run_pass): one `claude -p` Sonnet call that sees only the ask
 (quoted as data), the repo table and the engine rules, and either starts a lane with `lane.sh --ask <id>` or answers with `say`.
@@ -63,6 +64,7 @@ the transcript: no agent run, no channel delivery, no model tool), and to no oth
 there once the lane writes it.
 """
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -87,7 +89,15 @@ MAX_PER_DAY = 12
 FAIL_REFUND = 5 * 60  # a lane whose report fails this soon after its start gives the start back (a fumble is not a day's work)
 CLAIM_WINDOW = 10 * 60  # claim accepts only a lane `start` began for that ask this recently
 TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and probes: their starts never count toward the day
-PROJECTION_LIMIT = 90.0  # percent: past this projection a code lane waits (hub/lane-rules.md); Claude lanes step down to Sonnet, and the waiting room holds
+# The week's three phases (Jonathan, 19 Oct: use all the allotted tokens, so lift what is left from Monday morning, completely from
+# Tuesday morning). Every boundary and limit lives here and nowhere else; the week itself starts at the reset the quality report names.
+WEEK_TZ = "America/New_York"
+WEEK_RESET = (2, 12, 0)    # weekday (Mon=0), hour, minute: Wednesday 12:00 PM ET, used only when the report gives no reset
+PHASE2_START = (0, 6, 0)   # Monday 6:00 AM ET
+PHASE3_START = (1, 6, 0)   # Tuesday 6:00 AM ET
+PROJECTION_LIMIT = 90.0    # phase 1: past this projection a code lane waits (hub/lane-rules.md); Claude lanes step down to Sonnet, and the waiting room holds
+USED_LIMIT = 95.0          # phase 2: at or past this much USED a code lane waits, the same way; the projection no longer matters
+# phase 3: no budget gate at all
 PROJECTION_CACHE_SECONDS = 30 * 60
 TASK_MAX = 1500
 REPLY_MAX = 1500
@@ -314,28 +324,40 @@ class LaneHost:
         r = self._run(["tmux", "kill-window", "-t", "lanes:" + name], 15)
         return bool(r and r.returncode == 0)
 
-    def projection_pct(self, cache=STATE / "openclaw-dispatch-projection.json", now=None):
-        """The weekly-limit projection in percent, from model_quality_report.py (20 s), cached half an hour. None if unknown."""
+    def week_budget(self, cache=STATE / "openclaw-dispatch-projection.json", now=None):
+        """The week's budget from model_quality_report.py (20 s), cached half an hour: {"projected": %, "used": %, "reset": epoch}, each None
+        if unknown. A cache from before the reset is no longer true once the reset has passed."""
         now = time.time() if now is None else now
         try:
             c = json.loads(Path(cache).read_text())
-            if isinstance(c.get("pct"), (int, float)) and 0 <= now - c.get("at", 0) < PROJECTION_CACHE_SECONDS:
-                return float(c["pct"])
+            reset = c.get("reset")
+            if (isinstance(c.get("pct"), (int, float)) and isinstance(c.get("used"), (int, float))
+                    and 0 <= now - c.get("at", 0) < PROJECTION_CACHE_SECONDS and not (isinstance(reset, (int, float)) and reset <= now)):
+                return {"projected": float(c["pct"]), "used": float(c["used"]),
+                        "reset": reset if isinstance(reset, (int, float)) else None}
         except (OSError, ValueError, AttributeError):
             pass
         r = self._run(["python3", str(QUALITY), "--json"], 150)
-        pct = None
+        out = {"projected": None, "used": None, "reset": None}
         try:
-            v = json.loads(r.stdout)["projection"]["projected_pct"] if r and r.returncode == 0 else None
-            pct = float(v) if isinstance(v, (int, float)) else None
-        except (ValueError, KeyError, TypeError):
-            pct = None
-        if pct is not None:
+            p = json.loads(r.stdout)["projection"] if r and r.returncode == 0 else {}
+            for key, field in (("projected", "projected_pct"), ("used", "used_pct")):
+                if isinstance(p.get(field), (int, float)):
+                    out[key] = float(p[field])
+            if isinstance(p.get("reset"), str):
+                out["reset"] = datetime.datetime.fromisoformat(p["reset"]).timestamp()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            out = {"projected": None, "used": None, "reset": None}
+        if out["projected"] is not None:
             try:
-                Path(cache).write_text(json.dumps({"at": now, "pct": pct}))
+                Path(cache).write_text(json.dumps({"at": now, "pct": out["projected"], "used": out["used"], "reset": out["reset"]}))
             except OSError:
                 pass
-        return pct
+        return out
+
+    def projection_pct(self, cache=STATE / "openclaw-dispatch-projection.json", now=None):
+        """The weekly-limit projection in percent. None if unknown."""
+        return self.week_budget(cache, now)["projected"]
 
     def spawn_pass(self, ask_id):
         """Start the dispatch pass for an ask as its own detached process (the poller must not wait for it or be killed with it)."""
@@ -1446,14 +1468,12 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
     engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task, name == WORKSPACE)
     engine, blocked_why, note = resolve_engine(state, engine, now)
     why = blocked_why or why
-    if engine == "claude" and model == "opus":
-        pct = host.projection_pct()
-        if pct is not None and pct > PROJECTION_LIMIT:
-            model, note = "sonnet", " (Sonnet only: the week's usage is projected at %d%%)" % round(pct)
-    elif engine == "claude":
-        pct = host.projection_pct()
-        if pct is not None and pct > PROJECTION_LIMIT:
-            note = " (Sonnet only: the week's usage is projected at %d%%)" % round(pct)
+    if engine == "claude":
+        over = budget_over(host.week_budget(), now)  # an unknown budget is not a block here; the waiting room is the one that holds on it
+        if over is not None:
+            if model == "opus":
+                model = "sonnet"
+            note = " (Sonnet only: %s)" % over
     lane = "oc-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30], time.strftime("%m%d-%H%M", time.localtime(now)))
     n = 1
     while lane in state["lanes"]:
@@ -2798,21 +2818,68 @@ def room_start(ctx, host, entry, now):
     return "%s | room %s | started%s%s" % (stamp, name, behind, blocked_note), "started %s%s%s" % (name, behind, blocked_note)
 
 
-def _next_reset(now):
-    """-> "Wed 12:00 PM": the next weekly-limit reset (Wednesday 12:00 Eastern) after `now`, in 12-hour form."""
+def _et(ts):
     from zoneinfo import ZoneInfo
-    import datetime as dt
-    t = dt.datetime.fromtimestamp(now, ZoneInfo("America/New_York"))
-    reset = t.replace(hour=12, minute=0, second=0, microsecond=0) + dt.timedelta(days=(2 - t.weekday()) % 7)
-    if reset <= t:
-        reset += dt.timedelta(days=7)
-    return reset.strftime("%a %-I:%M %p")
+    return datetime.datetime.fromtimestamp(ts, ZoneInfo(WEEK_TZ))
 
 
-def _room_hold(ctx, host, count, pct, now):
-    """The week is projected past the limit, or unknown: start nothing. Say so in the chat only when the held state changes.
+def _clock(t):
+    """-> "Wed 12:00 PM": a time in 12-hour form."""
+    return t.strftime("%a %-I:%M %p")
+
+
+def _at(day, spec):
+    """The wall-clock moment `spec` (weekday, hour, minute) on or after `day`'s date, Eastern. Wall-clock arithmetic: a DST change
+    in the week moves no boundary."""
+    d = day.date() + datetime.timedelta(days=(spec[0] - day.weekday()) % 7)
+    return datetime.datetime(d.year, d.month, d.day, spec[1], spec[2], tzinfo=day.tzinfo)
+
+
+def week_phase(now, reset=None):
+    """-> (phase 1, 2 or 3, the phase's end as a 12-hour string or None, the week's reset as one). The week is the seven days to
+    `reset` (epoch; the quality report's own reset, passed in when known), otherwise to the next Wednesday 12:00 PM Eastern.
+    Phase 1: reset to Monday 6:00 AM. Phase 2: to Tuesday 6:00 AM. Phase 3: to the reset."""
+    t = _et(now)
+    r = _et(reset) if isinstance(reset, (int, float)) and reset > now else None
+    if r is None:
+        r = _at(t, WEEK_RESET)
+        if r <= t:
+            r = _at(t + datetime.timedelta(days=1), WEEK_RESET)
+    start = r - datetime.timedelta(days=7)  # wall-clock: both are Eastern datetimes of the same zone
+    phase2 = _at(start + datetime.timedelta(days=1), PHASE2_START)
+    phase3 = _at(phase2 + datetime.timedelta(days=1), PHASE3_START)
+    if t < phase2:
+        return 1, _clock(phase2), _clock(r)
+    if t < phase3:
+        return 2, _clock(phase3), _clock(r)
+    return 3, None, _clock(r)
+
+
+def budget_over(budget, now, held=False):
+    """The week's current phase against `budget` ({"projected", "used", "reset"} from host.week_budget()).
+    -> None when a lane may start. Otherwise the reason, in words the chat can carry: phase 1 and 2 name their limit and the number
+    (or say the number is unknown, which only counts when held=True: the waiting room holds on an unknown, the step-down does not)."""
+    phase, until, _reset = week_phase(now, budget.get("reset"))
+    if phase == 1:
+        pct, what, limit = budget.get("projected"), "projected", PROJECTION_LIMIT
+        over = pct is not None and pct > limit
+        label = "phase 1, reset to %s, holds past %d%% projected" % (until, limit)
+    elif phase == 2:
+        pct, what, limit = budget.get("used"), "used", USED_LIMIT
+        over = pct is not None and pct >= limit
+        label = "phase 2, to %s, holds at %d%% used" % (until, limit)
+    else:
+        return None
+    if pct is None:
+        return "the week's %s figure is unknown (%s)" % (what, label) if held else None
+    return "the week is %s at %d%% (%s)" % (what, round(pct), label) if over else None
+
+
+def _room_hold(ctx, host, count, reason, key, now, reset=None):
+    """The week is over the current phase's limit, or its figure is unknown: start nothing. `reason` is budget_over's words; `key`
+    is what makes this hold a new one to announce (the phase, the rounded figure, the count). Say so in the chat only when the key changes.
     -> list of (log line, chat text) for the note posted."""
-    held = {"pct": None if pct is None else round(pct), "count": count}
+    held = dict(key, count=count)
     with ctx.locked():
         state = load_state(ctx.state_path)
         if state.get("room_held") == held:
@@ -2820,12 +2887,11 @@ def _room_hold(ctx, host, count, pct, now):
         state["room_held"] = held
         save_state(ctx.state_path, state)
     plural = "%d lanes are" % count if count != 1 else "1 lane is"
-    why = ("the week's projection is unknown" if pct is None
-           else "the week is projected at %d%% (limit %d%%)" % (held["pct"], PROJECTION_LIMIT))
-    chat = "%s waiting in the queue: %s. They start when it is known and under %d%% or after the %s reset." % (
-        plural, why, PROJECTION_LIMIT, _next_reset(now))
+    phase, until, _reset = week_phase(now, reset)
+    nxt = ("from %s, when the limit becomes %d%% used" % (until, USED_LIMIT) if phase == 1 else "from %s, when there is no limit" % until)
+    chat = "%s waiting in the queue: %s. They start when the figure is known and within the limit, or %s." % (plural, reason, nxt)
     host.inject(chat)
-    return [("%s | room | held: %s, %d waiting" % (_stamp(now), why, count), chat)]
+    return [("%s | room | held: %s, %d waiting" % (_stamp(now), reason, count), chat)]
 
 
 def _room_release(ctx):
@@ -2866,9 +2932,13 @@ def room_due(ctx, host, now=None):
                 continue
         ready.append(e)
     if ready:
-        pct = host.projection_pct()
-        if pct is None or pct > PROJECTION_LIMIT:
-            return out + _room_hold(ctx, host, len(ready), pct, now)
+        budget = host.week_budget()
+        reason = budget_over(budget, now, held=True)
+        if reason is not None:
+            phase = week_phase(now, budget.get("reset"))[0]
+            figure = budget.get("used" if phase == 2 else "projected")
+            key = {"phase": phase, "pct": None if figure is None else round(figure)}
+            return out + _room_hold(ctx, host, len(ready), reason, key, now, budget.get("reset"))
     _room_release(ctx)
     for e in ready:
         line, chat = room_start(ctx, host, e, now)
