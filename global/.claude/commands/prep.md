@@ -30,6 +30,7 @@ If the working directory is ~/repos (the private hub repo TortoiseWolfe/workspac
    - For each client with new mail and no absorb lane already running (`lane.sh --status`), fill `~/.claude/state/lanes/absorb-template.md` ({{client}}, {{ids}}, {{lane_dir}}) into `~/.claude/state/lanes/<date>-<client-slug>-mail/prompt.md` and start it: `~/.claude/scripts/lane.sh <client-slug>-mail <repo_dir> opus <that prompt.md>`. Interactive and on the subscription, because Gmail needs it. Model per `feedback_model_tiers.md`: Opus now; Fable for paying clients once the Wednesday 14 Oct noon reset has passed.
    - When the lane's report.md and cards.md land, read only those, put the cards to Jonathan one at a time, and type his answers into the lane. When the reply is drafted, run `~/.claude/scripts/muse_poll_record.sh client-seen "<the ids>"` (it appends them to client-mail-seen.txt and ticks the inbox line).
    - Never send, never relabel client mail from the hub.
+   - If the session-start notice counts open client lines and the page's "Open client lines" section shows fewer (or prints a WARNING), the page is wrong: grep `~/.claude/state/muse-inbox.md` for open "Client mail:"/"Client alert:" lines before telling Jonathan there is no mail.
 
 Lanes never run /prep, so this never turns a lane into the director.
 

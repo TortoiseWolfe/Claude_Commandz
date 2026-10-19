@@ -128,6 +128,36 @@ class Parts(unittest.TestCase):
         self.assertIn("Which sample check is current?", groups["OpenClaw"][0][1])
         self.assertNotIn("Old finished thing", str(groups))
 
+    def test_open_inbox_keeps_a_client_line_with_two_ids(self):
+        line = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d 1792119952000\n"
+        groups, clients = hd.open_inbox(line)
+        self.assertEqual([c[1] for c in clients], ["Client mail: Example Brewing"])
+        self.assertEqual(clients[0][3], "1a2b3c4d5e6f7a8d 1792119952000")
+        self.assertEqual(groups["other"], [])
+
+    def test_open_inbox_never_drops_a_malformed_open_line(self):
+        bad = "- [ ] 2026-10-17 21:09 | Waiting on nobody | a | b | c | d | e f g | and more\n"
+        groups, clients = hd.open_inbox(bad)
+        self.assertEqual(clients, [])
+        self.assertEqual(len(groups["other"]), 1)
+        self.assertIn("Waiting on nobody", groups["other"][0][1])
+        # ticked lines stay out even when malformed
+        groups, _ = hd.open_inbox("- [x] 2026-10-17 21:09 | Waiting on nobody | a | b | c | d | e f g\n")
+        self.assertEqual(groups["other"], [])
+
+    def test_a_malformed_client_line_is_listed_with_its_raw_title(self):
+        bad = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | a | b | c | d | e f g | and more\n"
+        groups, clients = hd.open_inbox(bad)
+        self.assertEqual(clients, [])
+        self.assertTrue(any("Client mail: Example Brewing" in t for _, t in groups["other"]))
+
+    def test_count_open_client_lines_is_a_plain_scan(self):
+        text = ("- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | x | a b c d e\n"
+                "- [ ] 2026-10-17 21:10 | Client alert: Example Brewing | x | 1a2b3c4d5e6f7a8e\n"
+                "- [x] 2026-10-17 21:11 | Client mail: Example Brewing | x | 1a2b3c4d5e6f7a8f\n"
+                "- [ ] 2026-10-17 21:12 | Something else | no client words\n")
+        self.assertEqual(hd.count_open_client_lines(text), 2)
+
     def test_dispatcher_error_is_distinct_from_an_empty_queue(self):
         output, error = hd.dispatcher_open_questions(Path(tempfile.gettempdir()) / "missing-dispatcher.py")
         self.assertEqual(output, "")
@@ -198,6 +228,18 @@ class Page(unittest.TestCase):
             self.assertIn(needle, page)
         self.assertNotIn("Second paragraph", page)
         self.assertNotIn("third item that should be cut", page)
+
+    def test_client_section_warns_when_the_scan_finds_more_than_the_parse(self):
+        bad = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | a | b | c | d | e f g | and more\n"
+        page = self.build(inbox_text=INBOX + bad)
+        self.assertIn("WARNING: 3 open client lines in the inbox, 2 parsed: grep muse-inbox.md", page)
+        self.assertNotIn("WARNING", self.build())
+
+    def test_client_section_lists_a_two_id_line(self):
+        line = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d 1792119952000\n"
+        page = self.build(inbox_text=line)
+        self.assertIn("Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d 1792119952000", page)
+        self.assertNotIn("- none", page.split("## Open client lines")[1].split("##")[0])
 
     def test_open_receptionist_section_is_first_and_includes_age(self):
         page = self.build(open_questions_text="oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n")
