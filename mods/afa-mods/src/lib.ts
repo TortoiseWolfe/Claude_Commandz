@@ -330,6 +330,10 @@ function splitColons(spec: string): string[] {
 // a source with a / ~ or $ in it, or starting with a dot (compose reads `.` and `./x` as a path), is a folder here; anything else is a volume name
 const HOSTY = /[/~$]|^\./
 
+// what docker accepts as a volume name; any other non-path source is not known to be a volume, so it is judged as a folder
+export const VOLUME_NAME = /^[A-Za-z0-9][\w.-]*$/
+const kindOf = (source: string): 'host' | 'volume' => (HOSTY.test(source) || !VOLUME_NAME.test(source) ? 'host' : 'volume')
+
 // docker run / compose run flags, so the scan stops at the image and never reads the container's own arguments as mounts
 const RUN_BOOL = new Set(['-d', '-i', '-t', '-q', '-P', '-T', '--detach', '--interactive', '--tty', '--rm', '--privileged', '--init', '--read-only', '--no-healthcheck', '--oom-kill-disable', '--publish-all', '--sig-proxy', '--disable-content-trust', '--quiet', '--no-deps', '--service-ports', '--no-TTY', '--build', '--use-aliases', '--remove-orphans', '--quiet-pull', '--help'])
 const RUN_VALUE = new Set(['-a', '-c', '-e', '-h', '-l', '-m', '-p', '-u', '-w', '--add-host', '--annotation', '--attach', '--blkio-weight', '--blkio-weight-device', '--cap-add', '--cap-drop', '--cgroup-parent', '--cgroupns', '--cidfile', '--cpu-period', '--cpu-quota', '--cpu-rt-period', '--cpu-rt-runtime', '--cpu-shares', '--cpus', '--cpuset-cpus', '--cpuset-mems', '--detach-keys', '--device', '--device-cgroup-rule', '--device-read-bps', '--device-read-iops', '--device-write-bps', '--device-write-iops', '--dns', '--dns-option', '--dns-search', '--domainname', '--entrypoint', '--env', '--env-file', '--expose', '--gpus', '--group-add', '--health-cmd', '--health-interval', '--health-retries', '--health-start-period', '--health-timeout', '--hostname', '--ip', '--ip6', '--ipc', '--isolation', '--label', '--label-file', '--link', '--link-local-ip', '--log-driver', '--log-opt', '--mac-address', '--memory', '--memory-reservation', '--memory-swap', '--memory-swappiness', '--name', '--network', '--net', '--network-alias', '--oom-score-adj', '--pid', '--pids-limit', '--platform', '--publish', '--pull', '--restart', '--runtime', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--storage-opt', '--sysctl', '--tmpfs', '--ulimit', '--user', '--userns', '--uts', '--volume-driver', '--workdir', '--cap', '--entrypoint'])
@@ -348,7 +352,7 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
     if (second === undefined) {
       if (first.startsWith('/')) out.push({ source: '', target: first, kind: 'volume' }) // anonymous volume
       else incomplete = true
-    } else if (second.startsWith('/')) out.push({ source: first, target: second, kind: HOSTY.test(first) ? 'host' : 'volume' })
+    } else if (second.startsWith('/')) out.push({ source: first, target: second, kind: kindOf(first) })
     else incomplete = true
   }
   const mount = (spec: string) => {
@@ -364,8 +368,9 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
     const device = /device=([^,]+)/.exec(spec)?.[1]
     if (device) out.push({ source: device, target, kind: 'host' })
     else if (type === 'bind') out.push({ source, target, kind: 'host' })
-    else if (type === 'volume' || type === 'tmpfs') out.push({ source, target, kind: 'volume' })
-    else out.push({ source, target, kind: HOSTY.test(source) ? 'host' : 'volume' })
+    else if (type === 'tmpfs') out.push({ source, target, kind: 'volume' })
+    else if (type === 'volume') out.push({ source, target, kind: source === '' ? 'volume' : kindOf(source) })
+    else out.push({ source, target, kind: kindOf(source) })
   }
   // the next word is this flag's value
   const takes = (i: number, use: (v: string) => void): number => {
@@ -377,9 +382,17 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
     return i + 1
   }
   let i = t.findIndex(w => w === 'run') + 1
+  let imageSeen = false
   for (; i < t.length; i += 1) {
     const w = t[i]
-    if (w === '--' || !w.startsWith('-')) break // the image (or the compose service) starts what the container runs
+    if (/["']/.test(w)) incomplete = true // a quote left in a word: a value with spaces split the words, so what follows may be misread
+    if (w === '--' || !w.startsWith('-')) {
+      // the image (or the compose service) starts what the container runs; a word that is not a plausible one means the scan lost its place
+      const image = w === '--' ? t[i + 1] : w
+      if (image === undefined || !/^[\w][\w./:@-]*$/.test(image)) incomplete = true
+      imageSeen = true
+      break
+    }
     if (w === '-v' || w === '--volume') i = takes(i, volume)
     else if (w === '--mount') i = takes(i, mount)
     else if (w.startsWith('--volume=')) volume(unquote(w.slice(9)))
@@ -397,7 +410,7 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
     } else {
       // grouped short flags (-it, -dv, -itv src:dst) or one with its value attached (-vsrc:dst, -eNAME=x)
       const first = w[1]
-      if (first === 'v') volume(unquote(w.slice(2)))
+      if (first === 'v') volume(unquote(w.slice(2).replace(/^=/, '')))
       else if (SHORT_VALUE.has(first)) continue
       else {
         const letters = [...w.slice(1)]
@@ -409,7 +422,7 @@ function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
       }
     }
   }
-  return { mounts: out, incomplete }
+  return { mounts: out, incomplete: incomplete || !imageSeen }
 }
 
 // The names of the Docker volumes a command mounts into a docker run, so the caller can ask docker whether one is really a host folder
@@ -419,7 +432,7 @@ export function namedVolumesOf(command: string, depth = 0): string[] {
     for (const raw of segmentsOf(text)) {
       const seg = strip(raw).replace(/^\\/, '')
       if (DOCKER_RUN.test(seg)) {
-        for (const m of parseMounts(seg).mounts) if (m.kind === 'volume' && /^[A-Za-z0-9][\w.-]*$/.test(m.source)) names.add(m.source)
+        for (const m of parseMounts(seg).mounts) if (m.kind === 'volume' && m.source !== '') names.add(m.source)
       }
       const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
       if (depth < 3 && wrapped) for (const n of namedVolumesOf(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1)) names.add(n)

@@ -157,9 +157,18 @@ export const register: Register = on => {
     // A named Docker volume made over a host folder (local driver, device=/path) is that folder: ask docker, only when an rm is in play.
     const volumeDevices: Record<string, string> = {}
     if (/\brm\b/.test(e.command)) {
-      for (const name of namedVolumesOf(e.command).slice(0, 6)) {
-        const device = (await run($, ['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name])).trim()
-        if (device.startsWith('/')) volumeDevices[name] = device
+      // Every named volume is asked about. A volume docker has never heard of is new, so it is not a host folder; any other failure
+      // (docker missing, a timeout) leaves it unknown, and an unknown volume is held like an unresolved host path.
+      for (const name of namedVolumesOf(e.command)) {
+        try {
+          const r = await $.process.run(['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name], { timeoutMs: 10_000 })
+          const device = r.stdout.trim()
+          if (r.exitCode === 0) {
+            if (device.startsWith('/')) volumeDevices[name] = device
+          } else if (!/no such volume/i.test(r.stderr)) volumeDevices[name] = '$UNINSPECTED_VOLUME'
+        } catch {
+          volumeDevices[name] = '$UNINSPECTED_VOLUME'
+        }
       }
     }
     const scratchEnv = { home, tmpdir, volumeDevices }

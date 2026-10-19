@@ -406,7 +406,11 @@ describe('blast radius, rm inside docker run', () => {
     on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
     on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] }))
     on('process.run', (_$: any, e: any) => ({
-      value: { exitCode: 0, stdout: e.argv.includes('inspect') ? `${device}\n` : `${e.argv.at(-1)}\n`, stderr: '' },
+      value: e.argv.includes('inspect') && device === '!fail'
+        ? { exitCode: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' }
+        : e.argv.includes('inspect') && device === '!none'
+          ? { exitCode: 1, stdout: '', stderr: 'Error: No such volume: data' }
+          : { exitCode: 0, stdout: e.argv.includes('inspect') ? `${device}\n` : `${e.argv.at(-1)}\n`, stderr: '' },
     }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
@@ -508,6 +512,19 @@ describe('blast radius, rm inside docker run', () => {
       expect(seen.asked).toBe('')
       expect(r.deny).toContain('did not wait')
       expect(r.deny).toContain('outside the places a lane may clean up')
+    })
+    test('a volume docker cannot be asked about is held, not assumed harmless', async ($, on) => {
+      const { r } = await run($, on, `docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!fail')
+      expect(r.deny).toContain('did not wait')
+    })
+    test('a volume docker does not know is new, and runs', async ($, on) => {
+      const { r } = await run($, on, `docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, '!none')
+      expect(r.deny).toBeUndefined()
+    })
+    test('every named volume is asked about, however many a command mounts', async ($, on) => {
+      const mounts = Array.from({ length: 9 }, (_, i) => `-v v${i}:/m${i}`).join(' ')
+      const { r } = await run($, on, `docker run --rm ${mounts} alpine sh -c 'rm -rf /m8/x'`, '!fail')
+      expect(r.deny).toContain('did not wait')
     })
     test('docker exec is unchanged: refused with the plain reason', async ($, on) => {
       const { r } = await run($, on, `docker exec app sh -c 'rm -rf /w/x'`)
