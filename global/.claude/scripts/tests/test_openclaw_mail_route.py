@@ -171,6 +171,14 @@ class AWorktreeOfAListedRepoIsARepo(MailBase):
             self.assertIn("not a repo on the list", problem or "", str(d))
             self.assertIsNone(hit)
 
+    def test_a_folder_with_a_forged_git_file_pointing_at_a_listed_repo_is_refused(self):
+        forged = self.tmp / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text("gitdir: %s\n" % (self.root / "own-app" / ".git" / "worktrees" / self.wt.name))
+        problem, hit = dp.vet_start(self.ctx, forged, "claude", "sonnet")
+        self.assertIn("not a repo on the list", problem or "")
+        self.assertIsNone(hit)
+
     def test_the_waiting_room_starts_an_entry_whose_folder_is_a_new_worktree(self):
         room = self.ctx.room_dir
         self.host.proj = 50  # the week is on pace

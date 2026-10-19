@@ -2450,7 +2450,17 @@ def worktree_parent(ctx, real):
     if os.path.basename(common) != ".git":
         return None
     parent = os.path.dirname(common)
-    return next((v for v in ctx.repos.values() if os.path.realpath(str(v[1])) == parent), None)
+    hit = next((v for v in ctx.repos.values() if os.path.realpath(str(v[1])) == parent), None)
+    if hit is None:
+        return None
+    # The folder's own .git file is not proof (anyone can write one pointing at a listed repo); the listed repo has to list the folder.
+    try:
+        listing = subprocess.run(["git", "-C", parent, "worktree", "list", "--porcelain"], capture_output=True, text=True,
+                                 timeout=15, stdin=subprocess.DEVNULL).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    known = {os.path.realpath(line[len("worktree "):]) for line in listing if line.startswith("worktree ")}
+    return hit if real in known else None
 
 
 def listed_repo(ctx, real):
