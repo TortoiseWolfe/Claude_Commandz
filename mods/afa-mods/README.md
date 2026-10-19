@@ -50,7 +50,7 @@ that does not resolve (`$X`, `$(pwd)`, backticks) still holds and the question n
 climb out of a mount with `..`, and a relative path still hold. Only the options before the image are read, so a `-v` in the
 container's own arguments is not a mount. When the list may be incomplete (compose run, `--volumes-from`, a flag not read) a
 path no mount covers is held, not assumed to be the container's own scratch. A named volume that `docker volume inspect` reports
-as bound to a host folder is judged as that folder; one docker cannot be asked about (daemon down, timeout) is held, and every
+as bound to a host folder is judged as that folder; one docker cannot answer for (daemon down, timeout, or a volume it does not know yet, which the same command may make) is held, and every
 named volume is asked about, with no cap. A quote left in an option word, or an image word that is not plausible, also marks the
 list incomplete, and a source that is not a legal volume name is judged as a folder. `docker exec` has no mounts to read and is unchanged.
 The classifier judges what the command itself would run: it does not match text inside quoted
