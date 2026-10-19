@@ -134,7 +134,7 @@ function withoutTextHeredocs(command: string): string {
     const runs = (w: string) => SHELL_WORDS.has(plain(w)) || RUNS_ITS_ARGS.has(plain(w)) || WRAPPERS.has(plain(w))
     const shellIn = (s: string) => s.split(/\s+/).some(runs) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(s.trim())
     // `git commit -m "$(cat <<'EOF' ... EOF )"`: only a known text sink (git commit, gh pr/issue/release) takes the body as one message word; anywhere else it may be run, so it is kept
-    const textSink = /^\s*(?:\w+=\S*\s+)*(?:git\s+(?:\S+\s+)*?commit|gh\s+(?:pr|issue|release)\s+\S+)\b/.test(lead)
+    const textSink = /^\s*(?:\w+=\S*\s+)*(?:git(?:\s+-C\s+\S+)?\s+commit|gh\s+(?:pr|issue|release)\s+\S+)\b/.test(lead)
     const quotedMessage = textSink && /\$\(\s*(?:cat|tee)\s*$/.test(lead) && ((lead.replace(/\\./g, '').match(/"/g) ?? []).length % 2 === 1)
     const leadRest = quotedMessage ? lead.replace(/\$\(\s*(?:cat|tee)\s*$/, '') : lead
     // fail closed: the body is dropped only when nothing around the marker could run it (no shell word, pipe, substitution or backtick)
