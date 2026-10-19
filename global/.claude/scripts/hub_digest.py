@@ -80,7 +80,7 @@ def one_line(text, limit):
 
 def _run(cmd, timeout=40, cwd=None):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd)
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -90,7 +90,7 @@ def dispatcher_open_questions(dispatcher=None):
     """Read the authoritative queue; return an error separately so a failed read is never shown as an empty queue."""
     dispatcher = dispatcher or Path(__file__).with_name("openclaw_dispatch.py")
     try:
-        result = subprocess.run(["python3", str(dispatcher), "open"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["python3", str(dispatcher), "open"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "", "could not run dispatcher open: %s" % exc
     if result.returncode != 0:
