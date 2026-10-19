@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { classify, composeRunsOf, composeServiceCapped } from './lib'
+import { classify, composeKey, composeRunsOf, composeServiceCapped, composeServiceLimit } from './lib'
 import type { ScratchEnv } from './lib'
 import { RULE_SAMPLES, touches } from './touches'
 import type { Probe } from './touches'
@@ -110,10 +110,43 @@ describe('a docker run or compose run with no CPU cap and no timeout in front is
     })
   }
 
+  // review of #75: a flag that does not cap, or a timeout that does not time out, is not a fix
+  for (const command of [
+    'docker run --cpus 0 img',
+    'docker run --cpus $X img',
+    'docker run --cpus=abc img',
+    'docker run --cpus -1 img',
+    'docker run --cpu-quota -1 img',
+    'docker run --cpu-quota=0 img',
+    'docker run --cpuset-cpus x img',
+    'timeout 0 docker run img',
+    'timeout abc docker run img',
+    'timeout 999999 docker run img',
+    'timeout -s KILL docker run img',
+    'timeout $T docker run img',
+  ]) {
+    test(`held, the value is no limit: ${command}`, () => {
+      expect(held(command)).toHaveLength(1)
+    })
+  }
+  for (const command of ['timeout --foreground 5 docker run img', 'timeout -s KILL 5 docker run img', 'timeout -k 5 60 docker run img', 'timeout 1.5m docker run img', 'timeout 1d docker run img', 'docker run --cpus 0.5 img', 'docker run --cpuset-cpus 0,2-3 img']) {
+    test(`not held, a real limit: ${command}`, () => {
+      expect(held(command)).toEqual([])
+    })
+  }
+
+  test('the same service name in another folder is another key', () => {
+    const [a] = composeRunsOf('cd /srv/a && docker compose run --rm web x')
+    const [b] = composeRunsOf('cd /srv/b && docker compose run --rm web x')
+    expect(a.key).not.toBe(b.key)
+    expect(composeKey({ files: [], service: 'web' }, '/srv/a')).not.toBe(composeKey({ files: [], service: 'web' }, '/srv/b'))
+    expect(held('cd /srv/b && docker compose run --rm web x', { home: '/home/t', composeLimited: [a.key] })).toHaveLength(1)
+  })
+
   test('a compose service whose file gives it a cpus limit is capped, the same service with no limit is not', () => {
     const command = 'cd /srv/app && docker compose run --rm web npm test'
     const [run] = composeRunsOf(command)
-    expect(run).toMatchObject({ service: 'web', cwd: '/srv/app', cwdUnknown: false, files: [] })
+    expect(run).toMatchObject({ service: 'web', cwd: '/srv/app', needsCwd: true, files: [] })
     expect(held(command)).toHaveLength(1)
     expect(held(command, { home: '/home/t', composeLimited: [run.key] })).toEqual([])
     // the key belongs to this service and these files, so another service or file is still held
@@ -126,8 +159,10 @@ describe('a docker run or compose run with no CPU cap and no timeout in front is
     expect(composeRunsOf("timeout 60 bash -c 'docker compose run --rm web x'")).toEqual([])
     expect(composeRunsOf('docker compose -f a.yml --file=b.yml -fc.yml --project-directory /p run --rm web x')[0]).toMatchObject({ files: ['a.yml', 'b.yml', 'c.yml'], projectDir: '/p', service: 'web' })
     expect(composeRunsOf('docker-compose run -e A=b -v x:/y web x')[0]).toMatchObject({ service: 'web' })
-    expect(composeRunsOf('cd "$X" && docker compose run web x')[0]).toMatchObject({ cwdUnknown: true })
-    expect(composeRunsOf('docker compose run web x')[0]).toMatchObject({ cwdUnknown: false, cwd: undefined })
+    expect(composeRunsOf('cd "$X" && docker compose run web x')[0]).toMatchObject({ needsCwd: true, cwd: undefined })
+    expect(composeRunsOf('docker compose run web x')[0]).toMatchObject({ needsCwd: true, cwd: undefined })
+    expect(composeRunsOf('docker compose -f /abs/c.yml run web x')[0]).toMatchObject({ needsCwd: false })
+    expect(composeRunsOf('docker compose -f rel.yml run web x')[0]).toMatchObject({ needsCwd: true })
     expect(composeRunsOf('docker compose exec web x')).toEqual([])
   })
 })
@@ -175,6 +210,16 @@ volumes:
       expect(composeServiceCapped(file, service)).toBe(expected)
     })
   }
+  test('a key of the same name under another key is not the limit', () => {
+    const odd = 'services:\n  web:\n    image: x\n    environment:\n      cpus: 4\n    labels:\n      cpu_quota: 9\n'
+    expect(composeServiceLimit(odd, 'web')).toBe('absent')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: 0\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: ${C:-4}\n', 'web')).toBe('capped')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: ${C}\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    cpu_count: 4\n    cpu_percent: 50\n', 'web')).toBe('absent')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: 4\n  db:\n    cpus: 0\n', 'db')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: 4\n  db:\n    image: y\n', 'db')).toBe('absent')
+  })
   test('no services, or text that is not a compose file, caps nothing', () => {
     expect(composeServiceCapped('', 'web')).toBe(false)
     expect(composeServiceCapped('cpus: 4\nweb:\n  cpus: 4', 'web')).toBe(false)

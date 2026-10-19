@@ -4,7 +4,6 @@ declare module 'claude-code' {
   interface PluginState {
     'afa-mods': {
       isHub: boolean
-      cwd: string
       prepRan: boolean
       percent: number | null
       band: AfaModsBand
