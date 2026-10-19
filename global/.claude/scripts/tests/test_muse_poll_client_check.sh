@@ -35,3 +35,17 @@ rec() { MUSE_STATE=$ST bash "$HERE/muse_poll_record.sh" "$@"; }
 if rec client-seen "1792119952000" 2>/dev/null; then ok 'client-seen refuses a 13-digit timestamp' refused accepted; fi
 ok 'client-seen refuses a 13-digit timestamp' 0 "$(grep -c 1792119952000 "$ST/client-mail-seen.txt" 2>/dev/null || true)"
 rec client-seen "1a14c8be4df08299" && ok 'client-seen takes a 16-hex ID' 1 "$(grep -c 1a14c8be4df08299 "$ST/client-mail-seen.txt")"
+
+# A kind=payment sender (Gusto) mails from a no-reply address and must still come out NEW, because its handler
+# marks the invoice paid; a no-reply sender of any other kind is still skipped.
+printf 'client\trepo_dir\tkind\tgmail_from\nPayroll\t/x\tpayment\tno-reply@pay.example.test\nNews\t/x\tmail\tnoreply@news.example.test\n' >"$TMP/senders.tsv"
+cat >"$TMP/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat <<'OUT'
+MSG 2a14c8be4df08299 | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 2a14c8be4df08299
+MSG 3a14c8be4df08299 | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 3a14c8be4df08299
+OUT
+MOCK
+out=$(check)
+ok 'a no-reply payment sender comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c '^NEW 2a14c8be4df08299 |')"
+ok 'a no-reply sender of another kind is skipped' 0 "$(printf '%s\n' "$out" | grep -c 3a14c8be4df08299)"
