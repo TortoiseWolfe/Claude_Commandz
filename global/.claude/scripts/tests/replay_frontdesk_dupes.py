@@ -55,7 +55,7 @@ class Replay(PassBase):
             sent = [c for c in rec.calls if isinstance(c, dict)]
             print("1 one hub post          `post` printed %r, exit %d; chat.inject calls: %d, to %s, label %s (before the fix the code also sent once: the doubling is not here)" % (
                 out.getvalue().strip(), code, len(sent), sent[0]["sessionKey"], sent[0]["label"]))
-            assert len(sent) == 1 and sent[0]["message"] == text
+            assert len(sent) == 1 and sent[0]["message"].startswith(text)  # the outbox adds how many still wait
 
             # 2. one deferred question -> one short line, one whole-message hub-list line
             self.ctx.hand_off_first = False

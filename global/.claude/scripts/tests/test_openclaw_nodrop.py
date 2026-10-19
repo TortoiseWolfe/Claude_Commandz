@@ -214,5 +214,17 @@ class Decode(unittest.TestCase):
         self.assertIn("x", r.stderr)
 
 
+class DedupWindow(td.Base):
+    """The same words asked again are only a duplicate inside DEDUP_WINDOW: after it, his repeat is a new request and runs."""
+
+    def test_the_same_task_after_the_window_is_not_a_duplicate(self):
+        task = "trace the porch columns in own-app"
+        key = dp.task_key(task)
+        for age, dup in ((60, True), (dp.DEDUP_WINDOW + 1, False)):
+            dp.save_state(self.ctx.state_path, {"lanes": {}, "starts": [], "asks": {"oc-11111111": {
+                "task_key": key, "created": td.NOW - age, "status": "answered", "kind": "task"}}})
+            self.assertEqual(dp.duplicate_start(self.ctx, task, td.NOW), dup, age)
+
+
 if __name__ == "__main__":
     unittest.main()

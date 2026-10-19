@@ -797,6 +797,26 @@ def _chat_for(kind, line):
     return "%s: %s" % (parts[1], parts[2])
 
 
+def _move_on(item, host, outbox, now):
+    """The outbox shows him one post at a time. "next" shows the next one, and that is all the message does (-> its result line); any
+    other fresh message of his is his answer, so the next post shows too and the message runs as usual (-> None)."""
+    if outbox is None or item.get("source") != ACT_SOURCE or "text" not in item:
+        return None
+    if not ("ts" in item and abs(now - item["ts"]) <= ACT_MAX_AGE):
+        return None
+    sha = item.get("sha256_of_original", "")[:8]
+    if dispatch.NEXT_RE.match(item["text"]):
+        moved, r = dispatch.queue_next(outbox, host.inject_now, now, "next")
+        what = {"shown": "showed the next post", "empty": "nothing else waiting", "showing": "a post is already showing",
+                "later": "the next post has not landed yet; it is tried again by itself", "failed": "the next post did not land; it is tried again by itself",
+                "busy": "the next post is being sent"}.get(r, r)
+        if r == "empty":
+            host.inject_now("Nothing else waiting.")
+        return "%s | next | %s | oc-%s" % (time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), what, sha)
+    dispatch.queue_next(outbox, host.inject_now, now, "answered")
+    return None
+
+
 def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-site-aliases.json",
             inbox=STATE / "muse-inbox.md", wake=STATE / "openclaw-ask.wake", log=STATE / "openclaw-ask-results.log", now=None, ctx=None):
     """Sweep the lanes Jonathan started (the sweep posts its own reports), act on the accepted items of one scan, then settle the chat
@@ -813,11 +833,19 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
         done.append(("dispatch", line))
     if reported:
         host.refresh_digest()
+    outbox = getattr(host, "queue_path", None) if ctx is not None else None
+    if outbox is not None:  # a post that did not land is tried again here, every minute, until it does
+        dispatch.queue_pump(outbox, host.inject_now, now)
     queue = load_pending(ctx.pending_path) if ctx is not None else []
     for r in results:
         if r["verdict"] != "accept":
             continue
         item = r["stored"]
+        moved = _move_on(item, host, outbox, now)
+        if moved:
+            _append_line(log, moved)
+            done.append(("queue", moved))
+            continue
         kind, line = act_on(item, host, sites, aliases, inbox, wake, now, ctx)
         if line:
             _append_line(log, line)
@@ -874,7 +902,7 @@ def main(argv=None):
             print(quote_untrusted(r["stored"]))
     print("pickup: %s" % (", ".join("%d %s" % (n, v) for v, n in sorted(counts.items())) or "folder empty"))
     if a.act:
-        for kind, line in run_act(results, Host(), a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos(), hand_off_first=True)):
+        for kind, line in run_act(results, dispatch.queued(Host()), a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos(), hand_off_first=True)):
             print("act: %s%s" % (kind, " | " + line if line else ""))
     return 0
 
