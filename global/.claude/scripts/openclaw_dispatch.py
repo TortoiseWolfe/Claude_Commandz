@@ -340,6 +340,29 @@ def queue_add(path, text, now, source="hub"):
         return q["seq"]
 
 
+# 19 Oct 6:31 PM, after the link came back and one 1,600-character post answered seven questions at once: "overwheming me again,
+# what the fuck was all that". So every hub post is one item per question, and each item is short: one topic, one headline, and
+# nothing on it unless it needs him. `post` and `say` refuse an item over ITEM_MAX; several answers in one post are split on a line
+# of "---" into one outbox item each. Lane reports keep their own 150-word rule and are never cut.
+ITEM_MAX = 600
+ITEM_SPLIT_RE = re.compile(r"^[ \t]*---[ \t]*$", re.M)
+ITEM_RULE = "one topic and one headline per item, nothing on it unless it needs him"
+
+
+def split_items(text):
+    """-> the post's items: the text cut on lines of "---", each stripped, empties dropped."""
+    return [p.strip() for p in ITEM_SPLIT_RE.split(text or "") if p.strip()]
+
+
+def item_problem(verb, items):
+    """-> why these items may not go to his chat, or None."""
+    long = [n for n, p in enumerate(items, 1) if len(p) > ITEM_MAX]
+    if long:
+        return ("%s: item %s is over %d characters (%s). Shorten it, or split it on a line of --- into one item each"
+                % (verb, ", ".join(map(str, long)), ITEM_MAX, ITEM_RULE))
+    return None
+
+
 def queue_tail(waiting):
     if waiting <= 0:
         return "\n\n(Nothing else waiting.)"
@@ -3274,6 +3297,15 @@ def post_ask(ctx, host, ask_ids, text, now=None):
             _touch_wake(ctx, ask_id, now)
         return False, ("post: refused: that answer says his message was not passed on. Deliver it instead (lane.sh --send <lane>, or "
                        "restart the closed lane from its folder with his words), then post what happened; the ask stays open")
+    items = split_items(text)
+    if len(ids) > 1 and len(items) != len(ids):
+        return False, ("post: %d questions need %d answers, one per question in the same order, each on its own between lines of --- "
+                       "(%d found). Each goes to his chat as its own item; a repeat of a question he already asked is settled, not "
+                       "posted" % (len(ids), len(ids), len(items)))
+    bad = item_problem("post", items)
+    if bad:
+        return False, bad
+    answers = dict(zip(ids, items)) if len(ids) > 1 else {ids[0]: "\n\n".join(items)}
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
@@ -3283,17 +3315,19 @@ def post_ask(ctx, host, ask_ids, text, now=None):
                 return False, "post: no such ask %s" % ask_id
             if not (_post_closes(state, ask) or ask.get("status") == "answered"):
                 return False, "post: ask %s is already %s" % (ask_id, ask.get("status"))
-    chat_text = text
-    if len(_chat_parts(text)) > MAX_CHAT_PARTS:
-        chat_text += "\nFull text: stored with ask %s" % ", ".join(ids)
-    if not host.inject(chat_text):
-        return False, "post: could not post to the chat"
+    for n, item in enumerate(items):
+        if not host.inject(item):
+            if n == 0:
+                return False, "post: could not post to the chat"
+            ids = ids[:n] if len(ids) > 1 else ids  # what reached the chat is recorded; the rest stays open
+            break
     with ctx.locked():
         state = load_state(ctx.state_path)
         asks = asks_of(state)
         settled, followed = [], []
         for ask_id in ids:
             ask = asks.get(ask_id)
+            text = answers[ask_id]
             if ask and _post_closes(state, ask):
                 ask["answer"] = text
                 ask["status"], ask["answered_at"] = "answered", now
@@ -3668,6 +3702,8 @@ def say(ctx, host, ask_id, text, now=None):
     text = (text or "").strip()
     if not ASK_ID_RE.fullmatch(ask_id or "") or not text:
         return False, "say: bad ask id or empty text"
+    if len(text) > ITEM_MAX:
+        return False, "say: over %d characters; %s. Shorten it" % (ITEM_MAX, ITEM_RULE)
     with ctx.locked():
         state = load_state(ctx.state_path)
         ask = asks_of(state).get(ask_id)
@@ -4108,7 +4144,15 @@ def main(argv=None):
         pending = unanswered_question_ids(ctx)
         if pending:
             print("open questions: %s" % ", ".join(pending), file=sys.stderr)
-        ok, msg = post_line(queued(LaneHost()), argv[1], ctx)
+        items = split_items(re.sub(r"^\s*\[hub\]\s*", "", (argv[1] or "").strip()))
+        ok, msg = (False, "post: empty") if not items else (False, item_problem("post", items)) if item_problem("post", items) else (True, "")
+        host = queued(LaneHost())
+        for item in items if ok else []:
+            ok, msg = post_line(host, item, ctx)
+            if not ok:
+                break
+        if ok and len(items) > 1:
+            msg = "posted %d items" % len(items)
     elif len(argv) == 3 and argv[0] == "post":
         ok, msg = post_ask(Ctx({}, state_path=state_file()), queued(LaneHost()), argv[1], argv[2])
     elif len(argv) == 3 and argv[0] == "settle":
