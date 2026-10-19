@@ -214,7 +214,11 @@ volumes:
     const odd = 'services:\n  web:\n    image: x\n    environment:\n      cpus: 4\n    labels:\n      cpu_quota: 9\n'
     expect(composeServiceLimit(odd, 'web')).toBe('absent')
     expect(composeServiceLimit('services:\n  web:\n    cpus: 0\n', 'web')).toBe('none')
-    expect(composeServiceLimit('services:\n  web:\n    cpus: ${C:-4}\n', 'web')).toBe('capped')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: ${C:-4}\n', 'web')).toBe('none')
+    expect(composeServiceLimit('include:\n  - x.yml\nservices:\n  web:\n    cpus: 4\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    <<: *base\n    cpus: 4\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    extends:\n      service: b\n    cpus: 4\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web:\n    cpus: !reset 4\n', 'web')).toBe('none')
     expect(composeServiceLimit('services:\n  web:\n    cpus: ${C}\n', 'web')).toBe('none')
     expect(composeServiceLimit('services:\n  web:\n    cpu_count: 4\n    cpu_percent: 50\n', 'web')).toBe('absent')
     expect(composeServiceLimit('services:\n  web:\n    cpus: 4\n  db:\n    cpus: 0\n', 'db')).toBe('none')

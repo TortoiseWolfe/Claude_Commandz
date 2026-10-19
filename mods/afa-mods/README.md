@@ -62,9 +62,9 @@ duration of at most a day (`timeout 0` is not one). Either a cap or a timeout in
 its service is read in the compose file the way compose picks it: the `-f` files in order, else the first default file in the folder
 (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) plus its override file; the last file that says anything
 about the service's CPU wins, so `cpus: 0` in an override uncaps it. Only a direct `cpus`, `cpu_quota` or `cpuset` key, or
-`deploy.resources.limits.cpus`, with a positive value counts (`${X:-4}` by its default). The run stays held when it is unclear: a
+`deploy.resources.limits.cpus`, with a positive number counts; a `${X}` value, an `include`, `<<:`, `extends` or `!reset` does not. The run stays held when it is unclear: a
 relative path or the default files with no plain `cd` before them, `COMPOSE_FILE` (command, environment or the project env file),
-`--env-file`, `--profile` or `COMPOSE_PROJECT_DIR`, a file or service that cannot be read, or a limit set through an anchor or
+`--env-file`, `--profile`, `COMPOSE_PROJECT_DIR`, a `source`, `eval` or `export` before the call, a file or service that cannot be read, or a limit set through an anchor or
 `extends`. `docker-heavy.sh` itself, and `docker ps`, `logs`, `inspect`, `stats`, `update` and `exec`, are never held.
 A lane nobody watches is refused with the fix and runs it again.
 The classifier judges what the command itself would run: it does not match text inside quoted
