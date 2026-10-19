@@ -203,6 +203,22 @@ describe('review of #74: the mount reading fails closed', () => {
     expect(held(`docker run --rm -v data:/w alpine sh -c 'rm -rf /tmp/x'`)).toEqual([])
     expect(held(`docker run --rm alpine sh -c 'rm -rf /tmp/x'`)).toEqual([])
   })
+  test('a quote left in an option word, or an image that is not one, marks the list incomplete', () => {
+    for (const command of [
+      `docker run -e "A=b c" -v data:/w alpine sh -c 'rm -rf /tmp/x'`,
+      `docker run --name 'a b' -v data:/w alpine sh -c 'rm -rf /tmp/x'`,
+      `docker run -v data:/w $IMG sh -c 'rm -rf /tmp/x'`,
+    ]) expect(held(command).map(h => h.kind), command).toEqual(['rm -rf'])
+  })
+  test('-v=src:dst is read, and a source that is not a volume name is judged as a folder', () => {
+    expect(held(`docker run --rm -v=${HOME}:/h alpine sh -c 'rm -rf /h/x'`)[0]?.container?.[0]).toMatchObject({ kind: 'host', host: `${HOME}/x` })
+    expect(held(`docker run --rm -v=data:/w alpine sh -c 'rm -rf /w/x'`)).toEqual([])
+    for (const src of ['-data', '_data', 'da ta', 'da!ta']) {
+      const holds = held(`docker run --rm --mount type=volume,source=${src},target=/w alpine sh -c 'rm -rf /w/x'`)
+      expect(holds.map(h => h.kind), src).toEqual(['rm -rf'])
+    }
+    expect(namedVolumesOf(`docker run -v -data:/w alpine true`)).toEqual([])
+  })
   test('a named volume that docker says is a host folder is that folder', () => {
     const env = { home: HOME, volumeDevices: { data: `${HOME}/p` } }
     const holds = classify(`docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, 0, env)
