@@ -312,6 +312,11 @@ describe('review of #65: the narrower reading still fails closed', () => {
       expect(classify(command).map(h => h.kind)).toContain(kind)
     })
   }
+  for (const prefix of ['git -c core.hooksPath=/x', 'git --config-env=core.editor=X', 'git --exec-path=/x', 'FOO=1 git -c alias.x=y']) {
+    test(`${prefix} commit keeps the heredoc body`, () => {
+      expect(classify(`${prefix} commit -m "$(cat <<'EOF'\nvercel --prod\nEOF\n)"`).map(h => h.kind)).toContain('production deploy')
+    })
+  }
   test('a commit message heredoc is still message text', () => {
     expect(classify('git commit -m "$(cat <<\'EOF\'\nvercel --prod\nEOF\n)"')).toEqual([])
     expect(classify('git -C ~/x commit -m "$(cat <<\'EOF\'\nvercel --prod\nEOF\n)"')).toEqual([])
