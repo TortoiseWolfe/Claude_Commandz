@@ -40,8 +40,11 @@ the volumes of a compose stack; the service of a deploy. When the words cannot s
 `src/touches.ts`; `HELD_KINDS` in `src/lib.ts` lists every rule, and `src/touches.test.ts` fails if a rule has no
 description or a sample command gives no targets.
 The classifier judges what the command itself would run: it does not match text inside quoted
-message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file, or
-files a test runner loads (`claude plugin test` is not a deploy). `sh -c`, `ssh host "..."` and a
+message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file (including
+`git commit -m "$(cat <<'EOF' ...)"`), or
+files a test runner loads (`claude plugin test` is not a deploy). A word containing `/` is a path, not a flag:
+`~/repos/.worktrees/App--prod-lock` is not `--prod`, and `--prod` must be a whole word. When Jonathan refuses and types a
+reason under "Type something.", the reason is in the refusal the session reads (only the exact `1 - Run it` label runs). `sh -c`, `ssh host "..."` and a
 heredoc fed to `bash` or piped into a shell are still read. Known tradeoff, asked for by the hub: `tmux send-keys` text is treated as
 a message, so a deploy command typed into another window that way is not held here; that window's own guard judges it.
 If the guard itself throws, the command is denied. The match is best effort (a net, not a shell parser). Existing hooks and permission rules still apply.

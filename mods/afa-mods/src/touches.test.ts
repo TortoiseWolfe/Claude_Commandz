@@ -230,3 +230,67 @@ describe('the classifier judges the command itself, not text it only carries', (
     })
   }
 })
+
+// 19 Oct, 10:08 AM and 10:09 AM: two read-only `for d in ... Chattanooga-Digital--prod-lock ...` loops were held as a
+// "production deploy" and refused by hand. A folder name is not a command word; quoted text is not a command.
+describe('19 Oct refusals: a folder name or quoted text is not a deploy', () => {
+  const LOOP =
+    'for d in ~/repos/.worktrees/Chattanooga-Digital--live-lock ~/repos/.worktrees/Chattanooga-Digital--prod-lock ~/repos/Chattanooga-Digital /tmp/x/scratchpad; do [ -d "$d" ] && echo "$d exists; scratch: $([ -e "$d/scratch" ] && echo PRESENT || echo none)"; done'
+  for (const command of [
+    LOOP,
+    `${LOOP}; grep -n 'rm -rf scratch' ~/repos/Chattanooga-Digital/scripts/fix-settings/*.sh ~/repos/.worktrees/Chattanooga-Digital--*/scripts/fix-settings/*.sh 2>/dev/null | head -5`,
+    'ls ~/repos/.worktrees/Chattanooga-Digital--prod-lock',
+    'cd ~/repos/.worktrees/Chattanooga-Digital--prod-lock && git status',
+    'git -C ~/repos/.worktrees/Chattanooga-Digital--prod-lock log --oneline',
+    'cat ~/repos/.worktrees/App--redeploy-prod/notes.md',
+    'ls /srv/redeploy/prod',
+    'git worktree add ../App--prod-hotfix main',
+  ]) {
+    test(`a folder name holds nothing: ${command.slice(0, 70)}`, () => {
+      expect(classify(command)).toEqual([])
+    })
+  }
+  for (const command of [
+    'grep -rn "rm -rf" mods/',
+    "rg 'git push --force' mods/",
+    'grep -rn "docker volume prune" ~/.claude && echo done',
+    'echo "rm -rf /tmp/x then vercel --prod"',
+    "printf '%s\n' 'docker compose down -v'",
+    'git commit -m "fix push -f handling, never docker volume prune"',
+    'git commit -m "$(cat <<\'EOF\'\nfix: the deploy gate\n\nvercel --prod is held; git push --force too.\nrm -rf is held.\nEOF\n)"',
+    "git commit -F - <<'EOF'\nvercel --prod\nrm -rf /\nEOF",
+    "gh pr create --title t --body \"$(cat <<'EOF'\nWe hold rm -rf and vercel --prod.\nEOF\n)\"",
+    "cat > /tmp/note.md <<'EOF'\nredeploy production\nEOF",
+  ]) {
+    test(`quoted text holds nothing: ${command.split('\n')[0].slice(0, 70)}`, () => {
+      expect(classify(command)).toEqual([])
+    })
+  }
+  for (const [command, kind] of [
+    ['vercel --prod', 'production deploy'],
+    ['vercel deploy --prod --yes', 'production deploy'],
+    ['cd ~/repos/.worktrees/Chattanooga-Digital--prod-lock && vercel --prod', 'production deploy'],
+    ['./scripts/portainer-deploy.sh --prod', 'production deploy'],
+    ['npm run deploy -- --production', 'production deploy'],
+    ['app redeploy production', 'production deploy'],
+    ['./scripts/redeploy.sh prod', 'production deploy'],
+    ['portainer-deploy.sh --env=prod redeploy', 'production deploy'],
+    ['rm -rf build', 'rm -rf'],
+    ['rm -rf *', 'rm -rf'],
+    ['rm -rf ~/repos/Chattanooga-Digital/scripts/*.sh', 'rm -rf'],
+    ['rm -rf $UNSET/old', 'rm -rf'],
+    ['cd ~/repos/.worktrees/Chattanooga-Digital--prod-lock && rm -rf scratch', 'rm -rf'],
+    ['git push origin main --force', 'git push --force'],
+    ['git -C ~/x push -f origin main', 'git push --force'],
+    ['git push --force-with-lease origin x', 'git push --force'],
+    ['git push origin +main', 'git push --force'],
+    ['git commit -m "x"; git push -f', 'git push --force'],
+    ['echo ok; docker compose -p x down -v', 'docker compose down -v'],
+    ['bash <<EOF\nvercel --prod\nEOF', 'production deploy'],
+    ['git commit -m "$(cat <<\'EOF\'\nmsg\nEOF\n)" && vercel --prod', 'production deploy'],
+  ] as const) {
+    test(`still holds: ${command.split('\n')[0].slice(0, 70)}`, () => {
+      expect(classify(command).map(h => h.kind)).toContain(kind)
+    })
+  }
+})

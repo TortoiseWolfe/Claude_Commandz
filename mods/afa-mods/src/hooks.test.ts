@@ -28,6 +28,9 @@ const setup = (on: any, vars: Record<string, string> = {}) => {
   on('fs.read', ($: any, e: any) => ({ value: FILES[e.path] ?? '' }))
 }
 
+// The dialog's answer is keyed by the question text; a key that is not the question reads as "no answer" and the guard fails closed.
+const answer = (e: any, label: string) => ({ result: { answers: { [e.questions[0].question]: label } }, text: label })
+
 const measure = ($: any, percent: number) =>
   $.session.measure({ context: { window: 200000, percent }, rateLimits: [], changed: ['context'] })
 
@@ -88,12 +91,42 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+      return answer(e, '2 - Refuse')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('/home/t/afa-mods-test')
     expect(asked).toContain('2 entries')
     expect(r.deny).toContain('Blast Radius')
+  })
+  // 19 Oct: Jonathan refused two commands and typed why under "Type something." (the dialog's Other); the tool
+  // result only said "refused at the prompt", so the session retried blind.
+  const refuseWith = async ($: any, on: any, label: string) => {
+    setup(on)
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [] }))
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => answer(e, label))
+    return (await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })) as any
+  }
+  test('interactive: the reason he types when refusing reaches the session that ran the command', async ($, on) => {
+    const reason = 'Your description was too vague. Say which folder this reads.'
+    const r = await refuseWith($, on, reason)
+    expect(r.deny).toContain('Blast Radius')
+    expect(r.deny).toContain('did not run')
+    expect(r.deny).toContain(reason)
+    expect(r.deny).toContain('Do not resend')
+  })
+  test('interactive: a typed reason that starts with 1 is a refusal, never a Run it', async ($, on) => {
+    const reason = '1 hour later, after the window'
+    const r = await refuseWith($, on, reason)
+    expect(r.deny).toContain(reason)
+  })
+  test('interactive: plain Refuse adds no reason and Run it still runs', async ($, on) => {
+    const r = await refuseWith($, on, '2 - Refuse')
+    expect(r.deny).toBe('Blast Radius: refused at the prompt. The command did not run.')
+    const ran = await refuseWith($, on, '1 - Run it').catch((e: unknown) => e)
+    expect((ran as any).deny).toBeUndefined()
   })
   test('non-interactive: denies git push --force, logs it', async ($, on) => {
     setup(on)
@@ -153,13 +186,13 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+      return answer(e, '2 - Refuse')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('Blast Radius stopped a command before it ran')
     expect(asked).toContain('deletes the named files and folders')
     expect(asked).toContain('a wrong or empty path deletes far more than meant')
-    expect(r.deny).toContain('Blast Radius')
+    expect(r.deny).toContain('refused at the prompt')
   })
 })
 
@@ -180,9 +213,9 @@ describe('blast radius, unattended lane', () => {
     })
     const seen = { asked: false, log: '' }
     on('session.surfaces', () => ({ value: ['terminal'] }))
-    on('tool.call', { tool: 'AskUserQuestion' }, () => {
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = true
-      return { result: { answers: { q: '1 - Run it' } }, text: '1 - Run it' }
+      return answer(e, '1 - Run it')
     })
     on('fs.write', ($: any, e: any) => {
       seen.log += e.text
@@ -277,7 +310,7 @@ describe('blast radius, unattended lane', () => {
     on('fs.list', () => ({ value: [] }))
     on('tool.call', { tool: 'AskUserQuestion' }, () => {
       asked = true
-      return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+      return answer(e, '2 - Refuse')
     })
     await $.tool.call({ tool: 'Bash', command: `rm -rf ${HOME}/repos/ScriptHammer` })
     expect(asked).toBe(true)
@@ -314,7 +347,7 @@ describe('blast radius always says what it would touch', () => {
       on('fs.list', () => ({ value: [{ name: 'a' }] }))
       on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
         asked = JSON.stringify(e)
-        return { result: { answers: { q: '2 - Refuse' } }, text: '2 - Refuse' }
+        return answer(e, '2 - Refuse')
       })
       await $.tool.call({ tool: 'Bash', command })
       expect(asked).toContain('Blast Radius stopped a command before it ran')
