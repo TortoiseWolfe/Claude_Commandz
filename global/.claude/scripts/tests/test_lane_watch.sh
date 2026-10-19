@@ -251,5 +251,34 @@ else
   echo "FAIL named lanes: out=$(cat "$out")"; failures=$((failures + 1))
 fi
 
+# 19 Oct: a report from a lane that was told something after it (or has a job running) says "report stale", so the hub does not close it.
+stale_home="$TMP/stale"; mkdir -p "$stale_home/.claude/scripts" "$stale_home/.claude/state/lanes/2026-10-19-told"
+cat > "$stale_home/.claude/scripts/lane.sh" <<'SH'
+#!/usr/bin/env bash
+echo "told  report:stale idle    ✻ Worked for 3m"
+echo "    report stale: the lane got input after report.md was written; the report is not its last word"
+echo "    dir:/x model:sonnet"
+echo "calm  report:yes idle    done"
+SH
+chmod +x "$stale_home/.claude/scripts/lane.sh"
+echo "Done." > "$stale_home/.claude/state/lanes/2026-10-19-told/report.md"
+note=$(HOME="$stale_home" stale_note told); calm=$(HOME="$stale_home" stale_note calm)
+if [ "${note#report stale: the lane got input}" != "$note" ] && [ -z "$calm" ]; then
+  echo "ok   a stale report gets a note saying so; a settled one gets none"
+else
+  echo "FAIL stale_note: told='$note' calm='$calm'"; failures=$((failures + 1))
+fi
+rm -f "$LIVE_FILE"; echo told > "$LIVE_FILE"; rm -rf "$stale_home/.claude/state/lanes/2026-10-19-told"; : > "$out"
+( HOME="$stale_home" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" POSTED_MARK="$TMP/posted-mark2" LANE_WATCH_SETTLE=0 LANE_WATCH_POLL=1 \
+    timeout 20 bash "$SCRIPT" --max-min 5 told > "$out" 2>&1 ) &
+watcher=$!
+sleep 2; mkdir -p "$stale_home/.claude/state/lanes/2026-10-19-told"; echo "Done." > "$stale_home/.claude/state/lanes/2026-10-19-told/report.md"
+wait "$watcher" || true
+if grep -q '^report: told .*report stale: the lane got input.*do not close it' "$out"; then
+  echo "ok   the report wake says report stale and not to close the lane"
+else
+  echo "FAIL stale wake: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

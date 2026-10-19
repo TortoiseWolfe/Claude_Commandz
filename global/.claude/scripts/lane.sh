@@ -394,6 +394,18 @@ claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name]
 }
 
 # Context size in K tokens from the last assistant usage in a lane's transcript.
+# yes / input / job / no for a lane's report: "yes" only when report.md is newer than everything the lane was told and no background job
+# is running (lane_report_state.py reads the transcript). 19 Oct: "report:yes idle" got a lane closed mid-work.
+report_word() {  # <report.md> <dir> <session-id>
+  local rep="$1" dir="$2" id="$3" slug st
+  [ -n "$rep" ] && [ -s "$rep" ] || { echo no; return 0; }
+  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
+  if [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -r "$PROJ/$slug/$id.jsonl" ]; then
+    st="$(python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_report_state.py" "$rep" "$PROJ/$slug/$id.jsonl" 2>/dev/null || echo '?')"
+    case "$st" in input|job) echo "stale:$st"; return 0 ;; esac
+  fi
+  echo yes
+}
 ctx_k() {  # <dir> <session-id>
   local f slug
   slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")"
@@ -502,7 +514,8 @@ if [ "$mode" = status ]; then
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
         extra="(not in index)"
       else extra=""; fi
-      if [ -n "${rep:-}" ] && [ -s "$rep" ]; then wrote=yes; else wrote=no; fi
+      wrote="$(report_word "${rep:-}" "${dir:-}" "${id:-}")"; why=""
+      case "$wrote" in stale:*) why="${wrote#stale:}"; wrote=stale ;; esac
       outlog=""
       [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ] && outlog="$(dirname "$rep")/out.log"
       if [ -n "$outlog" ]; then
@@ -525,6 +538,7 @@ if [ "$mode" = status ]; then
       ctx="?"
       case "${b:-subscription}" in codex|copilot) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
       case "${b:-subscription}" in codex|copilot) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
+      [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
       printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
   else
