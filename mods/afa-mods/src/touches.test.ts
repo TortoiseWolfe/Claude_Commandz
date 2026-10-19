@@ -294,3 +294,26 @@ describe('19 Oct refusals: a folder name or quoted text is not a deploy', () => 
     })
   }
 })
+
+// Security review of #65: three ways to slip a real command past the narrower reading.
+describe('review of #65: the narrower reading still fails closed', () => {
+  for (const [command, kind] of [
+    ['NAME="$(cat <<\'EOF\'\nvercel --prod\nEOF\n)"; $NAME', 'production deploy'],
+    ['echo "$(cat <<\'EOF\'\nvercel --prod\nEOF\n)" | sh', 'production deploy'],
+    ['vercel \'#\' --prod', 'production deploy'],
+    ['vercel "#" --prod', 'production deploy'],
+    ['vercel --prod=/x', 'production deploy'],
+    ['vercel --prod=a/b', 'production deploy'],
+    ['vercel --pro\\d', 'production deploy'],
+    ['vercel --"prod"', 'production deploy'],
+    ['vercel -"-prod"', 'production deploy'],
+  ] as const) {
+    test(`still holds: ${command.split('\n')[0]}`, () => {
+      expect(classify(command).map(h => h.kind)).toContain(kind)
+    })
+  }
+  test('a commit message heredoc is still message text', () => {
+    expect(classify('git commit -m "$(cat <<\'EOF\'\nvercel --prod\nEOF\n)"')).toEqual([])
+    expect(classify('git -C ~/x commit -m "$(cat <<\'EOF\'\nvercel --prod\nEOF\n)"')).toEqual([])
+  })
+})
