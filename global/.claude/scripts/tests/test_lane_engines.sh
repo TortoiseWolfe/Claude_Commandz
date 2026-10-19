@@ -178,10 +178,10 @@ assert_contains "$LAST_OUTPUT" 'start a new lane with a follow-up prompt' 'Copil
 [ ! -e "$TMP/tmux-sent" ] || fail 'Copilot --send does not type into tmux'
 checks=$((checks + 1))
 
-# Claude lanes retain the existing interactive --send behavior.
-TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
-assert_exit 1 "$LAST_STATUS" 'Claude send remains on the existing submission check'
-assert_contains "$LAST_OUTPUT" 'input line is empty but no spinner seen' 'Claude --send still reaches the pane submission check'
+# Claude lanes retain the interactive --send, and an emptied input line is not delivery: the words must be in the lane's transcript.
+LANE_SEND_CONFIRM_SECS=1 TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_exit 1 "$LAST_STATUS" 'Claude send with no transcript entry is not counted as sent'
+assert_contains "$LAST_OUTPUT" 'NOT IN ITS TRANSCRIPT' 'Claude --send says the words are not in the transcript'
 
 # The second TSV field expands ~/ and protects client repositories; comments, blanks,
 # and the header row are not repository paths.
@@ -439,15 +439,23 @@ printf '%s\n' "${ESC}[38;5;246m❯${NBSP}${ESC}[39m${ESC}[38;5;2mtyped${ESC}[39m
 # tmux carries attributes across lines, so a dim set earlier holds until a reset.
 printf '%s\n' "${ESC}[2mfooter" "❯${NBSP}push it" >"$TMP/pane-carry"
 
-TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
-assert_contains "$LAST_OUTPUT" 'input line is empty but no spinner seen' 'dim "push it" in the input line counts as empty for --send'
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'the input line emptied' 'dim "push it" in the input line counts as empty for --send'
 assert_not_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'a dim suggestion is not reported as text that did not take'
-TMUX_PANE_FILE="$TMP/pane-typed" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-typed" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
 assert_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'the same text in normal colour still counts as typed'
-TMUX_PANE_FILE="$TMP/pane-colour2" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-colour2" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
 assert_contains "$LAST_OUTPUT" 'DID NOT TAKE' 'a colour with a 2 in its parameters is not read as dim'
-TMUX_PANE_FILE="$TMP/pane-carry" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
-assert_contains "$LAST_OUTPUT" 'input line is empty' 'dim carried over from an earlier line still applies'
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-carry" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
+assert_contains "$LAST_OUTPUT" 'the input line emptied' 'dim carried over from an earlier line still applies'
+
+# Delivered is the words in the lane's transcript: a user turn there holding the text sent makes --send exit 0.
+SLUG="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$REPO")"; mkdir -p "$HOME_TEST/.claude/projects/$SLUG"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"Jonathan says (from his OpenClaw chat): it does show the  porch columns"}}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'Jonathan says (from his OpenClaw chat): it does show the porch columns'
+assert_exit 0 "$LAST_STATUS" '--send exits 0 once the words are in the transcript'
+assert_contains "$LAST_OUTPUT" 'confirmed in its transcript' '--send says it found the words in the transcript'
+rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
 
 status_with_pane() {
   TMUX_PANE_FILE="$1" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane HOME="$HOME_TEST" PATH="$BIN:$PATH" \

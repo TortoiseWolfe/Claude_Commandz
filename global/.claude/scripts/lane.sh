@@ -560,7 +560,7 @@ fi
 
 if [ "$mode" = send ]; then
   [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; exit 1; }
-  name="$1"; shift; text="$*"
+  name="$1"; shift; text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
     IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
@@ -580,18 +580,56 @@ if [ "$mode" = send ]; then
     done
     return 1
   }
+  # Delivered means the words are in the lane's own transcript, not only that the input line emptied (19 Oct: "I can't have you
+  # dropping messages"). The transcript is the session's jsonl under ~/.claude/projects/<dir slug>/, else the newest one there.
+  confirmed() {  # poll up to ~$1 seconds for a user turn in the lane's transcript that holds the text sent
+    local i
+    [ -n "${dir:-}" ] || return 2
+    for i in $(seq 1 $(($1 * 2))); do
+      python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")" "${id:--}" "$text" <<'PY' && return 0
+import json, os, sys, time
+proj, sid, want = sys.argv[1], sys.argv[2], " ".join(sys.argv[3].split())[:200]
+try:
+    files = [os.path.join(proj, f) for f in os.listdir(proj) if f.endswith(".jsonl")]
+except OSError:
+    sys.exit(1)
+own = os.path.join(proj, sid + ".jsonl")
+files = [own] if own in files else [f for f in files if time.time() - os.path.getmtime(f) < 600]
+for f in files:
+    try:
+        lines = open(f, encoding="utf-8", errors="replace").readlines()[-400:]
+    except OSError:
+        continue
+    for line in lines:
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        m = o.get("message") if o.get("type") == "user" else None
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and isinstance(x.get("text"), str))
+        if isinstance(c, str) and want in " ".join(c.split()):
+            sys.exit(0)
+sys.exit(1)
+PY
+      sleep 0.5
+    done
+    return 1
+  }
   tmux send-keys -t "$target" -l -- "$text"
   sleep 0.3
   tmux send-keys -t "$target" C-m
-  if took 6; then echo "sent to $name: submitted (input empty, spinner showing)"; exit 0; fi
-  tmux send-keys -t "$target" C-m
-  if took 6; then echo "sent to $name: submitted after a second Enter"; exit 0; fi
+  how=""
+  if took 6; then how="submitted"; else tmux send-keys -t "$target" C-m; if took 6; then how="submitted after a second Enter"; fi; fi
   pane="$(tmux capture-pane -e -p -t "$target")"
-  if pane_input_empty "$pane"; then
-    echo "sent to $name: input line is empty but no spinner seen; it may have been taken and already finished. Check: tmux capture-pane -p -t $target"
-  else
-    echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"
+  if [ -z "$how" ] && ! pane_input_empty "$pane"; then
+    echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"; exit 1
   fi
+  rc=0; confirmed "${LANE_SEND_CONFIRM_SECS:-15}" || rc=$?
+  if [ "$rc" -eq 0 ]; then echo "sent to $name: confirmed in its transcript${how:+ ($how)}"; exit 0; fi
+  if [ "$rc" -eq 2 ] && [ -n "$how" ]; then echo "sent to $name: $how (input empty, spinner showing; no index row, so no transcript to check)"; exit 0; fi
+  echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
   exit 1
 fi
 

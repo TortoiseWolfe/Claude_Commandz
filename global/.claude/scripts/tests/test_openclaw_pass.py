@@ -1654,7 +1654,8 @@ class Questions(PassBase):
     def test_an_empty_or_long_question_sends_nothing(self):
         for q in ("   ", "x" * (dp.QUESTION_MAX + 1)):
             line, chat = self.asked(q)
-            self.assertTrue(chat.startswith("Nothing sent to the hub:"), chat)
+            self.assertIsNone(chat)  # the caller (the poller's ensure_delivered) files his words with the hub
+            self.assertIn("not run", line)
         self.assertEqual(self.host.spawned, [])
         self.assertNotIn(ASK, dp.asks_of(self.state()))
 

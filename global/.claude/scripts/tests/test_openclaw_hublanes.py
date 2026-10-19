@@ -264,8 +264,13 @@ class SendResult(unittest.TestCase):
     def test_a_submit_is_sent(self):
         self.assertTrue(self.send(0, "sent to x: submitted (input empty, spinner showing)"))
 
-    def test_an_empty_input_line_with_no_spinner_is_sent_because_the_lane_was_quick(self):
-        self.assertTrue(self.send(1, "sent to x: input line is empty but no spinner seen; it may have been taken and already finished."))
+    def test_an_empty_input_line_alone_is_not_sent(self):
+        # 19 Oct: an emptied input line is not delivery; only the words in the lane's transcript are (lane.sh --send exits 0)
+        self.assertFalse(self.send(1, "sent to x: input line is empty but no spinner seen; it may have been taken and already finished."))
+        self.assertFalse(self.send(1, "sent to x: NOT IN ITS TRANSCRIPT (the input line emptied, but the lane's transcript does not hold the words)"))
+
+    def test_words_confirmed_in_the_transcript_are_sent(self):
+        self.assertTrue(self.send(0, "sent to x: confirmed in its transcript (submitted)"))
 
     def test_text_still_in_the_input_line_is_not_sent_even_on_exit_zero(self):
         self.assertFalse(self.send(0, "sent to x: DID NOT TAKE (text still in the input line after two Enters)"))
