@@ -232,8 +232,8 @@ class Menu(Reply):
             self.go(self.flow("Sending to the hub: " + p))
             self.assertEqual((self.host.started, self.host.sent, self.host.killed), ([], [], []), p)
             his = "can you list the files in docs"  # what he typed (him()): the hub gets that, not the receptionist's marker
-            self.assertEqual(self.host.chats[-1], "On the hub's list: the hub has your message.", (p, self.host.chats))
-            self.assertNotIn(his, self.host.chats[-1])
+            self.assertFalse(any("hub has your message" in c or "on the hub's list" in c for c in self.host.chats), (p, self.host.chats))
+            self.assertFalse(any(his in c for c in self.host.chats), (p, self.host.chats))
             self.assertIn(json.dumps(his), self.ctx.inbox_path.read_text())
             self.assertNotIn(json.dumps(p), self.ctx.inbox_path.read_text())
             self.assertEqual(dp.asks_of(self.state())[dp.ask_id_for(td.SHA)]["marker"], p)  # the rewording is kept, as context

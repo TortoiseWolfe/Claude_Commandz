@@ -765,7 +765,8 @@ def _run_marker(e, got, history, host, sites, aliases, ctx, now, log):
             if chat:
                 host.inject(chat)
             line = "%s (chat) | oc-%s" % (line, sha)
-            kind, say = "dispatch", None if chat else "Nothing ran from that, so it is on the hub's list with your words."
+            # put on the hub's list already says nothing to him (the receptionist told him); only a question that did not run is told so
+            kind, say = "dispatch", None if chat or dispatch.delivery_of(line) else "Nothing ran from that, so it is on the hub's list with your words."
         elif menu is None:
             line = "%s | chat | nothing run: %s | oc-%s" % (stamp, why or "the marker line was empty", sha)
             kind, say = "dispatch", "Nothing ran from that (%s), so it is on the hub's list with your words." % (why or "the marker line was empty")

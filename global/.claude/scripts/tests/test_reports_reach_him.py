@@ -1,6 +1,6 @@
 """18 Oct: "it says I'll get reports back and then it just evolves into silence". The rules these tests hold:
-  - every lane's report.md reaches his chat without the hub: one post per report version, the lane name as a heading, the report whole
-    (numbered parts when long, never trimmed), a 12-hour stamp; the first run only records what exists, and the dispatcher's own lanes
+  - every lane's report.md reaches his chat without the hub: one post per report version, the lane name as a heading, one item of at
+    most 150 words with the full report's path when it was shortened (19 Oct 11:10 PM: "I don't need 5 part reports"), a 12-hour stamp; the first run only records what exists, and the dispatcher's own lanes
     (whose reports its sweep already posts) are left alone;
   - a person the people index gives a role for is masked by that role ("[field partner]"), not as a bare "[person]";
   - the receptionist forwards "next step" questions as its whole reply;
@@ -162,18 +162,17 @@ class OneFormattedPostPerReport(ReportPosts):
         self.assertEqual(len(self.host.chats), 2)
         self.assertIn("second version", self.host.chats[1])
 
-    def test_a_long_report_goes_whole_in_numbered_parts_and_is_never_trimmed(self):
+    def test_a_long_report_is_one_post_of_150_words_with_its_path(self):
         self.seeded()
         body = "\n\n".join("Paragraph %d. %s" % (i, "word " * 60) for i in range(1, 30))
         self.report("long-lane", body)
         self.run_posts()
-        self.assertGreater(len(self.host.chats), 1)
-        for i, part in enumerate(self.host.chats, 1):
-            self.assertTrue(part.endswith(" (part %d of %d)" % (i, len(self.host.chats))), part[-40:])
-        got = "".join(re.sub(r" \(part \d+ of \d+\)$", "", p) for p in self.host.chats)
-        for i in range(1, 30):
-            self.assertIn("Paragraph %d." % i, got)
-        self.assertNotIn("(trimmed)", got)
+        self.assertEqual(len(self.host.chats), 1, "one post, never parts")
+        post = self.host.chats[0]
+        self.assertLessEqual(len(post.split()), dp.REPORT_WORDS)
+        self.assertNotRegex(post, r"\(part \d+ of \d+\)")
+        self.assertIn("Paragraph 1.", post)
+        self.assertIn("(Shortened. Full report: %s)" % (self.lanes / "2026-10-18-long-lane" / "report.md"), post)
 
     def test_the_text_is_cleaned_of_control_characters(self):
         self.seeded()

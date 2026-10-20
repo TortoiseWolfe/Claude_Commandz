@@ -102,7 +102,7 @@ class Routing(PassBase):
             self.assertEqual(self.host.started, [], task)
             ask = self.state()["asks"][ask_id]
             self.assertEqual((ask["status"], ask["task"]), ("deferred", task), task)
-            self.assertIn("On the hub's list", chat)
+            self.assertIsNone(chat, "no acknowledgement in his chat (19 Oct 11:10 PM)")
             inbox = self.ctx.inbox_path.read_text()
             self.assertIn("mail connector", inbox.splitlines()[-1])
             self.assertIn(ask_id, inbox)
@@ -1667,8 +1667,7 @@ class Questions(PassBase):
     def test_with_the_pass_off_the_question_goes_on_the_hub_list(self):
         self.ctx.hand_off_first = False
         line, chat = self.asked()
-        self.assertEqual(chat, "On the hub's list: the hub has your message.")
-        self.assertNotIn(self.Q, chat)
+        self.assertIsNone(chat, "no acknowledgement in his chat: the receptionist already said it went to the hub")
         self.assertIn(json.dumps(self.Q), self.hub_list())
         self.assertIn(ASK, self.ctx.wake_path.read_text())
         self.assertEqual(self.host.spawned, [])
@@ -1681,8 +1680,7 @@ class Questions(PassBase):
         for i in range(dp.MAX_QUESTIONS - 1):
             self.asked("question %d" % i, ask="oc-1000000%d" % i)
         line, chat = self.asked("one too many", ask="oc-2000000f")
-        self.assertEqual(chat, "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s); the hub has your message."
-                         % (dp.MAX_QUESTIONS, time.strftime("%-I:%M %p", time.localtime(NOW))))  # change 7: the cap is said, not silent
+        self.assertIsNone(chat)  # 19 Oct 11:10 PM: no acknowledgement; the hub's list and the log line carry the cap
         self.assertIn("%d questions already waiting" % dp.MAX_QUESTIONS, line)
         capped = dp.asks_of(self.state())["oc-2000000f"]  # and the capped question is recorded, so its repeat is caught and it gets a finish time
         self.assertEqual((capped["status"], capped["route"], capped["task"]), ("deferred", "hub, pass full", "one too many"))
@@ -2106,8 +2104,7 @@ class FrontDeskRouting(PassBase):
     def test_a_message_that_is_not_a_facts_question_goes_to_the_hub_and_runs_no_pass(self):
         his = "what are the 22 notes from Hatch? I need them on your list"
         line, chat = self.asked("what are the Hatch notes", his=his)
-        self.assertEqual(chat, "On the hub's list: the hub has your message.")
-        self.assertNotIn(his, chat)  # his words go to the hub, not back into the chat
+        self.assertIsNone(chat)  # nothing posted back: his words go to the hub, and the receptionist already said so
         self.assertEqual(self.host.spawned, [])  # no Sonnet call, no wait
         self.assertIn(json.dumps(his), self.hub_list())
         self.assertIn(ASK, self.ctx.wake_path.read_text())
@@ -2137,13 +2134,15 @@ class FrontDeskRouting(PassBase):
         self.assertEqual(self.hub_list().count(json.dumps(q)), 1)
         self.assertTrue(dp.post_ask(self.ctx, self.host, "oc-5000000a", "Here are the files.", NOW + 200)[0])
         line, chat = self.asked(q, ask="oc-5000000c", now=NOW + 300)
-        self.assertEqual(chat, "On the hub's list: the hub has your message.")  # answered: the same words are a new question, never the old answer
+        self.assertIsNone(chat)  # answered: the same words are a new question, never the old answer
+        self.assertIn("put on the hub's list", line)
         self.assertEqual(self.hub_list().count(json.dumps(q)), 2)
 
     def test_a_similar_but_different_question_is_never_taken_for_a_repeat(self):
         self.asked("can you list the files in docs", ask="oc-5000000a")
         line, chat = self.asked("can you list the files in docs and the tests", ask="oc-5000000b", now=NOW + 30)
-        self.assertTrue(chat.startswith("On the hub's list"), chat)
+        self.assertIsNone(chat)
+        self.assertIn("put on the hub's list", line)
         self.assertIn("oc-5000000b", dp.asks_of(self.state()))
 
     def test_a_pass_that_ends_without_an_answer_says_so_in_the_chat(self):
@@ -2168,8 +2167,8 @@ class FrontDeskRouting(PassBase):
         for i in range(dp.MAX_QUESTIONS):
             self.asked("what does PR #%d do?" % (i + 1), ask="oc-1000000%d" % i)
         line, chat = self.asked("what does PR #99 do?", ask="oc-1000000f", now=NOW + 5)
-        self.assertIn("already has %d questions in hand" % dp.MAX_QUESTIONS, chat)
-        self.assertNotIn("what does PR #99 do?", chat)
+        self.assertIsNone(chat)
+        self.assertIn("%d questions already waiting" % dp.MAX_QUESTIONS, line)
         self.assertEqual(len(self.host.spawned), dp.MAX_QUESTIONS)
         self.assertIn("what does PR #99 do?", self.hub_list())
         self.assertEqual(self.ask("oc-1000000f")["route"], "hub, pass full")
