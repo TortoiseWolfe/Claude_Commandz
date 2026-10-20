@@ -7,6 +7,8 @@ import {
   countInbox,
   explain,
   hasExitLine,
+  hostRmSegment,
+  namedVolumesOf,
   ownScratchTargets,
   recentLanes,
   realPathVerdict,
@@ -152,7 +154,26 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
     const tmpdir = (await $.env.get('TMPDIR')) ?? undefined
-    const scratchEnv = { home, tmpdir }
+    // A named Docker volume made over a host folder (local driver, device=/path) is that folder: ask docker, only when an rm is in play.
+    const volumeDevices: Record<string, string> = {}
+    const uninspectedVolumes: string[] = []
+    if (/\brm\b/.test(e.command)) {
+      // Every named volume is asked about, and only an answer from docker clears it. A volume docker does not know, or cannot be asked
+      // about (docker missing, a timeout), is unknown: the same command may make it, so no text rule can call it new. It is held,
+      // and listed apart, never as text that could be read as a path.
+      for (const name of namedVolumesOf(e.command)) {
+        try {
+          const r = await $.process.run(['docker', 'volume', 'inspect', '--format', '{{index .Options "device"}}', '--', name], { timeoutMs: 10_000 })
+          const device = r.stdout.trim()
+          if (r.exitCode === 0) {
+            if (device.startsWith('/')) volumeDevices[name] = device
+          } else uninspectedVolumes.push(name)
+        } catch {
+          uninspectedVolumes.push(name)
+        }
+      }
+    }
+    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
@@ -175,16 +196,19 @@ export const register: Register = on => {
       const approval = 'Leave it out of this job and say in your report that it needs Jonathan to approve it.'
       const refusals: string[] = []
       for (const h of holds) {
-        let verdict: { ok: true } | { ok: false; reason: string } =
-          h.kind === 'rm -rf'
-            ? unattendedRmVerdict(h.segment, { home, hand, tmpdir })
-            : { ok: false as const, reason: approval }
-        if (verdict.ok && h.kind === 'rm -rf') {
+        // inside `docker run -v`, the delete is judged on the host folders the mounts lead to
+        const host = h.kind === 'rm -rf' ? hostRmSegment(h) : undefined
+        let verdict: { ok: true } | { ok: false; reason: string } = !host
+          ? { ok: false as const, reason: approval }
+          : 'reason' in host
+            ? { ok: false as const, reason: host.reason }
+            : unattendedRmVerdict(host.segment, { home, hand, tmpdir })
+        if (verdict.ok && host && 'segment' in host) {
           // The words are inside the lane's folder; now make sure no link on the way leads out of it.
           const laneEnv = { home, hand, tmpdir }
           const resolve = async (path: string) => (await run($, ['realpath', '-m', '--', path])).trim()
           const roots = await Promise.all(unattendedRoots(laneEnv).map(resolve))
-          const paths = unattendedRmPaths(h.segment, laneEnv)
+          const paths = unattendedRmPaths(host.segment, laneEnv)
           verdict = realPathVerdict(
             await Promise.all(paths.map(async path => ({ path, real: await resolve(path) }))),
             roots.filter(Boolean),

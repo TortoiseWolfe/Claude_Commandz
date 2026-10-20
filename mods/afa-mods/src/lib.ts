@@ -75,8 +75,10 @@ export const HELD_KINDS = [
 ] as const
 export type HeldKind = (typeof HELD_KINDS)[number]
 
-export type Hold = { kind: string; hard: boolean; segment: string }
-export type ScratchEnv = { home?: string; tmpdir?: string }
+export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
+// volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
+// uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[] }
 
 const strip = (s: string) =>
   s
@@ -132,7 +134,7 @@ function withoutTextHeredocs(command: string): string {
     // a shell anywhere in the lead (`sudo bash`, `env bash`), or a pipe/and/semicolon after the marker (`cat <<EOF | bash`): the body is run
     const plain = (w: string) => (w.replace(/^(?:\$\(|[<>]?\(|`|\{)+/, '').replace(/["'\\]/g, '').split('/').pop() ?? '')
     const runs = (w: string) => SHELL_WORDS.has(plain(w)) || RUNS_ITS_ARGS.has(plain(w)) || WRAPPERS.has(plain(w))
-    const shellIn = (s: string) => s.split(/\s+/).some(runs) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(s.trim())
+    const shellIn = (s: string) => s.split(/\s+/).some(runs) || /^(?:docker(?:\s+compose)?|docker-compose|podman|kubectl)\s+(?:exec|run)\b/.test(s.trim())
     // `git commit -m "$(cat <<'EOF' ... EOF )"`: only a known text sink (git commit, gh pr/issue/release) takes the body as one message word; anywhere else it may be run, so it is kept
     const textSink = /^\s*(?:\w+=\S*\s+)*(?:git(?:\s+-C\s+\S+)?\s+commit|gh\s+(?:pr|issue|release)\s+\S+)\b/.test(lead)
     const quotedMessage = textSink && /\$\(\s*(?:cat|tee)\s*$/.test(lead) && ((lead.replace(/\\./g, '').match(/"/g) ?? []).length % 2 === 1)
@@ -216,7 +218,7 @@ const withoutQuoted = (seg: string) => seg.replace(QUOTED, (_m, a?: string, b?: 
 const WRAPPERS = new Set(['env', 'nohup', 'exec', 'nice', 'ionice', 'stdbuf', 'doas', 'timeout', 'setsid', 'chrt'])
 // Fail closed: behind a wrapper (`env -i A=b ssh ...`, `timeout 5 bash -c ...`) we do not try to work out which word runs, so its quoted text is read as commands.
 const runsQuoted = (seg: string) =>
-  RUNS_ITS_ARGS.has(firstWord(seg)) || WRAPPERS.has(firstWord(seg)) || /^(?:docker(?:\s+compose)?|podman|kubectl)\s+(?:exec|run)\b/.test(strip(seg))
+  RUNS_ITS_ARGS.has(firstWord(seg)) || WRAPPERS.has(firstWord(seg)) || /^(?:docker(?:\s+compose)?|docker-compose|podman|kubectl)\s+(?:exec|run)\b/.test(strip(seg))
 const quotedPieces = (seg: string): string[] => Array.from(seg.matchAll(QUOTED), m => m[1] ?? m[2] ?? '').filter(s => s.trim() !== '')
 
 // Would this segment ship to production? Judged on what the command runs: its quoted text is data unless the command runs
@@ -237,23 +239,318 @@ function isProdDeploy(seg: string): boolean {
   return /redeploy/i.test(word) || args.some(w => /redeploy/i.test(w)) ? args.some(w => PROD_WORD.test(w)) : false
 }
 
+// ---- docker run -v / --mount: what a path inside the container is on this machine ----
+
+// A mount of a `docker run`: `kind` says whether its source is a folder on this machine ('host') or a Docker
+// volume ('volume': named, anonymous or tmpfs). The source is the text as written, not yet resolved.
+export type Mount = { source: string; target: string; kind: 'host' | 'volume' }
+// incomplete: the mount list may miss mounts (a compose file, --volumes-from, a flag not read), so an unlisted path is not known to be the container's own
+type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[] }
+
+// One path an rm names inside a container, seen through the mounts: where it really is.
+export type Mapped =
+  | { path: string; kind: 'host'; mountAt: string; folder: string; host: string } // folder: the mount's source here; host: the path here (may hold a pattern)
+  | { path: string; kind: 'volume'; mountAt: string; volume: string } // a Docker volume, not a folder on this machine
+  | { path: string; kind: 'unresolved'; mountAt: string; source: string; why: string } // a host source that cannot be worked out
+  | { path: string; kind: 'uncovered'; why: string } // no mount covers it
+
+const newScope = (command: string, env: ScratchEnv): Scope => ({ home: env.home ?? '', vars: assignmentsOf(command, env), devices: env.volumeDevices ?? {}, uninspected: env.uninspectedVolumes ?? [] })
+
+const SUBSTITUTION = /\$\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)|`[^`]*`/g
+const SUBST_WORD = '$CMDSUBST'
+
+// The rest of each docker run line with every $( ) and backtick substitution replaced by one unresolvable word
+function foldSubstitutionsInDockerRuns(command: string): string {
+  return command.replace(/((?:^|[\s;&|(])(?:(?:docker|podman)\s+(?:(?:compose|container)\s+)?run|docker-compose\s+run)\b)([^\n]*)/g, (_m, head: string, tail: string) =>
+    head + tail.replace(SUBSTITUTION, SUBST_WORD),
+  )
+}
+
+const DOCKER_RUN = /^(?:docker|podman)\s+(?:compose\s+|container\s+)?run\b|^docker-compose\s+run\b/
+
+// `cd /full/path` before the command gives it a known $PWD. Anything that may have run in another shell (a "(" in the
+// command, pushd, popd, a path that is not plain) leaves $PWD unknown, so a source that uses it keeps holding.
+function trackCd(seg: string, command: string, scope: Scope): void {
+  if (scope.mounts) return // inside a container its own cd says nothing about this machine
+  const m = /^(?:(cd)|pushd|popd)\b\s*(.*)$/.exec(seg)
+  if (!m) return
+  const arg = unquote(m[2].trim())
+  const dir = m[1] && arg !== '' && !/\s/.test(arg) && !command.includes('(') ? resolveHostPath(arg, scope) : undefined
+  scope.cwd = dir && 'path' in dir ? dir.path : undefined
+}
+
+// A path word on this machine: ~ and $HOME, $PWD after a cd, and variables the command set to a plain value. `why` says what blocked it.
+function resolveHostPath(word: string, scope: Scope): { path: string } | { why: string } {
+  let w = unquote(word)
+  if (/`|\$\(/.test(w)) return { why: 'is built by another command when the command runs' }
+  if (w === '~' || w.startsWith('~/')) {
+    if (!scope.home) return { why: 'starts with ~ and this session does not say where home is' }
+    w = scope.home + w.slice(1)
+  } else if (w.startsWith('~')) return { why: "starts with another user's ~" }
+  let missing = ''
+  if (w.includes(SUBST_WORD)) return { why: 'is built by another command when the command runs' }
+  w = w.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_m, a?: string, b?: string) => {
+    const name = (a ?? b) as string
+    const value = name === 'HOME' ? scope.home || undefined : name === 'PWD' ? scope.cwd : scope.vars.get(name)
+    if (value == null) missing = missing || name
+    return value ?? ''
+  })
+  if (missing) {
+    return {
+      why:
+        missing === 'PWD'
+          ? 'uses $PWD, which depends on the folder the shell is in, and no `cd` to a full path came before it'
+          : `goes through $${missing}, which is not set to a plain path earlier in this command (it may be empty, set elsewhere, or made by mktemp)`,
+    }
+  }
+  if (/[$`]/.test(w)) return { why: 'uses a shell expansion that is only worked out when the command runs' }
+  if (!w.startsWith('/')) {
+    if (!scope.cwd) return { why: 'is a relative path, which depends on the folder the shell is in' }
+    w = `${scope.cwd}/${w}`
+  }
+  return { path: normalizePath(w) }
+}
+
+// Split `SRC:DST:opts` at the colons that are not inside ${...}
+function splitColons(spec: string): string[] {
+  const parts: string[] = []
+  let cur = ''
+  let depth = 0
+  for (let i = 0; i < spec.length; i += 1) {
+    if (spec[i] === '$' && spec[i + 1] === '{') depth += 1
+    else if (spec[i] === '}' && depth > 0) depth -= 1
+    if (spec[i] === ':' && depth === 0) {
+      parts.push(cur)
+      cur = ''
+    } else cur += spec[i]
+  }
+  parts.push(cur)
+  return parts
+}
+
+// a source with a / ~ or $ in it, or starting with a dot (compose reads `.` and `./x` as a path), is a folder here; anything else is a volume name
+const HOSTY = /[/~$]|^\./
+
+// what docker accepts as a volume name; any other non-path source is not known to be a volume, so it is judged as a folder
+export const VOLUME_NAME = /^[A-Za-z0-9][\w.-]*$/
+const kindOf = (source: string): 'host' | 'volume' => (HOSTY.test(source) || !VOLUME_NAME.test(source) ? 'host' : 'volume')
+
+// docker run / compose run flags, so the scan stops at the image and never reads the container's own arguments as mounts
+const RUN_BOOL = new Set(['-d', '-i', '-t', '-q', '-P', '-T', '--detach', '--interactive', '--tty', '--rm', '--privileged', '--init', '--read-only', '--no-healthcheck', '--oom-kill-disable', '--publish-all', '--sig-proxy', '--disable-content-trust', '--quiet', '--no-deps', '--service-ports', '--no-TTY', '--build', '--use-aliases', '--remove-orphans', '--quiet-pull', '--help'])
+const RUN_VALUE = new Set(['-a', '-c', '-e', '-h', '-l', '-m', '-p', '-u', '-w', '--add-host', '--annotation', '--attach', '--blkio-weight', '--blkio-weight-device', '--cap-add', '--cap-drop', '--cgroup-parent', '--cgroupns', '--cidfile', '--cpu-period', '--cpu-quota', '--cpu-rt-period', '--cpu-rt-runtime', '--cpu-shares', '--cpus', '--cpuset-cpus', '--cpuset-mems', '--detach-keys', '--device', '--device-cgroup-rule', '--device-read-bps', '--device-read-iops', '--device-write-bps', '--device-write-iops', '--dns', '--dns-option', '--dns-search', '--domainname', '--entrypoint', '--env', '--env-file', '--expose', '--gpus', '--group-add', '--health-cmd', '--health-interval', '--health-retries', '--health-start-period', '--health-timeout', '--hostname', '--ip', '--ip6', '--ipc', '--isolation', '--label', '--label-file', '--link', '--link-local-ip', '--log-driver', '--log-opt', '--mac-address', '--memory', '--memory-reservation', '--memory-swap', '--memory-swappiness', '--name', '--network', '--net', '--network-alias', '--oom-score-adj', '--pid', '--pids-limit', '--platform', '--publish', '--pull', '--restart', '--runtime', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--storage-opt', '--sysctl', '--tmpfs', '--ulimit', '--user', '--userns', '--uts', '--volume-driver', '--workdir', '--cap', '--entrypoint'])
+const SHORT_BOOL = new Set(['d', 'i', 't', 'q', 'P', 'T'])
+const SHORT_VALUE = new Set(['a', 'c', 'e', 'h', 'l', 'm', 'p', 'u', 'w'])
+
+// The mounts a `docker run` / `docker compose run` gives its container: -v, --volume and --mount, in the forms docker accepts,
+// read from the options before the image only. `incomplete` says the list may miss mounts: a compose service brings its own,
+// --volumes-from and --mount forms or flags not understood are not listed.
+function parseMounts(seg: string): { mounts: Mount[]; incomplete: boolean } {
+  const t = seg.split(/\s+/).map(unquote)
+  const out: Mount[] = []
+  let incomplete = /\bcompose\b|^docker-compose\b/.test(seg.split(/\s+run\b/)[0] ?? '')
+  const volume = (spec: string) => {
+    const [first, second] = splitColons(spec)
+    if (second === undefined) {
+      if (first.startsWith('/')) out.push({ source: '', target: first, kind: 'volume' }) // anonymous volume
+      else incomplete = true
+    } else if (second.startsWith('/')) out.push({ source: first, target: second, kind: kindOf(first) })
+    else incomplete = true
+  }
+  const mount = (spec: string) => {
+    const kv = new Map(spec.split(',').map(p => [p.slice(0, p.indexOf('=')), p.slice(p.indexOf('=') + 1)] as const))
+    const type = kv.get('type') ?? kv.get('Type')
+    const source = kv.get('source') ?? kv.get('src') ?? ''
+    const target = kv.get('target') ?? kv.get('destination') ?? kv.get('dst')
+    if (!target?.startsWith('/') || (type === 'bind' && !source)) {
+      incomplete = true
+      return
+    }
+    // a volume made over a host folder with the local driver (volume-opt=device=/path) is that folder
+    const device = /device=([^,]+)/.exec(spec)?.[1]
+    if (device) out.push({ source: device, target, kind: 'host' })
+    else if (type === 'bind') out.push({ source, target, kind: 'host' })
+    else if (type === 'tmpfs') out.push({ source, target, kind: 'volume' })
+    else if (type === 'volume') out.push({ source, target, kind: source === '' ? 'volume' : kindOf(source) })
+    else out.push({ source, target, kind: kindOf(source) })
+  }
+  // the next word is this flag's value
+  const takes = (i: number, use: (v: string) => void): number => {
+    if (t[i + 1] === undefined) {
+      incomplete = true
+      return i
+    }
+    use(t[i + 1])
+    return i + 1
+  }
+  let i = t.findIndex(w => w === 'run') + 1
+  let imageSeen = false
+  for (; i < t.length; i += 1) {
+    const w = t[i]
+    if (/["']/.test(w)) incomplete = true // a quote left in a word: a value with spaces split the words, so what follows may be misread
+    if (w === '--' || !w.startsWith('-')) {
+      // the image (or the compose service) starts what the container runs; a word that is not a plausible one means the scan lost its place
+      const image = w === '--' ? t[i + 1] : w
+      if (image === undefined || !/^[\w][\w./:@-]*$/.test(image)) incomplete = true
+      imageSeen = true
+      break
+    }
+    if (w === '-v' || w === '--volume') i = takes(i, volume)
+    else if (w === '--mount') i = takes(i, mount)
+    else if (w.startsWith('--volume=')) volume(unquote(w.slice(9)))
+    else if (w.startsWith('--mount=')) mount(unquote(w.slice(8)))
+    else if (w.startsWith('--volumes-from')) {
+      incomplete = true
+      if (w === '--volumes-from') i += 1
+    } else if (w.startsWith('--')) {
+      if (RUN_BOOL.has(w) || w.includes('=')) continue
+      if (RUN_VALUE.has(w)) i += 1
+      else incomplete = true // a flag not known: whether it takes a value is a guess
+    } else if (w.length === 2) {
+      if (SHORT_VALUE.has(w[1])) i += 1
+      else if (!SHORT_BOOL.has(w[1])) incomplete = true
+    } else {
+      // grouped short flags (-it, -dv, -itv src:dst) or one with its value attached (-vsrc:dst, -eNAME=x)
+      const first = w[1]
+      if (first === 'v') volume(unquote(w.slice(2).replace(/^=/, '')))
+      else if (SHORT_VALUE.has(first)) continue
+      else {
+        const letters = [...w.slice(1)]
+        const last = letters[letters.length - 1]
+        if (!letters.slice(0, -1).every(c => SHORT_BOOL.has(c))) incomplete = true
+        else if (last === 'v') i = takes(i, volume)
+        else if (SHORT_VALUE.has(last)) i += 1
+        else if (!SHORT_BOOL.has(last)) incomplete = true
+      }
+    }
+  }
+  return { mounts: out, incomplete: incomplete || !imageSeen }
+}
+
+// The names of the Docker volumes a command mounts into a docker run, so the caller can ask docker whether one is really a host folder
+export function namedVolumesOf(command: string, depth = 0): string[] {
+  const names = new Set<string>()
+  for (const text of depth === 0 ? [command, foldSubstitutionsInDockerRuns(command)] : [command]) {
+    for (const raw of segmentsOf(text)) {
+      const seg = strip(raw).replace(/^\\/, '')
+      if (DOCKER_RUN.test(seg)) {
+        for (const m of parseMounts(seg).mounts) if (m.kind === 'volume' && m.source !== '') names.add(m.source)
+      }
+      const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
+      if (depth < 3 && wrapped) for (const n of namedVolumesOf(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1)) names.add(n)
+      else if (depth < 3 && runsQuoted(seg)) for (const piece of quotedPieces(seg)) for (const n of namedVolumesOf(piece, depth + 1)) names.add(n)
+    }
+  }
+  return [...names]
+}
+
+// Split an rm path at its first pattern character: `base` is the folder the pattern expands in (the whole path when it has none).
+export function globBase(path: string): { base: string; glob: boolean } {
+  const g = path.search(/[*?[{]/)
+  if (g < 0) return { base: path, glob: false }
+  return { base: path.slice(0, path.lastIndexOf('/', g)) || '/', glob: true }
+}
+
+const under = (parent: string, child: string) => (parent === '/' ? child !== '/' : child.startsWith(`${parent}/`))
+
+// What each path an rm names is, given the mounts of the container it runs in. The mount with the longest target
+// holds the path; a mount sitting below the path (or below the folder a pattern expands in) is reached too, because rm
+// goes down into it.
+function mapRmTargets(targets: string[], mounts: Mount[], scope: Scope): Mapped[] {
+  const out: Mapped[] = []
+  for (const path of targets) {
+    if (/[$`]/.test(path) || !path.startsWith('/')) {
+      out.push({
+        path,
+        kind: 'uncovered',
+        why: /[$`]/.test(path)
+          ? 'the path goes through a variable the container fills in when it runs'
+          : "the path is relative to the container's working directory, which this command does not show",
+      })
+      continue
+    }
+    const p = normalizePath(path)
+    const { base } = globBase(p)
+    const at = (m: Mount) => normalizePath(m.target)
+    const cover = mounts
+      .filter(m => at(m) === base || under(at(m), base))
+      .sort((a, b) => at(b).length - at(a).length)[0]
+    const below = mounts.filter(m => under(base, at(m)))
+    const entries: Mapped[] = []
+    for (const m of [...(cover ? [cover] : []), ...below]) {
+      const mountAt = at(m)
+      const device = m.kind === 'volume' ? scope.devices[m.source] : undefined
+      if (m.kind === 'volume' && scope.uninspected.includes(m.source)) {
+        entries.push({ path, kind: 'unresolved', mountAt, source: m.source, why: 'docker could not be asked what this volume is (it may be a host folder)' })
+        continue
+      }
+      if (m.kind === 'volume' && !device) {
+        entries.push({ path, kind: 'volume', mountAt, volume: m.source })
+        continue
+      }
+      const r = resolveHostPath(device ?? m.source, scope)
+      if ('why' in r) entries.push({ path, kind: 'unresolved', mountAt, source: m.source.replace(SUBST_WORD, '$(...)'), why: r.why })
+      else {
+        const rest = m === cover ? p.slice(mountAt === '/' ? 0 : mountAt.length) : ''
+        entries.push({ path, kind: 'host', mountAt, folder: r.path, host: normalizePath(`${r.path}${rest}`) })
+      }
+    }
+    out.push(
+      ...(entries.length > 0
+        ? entries
+        : [{ path, kind: 'uncovered' as const, why: 'no -v or --mount of this command covers it, so it is a path inside the container itself (or in a volume a compose file adds)' }]),
+    )
+  }
+  return out
+}
+
+// Nothing to ask about: a Docker volume is not a folder here; a host folder is judged as a host rm would be (own scratch only);
+// a path no mount covers is the container's own, held unless it is scratch by the same text rule a host rm gets.
+function containerPathIsHarmless(m: Mapped, env: ScratchEnv, incomplete = false): boolean {
+  if (m.kind === 'volume') return true
+  if (m.kind === 'host') return isOwnScratch(m.host, new Map(), env)
+  if (m.kind === 'uncovered') return !incomplete && isOwnScratch(m.path, new Map(), env)
+  return false
+}
+
+// A lane nobody watches judges the host side: the host paths of a container rm as one host rm, or the reason it cannot.
+export function hostRmSegment(h: Hold): { segment: string } | { reason: string } {
+  if (!h.container) return { segment: h.segment }
+  const hosts: string[] = []
+  for (const m of h.container) {
+    if (m.kind === 'host') hosts.push(m.host)
+    else if (m.kind === 'unresolved') return { reason: `the mount "${m.source}:${m.mountAt}" is a host folder that ${m.why}, so what "${m.path}" deletes on this machine is unknown` }
+    else if (m.kind === 'uncovered') return { reason: `"${m.path}" inside the container: ${m.why}` }
+  }
+  return { segment: `rm -rf ${hosts.join(' ')}` }
+}
+
 // Which dangerous patterns a Bash command holds. Best effort, a net and not a
 // parser: it splits on shell separators and looks inside sh -c. `hard` ones (force push,
 // production deploy) are refused outright where nobody can be asked.
 export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold[] {
-  return classifyWithEnv(command, depth, env)
+  const holds = classifyWithEnv(command, depth, env, newScope(command, env))
+  // `docker run -v "$(pwd):/w" img sh -c 'rm ...'`: the splitter cuts the docker run in two at the substitution, so a second
+  // look at a copy with each substitution named as one unknown word finds what the cut hid. Only ever adds holds.
+  const folded = depth === 0 ? foldSubstitutionsInDockerRuns(command) : command
+  if (folded === command) return holds
+  const seen = new Set(holds.map(h => `${h.kind}\0${h.segment}`))
+  return [...holds, ...classifyWithEnv(folded, depth, env, newScope(folded, env)).filter(h => !seen.has(`${h.kind}\0${h.segment}`))]
 }
 
-function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[] {
+function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
   const holds: Hold[] = []
   for (const raw of segmentsOf(command)) {
     const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
+    trackCd(seg, command, scope)
+    // `docker run -v SRC:DST ...`: the text it runs sees its paths through these mounts
+    const parsed = DOCKER_RUN.test(seg) ? parseMounts(seg) : undefined
+    const inner: Scope = { ...scope, mounts: parsed ? parsed.mounts : scope.mounts, incomplete: parsed ? parsed.incomplete : scope.incomplete }
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     if (wrapped && depth < 3) {
-      holds.push(...classifyWithEnv(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, env))
+      holds.push(...classifyWithEnv(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, env, inner))
     } else if (depth < 3 && runsQuoted(seg)) {
-      for (const piece of quotedPieces(seg)) holds.push(...classifyWithEnv(piece, depth + 1, env))
+      for (const piece of quotedPieces(seg)) holds.push(...classifyWithEnv(piece, depth + 1, env, inner))
     }
     const t = seg.split(/\s+/)
     const flags = t.filter(x => x.startsWith('-'))
@@ -276,7 +573,11 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv): Hold[
     if (/^(?:\S*\/)?rm$/.test(t[0])) {
       const r = flags.some(f => /^-[^-]*[rR]/.test(f) || f === '--recursive')
       const f = flags.some(f => /^-[^-]*f/.test(f) || f === '--force')
-      if (r && f && !ownScratchTargets(command, env, depth).some(group => group.segment === seg)) {
+      if (r && f && scope.mounts && (scope.mounts.length > 0 || scope.incomplete)) {
+        // inside a container that has mounts: judge each path by what it really is on this machine
+        const mapped = mapRmTargets(targetsOf(seg).map(unquote), scope.mounts, scope)
+        if (mapped.some(m => !containerPathIsHarmless(m, env, scope.incomplete))) holds.push({ kind: 'rm -rf', hard: false, segment: seg, container: mapped })
+      } else if (r && f && !ownScratchTargets(command, env, depth).some(group => group.segment === seg)) {
         add('rm -rf', false)
       }
     }
@@ -300,14 +601,7 @@ type OwnScratchGroup = { segment: string; targets: string[] }
 // Returns targets from rm -rf segments that are safe scratch locations. This
 // uses the same best-effort segmentation as classify, not a full shell parser.
 export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth = 0): OwnScratchGroup[] {
-  const assignments = new Map<string, string | null>()
-  if (env.tmpdir) assignments.set('TMPDIR', env.tmpdir)
-  const mktemp = /(?:^|[;&|]\s*)([A-Za-z_]\w*)=\$\(\s*mktemp(?:\s+[^)]*)?\)/g
-  for (const match of command.matchAll(mktemp)) assignments.set(match[1], null)
-  const literals = /(?:^|[;&|]\s*)(?:export\s+)?([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g
-  for (const match of command.matchAll(literals)) {
-    if (!match[2].startsWith('$(')) assignments.set(match[1], unquote(match[2]))
-  }
+  const assignments = assignmentsOf(command, env)
   const groups: OwnScratchGroup[] = []
   for (const raw of segmentsOf(command)) {
     const seg = strip(raw).replace(/^\\/, '')
@@ -333,6 +627,19 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
     }
   }
   return groups
+}
+
+// Variables the command sets itself: a literal value, or null for one set from `mktemp` (a fresh temp folder, path unknown).
+function assignmentsOf(command: string, env: ScratchEnv): Map<string, string | null> {
+  const assignments = new Map<string, string | null>()
+  if (env.tmpdir) assignments.set('TMPDIR', env.tmpdir)
+  const mktemp = /(?:^|[;&|]\s*)([A-Za-z_]\w*)=\$\(\s*mktemp(?:\s+[^)]*)?\)/g
+  for (const match of command.matchAll(mktemp)) assignments.set(match[1], null)
+  const literals = /(?:^|[;&|]\s*)(?:export\s+)?([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g
+  for (const match of command.matchAll(literals)) {
+    if (!match[2].startsWith('$(')) assignments.set(match[1], unquote(match[2]))
+  }
+  return assignments
 }
 
 export const unquote = (value: string) => value.replace(/^(["'])(.*)\1$/, '$2')
@@ -418,6 +725,12 @@ export function explain(hold: Hold): { what: string; why: string } {
   const vars = [...hold.segment.matchAll(/\$\{?([A-Za-z_]\w*)/g)].map(m => m[1])
   switch (hold.kind) {
     case 'rm -rf':
+      if (hold.container) {
+        return {
+          what: 'deletes files inside a Docker container; a path under a mounted host folder is deleted on this machine too, with no undo',
+          why: 'a mount ties the container path to a real folder here, and the held command does not say which until the mount is read',
+        }
+      }
       return {
         what: 'deletes the named files and folders and everything inside them, without asking for each one',
         why:
