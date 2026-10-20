@@ -809,7 +809,8 @@ def _move_on(item, host, outbox, now):
         moved, r = dispatch.queue_next(outbox, host.inject_now, now, "next")
         what = {"shown": "showed the next post", "empty": "nothing else waiting", "showing": "a post is already showing",
                 "later": "the next post has not landed yet; it is tried again by itself", "failed": "the next post did not land; it is tried again by itself",
-                "busy": "the next post is being sent"}.get(r, r)
+                "busy": "the next post is being sent",
+                "settling": "a post showed seconds ago; this next is the one that showed it"}.get(r, r)
         if r == "empty":
             host.inject_now("Nothing else waiting.")
         return "%s | next | %s | oc-%s" % (time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), what, sha)

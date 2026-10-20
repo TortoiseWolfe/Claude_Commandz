@@ -22,6 +22,10 @@ TESTS = ["test_state_guard", "test_openclaw_ask", "test_openclaw_ask_hook", "tes
 MUTANTS = [
     # the outbox: one post at a time, never lost (19 Oct 4:59 PM and 5:03-5:24 PM)
     # one item per question, each short, and no flush after an outage (19 Oct 6:31 PM)
+    (DISPATCH, "freeze: a long post goes out whole", '    if len(text) <= ITEM_MAX:\n        return [text]\n    pieces', '    if True:\n        return [text]\n    pieces'),
+    (DISPATCH, "freeze: the nudge is a bare count", 'ok = send(queue_nudge(waiting, nxt))', 'ok = send(queue_tail(waiting).strip())'),
+    (DISPATCH, "freeze: a slow nudge is sent again", 'head["nudged"], nxt = now, q["items"][1]["text"]', 'nxt = q["items"][1]["text"]'),
+    (DISPATCH, "freeze: held nexts skip a post", 'if why == "next" and q["items"] and q["items"][0]["shown"] and 0 <=', 'if False and q["items"] and q["items"][0]["shown"] and 0 <='),
     (DISPATCH, "items: the pump flushes a backlog", '        print(queue_pump(path, host.inject_now, now))', '        print([queue_next(path, host.inject_now, now) for _ in range(20)])'),
     (DISPATCH, "items: a post flushes the backlog", '        queue_pump(self.queue_path, self.inject_now, self.clock())\n        return True', '        [queue_next(self.queue_path, self.inject_now, self.clock()) for _ in range(20)]\n        return True'),
     (DISPATCH, "items: a repeat of the post showing goes out again", '            if head["shown"] and not (waiting', '            if False and head["shown"] and not (waiting'),
