@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex and
 # GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -33,6 +33,10 @@
 # ~/repos/hub/client-repos.txt, as well as ~/repos/CD. If either list is missing,
 # unreadable, or not a regular file, either external engine is refused. --allow-client bypasses the guard.
 # The model argument is passed through to Codex/Copilot only when it is not a Claude model.
+#
+# 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/ or site-model (3D fitting, photo
+# matching, site models) starts or resumes only on fable or opus, each at effort high.
+# sonnet, haiku or any other model name is refused, on start, --console, --headless and --resume alike. --allow-low-tier bypasses it.
 #
 # --ask <oc-id>: this lane answers an OpenClaw ask ("Jonathan via OpenClaw:", ask oc-xxxxxxxx). Once the window is up and the lane is in
 # index.tsv, lane.sh runs `openclaw_dispatch.py claim <id> <name>`, which registers the lane so its finish, failure or stall is
@@ -116,10 +120,10 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
-  lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] --resume <name>
+  lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] --resume <name>
 
 Claude is the default engine. Codex and Copilot run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -132,10 +136,12 @@ Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they also compact in place at 200K tokens.
 Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
 --connectors keeps connectors; --no-connectors disables them even when the name or prompt would enable them.
+A Claude lane whose prompt names data/sites/ or site-model (3D and photo-match work) runs only on fable or opus;
+sonnet and haiku are refused there. --allow-low-tier overrides that.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -153,6 +159,7 @@ while [ $# -gt 0 ]; do
       ask_id="$2"; shift 2 ;;
     --ask=*) ask_id="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
+    --allow-low-tier) allow_low_tier=1; shift ;;
     --connectors) connectors_opt=1; no_connectors=0; shift ;;
     --no-connectors) no_connectors=1; connectors_opt=0; shift ;;
     --console) console=1; shift ;;
@@ -334,6 +341,17 @@ is_claude_model() {
     opus|sonnet|haiku|fable|claude-*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# 3D fitting, photo matching and site-model work is judgment work, never execution (his rule, 19 Oct: "using the lower
+# models isn't a savings if it's not capable of doing the job"). A prompt that names data/sites/ or site-model runs on
+# fable or opus only; anything else (sonnet, haiku, an unnamed default) is refused unless --allow-low-tier is passed.
+site_tier_ok() {  # <model> <prompt-file>
+  [ "$allow_low_tier" = 1 ] && return 0
+  grep -qE 'data/sites/|site-model' -- "$2" 2>/dev/null || return 0
+  case "${1,,}" in *opus*|*fable*) return 0 ;; esac
+  echo "refusing model ${1:-(none)}: the prompt names data/sites/ or site-model, and 3D fitting, photo matching and site-model work runs only on fable or opus, each at effort high; never Sonnet or Haiku (rule: ~/repos/hub/lane-rules.md, 19 Oct). Pass --allow-low-tier to override." >&2
+  return 1
 }
 
 # Default effort for a Claude model: high (sonnet, opus, fable); haiku none (prints nothing).
@@ -651,6 +669,7 @@ if [ "$mode" = resume ]; then
     echo "$name is a headless lane (out.log beside its report); there is no interactive session to resume. Read $(dirname "$rep")/out.log" >&2; exit 1
   fi
   [ "$b" = console ] && console=1
+  site_tier_ok "$m" "${p:-}" || exit 1
   if [ "$dry" = 0 ]; then
     command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
     if tmux has-session -t "$SESSION" 2>/dev/null \
@@ -695,6 +714,7 @@ if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
   echo "--headless applies only to Claude with --console; Codex and Copilot are already headless" >&2
   exit 1
 fi
+[ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
 guard_external_engine || exit 1
 
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"

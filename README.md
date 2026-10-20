@@ -117,8 +117,8 @@ cp -a repos/ScriptHammer/.claude/commands/. ~/repos/ScriptHammer/.claude/command
 `global/.claude/scripts/lane.sh` starts work in a named tmux window and keeps a hand-off folder under `~/.claude/state/lanes/` for the prompt, report, and logs.
 
 ```bash
-lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--console [--headless]] <name> <repo-dir> <model> <prompt-file>
-lane.sh --status | --send <name> <text> | [--dry-run] [--console] [--connectors] --resume <name>
+lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--allow-low-tier] [--console [--headless]] <name> <repo-dir> <model> <prompt-file>
+lane.sh --status | --send <name> <text> | [--dry-run] [--console] [--connectors] [--allow-low-tier] --resume <name>
 lane.sh --help
 ```
 
@@ -127,6 +127,8 @@ Claude is the default, so existing calls continue to use Claude Code. `--console
 Claude lanes start lean, because a lane re-reads everything it starts with on every turn. Effort defaults to `high` on every model (haiku takes none; `--effort` overrides it), and a lane compacts in place at 200K. One `--settings` JSON switches off the claude.ai connectors, the plugins listed in `LANE_PLUGINS_OFF` at the top of the script, and the workspace `~/repos/CLAUDE.md`, which `--append-system-prompt-file` replaces with `$LANE_RULES` (default `~/repos/hub/lane-rules.md`; with no such file the workspace CLAUDE.md loads as before). The Artifact tools are withheld with `--disallowedTools`. Connectors stay on when the lane name ends in `-mail`, when the prompt file mentions Gmail, Calendar or Drive, or with `--connectors`; the choice is column 11 of the index, shown by `--status` and reused by `--resume` (an older row without it counts as on). Measured with a one-line "Reply READY" prompt on sonnet, a lane's first-turn context went from 58.2K to 34.0K tokens.
 
 `--no-connectors` explicitly disables connectors even when the lane name or prompt would otherwise enable them.
+
+3D fitting, photo matching and site-model work runs only on `fable` or `opus` (each at effort high). When a Claude lane's prompt file contains `data/sites/` or `site-model`, lane.sh refuses `sonnet`, `haiku` or any other model on start, `--console`, `--headless` and `--resume`, and names the rule in `~/repos/hub/lane-rules.md`. `--allow-low-tier` overrides it. Jonathan's rule of 19 Oct 2026: a cheap model on work it can't do is no saving.
 
 ### The hub starts lean too
 
