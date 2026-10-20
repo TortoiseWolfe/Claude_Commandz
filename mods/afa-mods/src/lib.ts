@@ -69,6 +69,7 @@ export const HELD_KINDS = [
   'docker volume prune',
   'docker volume rm',
   'docker compose down -v',
+  'docker run without limits',
   'git push --force',
   'production deploy',
   'tmux shared lanes',
@@ -78,7 +79,8 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[] }
+// composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[] }
 
 const strip = (s: string) =>
   s
@@ -215,7 +217,7 @@ const QUOTED = /'([^']*)'|"((?:\\.|[^"\\])*)"/g
 const withoutQuoted = (seg: string) => seg.replace(QUOTED, (_m, a?: string, b?: string) => ((a ?? b ?? '') !== '' && /^\S+$/.test(a ?? b ?? '') ? (a ?? b ?? '') : ''))
 
 // Commands that run the quoted text they are given (`ssh host "a; b"`, `docker exec c "..."`): each quoted piece is a command line to judge too.
-const WRAPPERS = new Set(['env', 'nohup', 'exec', 'nice', 'ionice', 'stdbuf', 'doas', 'timeout', 'setsid', 'chrt'])
+const WRAPPERS = new Set(['env', 'nohup', 'exec', 'nice', 'ionice', 'stdbuf', 'doas', 'timeout', 'setsid', 'chrt', 'command', 'time', 'xargs'])
 // Fail closed: behind a wrapper (`env -i A=b ssh ...`, `timeout 5 bash -c ...`) we do not try to work out which word runs, so its quoted text is read as commands.
 const runsQuoted = (seg: string) =>
   RUNS_ITS_ARGS.has(firstWord(seg)) || WRAPPERS.has(firstWord(seg)) || /^(?:docker(?:\s+compose)?|docker-compose|podman|kubectl)\s+(?:exec|run)\b/.test(strip(seg))
@@ -245,7 +247,7 @@ function isProdDeploy(seg: string): boolean {
 // volume ('volume': named, anonymous or tmpfs). The source is the text as written, not yet resolved.
 export type Mount = { source: string; target: string; kind: 'host' | 'volume' }
 // incomplete: the mount list may miss mounts (a compose file, --volumes-from, a flag not read), so an unlisted path is not known to be the container's own
-type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[] }
+type Scope = { home: string; cwd?: string; vars: Map<string, string | null>; mounts?: Mount[]; incomplete?: boolean; devices: Record<string, string>; uninspected: string[]; timeout?: boolean }
 
 // One path an rm names inside a container, seen through the mounts: where it really is.
 export type Mapped =
@@ -267,6 +269,223 @@ function foldSubstitutionsInDockerRuns(command: string): string {
 }
 
 const DOCKER_RUN = /^(?:docker|podman)\s+(?:compose\s+|container\s+)?run\b|^docker-compose\s+run\b/
+
+// ---- a container started with no CPU cap and no timeout in front ----
+// 19 Oct: one `docker run` with neither took 14.6 of 16 cores and the machine thrashed. Held with the one-line fix.
+const DOCKER_WORDS = new Set(['docker', 'podman', 'docker-compose'])
+const baseName = (w: string) => w.split('/').pop() ?? w
+const COMPOSE_GLOBAL_VALUE = new Set(['-f', '--file', '-p', '--project-name', '--project-directory', '--profile', '--env-file', '--ansi', '--progress', '-H', '--host', '--context'])
+const DOCKER_GLOBAL_VALUE = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level'])
+// a flag only caps the container when its value does: --cpus 0 and --cpu-quota -1 mean no limit, and $X is not known to be a number
+const CPU_FLAG = /^--(cpus|cpu-quota|cpuset-cpus)(?:=(.*))?$/
+const capValue = (flag: string, value: string | undefined): boolean => {
+  const v = unquote(value ?? '')
+  if (flag === 'cpus') return /^\d+(?:\.\d+)?$/.test(v) && Number(v) > 0
+  if (flag === 'cpu-quota') return /^\d+$/.test(v) && Number(v) > 0
+  return /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(v)
+}
+const isTimeout = (w: string) => /^g?timeout$/.test(baseName(w))
+// `timeout [options] DURATION` among the words in front of what runs: the duration must be a positive number of seconds, minutes, hours
+// or days, at most a day (`timeout 0` means no limit). Stops at the first shell or docker word.
+function timeoutIn(words: string[]): boolean {
+  for (let k = 0; k < words.length; k += 1) {
+    if (isTimeout(words[k])) {
+      let j = k + 1
+      while (j < words.length && words[j].startsWith('-')) j += ['-s', '-k', '--signal', '--kill-after'].includes(words[j]) ? 2 : 1
+      const m = /^(\d+(?:\.\d+)?)([smhd]?)$/.exec(unquote(words[j] ?? ''))
+      if (!m) return false
+      const seconds = Number(m[1]) * ({ s: 1, '': 1, m: 60, h: 3600, d: 86400 } as Record<string, number>)[m[2]]
+      return seconds > 0 && seconds <= 86400
+    }
+    if (SHELL_WORDS.has(baseName(words[k])) || DOCKER_WORDS.has(baseName(words[k]))) return false
+  }
+  return false
+}
+
+export const UNLIMITED_FIX =
+  'add --cpus N (and a timeout in front), or run it through ~/.claude/scripts/docker-heavy.sh -- docker run ...'
+
+// detached: -d / --detach, so the container outlives a timeout in front of the docker command and only a cap limits it
+export type RunCall = { mode: 'run' | 'compose'; timeout: boolean; detached: boolean; capped: boolean; service?: string; image?: string; files: string[]; projectDir?: string }
+
+// the files, project directory, service and the folder the command is in: the same service in another folder is another key
+export const composeKey = (c: Pick<RunCall, 'files' | 'projectDir' | 'service'>, cwd?: string) => `${c.files.join('|')}::${c.projectDir ?? ''}::${c.service ?? ''}::${cwd ?? ''}`
+
+// A segment that starts a container with `docker run` / `docker compose run` (also podman, docker-compose), looking only at the
+// options before the image. undefined: not one, or one run through docker-heavy.sh (it adds the limits, the lock and a timeout).
+function parseRunCall(seg: string): RunCall | undefined {
+  const t = seg.split(/\s+/).filter(Boolean).map(unquote)
+  if (t.length === 0) return undefined
+  let at = 0
+  if (!DOCKER_WORDS.has(baseName(t[0]))) {
+    if (!WRAPPERS.has(baseName(t[0]))) return undefined
+    at = t.findIndex(w => DOCKER_WORDS.has(baseName(w)))
+    if (at < 0) return undefined
+  }
+  const prefix = t.slice(0, at)
+  // docker-heavy.sh adds the limits, the lock and a timeout; it is called as `docker-heavy.sh [options] -- docker ...`
+  if (prefix.some(w => baseName(w) === 'docker-heavy.sh') && t[at - 1] === '--') return undefined
+  const timeout = timeoutIn(prefix)
+  let i = at + 1
+  let mode: 'run' | 'compose'
+  const files: string[] = []
+  let projectDir: string | undefined
+  if (baseName(t[at]) === 'docker-compose') mode = 'compose'
+  else {
+    while (i < t.length && t[i].startsWith('-')) i += DOCKER_GLOBAL_VALUE.has(t[i]) ? 2 : 1
+    if (t[i] === 'compose') {
+      mode = 'compose'
+      i += 1
+    } else {
+      if (t[i] === 'container') i += 1
+      if (t[i] !== 'run') return undefined
+      mode = 'run'
+      i += 1
+    }
+  }
+  if (mode === 'compose') {
+    while (i < t.length && t[i].startsWith('-')) {
+      const w = t[i]
+      if (w === '-f' || w === '--file') {
+        files.push(t[i + 1] ?? '')
+        i += 2
+      } else if (w.startsWith('--file=')) {
+        files.push(w.slice(7))
+        i += 1
+      } else if (/^-f./.test(w)) {
+        files.push(w.slice(2))
+        i += 1
+      } else if (w === '--project-directory') {
+        projectDir = t[i + 1]
+        i += 2
+      } else if (w.startsWith('--project-directory=')) {
+        projectDir = w.slice(20)
+        i += 1
+      } else i += COMPOSE_GLOBAL_VALUE.has(w) ? 2 : 1
+    }
+    if (t[i] !== 'run') return undefined
+    i += 1
+  }
+  let capped = false
+  let detached = false
+  for (; i < t.length; i += 1) {
+    const w = t[i]
+    if (w === '--') {
+      i += 1
+      break
+    }
+    if (!w.startsWith('-')) break
+    const flag = CPU_FLAG.exec(w)
+    if (flag && capValue(flag[1], flag[2] ?? t[i + 1])) capped = true
+    if (w === '--detach' || w.startsWith('--detach=')) detached = true
+    else if (!w.startsWith('--') && w.length > 1) {
+      // grouped short flags (-itd): a d before the first flag that takes a value
+      for (const c of w.slice(1)) {
+        if (c === 'd') detached = true
+        if (SHORT_VALUE.has(c) || c === 'v') break
+      }
+    }
+    if (w.startsWith('--')) {
+      if (!w.includes('=') && RUN_VALUE_ALL.has(w)) i += 1
+    } else if (w.length === 2) {
+      if (SHORT_VALUE.has(w[1]) || w[1] === 'v') i += 1
+    } else {
+      const takes = (c: string) => SHORT_VALUE.has(c) || c === 'v'
+      if (takes(w[w.length - 1]) && !takes(w[1])) i += 1
+    }
+  }
+  return { mode, timeout, detached, capped, service: mode === 'compose' ? t[i] : undefined, image: mode === 'run' ? t[i] : undefined, files, projectDir }
+}
+
+// What an uncapped run starts: its image, or its compose service
+export const runTargetOf = (seg: string): string | undefined => {
+  const c = parseRunCall(strip(seg))
+  return c?.image ?? c?.service
+}
+
+// What a compose file says about a service's CPU: 'capped' (cpus, cpu_quota or cpuset as a direct key, or deploy.resources.limits.cpus,
+// with a positive value: a `${X}` value never counts), 'none' (a CPU key whose value is no cap, such as 0), 'absent'. Read as text:
+// anchors, `extends` and includes are not followed, so a limit set that way is 'absent' and the run stays held.
+export function composeServiceLimit(yaml: string, service: string): 'capped' | 'none' | 'absent' {
+  // text the reader cannot follow: an include, or a service that merges, extends or resets keys. Such a file is 'none', so the run is held.
+  if (/^include\s*:/m.test(yaml)) return 'none'
+  const lines = yaml.split('\n')
+  const live = (l: string) => l.trim() !== '' && !l.trim().startsWith('#')
+  const indentOf = (l: string) => l.length - l.trimStart().length
+  const top = lines.findIndex(l => live(l) && /^services\s*:\s*(#.*)?$/.test(l))
+  if (top < 0) return 'absent'
+  let svcIndent = -1
+  let start = -1
+  for (let k = top + 1; k < lines.length && start < 0; k += 1) {
+    const l = lines[k]
+    if (!live(l)) continue
+    if (indentOf(l) === 0) break
+    if (svcIndent < 0) svcIndent = indentOf(l)
+    if (indentOf(l) === svcIndent && /^["']?([^"':\s]+)["']?\s*:/.exec(l.trim())?.[1] === service) {
+      // the service must be a plain block: `web: {...}`, `web: *base` or `web: &a` hides its keys from this reader
+      if (!/^["']?[^"':\s]+["']?\s*:\s*(#.*)?$/.test(l.trim())) return 'none'
+      start = k
+    }
+  }
+  if (start < 0) return 'absent'
+  const stack: { indent: number; key: string }[] = []
+  let found = false
+  for (let k = start + 1; k < lines.length; k += 1) {
+    const l = lines[k]
+    if (!live(l)) continue
+    const indent = indentOf(l)
+    if (indent <= svcIndent) break
+    if (/<<\s*:|\bextends\s*:|!reset|!override/.test(l)) return 'none'
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop()
+    const m = /^\s*["']?([\w.-]+)["']?\s*:\s*(.*?)\s*(?:#.*)?$/.exec(l)
+    if (!m) continue
+    const path = [...stack.map(x => x.key), m[1]].join('.')
+    stack.push({ indent, key: m[1] })
+    if (!['cpus', 'cpu_quota', 'cpuset', 'deploy.resources.limits.cpus'].includes(path)) continue
+    // a ${VAR} value is unknown (the variable may be set elsewhere), so it never counts as a cap
+    const v = unquote(m[2])
+    found = true
+    if (path === 'cpuset' ? /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(v) : /^\d+(?:\.\d+)?$/.test(v) && Number(v) > 0) return 'capped'
+  }
+  return found ? 'none' : 'absent'
+}
+
+export const composeServiceCapped = (yaml: string, service: string): boolean => composeServiceLimit(yaml, service) === 'capped'
+
+export type ComposeRun = { key: string; service: string; files: string[]; projectDir?: string; cwd?: string; needsCwd: boolean }
+
+// The `docker compose run` calls in a command that have no timeout in front, so the caller can read each one's compose file for a cpus limit.
+export function composeRunsOf(command: string, depth = 0, timeoutFront = false, scope: Scope = newScope(command, {})): ComposeRun[] {
+  const out: ComposeRun[] = []
+  for (const raw of segmentsOf(command)) {
+    const seg = strip(raw).replace(/^\\/, '')
+    if (seg === '') continue
+    trackCd(seg, command, scope)
+    const call = parseRunCall(seg)
+    if (call?.mode === 'compose' && call.service && ((!call.timeout && !timeoutFront) || call.detached)) {
+      const absolute = (p: string) => p.startsWith('/') || p.startsWith('~/')
+      out.push({
+        key: composeKey(call, scope.cwd),
+        service: call.service,
+        files: call.files,
+        projectDir: call.projectDir,
+        cwd: scope.cwd,
+        // a relative -f or project directory, or the default files of the folder, depend on where the shell is
+        needsCwd: call.files.length === 0 || call.files.some(f => !absolute(f)) || (call.projectDir !== undefined && !absolute(call.projectDir)),
+      })
+    }
+    const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
+    const front = timeoutFront || segmentTimeout(seg)
+    if (depth < 3 && wrapped) out.push(...composeRunsOf(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, front, scope))
+    else if (depth < 3 && runsQuoted(seg)) for (const piece of quotedPieces(seg)) out.push(...composeRunsOf(piece, depth + 1, front, scope))
+  }
+  return out
+}
+
+// a timeout among the words in front of what the segment runs (`timeout 600 bash -c '...'`), which then covers the quoted text it runs
+function segmentTimeout(seg: string): boolean {
+  return timeoutIn(seg.split(/\s+/).filter(Boolean))
+}
 
 // `cd /full/path` before the command gives it a known $PWD. Anything that may have run in another shell (a "(" in the
 // command, pushd, popd, a path that is not plain) leaves $PWD unknown, so a source that uses it keeps holding.
@@ -340,6 +559,7 @@ const RUN_BOOL = new Set(['-d', '-i', '-t', '-q', '-P', '-T', '--detach', '--int
 const RUN_VALUE = new Set(['-a', '-c', '-e', '-h', '-l', '-m', '-p', '-u', '-w', '--add-host', '--annotation', '--attach', '--blkio-weight', '--blkio-weight-device', '--cap-add', '--cap-drop', '--cgroup-parent', '--cgroupns', '--cidfile', '--cpu-period', '--cpu-quota', '--cpu-rt-period', '--cpu-rt-runtime', '--cpu-shares', '--cpus', '--cpuset-cpus', '--cpuset-mems', '--detach-keys', '--device', '--device-cgroup-rule', '--device-read-bps', '--device-read-iops', '--device-write-bps', '--device-write-iops', '--dns', '--dns-option', '--dns-search', '--domainname', '--entrypoint', '--env', '--env-file', '--expose', '--gpus', '--group-add', '--health-cmd', '--health-interval', '--health-retries', '--health-start-period', '--health-timeout', '--hostname', '--ip', '--ip6', '--ipc', '--isolation', '--label', '--label-file', '--link', '--link-local-ip', '--log-driver', '--log-opt', '--mac-address', '--memory', '--memory-reservation', '--memory-swap', '--memory-swappiness', '--name', '--network', '--net', '--network-alias', '--oom-score-adj', '--pid', '--pids-limit', '--platform', '--publish', '--pull', '--restart', '--runtime', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--storage-opt', '--sysctl', '--tmpfs', '--ulimit', '--user', '--userns', '--uts', '--volume-driver', '--workdir', '--cap', '--entrypoint'])
 const SHORT_BOOL = new Set(['d', 'i', 't', 'q', 'P', 'T'])
 const SHORT_VALUE = new Set(['a', 'c', 'e', 'h', 'l', 'm', 'p', 'u', 'w'])
+const RUN_VALUE_ALL = new Set([...RUN_VALUE, '-v', '--volume', '--mount', '--volumes-from'])
 
 // The mounts a `docker run` / `docker compose run` gives its container: -v, --volume and --mount, in the forms docker accepts,
 // read from the options before the image only. `incomplete` says the list may miss mounts: a compose service brings its own,
@@ -545,7 +765,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
     trackCd(seg, command, scope)
     // `docker run -v SRC:DST ...`: the text it runs sees its paths through these mounts
     const parsed = DOCKER_RUN.test(seg) ? parseMounts(seg) : undefined
-    const inner: Scope = { ...scope, mounts: parsed ? parsed.mounts : scope.mounts, incomplete: parsed ? parsed.incomplete : scope.incomplete }
+    const inner: Scope = { ...scope, mounts: parsed ? parsed.mounts : scope.mounts, incomplete: parsed ? parsed.incomplete : scope.incomplete, timeout: scope.timeout || segmentTimeout(seg) }
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     if (wrapped && depth < 3) {
       holds.push(...classifyWithEnv(wrapped[1].replace(/^["']|["']$/g, ''), depth + 1, env, inner))
@@ -581,6 +801,8 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
         add('rm -rf', false)
       }
     }
+    const call = parseRunCall(seg)
+    if (call && !((call.timeout || scope.timeout) && !call.detached) && !(call.mode === 'run' ? call.capped : (env.composeLimited ?? []).includes(composeKey(call, scope.cwd)))) add('docker run without limits', false)
     if (/^docker\s+(system|volume|image)\s+prune\b/.test(seg)) add(`docker ${t[1]} prune` as HeldKind, false)
     if (/^docker\s+volume\s+(rm|remove)\b/.test(seg)) add('docker volume rm', false)
     if (/^(docker\s+compose|docker-compose)\b/.test(seg) && bare.includes('down')) {
@@ -755,6 +977,11 @@ export function explain(hold: Hold): { what: string; why: string } {
       return {
         what: 'stops the compose stack and deletes its volumes (its database and uploads)',
         why: 'the data in a deleted volume cannot be brought back',
+      }
+    case 'docker run without limits':
+      return {
+        what: 'starts a container with no CPU cap and no timeout in front, so it can take every core and keep them',
+        why: 'on 19 Oct one such container took 14.6 of 16 cores and the machine stopped answering',
       }
     case 'git push --force':
       return {
