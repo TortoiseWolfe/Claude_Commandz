@@ -190,7 +190,7 @@ class TodayAfterTheFix(Fixture):
         self.poll(None, t + pk.REPLY_WAIT + 10)
         lines = dp.open_question_lines(self.ctx, t + pk.REPLY_WAIT + 20)
         self.assertTrue(any("receptionist's reply" in l for l in lines), lines)
-        self.assertIn("hub's list", self.host.chats[-1])
+        self.assertFalse(any("hub's list" in c for c in self.host.chats), self.host.chats)  # no note in his chat; the hub has it
         self.assertEqual(self.found(0, t + rc.GRACE + 120)[0], [])
 
     def test_a_plain_chat_answer_leaves_a_trace_and_counts_as_delivered(self):

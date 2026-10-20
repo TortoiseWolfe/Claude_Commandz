@@ -54,13 +54,13 @@ class Alarm(Drops):
         self.assertEqual(len(self.open_asks()), 1)
         self.nothing()
 
-    def test_the_hub_is_told_in_the_chat_once_for_a_burst(self):
+    def test_his_chat_gets_no_note_that_it_went_on_the_hubs_list(self):
+        # 20 Oct 12:04 AM that note sat in his outbox ahead of the hub's answer to the very message it was about
         self.go(None)
         later = ASK_TS + pk.REPLY_WAIT + 30
         self.poll(None, later)
-        self.assertEqual(len(self.host.chats), 1)
-        self.assertIn("hub's list", self.host.chats[0])
-        self.assertNotIn(self.TEXT, self.host.chats[0])  # his words are not echoed back
+        self.assertEqual(len(self.inbox_lines()), 1)
+        self.assertEqual(self.host.chats, [])
 
     def test_a_young_unreadable_message_waits_and_files_nothing(self):
         self.go(None)

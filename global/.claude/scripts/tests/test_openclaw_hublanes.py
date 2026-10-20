@@ -109,8 +109,9 @@ class ReplyToAHubLane(HubLanes):
         self.host.hub_live.add(HUB)
         self.host.send_result = (False, "its window did not take the words")
         self.act("reply %s: hi" % HUB)
-        self.assertIn("Couldn't send that to %s" % HUB, self.chat())
-        self.assertIn("The hub has it", self.chat())
+        self.assertIn("Your message didn't reach %s" % HUB, self.chat())
+        self.assertIn("The hub has your words and will pass them on", self.chat())
+        self.assertNotIn("did not take", self.chat())
         self.assertEqual(len(self.filed()), 1)
         self.assertIn("hi", self.inbox_text())
 
@@ -137,8 +138,9 @@ class NothingDeadEnds(HubLanes):
         self.put("oc-own-app-1")
         self.host.send_result = (False, "its window did not take the words")
         self.act("reply oc-own-app-1: hi")
-        self.assertIn("Couldn't send that to oc-own-app-1", self.chat())
-        self.assertIn("The hub has it", self.chat())
+        self.assertIn("Your message didn't reach oc-own-app-1", self.chat())
+        self.assertIn("The hub has your words and will pass them on", self.chat())
+        self.assertNotIn("did not take", self.chat())
         self.assertEqual(len(self.filed()), 1)
 
     def test_a_close_word_that_fits_two_hub_lanes_is_not_guessed(self):

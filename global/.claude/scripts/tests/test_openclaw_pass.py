@@ -659,7 +659,9 @@ class Fallback(PassBase):
         self.host.start_ok = (False, "no window")
         dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT)
         self.assertEqual(self.ask()["status"], "fallback-failed")
-        self.assertIn("couldn't start the lane", self.host.chats[-1])
+        self.assertIn("and I couldn't start a lane in", self.host.chats[-1])
+        self.assertNotIn("no window", self.host.chats[-1])  # lane.sh's words stay in the log line
+        self.assertEqual(self.host.chats[-1].count("hub has your words") + self.host.chats[-1].count("hub's list"), 1)  # said once
         self.assertFalse(dp.duplicate_start(self.ctx, "do the thing", NOW + dp.ASK_WAIT + 1))
 
     def test_each_poller_run_checks_the_fallback(self):
@@ -1648,7 +1650,7 @@ class Questions(PassBase):
 
     def test_a_question_is_recorded_and_handed_to_the_pass_with_no_lane(self):
         line, chat = self.asked()
-        self.assertEqual(chat, "asked Claude: " + self.Q)
+        self.assertIsNone(chat, "no echo of his words: the answer is the post he hears")
         self.assertIn("handed to Claude", line)
         self.assertEqual(self.host.spawned, [ASK])
         self.assertEqual(self.host.started, [])
@@ -1675,8 +1677,8 @@ class Questions(PassBase):
     def test_questions_do_not_count_against_the_lane_cap_and_have_their_own(self):
         for i in range(dp.MAX_RUNNING):
             self.hand(task="job %d" % i, ask="oc-0000000%d" % i)
-        _, chat = self.asked()
-        self.assertEqual(chat, "asked Claude: " + self.Q)  # three lanes waiting, the question still goes
+        line, chat = self.asked()
+        self.assertIn("handed to Claude", line)  # three lanes waiting, the question still goes
         for i in range(dp.MAX_QUESTIONS - 1):
             self.asked("question %d" % i, ask="oc-1000000%d" % i)
         line, chat = self.asked("one too many", ask="oc-2000000f")
@@ -1811,7 +1813,7 @@ class Questions(PassBase):
     def test_an_identical_question_within_two_minutes_is_one_ask_one_pass_one_chat_line(self):
         _, first = self.asked(ask="oc-5000000a")
         line, again = self.asked("  How many OPEN issues does own-app have? ", ask="oc-5000000b", now=NOW + 19)
-        self.assertEqual(first, "asked Claude: " + self.Q)
+        self.assertIsNone(first)
         self.assertIn("not run: same words as ask oc-5000000a, still open since", line)
         self.assertTrue(again.startswith("Already with Claude's quick check since"), again)
         self.assertEqual(self.host.spawned, ["oc-5000000a"])
@@ -1825,7 +1827,7 @@ class Questions(PassBase):
         for n, q in enumerate(("Tell me how many open issues own-app has", self.Q)):  # reworded, then the very same words
             line, chat = self.asked(q, ask="oc-5000000b%d" % n, now=NOW + 60 + n)
             self.assertIn("handed to Claude", line)
-            self.assertNotIn("Already answered", chat)
+            self.assertIsNone(chat)  # handed on, not answered from the old ask, and not echoed
         self.assertEqual(self.host.spawned, ["oc-5000000a", "oc-5000000b0", "oc-5000000b1"])
 
     def test_a_reworded_question_is_its_own_ask_and_only_an_exact_repeat_is_caught(self):
@@ -1879,7 +1881,7 @@ class Questions(PassBase):
         line, chat = self.asked(q3, ask="oc-70000005", now=t + 5 * 60)
         chats.append(chat)
         self.assertIn("handed to Claude", line)
-        self.assertNotIn("Already answered", chat)
+        self.assertIsNone(chat)  # handed on, not answered from the old ask, and not echoed
         self.assertEqual(self.host.spawned, [a, "oc-70000005"])
 
         # 4-5. A work request starts once, then defer records only a hub inbox reason, with no chat post.
@@ -1933,7 +1935,7 @@ class Questions(PassBase):
         self.assertFalse(dp.say(self.ctx, self.host, c, "I can't see the budget from this chat.", t + 20 * 60)[0])
         self.assertEqual(self.ask(c)["status"], "pending")
         self.assertNotIn("I can't see the budget from this chat.", self.host.chats)
-        self.assertFalse(re.search(r"couldn't|can't|GitHub or a mail search", "\n".join(chats + self.host.chats), re.I))
+        self.assertFalse(re.search(r"couldn't|can't|GitHub or a mail search", "\n".join(c for c in chats + self.host.chats if c), re.I))
 
     def test_a_repeat_of_a_question_the_hub_still_holds_is_flagged_to_it_again_after_ten_minutes(self):
         self.asked(ask="oc-5000000a")

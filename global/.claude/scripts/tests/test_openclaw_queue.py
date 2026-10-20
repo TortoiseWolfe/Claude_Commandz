@@ -27,6 +27,7 @@ NOW = td.NOW
 class QHost(tr.ReplyHost):
     """The fake host with the real queued inject in front of a fake chat."""
     inject = dp.LaneHost.inject
+    inject_answer = dp.LaneHost.inject_answer
 
     def __init__(self, path):
         super().__init__([])
@@ -62,6 +63,18 @@ class Outbox(td.Base):
 
     def items(self):
         return dp.queue_load(self.box)["items"]
+
+    def test_his_next_refreshes_the_outbox_file_the_receptionist_reads(self):
+        # 20 Oct 12:05 AM: the receptionist said "last item" from stale counts; OUTBOX.md must follow every move of the queue
+        views = []
+        self.host.mirror_outbox = lambda: views.append(dp.outbox_view(self.box, NOW))
+        self.host.inject("Post 1: the porch columns are traced.")
+        self.host.inject("Post 2: the roof is matched.")
+        views.clear()
+        self.poll(self.him("next", NOW + 60), NOW + 60)
+        self.assertTrue(views, "the pickup run did not refresh OUTBOX.md")
+        self.assertIn("Showing now: Post 2", views[-1])
+        self.assertIn("Waiting, not shown yet: 0", views[-1])
 
     def test_a_burst_of_five_posts_shows_one_then_one_per_next(self):
         posts = ["Post %d: the porch columns are traced.\n\nSecond paragraph %d." % (i, i) for i in range(1, 6)]

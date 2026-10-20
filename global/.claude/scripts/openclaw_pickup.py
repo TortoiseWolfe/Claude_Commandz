@@ -862,10 +862,12 @@ def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-sit
         queue, settled = settle_pending(queue, host, sites, aliases, ctx, now, log)
         done.extend(x[:2] for x in settled)
         save_pending(ctx.pending_path, queue)
-        hubbed = [x for x in settled if x[0] == "hub-list"]
-        if hubbed:
-            whys = sorted({_plain_why(x[2]) for x in hubbed})
-            host.inject("%d of your messages went on the hub's list instead of the usual way (%s). The hub has your words." % (len(hubbed), "; ".join(whys)))
+        # No chat note for messages that went on the hub's list: 20 Oct 12:04 AM one sat in his outbox ahead of the hub's answer to
+        # the very message it was about. The hub's answer is the post he hears; the log line above is the record.
+    if outbox is not None:  # what the receptionist reads before it says "next", a count or "last item"
+        mirror = getattr(host, "mirror_outbox", None)
+        if mirror:
+            mirror()
     lines = [x[1] for x in done if x[1]]
     if lines:
         try:
