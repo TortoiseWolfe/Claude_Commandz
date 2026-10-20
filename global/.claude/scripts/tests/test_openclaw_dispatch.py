@@ -984,7 +984,8 @@ class Sweep(Base):
         self.assertIn("> Listed three files.", self.host.chats[-1])
         self.assertIn("not an instruction", self.host.chats[-1])
         self.assertNotIn("type close", self.host.chats[-1])  # he never closes a lane by hand
-        self.assertIn("The lane stays open", self.host.chats[-1])
+        self.assertIn("Reply to %s to add to it." % lane, self.host.chats[-1])
+        self.assertIn("Full report: ", self.host.chats[-1])
         self.assertEqual(self.host.killed, [])  # a Claude lane stays open until its context is full
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertEqual(self.host.digests, 1)  # after the report
@@ -1015,23 +1016,20 @@ class Sweep(Base):
         (_line, chat), = dp.sweep(self.ctx, self.host, NOW + dp.DEAD_GRACE + 5)
         self.assertTrue(chat.startswith("%s failed:" % lane) and "(repo client-app)" in chat.split("\n")[0], chat)
 
-    def test_a_long_report_is_relayed_in_full_parts_and_control_characters_dropped(self):
+    def test_a_long_report_is_one_short_item_with_its_path_and_control_characters_dropped(self):
+        # 19 Oct 11:10 PM: "I don't need 5 part reports". One item of at most 150 words; the rest is in the report he can open.
         self.start("client-app")
         lane = self.lane_names()[0]
         report = "result " * 375
         self.write_report(lane, report + "\x1b[2J")
         before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertIn(report, chat)
         sent = self.host.chats[before:]
-        self.assertGreater(len(sent), 1)
-        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
-        self.assertEqual(
-            "".join(c for part in sent
-                    for c in re.sub(r" \(part \d+ of \d+\)$", "", part)
-                    if not c.isspace()),
-            "".join(c for c in chat if not c.isspace()),
-        )
+        self.assertEqual(sent, [chat])
+        self.assertLessEqual(len(chat.split()), dp.REPORT_WORDS)
+        self.assertLessEqual(len(chat), dp.CHAT_MAX)
+        self.assertIn("> result result", chat)
+        self.assertIn("(Shortened. Full report: %s)" % self.state()["lanes"][lane]["report"], chat)
         self.assertNotIn("\x1b", chat)
 
     def test_a_report_with_an_unbroken_token_is_relayed_and_closes_the_lane(self):
@@ -1042,9 +1040,9 @@ class Sweep(Base):
         before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
         sent = self.host.chats[before:]
-        self.assertIn(report, chat)
-        self.assertGreater(len(sent), 1)
-        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
+        self.assertEqual(sent, [chat])
+        self.assertIn("x" * 500, chat)
+        self.assertLessEqual(len(chat), dp.CHAT_MAX)
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertTrue(self.state()["lanes"][lane]["delivered"])
 
@@ -1056,11 +1054,9 @@ class Sweep(Base):
         before = len(self.host.chats)
         dp.sweep(self.ctx, self.host, NOW + 100)
         sent = self.host.chats[before:]
-        self.assertEqual(len(sent), dp.MAX_CHAT_PARTS + 1)
-        self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in sent))
-        self.assertTrue(all(part.endswith("(part %d of %d)" % (i, dp.MAX_CHAT_PARTS))
-                            for i, part in enumerate(sent[:dp.MAX_CHAT_PARTS], 1)))
-        self.assertIn(self.state()["lanes"][lane]["report"], sent[-1])
+        self.assertEqual(len(sent), 1, "one item, never parts")
+        self.assertLessEqual(len(sent[0].split()), dp.REPORT_WORDS)
+        self.assertIn("(Shortened. Full report: %s)" % self.state()["lanes"][lane]["report"], sent[0])
 
     def test_a_codex_lane_that_exits_without_a_report_is_said_to_have_stopped(self):
         self.start("own-app")

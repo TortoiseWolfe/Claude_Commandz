@@ -17,11 +17,25 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 PICKUP, HOOK, INSTALL = "openclaw_pickup.py", "openclaw_ask_hook/handler.js", "openclaw_ask_install.sh"
 DISPATCH = "openclaw_dispatch.py"
-TESTS = ["test_state_guard", "test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes", "test_openclaw_nodrop", "test_openclaw_hublanes", "test_openclaw_queue", "test_reports_reach_him"]
+TESTS = ["test_state_guard", "test_openclaw_ask", "test_openclaw_ask_hook", "test_openclaw_ask_install", "test_openclaw_pickup", "test_openclaw_dispatch", "test_openclaw_reply", "test_openclaw_pass", "test_openclaw_lanes", "test_openclaw_nodrop", "test_openclaw_hublanes", "test_openclaw_queue", "test_reports_reach_him", "test_outbox_clean"]
 
 MUTANTS = [
     # the outbox: one post at a time, never lost (19 Oct 4:59 PM and 5:03-5:24 PM)
     # one item per question, each short, and no flush after an outage (19 Oct 6:31 PM)
+    # 19 Oct 11:10 PM: 10 of 20 waiting posts were acknowledgements, 6 repeats; his question about the chat sat behind the day's cap
+    (DISPATCH, "clean: the hub-list acknowledgement is posted", "no pass: put on the hub's list (ask %s)\" % (stamp, ask_id), None", "no pass: put on the hub's list (ask %s)\" % (stamp, ask_id), \"On the hub's list: the hub has your message.\""),
+    (DISPATCH, "clean: an acknowledgement is queued", '    if QUEUE_NOISE_RE.search(text or ""):\n        return None\n    with _queue_lock(path):', '    with _queue_lock(path):'),
+    (DISPATCH, "clean: the same words wait twice", '        if any(not i["shown"] and _queue_same(i["text"], pieces[0]) for i in q["items"]):\n            return None\n', ''),
+    (DISPATCH, "clean: old noise counts as waiting", '            if _queue_clean(q, now):', '            if False:'),
+    (DISPATCH, "clean: old repeats count as waiting", 'repeat = not i["shown"] and any(_queue_same(i["text"], k["text"]) for k in keep)', 'repeat = False'),
+    (DISPATCH, "clean: a lane report goes in parts", '        queue_add(path, text, now, key=key, whole=True)', '        queue_add(path, text, now)'),
+    (DISPATCH, "clean: a rewritten report adds a second post", '        if key is not None:\n            old = next(', '        if False:\n            old = next('),
+    (DISPATCH, "clean: a report is not shortened", '    while budget > 0 and len(out.split()) > limit:', '    budget = 10 ** 6\n    out = build(budget)\n    while False:'),
+    (DISPATCH, "clean: a seen report is posted whole again", '                news = report_news(body, base) if base else body\n                if not news', '                news = body\n                if not news'),
+    (DISPATCH, "clean: an unseen rewrite is posted as news only", '                base = rec.get("base") if waiting else rec.get("last")', '                base = rec.get("last")'),
+    (DISPATCH, "clean: the sweep reposts what the lane already posted", '                answered_in_chat = True\n                line = "%s | report | %s finished; not posted: it already', '                line = "%s | report | %s finished; not posted: it already'),
+    (DISPATCH, "clean: his chat question waits for the day's cap", 'day_cap=not about_the_chat(question))', 'day_cap=True)'),
+    (DISPATCH, "clean: no question waits for the day's cap", '    if today >= MAX_PER_DAY and day_cap:', '    if False:'),
     (DISPATCH, "freeze: a long post goes out whole", '    if len(text) <= ITEM_MAX:\n        return [text]\n    pieces', '    if True:\n        return [text]\n    pieces'),
     (DISPATCH, "freeze: a huge post is dozens of nexts", '    if len(pieces) > QUEUE_MAX_PIECES:', '    if False:'),
     (DISPATCH, "freeze: the nudge is a bare count", 'ok = send(queue_nudge(waiting, nxt))', 'ok = send(queue_tail(waiting).strip())'),

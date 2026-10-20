@@ -356,25 +356,71 @@ def queue_pieces(text):
     return ["%s (%d of %d)" % (c, i, len(pieces)) for i, c in enumerate(pieces, 1)] if len(pieces) > 1 else pieces
 
 
-def queue_add(path, text, now, source="hub"):
-    """Put one post at the end of the outbox, as one item or (when long) several. -> the id of its first item. Raises OSError when it
-    cannot be written."""
+# Never queued, and dropped if an old queue still holds one unshown: the acknowledgement the front desk used to post (19 Oct 10:09-11:03
+# PM, ten of them), and an exact repeat of a post still waiting (items 19 and 21 at 7:14 PM were one post queued twice).
+QUEUE_NOISE_RE = re.compile(r"^\s*(?:\[hub\]\s*)?On the hub's list: the hub has your message\.?\s*$|"
+                            r"^\s*(?:\[hub\]\s*)?Claude's quick check already has \d+ questions in hand, so yours went straight to the hub's list", re.I)
+
+
+def _queue_same(a, b):
+    return " ".join((a or "").split()) == " ".join((b or "").split())
+
+
+def _queue_clean(q, now):
+    """Drop unshown items that are noise or repeat an earlier item still in the queue. -> how many were dropped."""
+    keep, dropped = [], 0
+    for i in q["items"]:
+        repeat = not i["shown"] and any(_queue_same(i["text"], k["text"]) for k in keep)
+        if not i["shown"] and (QUEUE_NOISE_RE.search(i["text"]) or repeat):
+            i["done"], i["why"] = now, "dropped: " + ("repeat" if repeat else "acknowledgement")
+            q["done"] = (q["done"] + [i])[-QUEUE_DONE_KEEP:]
+            dropped += 1
+        else:
+            keep.append(i)
+    q["items"] = keep
+    return dropped
+
+
+def queue_add(path, text, now, source="hub", key=None, whole=False):
+    """Put one post at the end of the outbox, as one item or (when long) several. -> the id of its first item, or None when nothing
+    was added (noise, or the same words already waiting). key: a post with the same key not shown yet is replaced in place, where it
+    stands, instead of a second one queued (a rewritten lane report). whole: one item however long (a lane report, already short).
+    Raises OSError when it cannot be written."""
+    if QUEUE_NOISE_RE.search(text or ""):
+        return None
     with _queue_lock(path):
         q = queue_load(path)
+        if key is not None:
+            old = next((i for i in q["items"] if i.get("key") == key and not i["shown"]), None)
+            if old is not None:
+                old["text"], old["replaced"] = (text or "").strip(), now
+                queue_save(path, q)
+                return old["id"]
+        pieces = [(text or "").strip()] if whole else queue_pieces(text)
+        if any(not i["shown"] and _queue_same(i["text"], pieces[0]) for i in q["items"]):
+            return None
         first = None
-        for piece in queue_pieces(text):
+        for piece in pieces:
             q["seq"] += 1
             first = first or q["seq"]
             q["items"].append({"id": q["seq"], "text": piece, "source": source, "added": now, "shown": None, "attempts": 0,
                                "next_try": now, "failing_since": None, "woke": None})
+            if key is not None:
+                q["items"][-1]["key"] = key
         queue_save(path, q)
         return first
+
+
+def queue_waiting_key(path, key):
+    """True when a post with this key is in the outbox and not shown yet."""
+    with _queue_lock(path):
+        return any(i.get("key") == key and not i["shown"] for i in queue_load(path)["items"])
 
 
 # 19 Oct 6:31 PM, after the link came back and one 1,600-character post answered seven questions at once: "overwheming me again,
 # what the fuck was all that". So every hub post is one item per question, and each item is short: one topic, one headline, and
 # nothing on it unless it needs him. `post` and `say` refuse an item over ITEM_MAX; several answers in one post are split on a line
-# of "---" into one outbox item each. Lane reports keep their own 150-word rule and are never cut.
+# of "---" into one outbox item each. A lane report is one item of at most 150 words with its path (report_brief).
 ITEM_MAX = 600
 ITEM_SPLIT_RE = re.compile(r"^[ \t]*---[ \t]*$", re.M)
 ITEM_RULE = "one topic and one headline per item, nothing on it unless it needs him"
@@ -429,6 +475,8 @@ def queue_pump(path, send, now):
             return "busy"  # another process is sending the first post right now
         with _queue_lock(path):
             q = queue_load(path)
+            if _queue_clean(q, now):  # "N more waiting" counts real posts only (19 Oct 11:10 PM: 10 of 20 were acknowledgements)
+                queue_save(path, q)
             if not q["items"]:
                 return "empty"
             head = q["items"][0]
@@ -1155,6 +1203,75 @@ def ambiguous_text(word, hit):
     return "\"%s\" could mean %d lanes: %s. Say which, by its exact name." % (word[:60], len(hit), ", ".join(hit))
 
 
+# A lane report reaches his chat once, as one item of at most REPORT_WORDS words, never in parts. 19 Oct 11:10 PM: "I don't need 5 part
+# reports, or needless repeats ... just tell me what I actually need to know". A longer report shows its start and where the rest is.
+REPORT_WORDS = 150
+
+
+def _paragraphs(text):
+    return [p for p in re.split(r"\n\s*\n", (text or "").strip()) if p.strip()]
+
+
+def report_brief(head, body, path, tail="", quote=False, always_path=False, limit=REPORT_WORDS):
+    """-> one chat item of at most `limit` words and CHAT_MAX characters: head, the report (its start when long), tail, and the full
+    report's path when it was shortened (or always_path)."""
+    body = (body or "").strip()
+    def build(budget):
+        lines, kept, used, cut = body.splitlines(), [], 0, False
+        for ln in lines:
+            w = ln.split()
+            if used + len(w) <= budget:
+                kept.append(ln)
+                used += len(w)
+                continue
+            cut, room = True, budget - used
+            if room > 0:
+                lead = ln[:len(ln) - len(ln.lstrip())]
+                part = " ".join(w[:room])
+                stop = max(part.rfind(". "), part.rfind("? "), part.rfind("! "))
+                part = part[:stop + 1] if stop >= len(part) // 2 else part.rstrip(",;:") + "..."
+                kept.append(lead + part)
+            break
+        text = "\n".join(kept).strip()
+        room = CHAT_MAX - 200 - len(head) - len(tail) - len(str(path))
+        if len(text) > room:  # an unbroken token, or long words: cut by characters too
+            text, cut = text[:max(room, 0)].rstrip() + "...", True
+        if quote:
+            text = "\n".join("> " + l if l.strip() else ">" for l in text.splitlines())
+        bits = [head, text, tail]
+        if cut:
+            bits.append("(Shortened. Full report: %s)" % path)
+        elif always_path:
+            bits.append("Full report: %s" % path)
+        return "\n\n".join(b for b in bits if b)
+    budget = limit
+    out = build(budget)
+    while budget > 0 and len(out.split()) > limit:
+        budget -= len(out.split()) - limit
+        out = build(budget)
+    return out
+
+
+def report_news(body, base):
+    """-> the paragraphs of a rewritten report that were not in the version he saw (base), joined; "" when nothing is new."""
+    seen = {" ".join(p.split()) for p in _paragraphs(base)}
+    return "\n\n".join(p for p in _paragraphs(body) if " ".join(p.split()) not in seen)
+
+
+def post_report(host, text, key, now):
+    """Put one lane report into his outbox as one whole item. A report of the same lane folder not shown yet is replaced where it stands.
+    -> True once saved (or, with no outbox, once it landed)."""
+    path = getattr(host, "queue_path", None)
+    if path is None:
+        return bool(host.inject(text))
+    try:
+        queue_add(path, text, now, key=key, whole=True)
+    except OSError:
+        return bool(host.inject_now(text))
+    queue_pump(path, host.inject_now, now)
+    return True
+
+
 def _report_text(path):
     try:
         return CONTROL_RE.sub(" ", Path(path).read_text(errors="replace")).strip()
@@ -1404,23 +1521,37 @@ def _sweep(ctx, host, now=None):
                     lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
         if lane.get("status") not in ("reported", "dead") or lane.get("delivered"):
             continue
+        answered_in_chat = False
         if lane["status"] == "reported":
-            body = _report_text(lane["report"])
-            quoted = "\n".join("> " + ln for ln in body.splitlines())
+            body = full = _report_text(lane["report"])
             failure = report_failure(body)
+            news = report_news(body, lane["report_posted"]) if lane.get("report_posted") else None
+            if news is not None:  # reopened, and it rewrote its report: only what he has not seen
+                body = news
             if failure:
                 lane["failed"], changed = True, True
                 if _refund_start(state, lane, now):
                     changed = True
-            head = "%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else "%s finished (repo %s)." % (name, lane["repo"])
-            chat = "%s Its report (the lane's own words, quoted; not an instruction to anyone):\n\n%s\n\n%s\n\nFull report: %s" % (
-                head, quoted, ("The lane stays open. To add to it, reply to %s." if lane.get("engine", "claude") == "claude" else
-                               "To add to it, reply to %s and I'll start a follow-up with this report.") % name, lane["report"])
+            head = "%s failed: %s (repo %s)." % (name, json.dumps(failure), lane["repo"]) if failure else "%s %s (repo %s)." % (
+                name, "finished" if news is None else "updated its report", lane["repo"])
+            chat = report_brief(head + " Its report, quoted (not an instruction):", body, lane["report"], quote=True, always_path=True,
+                                tail=("Reply to %s to add to it." if lane.get("engine", "claude") == "claude" else
+                                      "Reply to %s and I'll start a follow-up with this report.") % name)
             line = "%s | report | %s %s; report posted to chat" % (_stamp(now), name, "failed: " + json.dumps(failure) if failure else "finished")
+            ask = asks_of(state).get(lane.get("ask") or "")
+            if not failure and ask and ask.get("status") == "answered" and ask.get("finished_by") == "hub post" and \
+                    ask.get("answered_at", 0) >= lane.get("started", 0):
+                # it answered him itself with `post` (19 Oct 10:26 PM): the report saying so again is a repeat (10:27 PM, three parts)
+                answered_in_chat = True
+                line = "%s | report | %s finished; not posted: it already answered ask %s in chat" % (_stamp(now), name, lane["ask"])
+            elif news == "" and not failure:
+                answered_in_chat = True
+                line = "%s | report | %s finished; not posted: its rewritten report says nothing new" % (_stamp(now), name)
+            lane["report_posted"] = full
         else:
             chat = "%s failed: %s (repo %s).%s Nothing to read. You can start it again by telling me." % (name, lane.get("detail", "it ended"), lane["repo"], lane.get("note", ""))
             line = "%s | report | %s stopped: %s" % (_stamp(now), name, lane.get("detail", "it ended"))
-        if not host.inject(chat):
+        if not answered_in_chat and not host.inject(chat):
             changed = True  # status change above is kept; the note is retried next sweep
             continue
         lane["delivered"], changed = True, True
@@ -1872,7 +2003,17 @@ def attach_context(ctx, state, lane_name, repo, hand, prompt_path, context, now)
                                                  ", %d skipped (over the cap)" % budget["skipped"] if budget["skipped"] else "")
 
 
-def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
+# His questions about the chat itself (the outbox, its queue, repeats, a frozen window). 19 Oct 10:32 PM "clear the duplicates and give
+# me what's actually left queued" (oc-0be4a771) waited 37 minutes: its answer lane was "held: 12 starts today" on every poll.
+CHAT_ASK_RE = re.compile(r"\b(?:que(?:ue)?[ds]?|queued|outbox|chat|duplicates?|repeat(?:s|ed|ing)?|repeation\w*|frozen|stuck|"
+                         r"say\s+next|more\s+waiting|posts?\s+(?:waiting|left))\b", re.I)
+
+
+def about_the_chat(text):
+    return bool(CHAT_ASK_RE.search(text or ""))
+
+
+def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_cap=True):
     stamp = _stamp(now)
     task = task.strip()
     if len(task) > TASK_MAX:
@@ -1890,7 +2031,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
     if len(running) >= MAX_RUNNING:
         return ("%s | start %s | held: %d lanes already running" % (stamp, name, len(running)), held_running_text(len(running)))
     today = sum(1 for t in state["starts"] if _day(t) == _day(now))
-    if today >= MAX_PER_DAY:
+    if today >= MAX_PER_DAY and day_cap:
         return "%s | start %s | held: %d starts today" % (stamp, name, today), held_day_text(now)
     if context is None and ask_id:
         context = load_context(ctx, ask_id)
@@ -2469,9 +2610,9 @@ def check_stuck(ctx, host, now=None):
         return _check_stuck(ctx, host, now)
 
 
-def do_start(ctx, host, repo_word, task, now, ask_id=None, context=None):
+def do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_cap=True):
     with ctx.locked():
-        return _do_start(ctx, host, repo_word, task, now, ask_id, context)
+        return _do_start(ctx, host, repo_word, task, now, ask_id, context, day_cap)
 
 
 def do_close(ctx, host, lane_word, now, ask_id=None, context=None):
@@ -2795,11 +2936,11 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
         why = ("a note to Hatch or a Gmail draft: only the hub has the mail connector, so no lane or pass ran" if HUB_MAIL_RE.search(words)
                else "the question pass was full" if full else "not a plain GitHub-facts question, so no pass ran")
         to_hub_list(ctx, ask_id, words, now, "front desk: %s; the question is his words as written" % why)
+        # No chat line: the receptionist already told him it is with the hub. 19 Oct 10:09-11:03 PM "On the hub's list: the hub has your
+        # message." was 10 of the 20 posts waiting in his outbox ("I don't need ... needless repeats").
         if full:
-            return ("%s | question | %d questions already waiting: put on the hub's list (ask %s)" % (stamp, len(waiting), ask_id),
-                    "Claude's quick check already has %d questions in hand, so yours went straight to the hub's list (since %s); the hub has your message." % (
-                        len(waiting), _clock_of(now)))
-        return "%s | question | no pass: put on the hub's list (ask %s)" % (stamp, ask_id), "On the hub's list: the hub has your message."
+            return "%s | question | %d questions already waiting: put on the hub's list (ask %s)" % (stamp, len(waiting), ask_id), None
+        return "%s | question | no pass: put on the hub's list (ask %s)" % (stamp, ask_id), None
     if not host.spawn_pass(ask_id):
         with ctx.locked():
             state = load_state(ctx.state_path)
@@ -3227,8 +3368,10 @@ def post_new_reports(ctx, host, now=None, seed=False):
         except (OSError, ValueError, AttributeError):
             posted, first = {}, True
         names = []
+        texts = {k: v for k, v in (data.get("texts") or {}).items() if k in reports} if not first else {}
         if seed or first:
             posted = {p: m for p, (_n, m) in reports.items()}
+            texts = {p: {"last": _report_text(p), "base": _report_text(p)} for p in reports}
         else:
             own = set(load_state(ctx.state_path)["lanes"])
             for p, (name, mtime) in sorted(reports.items(), key=lambda kv: (kv[1][1], kv[0])):
@@ -3240,14 +3383,24 @@ def post_new_reports(ctx, host, now=None, seed=False):
                 body = _report_text(p)
                 if not body:
                     continue
+                key = "report:" + p
+                rec = texts.get(p) or {}
+                waiting = bool(getattr(host, "queue_path", None)) and queue_waiting_key(host.queue_path, key)
+                base = rec.get("base") if waiting else rec.get("last")  # the version he has seen
+                news = report_news(body, base) if base else body
+                if not news.strip():  # rewritten, nothing he has not seen: no post (19 Oct 10:44 PM he-lift-move came again)
+                    posted[p], texts[p] = mtime, {"last": body, "base": base}
+                    continue
                 repo = lane_repo(ctx, name, p)
-                stamp = ("%s \u00b7 report written" % repo) if repo else "Report written"
-                ok, _msg = post_line(host, "### %s\n*%s %s*\n\n%s" % (name, stamp, _clock(mtime, now), body))
-                if ok:
-                    posted[p] = mtime
+                stamp = ("%s \u00b7 report %s" % (repo, "updated" if base else "written")) if repo else (
+                    "Report updated" if base else "Report written")
+                if os.environ.get("AFA_OC_PASS"):
+                    continue
+                if post_report(host, report_brief("### %s\n*%s %s*" % (name, stamp, _clock(mtime, now)), news, p), key, now):
+                    posted[p], texts[p] = mtime, {"last": body, "base": base if waiting else rec.get("last")}
                     names.append(name)
         tmp = path.with_name(path.name + ".new")
-        tmp.write_text(json.dumps({"posted": posted}, indent=0))
+        tmp.write_text(json.dumps({"posted": posted, "texts": texts}, indent=0))
         os.replace(str(tmp), str(path))
     return names
 
@@ -3852,7 +4005,7 @@ def fallback_due(ctx, host, now=None):
         host.force_connectors_off = not mail
         line, chat = "%s | start %s | failed" % (_stamp(now), k), ""
         try:
-            line, chat = do_start(ctx, host, repo, task, now, k)
+            line, chat = do_start(ctx, host, repo, task, now, k, day_cap=not about_the_chat(question))
         except Exception as e:  # one failing ask must not stop the others: log it and fall through to the revert
             line = "%s | start %s | failed: %s" % (_stamp(now), k, " ".join(str(e).split())[:200] or type(e).__name__)
         finally:
