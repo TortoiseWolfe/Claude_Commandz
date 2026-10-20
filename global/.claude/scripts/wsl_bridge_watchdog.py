@@ -177,7 +177,72 @@ def heal(read, root, buddy_text):
     return steps, route2 if ok else route, text, big_blocks(text) >= MIN_BLOCKS
 
 
-def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time):
+def heal_log_tail(sd):
+    try:
+        with open(os.path.join(sd, "heal.log")) as f:
+            return f.read()[-600:].rstrip("\n").rsplit("\n", 1)[-1]
+    except OSError:
+        return ""
+
+
+def snapshot_io():
+    """{pid: read_bytes} for every process this user can read /proc/<pid>/io of."""
+    snap = {}
+    for p in os.listdir("/proc"):
+        if p.isdigit():
+            try:
+                with open("/proc/%s/io" % p) as f:
+                    snap[int(p)] = int(re.search(r"^read_bytes:\s+(\d+)", f.read(), re.M).group(1))
+            except (OSError, AttributeError, ValueError):
+                pass
+    return snap
+
+
+def busiest_reader(a, b, secs):
+    """(pid, MB/s) of the process that read the most between two snapshots, or None when nothing read over 20 MB/s."""
+    rates = sorted(((b[p] - a[p]) / secs / 1048576, p) for p in b if p in a)
+    return (rates[-1][1], rates[-1][0]) if rates and rates[-1][0] >= 20 else None
+
+
+def proc_cmd(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def lane_of(pid):
+    """The lanes tmux window whose pane is an ancestor of `pid`, else ''. Used only to name who started a heavy reader."""
+    try:
+        panes = subprocess.run(["tmux", "list-windows", "-t", "lanes", "-F", "#{pane_pid} #{window_name}"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    names = dict(l.split(" ", 1) for l in panes.splitlines() if " " in l)
+    while pid > 1:
+        if str(pid) in names:
+            return names[str(pid)]
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return ""
+    return ""
+
+
+def describe_churn(snapshot=snapshot_io, lane=lane_of, secs=2):
+    """Who is filling the page cache right now: 'pid 160023 244MB/s (lane greg-drafts-check) bfs -S dfs / -iname ...', or ''."""
+    a = snapshot()
+    time.sleep(secs)
+    hit = busiest_reader(a, snapshot(), secs)
+    if not hit:
+        return ""
+    pid, rate = hit
+    who = lane(pid)
+    return "pid %d %dMB/s%s %s" % (pid, rate, " (lane %s)" % who if who else "", proc_cmd(pid)[:110])
+
+
+def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time, churn_of=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--probe", action="store_true", help="run the bridge probe even when nothing needed healing")
     ap.add_argument("--dry-run", action="store_true")
@@ -211,35 +276,46 @@ def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.t
             if not ok:
                 write_alert(sd, t, "wsl bridge watchdog: cannot reach root to re-apply the memory reserve (docker and wsl.exe -u root both failed)")
 
+    # A low block count starts a heal, but it is not proof the bridge is down (19 Oct 9:27 PM: 7 blocks at one instant, cmd.exe still
+    # answered in 0.05 s): only the probe decides whether the hub is woken. Inside the heal gap the probe decides whether to heal anyway.
     low = before < MIN_BLOCKS
-    healthy_now = not low
-    steps, route, after, probe_ok = [], "none", buddy, None
-    if low:
-        if args.dry_run:
-            notes.append("would-heal")
-        elif file_age(os.path.join(sd, "last-heal"), t) < HEAL_GAP_S:
-            notes.append("heal-skipped(<%ds since the last)" % HEAL_GAP_S)
-        else:
-            steps, route, after, healthy_now = heal(read, root, buddy)
+    steps, route, after, probe_ok, root_failed = [], "none", buddy, None, False
+    churn = ""
+    if low and not args.dry_run:
+        churn = (churn_of or describe_churn)()
+    if low and args.dry_run:
+        notes.append("would-heal")
+    elif low:
+        gap_ok = file_age(os.path.join(sd, "last-heal"), t) >= HEAL_GAP_S
+        if not gap_ok:
+            probe_ok = probe()
+            notes.append("heal-skipped(<%ds since the last, bridge %s)" % (HEAL_GAP_S, "answers" if probe_ok else "DOWN: healing anyway"))
+            gap_ok = not probe_ok
+        if gap_ok:
+            steps, route, after, _ = heal(read, root, buddy)
+            root_failed = any(x.endswith("-failed") for x in steps)
             write_stamped(os.path.join(sd, "last-heal"), stamp(t) + "\n", t)
-    if (steps or args.probe) and not args.dry_run:
+            probe_ok = probe()
+    elif args.probe and not args.dry_run:
         probe_ok = probe()
 
     now_blocks = big_blocks(after)
     if not args.dry_run and (steps or notes):
-        line = "%s order%d+ blocks %d->%d (min %d) steps=%s route=%s free_mb %d->%d probe=%s%s" % (
+        line = "%s order%d+ blocks %d->%d (min %d) steps=%s route=%s free_mb %d->%d probe=%s%s%s" % (
             stamp(t), ORDER, before, now_blocks, MIN_BLOCKS, ",".join(steps) or "none", route, free_before,
             mem_free_kb(read("/proc/meminfo")) // 1024, {True: "ok", False: "FAIL", None: "skipped"}[probe_ok],
-            (" " + " ".join(notes)) if notes else "")
-        log_line(sd, line)
-        print(line)
+            (" " + " ".join(notes)) if notes else "", (" churn=" + churn) if churn else "")
+        # the 15-minute task and lane_watch.sh can both skip in the same second: one line per state is enough
+        if steps or not heal_log_tail(sd).endswith(line[len(stamp(t)):]):
+            log_line(sd, line)
+            print(line)
     elif args.dry_run and (low or notes):
         print("dry-run: order%d+ blocks %d (min %d) %s" % (ORDER, before, MIN_BLOCKS, " ".join(notes)))
 
-    bad = (low and not healthy_now and not args.dry_run) or probe_ok is False
-    if bad:
-        write_alert(sd, t, "wsl bridge: free order-%d+ blocks %d (min %d) after healing, probe %s. Windows commands from WSL may hang; see %s"
-                    % (ORDER, now_blocks, MIN_BLOCKS, {True: "ok", False: "FAILED", None: "not run"}[probe_ok], os.path.join(sd, "heal.log")))
+    if probe_ok is False or root_failed:
+        write_alert(sd, t, "wsl bridge: Windows commands from WSL %s; free order-%d+ blocks %d (min %d)%s. See %s"
+                    % ("are NOT answering (10 s probe failed)" if probe_ok is False else "could not be healed (no root route)",
+                       ORDER, now_blocks, MIN_BLOCKS, (", page-cache churn: " + churn) if churn else "", os.path.join(sd, "heal.log")))
         return 2
     return 0
 
