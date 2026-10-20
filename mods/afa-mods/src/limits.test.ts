@@ -135,6 +135,21 @@ describe('a docker run or compose run with no CPU cap and no timeout in front is
     })
   }
 
+  // review of #75, round 8: a timeout does not stop a detached container; only a cap does
+  for (const command of ['timeout 600 docker run -d img', 'timeout 600 docker run -itd img', 'timeout 600 docker run --detach img', 'timeout 600 docker compose run -d web x', 'command docker run img', 'time docker run img', 'xargs docker run img']) {
+    test(`held: ${command}`, () => {
+      expect(held(command)).toHaveLength(1)
+    })
+  }
+  for (const command of ['timeout 600 docker run -d --cpus 2 img', 'timeout 600 docker run -e A=b img', 'timeout 600 docker run -e d img', 'command timeout 5 docker run img']) {
+    test(`not held: ${command}`, () => {
+      expect(held(command)).toEqual([])
+    })
+  }
+  // docker-heavy.sh is called as `docker-heavy.sh [options] -- docker ...`; the name elsewhere in front is not that
+  test('docker-heavy.sh not followed by -- before docker is not the exemption', () => {
+    expect(held('env docker-heavy.sh docker run img')).toHaveLength(1)
+  })
   test('the same service name in another folder is another key', () => {
     const [a] = composeRunsOf('cd /srv/a && docker compose run --rm web x')
     const [b] = composeRunsOf('cd /srv/b && docker compose run --rm web x')
@@ -214,6 +229,10 @@ volumes:
     const odd = 'services:\n  web:\n    image: x\n    environment:\n      cpus: 4\n    labels:\n      cpu_quota: 9\n'
     expect(composeServiceLimit(odd, 'web')).toBe('absent')
     expect(composeServiceLimit('services:\n  web:\n    cpus: 0\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web: *base\n  db:\n    cpus: 4\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web: { cpus: 4 }\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web: &a\n    cpus: 4\n', 'web')).toBe('none')
+    expect(composeServiceLimit('services:\n  web: # note\n    cpus: 4\n', 'web')).toBe('capped')
     expect(composeServiceLimit('services:\n  web:\n    cpus: ${C:-4}\n', 'web')).toBe('none')
     expect(composeServiceLimit('include:\n  - x.yml\nservices:\n  web:\n    cpus: 4\n', 'web')).toBe('none')
     expect(composeServiceLimit('services:\n  web:\n    <<: *base\n    cpus: 4\n', 'web')).toBe('none')

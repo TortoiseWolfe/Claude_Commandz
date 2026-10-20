@@ -58,7 +58,7 @@ one-line fix: add `--cpus N` (and a timeout), or run it through `~/.claude/scrip
 (19 Oct: one uncapped run took 14.6 of 16 cores and the machine stopped answering). A cap is `--cpus`, `--cpu-quota` or
 `--cpuset-cpus` among the options before the image, so a `--cpus` the container's own program is given does not count, and its value
 must be a real limit (`--cpus 0`, `--cpu-quota -1` and `$X` are not). A timeout is `timeout [options] DURATION` with a positive
-duration of at most a day (`timeout 0` is not one). Either a cap or a timeout in front clears it. A compose run has no `--cpus` flag, so
+duration of at most a day (`timeout 0` is not one). Either a cap or a timeout in front clears it, except a detached run (`-d`, `--detach`), which outlives a timeout and needs a cap. A compose run has no `--cpus` flag, so
 its service is read in the compose file the way compose picks it: the `-f` files in order, else the first default file in the folder
 (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) plus its override file; the last file that says anything
 about the service's CPU wins, so `cpus: 0` in an override uncaps it. Only a direct `cpus`, `cpu_quota` or `cpuset` key, or
