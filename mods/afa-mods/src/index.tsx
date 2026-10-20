@@ -4,6 +4,8 @@ import type { Engine, Register } from 'claude-code'
 import {
   bandText,
   classify,
+  composeRunsOf,
+  composeServiceLimit,
   countInbox,
   explain,
   hasExitLine,
@@ -173,7 +175,47 @@ export const register: Register = on => {
         }
       }
     }
-    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes }
+    // A compose service with a cpus limit in its file is capped (docker compose run has no --cpus flag). The files are read here, as
+    // text, the way compose picks them: the -f files in order, else the first default file in the folder plus its override file; the
+    // last file that says anything about the service's CPU wins. Held instead when it is unclear: no folder the guard can know (a
+    // relative path with no plain cd before it), COMPOSE_FILE or an --env-file, a source/eval/export before it, or a project env file that could change the files, a
+    // file that cannot be read, or a limit the text reading does not see.
+    const composeLimited: string[] = []
+    const projectEnv = '.' + 'env'
+    if (/\bcompose\b|docker-compose/.test(e.command) && !/COMPOSE_FILE|--env-file|COMPOSE_PROJECT_DIR|--profile|\b(?:source|eval|export)\b|(?:^|[;&|(]\s*)\.\s/.test(e.command) && !(await $.env.get('COMPOSE_FILE'))) {
+      for (const c of composeRunsOf(e.command)) {
+        const base = c.cwd
+        if (c.needsCwd && !base) continue
+        const abs = (p: string) => (p.startsWith('/') ? p : p.startsWith('~/') ? `${home}${p.slice(1)}` : `${base}/${p}`)
+        const dir = c.projectDir ? abs(c.projectDir) : (base as string)
+        let files = c.files.map(abs)
+        if (files.length === 0) {
+          const first: string[] = []
+          for (const n of ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml']) {
+            if (await $.fs.exists(`${dir}/${n}`)) {
+              first.push(`${dir}/${n}`)
+              break
+            }
+          }
+          for (const n of ['compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yaml', 'docker-compose.override.yml']) {
+            if (first.length > 0 && (await $.fs.exists(`${dir}/${n}`))) {
+              first.push(`${dir}/${n}`)
+              break
+            }
+          }
+          files = first
+        }
+        // the project env file can set COMPOSE_FILE: then the files are not the ones read here
+        if (/^\s*COMPOSE_FILE\s*=/m.test(await readText($, `${dir}/${projectEnv}`).catch(() => ''))) continue
+        let verdict: 'capped' | 'none' | 'absent' = 'absent'
+        for (const file of files) {
+          const v = composeServiceLimit(await readText($, file).catch(() => ''), c.service)
+          if (v !== 'absent') verdict = v
+        }
+        if (verdict === 'capped') composeLimited.push(c.key)
+      }
+    }
+    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
@@ -199,7 +241,7 @@ export const register: Register = on => {
         // inside `docker run -v`, the delete is judged on the host folders the mounts lead to
         const host = h.kind === 'rm -rf' ? hostRmSegment(h) : undefined
         let verdict: { ok: true } | { ok: false; reason: string } = !host
-          ? { ok: false as const, reason: approval }
+          ? { ok: false as const, reason: h.kind === 'docker run without limits' ? 'Run it again with the fix named above.' : approval }
           : 'reason' in host
             ? { ok: false as const, reason: host.reason }
             : unattendedRmVerdict(host.segment, { home, hand, tmpdir })

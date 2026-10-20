@@ -399,7 +399,10 @@ describe('blast radius, rm inside docker run', () => {
   const WT = `${HOME}/repos/.worktrees/ScriptHammer--skip-conformance`
   const SCRIPTHAMMER = `cd ~/repos/.worktrees && docker run --rm -v "$PWD/ScriptHammer--skip-conformance:/w" alpine sh -c 'rm -rf /w/* /w/.[!.]* /w/..?*'`
   const CHATTANOOGA = `docker run --rm -v cd-repro-core:/work cd-repro sh -c 'rm -rf /work/.good'`
-  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, device = '') => {
+  // these tests are about the rm in a container: the CPU cap is added so the limits hold stays out of them (limits.test.ts covers it)
+  const capped = (c: string) => c.replace(/\bdocker run\b/g, 'docker run --cpus 1')
+  const go = async ($: any, on: any, rawCommand: string, vars: Record<string, string> = {}, device = '', raw = false) => {
+    const command = raw ? rawCommand : capped(rawCommand)
     setup(on, vars)
     const seen = { asked: '', log: '' }
     on('session.surfaces', () => ({ value: ['terminal'] }))
@@ -461,9 +464,9 @@ describe('blast radius, rm inside docker run', () => {
     expect(r.deny).toContain('refused at the prompt')
   })
   describe('in a lane nobody watches', () => {
-    const run = async ($: any, on: any, command: string, device = '') => {
+    const run = async ($: any, on: any, command: string, device = '', raw = false) => {
       const vars = { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` }
-      return go($, on, command, vars, device)
+      return go($, on, command, vars, device, raw)
     }
     test('a named volume runs and is not held at all', async ($, on) => {
       const { seen, r } = await run($, on, CHATTANOOGA)
@@ -543,5 +546,117 @@ describe('blast radius, rm inside docker run', () => {
       expect(r.deny).toContain('did not wait')
       expect(r.deny).toContain('is outside the places a lane may clean up')
     })
+  })
+})
+
+describe('blast radius, docker run with no CPU cap and no timeout', () => {
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, files: Record<string, string> = {}) => {
+    setup(on, vars)
+    const seen = { asked: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    Object.assign(FILES, files)
+    on('fs.write', () => ({ value: undefined }))
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+  const INCIDENT = 'docker run ada-stair-generator-site-tools'
+
+  test('interactive: the incident command asks, naming the fix', async ($, on) => {
+    const { seen, r } = await go($, on, INCIDENT)
+    expect(seen.asked).toContain('docker run without limits')
+    expect(seen.asked).toContain('no CPU cap and no timeout')
+    expect(seen.asked).toContain('docker-heavy.sh')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('interactive: a capped run, a timeout and docker-heavy.sh run without asking', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker run --cpus 4 img')
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('interactive: docker-heavy.sh runs without asking', async ($, on) => {
+    const { seen, r } = await go($, on, '~/.claude/scripts/docker-heavy.sh -- docker run img')
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('interactive: docker ps, logs, inspect, stats and update are never held', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker ps && docker logs web && docker inspect web && docker stats --no-stream && docker update --cpus 4 web')
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('a lane nobody watches is refused with the fix and told to run it again', async ($, on) => {
+    const { seen, r } = await go($, on, INCIDENT, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toContain('did not wait')
+    expect(r.deny).toContain('fix: add --cpus N')
+    expect(r.deny).toContain('Run it again with the fix')
+    expect(r.deny).not.toContain('needs Jonathan to approve')
+  })
+  test('a lane with --cpus and a timeout in front runs', async ($, on) => {
+    const { r } = await go($, on, 'timeout 600 docker run --cpus 4 img', { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` })
+    expect(r.deny).toBeUndefined()
+  })
+  test('a compose service whose file sets cpus is capped; the same run on a file with no limit is held', async ($, on) => {
+    const capped = await go($, on, 'cd /srv/app && docker compose run --rm web npm test', {}, { '/srv/app/compose.yaml': 'services:\n  web:\n    image: n\n    cpus: 4\n' })
+    expect(capped.seen.asked).toBe('')
+    expect(capped.r.deny).toBeUndefined()
+  })
+  test('a compose service with no limit in its file is held', async ($, on) => {
+    const { seen, r } = await go($, on, 'cd /srv/app && docker compose run --rm web npm test', {}, { '/srv/app/compose.yaml': 'services:\n  web:\n    image: n\n' })
+    expect(seen.asked).toContain('docker run without limits')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  const WEB4 = 'services:\n  web:\n    image: n\n    cpus: 4\n'
+  const RUN = 'cd /srv/app && docker compose run --rm web npm test'
+  test('review of #75: an override file that sets cpus: 0 uncaps the service, so the run is held', async ($, on) => {
+    const { seen } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/compose.override.yaml': 'services:\n  web:\n    cpus: 0\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: an override that only adds other keys leaves the base cap standing', async ($, on) => {
+    const { seen, r } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/compose.override.yaml': 'services:\n  web:\n    image: m\n' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('review of #75: -f names the files, so the default file is not read', async ($, on) => {
+    const { seen } = await go($, on, 'cd /srv/app && docker compose -f ci.yml run --rm web x', {}, { '/srv/app/compose.yaml': WEB4, '/srv/app/ci.yml': 'services:\n  web:\n    image: n\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: COMPOSE_FILE in the command or the environment holds the run', async ($, on) => {
+    const a = await go($, on, 'cd /srv/app && COMPOSE_FILE=other.yml docker compose run --rm web x', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(a.seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: COMPOSE_FILE in the environment holds the run', async ($, on) => {
+    const { seen } = await go($, on, RUN, { COMPOSE_FILE: 'other.yml' }, { '/srv/app/compose.yaml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: --env-file, --profile and a project env file that sets COMPOSE_FILE hold the run', async ($, on) => {
+    const a = await go($, on, 'cd /srv/app && docker compose --env-file x run --rm web y', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(a.seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: a project env file that sets COMPOSE_FILE holds the run', async ($, on) => {
+    const { seen } = await go($, on, RUN, {}, { '/srv/app/compose.yaml': WEB4, ['/srv/app/.' + 'env']: 'COMPOSE_FILE=other.yml\n' })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: a source, eval or export before the compose call holds the run', async ($, on) => {
+    const { seen } = await go($, on, 'cd /srv/app && export COMPOSE_FILE=other.yml; docker compose run --rm web x', {}, { '/srv/app/compose.yaml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: a relative compose file with no cd before it is held, because the guard cannot know the folder', async ($, on) => {
+    const { seen } = await go($, on, 'docker compose -f ci.yml run --rm web x', {}, { '/srv/app/ci.yml': WEB4 })
+    expect(seen.asked).toContain('docker run without limits')
+  })
+  test('review of #75: an absolute compose file needs no cd', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker compose -f /srv/app/ci.yml run --rm web x', {}, { '/srv/app/ci.yml': WEB4 })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+  test('a compose run whose file cannot be found, or a cd the guard cannot follow, is held', async ($, on) => {
+    const { seen } = await go($, on, 'cd "$X" && docker compose run --rm web npm test', {}, { '/srv/app/compose.yaml': 'services:\n  web:\n    cpus: 4\n' })
+    expect(seen.asked).toContain('docker run without limits')
   })
 })
