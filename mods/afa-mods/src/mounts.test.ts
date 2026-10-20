@@ -6,7 +6,8 @@ import { touches } from './touches'
 import type { Probe } from './touches'
 
 const HOME = '/home/t'
-const held = (command: string, home = HOME): Hold[] => classify(command, 0, { home })
+// these tests are about the rm; the CPU-limit hold has its own tests (limits.test.ts)
+const held = (command: string, home = HOME): Hold[] => classify(command, 0, { home }).filter(h => h.kind !== 'docker run without limits')
 const WT = `${HOME}/repos/.worktrees/ScriptHammer--skip-conformance`
 
 // 19 Oct: both of these froze a lane on "can't tell what this touches" and the hub dug through transcripts to clear them.
@@ -221,10 +222,10 @@ describe('review of #74: the mount reading fails closed', () => {
   })
   test('a named volume that docker says is a host folder is that folder', () => {
     const env = { home: HOME, volumeDevices: { data: `${HOME}/p` } }
-    const holds = classify(`docker run --rm -v data:/w alpine sh -c 'rm -rf /w/x'`, 0, env)
+    const holds = classify(`docker run --rm --cpus 1 -v data:/w alpine sh -c 'rm -rf /w/x'`, 0, env)
     expect(holds.map(h => h.kind)).toEqual(['rm -rf'])
     expect(holds[0].container?.[0]).toMatchObject({ kind: 'host', folder: `${HOME}/p`, host: `${HOME}/p/x` })
-    expect(classify(`docker run --rm -v other:/w alpine sh -c 'rm -rf /w/x'`, 0, env)).toEqual([])
+    expect(classify(`docker run --rm --cpus 1 -v other:/w alpine sh -c 'rm -rf /w/x'`, 0, env)).toEqual([])
   })
   test('namedVolumesOf lists the volume names a command mounts, through sh -c and substitutions', () => {
     expect(namedVolumesOf(`docker run -v data:/w -v ${HOME}:/h --mount source=cache,target=/c alpine true`).sort()).toEqual(['cache', 'data'])
