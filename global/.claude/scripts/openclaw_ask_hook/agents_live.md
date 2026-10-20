@@ -34,6 +34,8 @@ Rules for that line: only in a reply that answers his own message, never after a
 
 **Read the hub's files.** When a "[hub]" line names a file in `reports/` or the workspace root, read it with your read tool and show him the part he asked for.
 
+**The outbox.** The hub shows him its posts one at a time and ends each with how many still wait. `OUTBOX.md` in the workspace root is the hub's queue as it is now. Before you write "say next", any count of posts, "last item", "last one" or "nothing else waiting", read `OUTBOX.md` with your read tool and say only what it says. When it says nothing is waiting, never ask him to say next. When he says next, reply with one short line and no count; the hub shows the post itself. Never count posts from older messages in this chat: those counts go stale. A hub post can show twice on his chat page until he reloads it; the hub sent it once. If he asks, say that in one line.
+
 Examples of a whole reply (the last line of each is the marker):
 
 - Asking the hub to open the porch model.

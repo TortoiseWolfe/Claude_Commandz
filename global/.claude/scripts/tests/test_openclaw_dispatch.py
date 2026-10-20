@@ -407,13 +407,16 @@ class ReceptionistQueue(Base):
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.chats, ["A short complete answer."])
 
-    def test_question_echo_keeps_all_300_characters(self):
+    def test_a_handed_question_is_not_echoed_and_the_pass_keeps_all_300_characters(self):
+        # 20 Oct 12:02 AM the echo ("asked Claude: <his words>") put a report he had quoted back in his outbox, in three parts
         self.ctx.hand_off_first = True
         question = "Which current sample is correct on the pull request? " * 5 + "x"
         question += "y" * (300 - len(question))
         self.assertEqual(len(question), 300)
-        _line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
-        self.assertEqual(chat, "asked Claude: " + question)
+        line, chat = dp.ask_question(self.ctx, self.host, "oc-11111111", question, NOW)
+        self.assertIn("handed to Claude", line)
+        self.assertIsNone(chat)
+        self.assertEqual(dp.asks_of(dp.load_state(self.ctx.state_path))["oc-11111111"]["task"], question)
 
     def test_the_hub_list_carries_a_long_question_whole(self):
         # change 5: the hub list used to cut a question at 300 characters; the hub works from the whole of it
@@ -774,7 +777,8 @@ class Budget(Base):
         self.host.start_ok = (False, "refusing engine codex: whatever")
         kind, line = self.act("start own-app: x")
         self.assertIn("couldn't start: refusing engine codex", line)
-        self.assertIn("Couldn't start the lane in own-app", self.host.chats[-1])
+        self.assertIn("I couldn't start a lane in own-app", self.host.chats[-1])
+        self.assertNotIn("refusing engine", self.host.chats[-1])  # lane.sh's own words stay in the log line
         self.assertEqual((self.lane_names(), self.state()["starts"]), ([], []))
 
     def test_past_90_percent_projected_claude_lanes_run_on_sonnet_only(self):
@@ -843,7 +847,8 @@ class Replies(Base):
         self.start("client-app")
         self.host.send_result = (False, "its window did not take the words")
         self.act("reply client-app: hi")
-        self.assertIn("Couldn't send", self.host.chats[-1])
+        self.assertIn("Your message didn't reach", self.host.chats[-1])
+        self.assertNotIn("did not take", self.host.chats[-1])
 
     def test_close_kills_the_window_of_a_lane_with_a_report(self):
         self.start("client-app")

@@ -469,17 +469,22 @@ assert_not_contains "$(status_with_pane "$TMP/pane-bare")" 'suggestion:' '--stat
 
 # 19 Oct: "report:yes idle" got tigard-trace closed while it was mid-work. A report is the last word only when it is newer than
 # every input the lane got and no background job is running; otherwise --status says report:stale.
-stale_row() {  # <name> <transcript-json-lines>...: a lane whose report.md is dated 16:20 UTC on 19 Oct, with this transcript
+# Times relative to now: lane_report_state.py calls a job lost after LOST_JOB_HOURS (12), so fixed 19 Oct stamps went red on 20 Oct.
+T_REP="$(date -u -d '-2 hours' '+%F %T UTC')"
+T_OLD="$(date -u -d '-4 hours' +%FT%T.000Z)"
+T_NEW="$(date -u -d '-100 minutes' +%FT%T.000Z)"
+T_BG="$(date -u -d '-75 minutes' +%FT%T.000Z)"
+stale_row() {  # <name> <transcript-json-lines>...: a lane whose report.md is two hours old, with this transcript
   local n="$1"; shift
   local dir="$TMP/stale-$n" slug rep
   mkdir -p "$dir"; slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
   mkdir -p "$HOME_TEST/.claude/projects/$slug"; printf '%s\n' "$@" >"$HOME_TEST/.claude/projects/$slug/sess-$n.jsonl"
-  rep="$TMP/stale-$n.md"; echo done >"$rep"; touch -d '2026-10-19 16:20:00 UTC' "$rep"
+  rep="$TMP/stale-$n.md"; echo done >"$rep"; touch -d "$T_REP" "$rep"
   printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsess-%s\t-\thigh\toff\n' "$(date +%F)" "$n" "$dir" "$PROMPT" "$rep" "$n" >>"$INDEX"
 }
-U_OLD='{"type":"user","timestamp":"2026-10-19T14:37:18.000Z","message":{"role":"user","content":"You are a lane"}}'
-U_NEW='{"type":"user","timestamp":"2026-10-19T16:40:42.000Z","message":{"role":"user","content":"Jonathan says the blue lines do not match"}}'
-BG='{"type":"assistant","timestamp":"2026-10-19T17:05:13.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tb1","name":"Bash","input":{"command":"run tests","run_in_background":true}}]}}'
+U_OLD='{"type":"user","timestamp":"'"$T_OLD"'","message":{"role":"user","content":"You are a lane"}}'
+U_NEW='{"type":"user","timestamp":"'"$T_NEW"'","message":{"role":"user","content":"Jonathan says the blue lines do not match"}}'
+BG='{"type":"assistant","timestamp":"'"$T_BG"'","message":{"role":"assistant","content":[{"type":"tool_use","id":"tb1","name":"Bash","input":{"command":"run tests","run_in_background":true}}]}}'
 stale_row calm "$U_OLD"
 stale_row told "$U_OLD" "$U_NEW"
 stale_row busy "$U_OLD" "$BG"

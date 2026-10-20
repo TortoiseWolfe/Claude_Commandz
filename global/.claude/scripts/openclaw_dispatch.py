@@ -360,7 +360,8 @@ def queue_pieces(text):
 # Never queued, and dropped if an old queue still holds one unshown: the acknowledgement the front desk used to post (19 Oct 10:09-11:03
 # PM, ten of them), and an exact repeat of a post still waiting (items 19 and 21 at 7:14 PM were one post queued twice).
 QUEUE_NOISE_RE = re.compile(r"^\s*(?:\[hub\]\s*)?On the hub's list: the hub has your message\.?\s*$|"
-                            r"^\s*(?:\[hub\]\s*)?Claude's quick check already has \d+ questions in hand, so yours went straight to the hub's list", re.I)
+                            r"^\s*(?:\[hub\]\s*)?Claude's quick check already has \d+ questions in hand, so yours went straight to the hub's list|"
+    r"^\s*(?:\[hub\]\s*)?\d+ of your messages went on the hub's list instead of the usual way", re.I)
 
 
 def _queue_same(a, b):
@@ -382,11 +383,33 @@ def _queue_clean(q, now):
     return dropped
 
 
-def queue_add(path, text, now, source="hub", key=None, whole=False):
+# 20 Oct 12:02 AM: his question quoted the 11:39 PM nc35-upgrade report, the front desk echoed his words back ("asked Claude: ..."),
+# and the report he had read came back as three new items. A post whose text is mostly lines he has already been shown is not queued.
+SEEN_LINE_MIN = 60
+QUEUE_TAIL_RE = re.compile(r"\((?:\d+ more waiting\. Say next for the next one|Nothing else waiting)\.?\)|\(\d+ of \d+\)|\[hub\]")
+
+
+def _seen_norm(text):
+    return " ".join(re.sub(r"(?:^|\s)>\s?|\*\*|`", " ", QUEUE_TAIL_RE.sub(" ", text or "")).split())
+
+
+def _seen_before(q, text):
+    """True when at least half of this post is lines of posts he was already shown."""
+    body = _seen_norm(text)
+    if not body:
+        return False
+    seen = {_seen_norm(re.sub(r"^[\s#>*\-]+", "", ln)) for i in q["done"] + q["items"] if i.get("shown") for ln in i["text"].splitlines()}
+    covered = sum(len(ln) for ln in seen if len(ln) >= SEEN_LINE_MIN and ln in body)
+    return covered * 2 >= len(body)
+
+
+def queue_add(path, text, now, source="hub", key=None, whole=False, answer=False):
     """Put one post at the end of the outbox, as one item or (when long) several. -> the id of its first item, or None when nothing
     was added (noise, or the same words already waiting). key: a post with the same key not shown yet is replaced in place, where it
     stands, instead of a second one queued (a rewritten lane report). whole: one item however long (a lane report, already short).
-    Raises OSError when it cannot be written."""
+    answer: the hub answering his ask: it goes ahead of every waiting post that is not an answer (never ahead of the first post,
+    which is showing or being sent). Any other post that mostly repeats what he was already shown is not added. Raises OSError when it
+    cannot be written."""
     if QUEUE_NOISE_RE.search(text or ""):
         return None
     with _queue_lock(path):
@@ -400,14 +423,24 @@ def queue_add(path, text, now, source="hub", key=None, whole=False):
         pieces = [(text or "").strip()] if whole else queue_pieces(text)
         if any(not i["shown"] and _queue_same(i["text"], pieces[0]) for i in q["items"]):
             return None
+        if key is None and not answer and _seen_before(q, text):  # an answer he asked for is never dropped, even one that quotes
+            return None
+        at = len(q["items"])
+        if answer and q["items"]:
+            at = 1
+            while at < len(q["items"]) and q["items"][at].get("answer"):
+                at += 1
         first = None
-        for piece in pieces:
+        for n, piece in enumerate(pieces):
             q["seq"] += 1
             first = first or q["seq"]
-            q["items"].append({"id": q["seq"], "text": piece, "source": source, "added": now, "shown": None, "attempts": 0,
-                               "next_try": now, "failing_since": None, "woke": None})
+            item = {"id": q["seq"], "text": piece, "source": source, "added": now, "shown": None, "attempts": 0,
+                    "next_try": now, "failing_since": None, "woke": None}
             if key is not None:
-                q["items"][-1]["key"] = key
+                item["key"] = key
+            if answer:
+                item["answer"] = True
+            q["items"].insert(at + n, item)
         queue_save(path, q)
         return first
 
@@ -416,6 +449,71 @@ def queue_waiting_key(path, key):
     """True when a post with this key is in the outbox and not shown yet."""
     with _queue_lock(path):
         return any(i.get("key") == key and not i["shown"] for i in queue_load(path)["items"])
+
+
+# 20 Oct 12:05 AM: the receptionist told him "last item", then a post ended "(2 more waiting. Say next ...)": "is it the last item or
+# you need me to say next, that confusing as fuck"; ~12:08 AM "it's clueless about what's really in the ques". The receptionist
+# cannot see the hub's queue, so the hub writes it into the receptionist's workspace as OUTBOX.md on every change, and AGENTS.md
+# (openclaw_ask_hook/agents_live.md) has it read that file before it says "say next", a count, or "last item".
+OUTBOX_FILE = "/home/openclaw/.openclaw/workspace/OUTBOX.md"
+OUTBOX_LIST = 10
+
+
+def outbox_view(path, now):
+    """-> OUTBOX.md: what the queue holds right now (the post showing, then every post not shown yet), and what that lets the
+    receptionist say."""
+    items = queue_load(path)["items"]
+    showing = items[0] if items and items[0]["shown"] else None
+    waiting = [i for i in items if not i["shown"]]
+    lines = ["# Outbox: what the hub's queue holds", "",
+             "Written by the hub from its queue at %s. This file is the only true count; the counts at the end of the posts in the chat "
+             "were true when each was shown and go stale." % _clock_of(now), "",
+             "Showing now: %s" % (queue_headline(showing["text"]) or "a post") if showing else "Showing now: nothing",
+             "Waiting, not shown yet: %d" % len(waiting)]
+    lines += ["%d. %s" % (n, queue_headline(i["text"]) or "a post") for n, i in enumerate(waiting[:OUTBOX_LIST], 1)]
+    if len(waiting) > OUTBOX_LIST:
+        lines.append("... and %d more" % (len(waiting) - OUTBOX_LIST))
+    lines.append("")
+    if waiting:
+        lines.append("What you may say: %d post%s wait%s. When he says next, the hub shows the next one itself." %
+                     (len(waiting), "" if len(waiting) == 1 else "s", "s" if len(waiting) == 1 else ""))
+    else:
+        lines.append("What you may say: nothing else is waiting%s. Never ask him to say next." %
+                     (" (the post showing is the last one)" if showing else ""))
+    return "\n".join(lines) + "\n"
+
+
+def outbox_mirror(path, push, now):
+    """Write OUTBOX.md when what the queue holds changed since the last write. push(text) -> True once written. Only the live
+    queue is mirrored: a test queue never reaches the receptionist. -> "pushed" | "same" | "failed" | "not live"."""
+    if path is None or Path(path) != STATE / "openclaw-chat-queue.json":
+        return "not live"
+    return _outbox_mirror(path, push, now)
+
+
+def _outbox_mirror(path, push, now):
+    text = outbox_view(path, now)
+    body = text.split("\n", 4)[4]  # without the time line: a new time alone is no change
+    seen = Path(str(path) + ".outbox")
+    try:
+        if seen.read_text() == body:
+            return "same"
+    except OSError:
+        pass
+    try:
+        ok = bool(push(text))
+    except Exception:
+        ok = False
+    if ok:
+        seen.write_text(body)
+    return "pushed" if ok else "failed"
+
+
+def post_answer(host, text):
+    """Post the hub's answer to his ask. Through the outbox it goes ahead of the waiting posts that are not answers (20 Oct 12:04 AM
+    the answer to oc-ce1095ad sat behind four stale items). -> True once saved (or, with no outbox, once it landed)."""
+    post = getattr(host, "inject_answer", None) or host.inject
+    return bool(post(text))
 
 
 # 19 Oct 6:31 PM, after the link came back and one 1,600-character post answered seven questions at once: "overwheming me again,
@@ -432,8 +530,18 @@ def split_items(text):
     return [p.strip() for p in ITEM_SPLIT_RE.split(text or "") if p.strip()]
 
 
+# The outbox adds the true count to every post it shows; a count in the post's own words goes stale and contradicts it (20 Oct 12:06
+# AM a hub post said "this is the last item" while the receptionist and the tail each said something else).
+QUEUE_TALK_RE = re.compile(r"\blast (?:item|post)\b|\bnothing (?:else )?(?:is )?(?:waiting|queued)\b|\b\d+ (?:more )?(?:posts? )?(?:are )?waiting\b|"
+                           r"\bsay next\b", re.I)
+
+
 def item_problem(verb, items):
     """-> why these items may not go to his chat, or None."""
+    talk = [n for n, p in enumerate(items, 1) if QUEUE_TALK_RE.search(p)]
+    if talk:
+        return ("%s: item %s talks about the outbox (a count, \"last item\", \"say next\"). Leave that out: the outbox ends every "
+                "post with the true count" % (verb, ", ".join(map(str, talk))))
     long = [n for n, p in enumerate(items, 1) if len(p) > ITEM_MAX]
     if long:
         return ("%s: item %s is over %d characters (%s). Shorten it, or split it on a line of --- into one item each"
@@ -739,19 +847,45 @@ class LaneHost:
     def inject(self, text):
         """Post to his chat. Through the outbox when this host is queued() (the live entry points): the post is saved first, so it is
         never lost, and shown when nothing else is showing. -> True once it is saved (or, unqueued, once it landed)."""
+        return LaneHost._post(self, text, False)
+
+    def inject_answer(self, text):
+        """inject for the hub's answer to his ask: ahead of the older waiting posts (queue_add)."""
+        return LaneHost._post(self, text, True)
+
+    def _post(self, text, answer):
         if self.queue_path is None:
             return self.inject_now(text)
         try:
-            queue_add(self.queue_path, text, self.clock())
+            queue_add(self.queue_path, text, self.clock(), answer=answer)
         except OSError as e:
             _append(STATE / "openclaw-inject.log", "%s chat queue could not be written (%s): posting straight away" %
                     (time.strftime("%Y-%m-%dT%H:%M:%S%z"), e))
             return self.inject_now(text)
         queue_pump(self.queue_path, self.inject_now, self.clock())
+        mirror = getattr(self, "mirror_outbox", None)
+        if mirror:
+            mirror()
         return True
 
     def clock(self):
         return time.time()
+
+    def mirror_outbox(self):
+        """OUTBOX.md in the receptionist's workspace, from the live queue (outbox_mirror). -> its result."""
+        return outbox_mirror(getattr(self, "queue_path", None), self.push_outbox, self.clock())
+
+    def push_outbox(self, text):
+        """Write OUTBOX.md in OpenClaw's workspace (hub -> OpenClaw only, a temp file moved into place). -> True once written."""
+        script = ('set -eu\nf=%s\ntmp=$(mktemp "$(dirname "$f")/.outbox.XXXXXX")\ntrap \'rm -f "$tmp"\' EXIT\n'
+                  "cat > \"$tmp\" <<'__OCOUTBOX_EOF__'\n%s__OCOUTBOX_EOF__\nchmod 644 \"$tmp\"\nmv \"$tmp\" \"$f\"\necho ok\n" %
+                  (shlex.quote(OUTBOX_FILE), text.replace("__OCOUTBOX_EOF__", "")))
+        try:
+            r = subprocess.run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--", "bash", "-s"], input=script,
+                               capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0 and "ok" in r.stdout
 
     def inject_now(self, text):
         """Post a note into Main session (gateway chat.inject): no agent run, no channel delivery. Only that session, or in a live test
@@ -1270,6 +1404,9 @@ def post_report(host, text, key, now):
     except OSError:
         return bool(host.inject_now(text))
     queue_pump(path, host.inject_now, now)
+    mirror = getattr(host, "mirror_outbox", None)
+    if mirror:
+        mirror()
     return True
 
 
@@ -2064,7 +2201,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
         attached = "context not attached: %s" % e
     ok, msg = _start_lane(host, mail, lane, path, engine, model, prompt)
     if not ok:
-        return "%s | start %s | couldn't start: %s" % (stamp, name, msg), "Couldn't start the lane in %s: %s" % (name, msg)
+        return "%s | start %s | couldn't start: %s" % (stamp, name, msg), "I couldn't start a lane in %s, so nothing has picked up your message yet. %s" % (name, HUB_PASSES_IT_ON)
     state["lanes"][lane] = {"repo": name, "engine": engine, "model": model, "started": now, "status": "started", "report": str(report),
                             "task": task, "task_key": task_key(task)}
     if ask_id and ask_id in asks_of(state):
@@ -2180,6 +2317,19 @@ def ensure_delivered(ctx, host, line, ask_id, words, now, target_lane=None, say=
     return "hub", "%s; on the hub's list (ask %s)" % (line, filed)
 
 
+HUB_PASSES_IT_ON = "The hub has your words and will pass them on."
+
+
+def not_sent_text(name, out):
+    """His chat line for a reply lane.sh could not confirm: plain words on what did not arrive and what happens next, never lane.sh's
+    own output (20 Oct 12:02 AM: "sent to nc35-upgrade: NOT IN ITS TRANSCRIPT (...)" reached him; "what do I care if it's in its
+    transcript?"). The tool text stays in the log line and on the hub's list. NOT IN ITS TRANSCRIPT means the lane was busy and took
+    the line but has not shown the words yet, so it may still have them: say we could not confirm it, not that it was lost."""
+    if "NOT IN ITS TRANSCRIPT" in (out or ""):
+        return "I couldn't confirm that your message reached %s; it was busy. %s" % (name, HUB_PASSES_IT_ON)
+    return "Your message didn't reach %s. %s" % (name, HUB_PASSES_IT_ON)
+
+
 def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0):
     """Send his words to a running lane: one the dispatcher started, else any lane running now that `lane.sh --status` lists (the hub's own).
     A lane that has finished (within REPLY_WINDOW) gets a follow-up lane in its repo instead: his
@@ -2211,7 +2361,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
             if delivery_of(got[0]):
                 return got
             hub_has_it(ctx, ask_id, words, now, "front desk: %s had closed and could not be restarted (%s)" % (old, got[0].split(" | ")[-1]), old)
-            return "%s; on the hub's list" % got[0], "%s had closed and I couldn't restart it (%s). The hub has your words." % (old, got[0].split(" | ")[-1])
+            return "%s; on the hub's list" % got[0], "%s had closed and I couldn't start it again, so your message didn't reach it. %s" % (old, HUB_PASSES_IT_ON)
         hub_has_it(ctx, ask_id, words, now, "front desk: no lane called %s is running, so his reply to it was not sent" % lane_word[:60], lane_word[:60])
         return "%s | reply | no such lane: on the hub's list" % stamp, "I don't have a lane called \"%s\" that I can reach (open lanes: %s). The hub has it." % (
             lane_word[:60], _open_lane_names(state, live))
@@ -2224,7 +2374,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
         if ok:
             return "%s | reply %s | sent (hub lane)" % (stamp, name), "Sent to %s, a lane the hub started. It will answer the hub in its report." % name
         hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"), name)
-        return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), "Couldn't send that to %s: %s. The hub has it." % (name, out or "it did not take")
+        return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), not_sent_text(name, out)
     lane = state["lanes"][name]
     ago = _finished_ago(lane, now)
     if ago is not None and lane.get("engine", "claude") == "claude":
@@ -2272,7 +2422,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
     if ok:
         return "%s | reply %s | sent" % (stamp, name), "Sent to %s. It will answer in its report, which I'll post here." % name
     hub_has_it(ctx, ask_id, words, now, "front desk: his reply to %s was not sent (%s)" % (name, out or "it did not take"), name)
-    return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), "Couldn't send that to %s: %s. The hub has it." % (name, out or "it did not take")
+    return "%s | reply %s | not sent: %s: on the hub's list" % (stamp, name, out), not_sent_text(name, out)
 
 
 def successor(state, name):
@@ -2948,8 +3098,9 @@ def ask_question(ctx, host, ask_id, question, now, context=None):
             if ask_id in asks_of(state):
                 asks_of(state)[ask_id]["pass"] = {"exit": -1, "error": "could not start the pass"}
                 save_state(ctx.state_path, state)
-    return ("%s | question | handed to Claude (ask %s, %d min to answer)" % (stamp, ask_id, ASK_WAIT // 60),
-            "asked Claude: %s" % words)
+    # No chat line: echoing his words ("asked Claude: ...") put back into his outbox everything he had quoted (20 Oct 12:02 AM, a
+    # whole report he had read, in three parts). The receptionist already told him it went on; the answer comes as its own post.
+    return "%s | question | handed to Claude (ask %s, %d min to answer)" % (stamp, ask_id, ASK_WAIT // 60), None
 
 
 def defer(ctx, host, ask_id, why, now=None):
@@ -3524,7 +3675,7 @@ def post_ask(ctx, host, ask_ids, text, now=None):
             if not (_post_closes(state, ask) or ask.get("status") == "answered"):
                 return False, "post: ask %s is already %s" % (ask_id, ask.get("status"))
     for n, item in enumerate(items):
-        if not host.inject(item):
+        if not post_answer(host, item):
             if n == 0:
                 return False, "post: could not post to the chat"
             ids = ids[:n] if len(ids) > 1 else ids  # what reached the chat is recorded; the rest stays open
@@ -3912,6 +4063,8 @@ def say(ctx, host, ask_id, text, now=None):
         return False, "say: bad ask id or empty text"
     if len(text) > ITEM_MAX:
         return False, "say: over %d characters; %s. Shorten it" % (ITEM_MAX, ITEM_RULE)
+    if QUEUE_TALK_RE.search(text):
+        return False, item_problem("say", [text])
     with ctx.locked():
         state = load_state(ctx.state_path)
         ask = asks_of(state).get(ask_id)
@@ -3927,7 +4080,7 @@ def say(ctx, host, ask_id, text, now=None):
                            "Run promote %s <repo> to start it as a job" % ask_id)
         if ask.get("kind") == "question" and CANT_RE.search(text):
             return False, "say: do not tell him what cannot be done; defer it to the hub instead"
-    if not host.inject(text):
+    if not post_answer(host, text):
         return False, "say: could not post to the chat"
     with ctx.locked():
         state = load_state(ctx.state_path)
@@ -4052,8 +4205,8 @@ def fallback_due(ctx, host, now=None):
         elif chat.startswith("Held by"):
             chat = "%s. %s" % (why, chat)  # the held line is quoted word for word (the receptionist repeats it as written)
         else:
-            chat = "%s, and %s" % (why, chat[0].lower() + chat[1:])
-        if " | started " not in line:
+            chat = "%s, and %s" % (why, chat if chat.startswith("I ") else chat[0].lower() + chat[1:])
+        if " | started " not in line and HUB_PASSES_IT_ON not in chat:
             chat += " It is on the hub's list with your words."
         host.inject(chat)
         out.append((line.replace(" | start ", " | fallback ", 1) if " | start " in line else line, chat))
@@ -4302,6 +4455,8 @@ def queue_cli(args):
     else:
         print(queue_cli.__doc__, file=sys.stderr)
         return 2
+    if args != ["check"] or not os.environ.get("AFA_OC_PASS"):
+        host.mirror_outbox()  # OUTBOX.md follows the queue (also every lane_watch.sh poll, through "queue check")
     return 0
 
 
