@@ -87,6 +87,7 @@ QUALITY = REPOS / "hub/scripts/model_quality_report.py"
 OWNER = "tortoisewolfe"
 MAX_RUNNING = 3
 MAX_PER_DAY = 12
+CHAT_EXTRA_PER_DAY = 4  # starts past MAX_PER_DAY a question about the chat itself may use; then it waits like any other
 FAIL_REFUND = 5 * 60  # a lane whose report fails this soon after its start gives the start back (a fumble is not a day's work)
 CLAIM_WINDOW = 10 * 60  # claim accepts only a lane `start` began for that ask this recently
 TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and probes: their starts never count toward the day
@@ -2031,7 +2032,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
     if len(running) >= MAX_RUNNING:
         return ("%s | start %s | held: %d lanes already running" % (stamp, name, len(running)), held_running_text(len(running)))
     today = sum(1 for t in state["starts"] if _day(t) == _day(now))
-    if today >= MAX_PER_DAY and day_cap:
+    if today >= MAX_PER_DAY + (0 if day_cap else CHAT_EXTRA_PER_DAY):  # a word match buys a few starts, never an open door
         return "%s | start %s | held: %d starts today" % (stamp, name, today), held_day_text(now)
     if context is None and ask_id:
         context = load_context(ctx, ask_id)
@@ -3350,10 +3351,11 @@ def _reports_on_disk(lanes_dir):
 
 
 def post_new_reports(ctx, host, now=None, seed=False):
-    """Put every lane's new or changed report.md into Jonathan's chat, whole, so a result reaches him with no hub session open.
+    """Put every lane's new or changed report.md into Jonathan's chat, so a result reaches him with no hub session open.
     One post per report version (path and mtime are recorded in ctx.reports_posted_path): the lane name as a heading, a 12-hour
-    stamp that names the repo (lane_repo; no repo, no name), the report as written, in numbered parts when long. The first run (no record yet) and seed=True only record what is
-    there. Lanes the dispatcher started are recorded and skipped: its own sweep posts their reports. A post that cannot land is
+    stamp that names the repo (lane_repo; no repo, no name), and the report as one item of at most REPORT_WORDS words (report_brief).
+    A rewrite he has not seen replaces its item; after he has seen it, only its new paragraphs are posted, and nothing when none are
+    new (the texts are kept beside the mtimes). The first run (no record yet) and seed=True only record what is there. Lanes the dispatcher started are recorded and skipped: its own sweep posts their reports. A post that cannot land is
     tried again on the next run. -> the lane names posted."""
     now = time.time() if now is None else now
     path = ctx.reports_posted_path
@@ -4005,7 +4007,7 @@ def fallback_due(ctx, host, now=None):
         host.force_connectors_off = not mail
         line, chat = "%s | start %s | failed" % (_stamp(now), k), ""
         try:
-            line, chat = do_start(ctx, host, repo, task, now, k, day_cap=not about_the_chat(question))
+            line, chat = do_start(ctx, host, repo, task, now, k, day_cap=mail or not about_the_chat(question))
         except Exception as e:  # one failing ask must not stop the others: log it and fall through to the revert
             line = "%s | start %s | failed: %s" % (_stamp(now), k, " ".join(str(e).split())[:200] or type(e).__name__)
         finally:
