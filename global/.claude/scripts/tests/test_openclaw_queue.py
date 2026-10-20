@@ -189,6 +189,21 @@ class Outbox(td.Base):
         whole = " ".join(re.sub(r" \(\d+ of \d+\)$", "", i["text"]) for i in q)
         self.assertEqual(whole.split(), self.LANES.split(), "the pieces joined are the whole list")
 
+    def test_a_very_long_report_is_five_pieces_and_the_last_says_where_the_whole_is(self):
+        body = "\n\n".join("## Section %d\n\n" % k + "The plan for this site is sorted and the renewal is set for next year. " * 6 for k in range(70))
+        report = "### client-mail\n*client-site \u00b7 report written 8:06 PM*\n\n" + body
+        self.assertGreater(len(report), 25000)
+        with mock.patch.object(dp, "STATE", self.tmp / "state"):
+            self.host.inject(report)
+        q = self.items()
+        self.assertEqual(len(q), 5, "not 61 nexts")
+        self.assertTrue(all(len(i["text"]) <= dp.ITEM_MAX + 200 for i in q))
+        self.assertTrue(q[0]["text"].startswith("### client-mail") and q[0]["text"].endswith("(1 of 5)"))
+        m = re.search(r"Full text is stored at: (\S+)\) \(5 of 5\)$", q[4]["text"])
+        self.assertIsNotNone(m, q[2]["text"])
+        self.assertTrue(m.group(1).startswith(str(self.tmp)))
+        self.assertEqual(Path(m.group(1)).read_text().strip(), report.strip(), "the whole report is kept")
+
     def test_the_nudge_names_what_waits_and_a_slow_landing_is_not_sent_twice(self):
         self.host.inject("Open lanes (15): all quiet.")
         sends = []

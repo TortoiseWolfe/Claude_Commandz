@@ -23,6 +23,7 @@ MUTANTS = [
     # the outbox: one post at a time, never lost (19 Oct 4:59 PM and 5:03-5:24 PM)
     # one item per question, each short, and no flush after an outage (19 Oct 6:31 PM)
     (DISPATCH, "freeze: a long post goes out whole", '    if len(text) <= ITEM_MAX:\n        return [text]\n    pieces', '    if True:\n        return [text]\n    pieces'),
+    (DISPATCH, "freeze: a huge post is dozens of nexts", '    if len(pieces) > QUEUE_MAX_PIECES:', '    if False:'),
     (DISPATCH, "freeze: the nudge is a bare count", 'ok = send(queue_nudge(waiting, nxt))', 'ok = send(queue_tail(waiting).strip())'),
     (DISPATCH, "freeze: a slow nudge is sent again", 'head["nudged"], nxt = now, q["items"][1]["text"]', 'nxt = q["items"][1]["text"]'),
     (DISPATCH, "freeze: held nexts skip a post", 'if why == "next" and q["items"] and q["items"][0]["shown"] and 0 <=', 'if False and q["items"] and q["items"][0]["shown"] and 0 <='),

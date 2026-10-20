@@ -329,6 +329,9 @@ def queue_save(path, q):
     os.replace(tmp, p)
 
 
+QUEUE_MAX_PIECES = 5  # a 16-lane list (about 2,500 characters) still comes whole, one piece per next
+
+
 def queue_pieces(text):
     """-> the post as outbox items of at most ITEM_MAX characters each, cut only at paragraph or line breaks and marked "(1 of 3)".
     19 Oct 7:12 PM: two lane lists of about 1,500 characters each went out as three chat parts in one go, twice. A long post (a lane
@@ -337,6 +340,19 @@ def queue_pieces(text):
     if len(text) <= ITEM_MAX:
         return [text]
     pieces = [c.strip() for c in _chat_chunks(text, ITEM_MAX - len(" (10 of 10)")) if c.strip()]
+    if len(pieces) > QUEUE_MAX_PIECES:
+        # 19 Oct 8:06 and 8:24 PM two lane reports of about 25,900 characters would have been 61 pieces each. Past QUEUE_MAX_PIECES the
+        # chat shows the start, and the last piece says where the whole text is kept (as the chat's own 20-part cap always did).
+        ref = _chat_ref(text)
+        if ref is None:
+            try:
+                ref = ("file", _store_chat_overflow(text))
+            except OSError:
+                ref = None  # nowhere to keep it: every piece goes, nothing is lost
+        if ref is not None:
+            shown = pieces[:QUEUE_MAX_PIECES - 1]
+            rest = len(text) - sum(len(c) for c in shown)
+            pieces = shown + ["(%d more characters are not shown here. %s)" % (rest, _chat_overflow_notice(ref))]
     return ["%s (%d of %d)" % (c, i, len(pieces)) for i, c in enumerate(pieces, 1)] if len(pieces) > 1 else pieces
 
 
