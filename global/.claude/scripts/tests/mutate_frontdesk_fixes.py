@@ -53,7 +53,7 @@ MUTANTS = [
     # 7. the cap is said, and the question is filed
     ("7", D, "the cap is never reached", "full = kind is not None and len(waiting) >= MAX_QUESTIONS", "full = False"),
     ("7", D, "a capped question is not marked as such", 'ask["route"] = "hub, pass full" if full else "hub, no pass"', 'ask["route"] = "hub, no pass"'),
-    ("7", D, "the cap message is not sent", '            return ("%s | question | %d questions already waiting: put on the hub\'s list (ask %s)" % (stamp, len(waiting), ask_id),\n                    "Claude\'s quick check', '            return ("%s | question | %d questions already waiting: put on the hub\'s list (ask %s)" % (stamp, len(waiting), ask_id),\n                    None and "Claude\'s quick check'),
+    # (19 Oct 11:10 PM: the cap message is no longer posted; "the cap line posts an acknowledgement" under D holds that now)
     # 8. a finish time on every ask
     ("8", D, "finish is never recorded", '    ask.setdefault("finished_at", now if at is None else at)', "    pass"),
     ("8", D, "a later finish overwrites the first", '    ask.setdefault("finished_at", now if at is None else at)', '    ask["finished_at"] = now if at is None else at'),

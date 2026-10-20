@@ -6,7 +6,8 @@ just tell me what I actually need to know"; "clear the duplicates". The rules:
   1. the front desk never posts that acknowledgement (the receptionist already said it went to the hub);
   2. a lane report reaches his chat once, as one item of at most 150 words, never in parts; a rewritten report replaces its item when
      he has not seen it yet, and after he has seen it only what is new is posted (nothing, when nothing is new);
-  3. his questions about the chat itself are never held by the day's cap;
+  3. his questions about the chat itself are not held by the day's cap (they get CHAT_EXTRA_PER_DAY more starts; one that needs
+     mail gets none);
   4. "N more waiting" counts real posts only.
 Names here are invented."""
 import json
@@ -134,6 +135,13 @@ class Clean(td.Base):
         self.assertIn("Report updated", new)
         self.assertNotIn("16 pages move", new)
 
+    def test_a_record_from_before_texts_were_kept_still_posts_nothing_for_an_unchanged_report(self):
+        # the live record held 411 report times and texts for 4 when this shipped: an old entry has its mtime only
+        p = self.report("old-lane", PLAN, NOW - 600)
+        self.ctx.reports_posted_path.write_text(json.dumps({"posted": {str(p): NOW - 600}}))
+        self.assertEqual(self.posts(NOW), [])
+        self.assertEqual(self.items(), [])
+
     def test_a_lane_that_already_answered_in_chat_does_not_post_its_report_again(self):
         # 10:26 PM the answer lane posted three items with `post`; 10:27 PM the sweep posted its report saying the same, in three parts
         (self.root / ".git").mkdir()
@@ -171,6 +179,25 @@ class Clean(td.Base):
         self.assertEqual(len(out), 1)
         self.assertIn(" | started ", out[0][0])
         self.assertEqual(dp.asks_of(self.state())["oc-0be4a771"]["status"], "fallback-lane")
+
+    def test_a_question_about_the_chat_gets_a_few_extra_starts_not_an_open_door(self):
+        # a word match ("chat", "stuck") is loose, so it buys CHAT_EXTRA_PER_DAY starts past the cap, never an unlimited number
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question("oc-0be4a771", "clear the duplicates in the chat")
+        state = self.state()
+        state["starts"] = [NOW - 10] * (dp.MAX_PER_DAY + dp.CHAT_EXTRA_PER_DAY)
+        dp.save_state(self.ctx.state_path, state)
+        out = dp.fallback_due(self.ctx, self.host, NOW)
+        self.assertIn("held: %d starts today" % (dp.MAX_PER_DAY + dp.CHAT_EXTRA_PER_DAY), out[0][0])
+
+    def test_a_chat_question_that_needs_mail_still_waits_for_the_days_cap(self):
+        (self.root / ".git").mkdir()
+        self.ctx.repos = dp.load_repos(self.root / "hub/repos.tsv", self.root)
+        self.record_question("oc-33334444", "the chat says the Gmail draft is stuck, fix it")
+        self.assertTrue(dp.mail_ask("the chat says the Gmail draft is stuck, fix it"))
+        out = dp.fallback_due(self.ctx, self.host, NOW)
+        self.assertIn("held: %d starts today" % dp.MAX_PER_DAY, out[0][0])
 
     def test_any_other_question_still_waits_for_the_days_cap(self):
         (self.root / ".git").mkdir()

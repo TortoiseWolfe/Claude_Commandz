@@ -88,7 +88,7 @@ class TheStampLineNamesTheRepo(ReportPosts):
 
     def test_a_plain_repo_is_named_on_the_stamp_line(self):
         self.indexed("fix-nav", self.root / "ScriptHammer")
-        self.assertRegex(self.stamp_line("fix-nav"), r"^\*ScriptHammer \u00b7 report written \d{1,2}:\d{2} (AM|PM)\*$")
+        self.assertRegex(self.stamp_line("fix-nav"), r"^\*ScriptHammer \u00b7 report written (?:[A-Z][a-z]{2} )?\d{1,2}:\d{2} (AM|PM)\*$")
 
     def test_a_folder_inside_a_repo_names_that_repo(self):
         self.indexed("deep", self.root / "TurtleWolfe" / "stream" / "can-we-build-it")
@@ -107,7 +107,7 @@ class TheStampLineNamesTheRepo(ReportPosts):
         self.assertTrue(self.stamp_line("hub-lane").startswith("*workspace (hub) \u00b7 report written "))
 
     def test_a_lane_not_in_the_index_keeps_the_old_stamp_line(self):
-        self.assertRegex(self.stamp_line("nobody-knows"), r"^\*Report written \d{1,2}:\d{2} (AM|PM)\*$")
+        self.assertRegex(self.stamp_line("nobody-knows"), r"^\*Report written (?:[A-Z][a-z]{2} )?\d{1,2}:\d{2} (AM|PM)\*$")
 
     def test_a_folder_outside_the_repos_keeps_the_old_stamp_line(self):
         self.indexed("elsewhere", "/tmp/somewhere/else")
