@@ -67,11 +67,12 @@ class Watchdog(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.t = 1_000_000.0
 
-    def go(self, box, *argv, probe=True, dt=0):
+    def go(self, box, *argv, probe=True, dt=0, churn=""):
         self.t += dt
         out = io.StringIO()
+        probes = probe if isinstance(probe, list) else [probe] * 5
         with redirect_stdout(out):
-            rc = wd.run(list(argv), read=box.read, root=box.root, probe=lambda: probe, now=lambda: self.t)
+            rc = wd.run(list(argv), read=box.read, root=box.root, probe=lambda: probes.pop(0), now=lambda: self.t, churn_of=lambda: churn)
         return rc, out.getvalue()
 
     def alert(self):
@@ -129,11 +130,11 @@ class Watchdog(unittest.TestCase):
         self.assertIn("steps=compact,drop_caches+compact", self.heal_log())
 
     # ---- failure wakes the hub
-    def test_heal_that_leaves_the_blocks_missing_alerts_and_exits_2(self):
+    def test_heal_that_leaves_the_blocks_missing_and_the_bridge_down_alerts_and_exits_2(self):
         box = Box(effects={"drop_caches": (PARTIAL, LOW_FREE)})
-        rc, _ = self.go(box)
+        rc, _ = self.go(box, probe=False)
         self.assertEqual(rc, 2)
-        self.assertIn("wsl bridge: free order-7+ blocks", self.alert())
+        self.assertIn("NOT answering", self.alert())
         self.assertRegex(self.alert(), r"^\d{1,2}:\d{2} [AP]M ")  # Jonathan reads times as 12-hour
 
     def test_no_root_route_alerts_and_exits_2(self):
@@ -146,7 +147,7 @@ class Watchdog(unittest.TestCase):
         box = Box(effects={"drop_caches": (HEALED, HIGH_FREE)})
         rc, _ = self.go(box, probe=False)
         self.assertEqual(rc, 2)
-        self.assertIn("probe FAILED", self.alert())
+        self.assertIn("NOT answering", self.alert())
         self.assertIn("probe=FAIL", self.heal_log())
 
     def test_probe_flag_probes_a_healthy_vm_and_alerts_on_a_dead_bridge(self):
@@ -154,7 +155,7 @@ class Watchdog(unittest.TestCase):
         self.assertEqual(self.go(box, "--probe", probe=True)[0], 0)
         self.assertIsNone(self.alert())
         self.assertEqual(self.go(box, "--probe", probe=False)[0], 2)
-        self.assertIn("probe FAILED", self.alert())
+        self.assertIn("NOT answering", self.alert())
 
     def test_a_healthy_vm_without_the_probe_flag_never_runs_the_probe(self):
         box = Box(buddy=HEALED, meminfo=HIGH_FREE)
@@ -164,22 +165,71 @@ class Watchdog(unittest.TestCase):
                 self.assertEqual(wd.run([], read=box.read, root=box.root, now=lambda: self.t), 0)
 
     # ---- rate limits
-    def test_no_second_heal_inside_five_minutes_and_a_standing_failure_wakes_the_hub_once_per_half_hour(self):
+    def test_a_standing_outage_wakes_the_hub_once_per_half_hour(self):
         box = Box(effects={"drop_caches": (PARTIAL, LOW_FREE)})
-        self.go(box)
-        first_alert = self.alert()
-        n = len(box.scripts)
-        rc, _ = self.go(box, dt=60)
-        self.assertEqual(rc, 2)
-        self.assertEqual(len(box.scripts), n)  # skipped
-        self.assertIn("heal-skipped", self.heal_log())
+        self.go(box, probe=False)
+        self.assertIn("NOT answering", self.alert())
         os.utime(os.path.join(self.sd, "alert"), (self.t - 100, self.t - 100))
         mtime = os.stat(os.path.join(self.sd, "alert")).st_mtime
-        self.go(box, dt=60)
+        self.go(box, probe=False, dt=60)
         self.assertEqual(os.stat(os.path.join(self.sd, "alert")).st_mtime, mtime)  # not rewritten: lane_watch would wake again
-        self.go(box, dt=wd.ALERT_GAP_S)
+        self.go(box, probe=False, dt=wd.ALERT_GAP_S)
         self.assertGreater(os.stat(os.path.join(self.sd, "alert")).st_mtime, mtime)
-        self.assertEqual(first_alert.split(" ", 2)[2][:20], self.alert().split(" ", 2)[2][:20])
+
+    # ---- 19 Oct 9:27 PM: 7 blocks at one instant, 71 s after a heal, with the bridge still answering
+    def test_low_blocks_inside_the_heal_gap_with_the_bridge_answering_do_not_heal_or_wake_the_hub(self):
+        box = Box(effects={"drop_caches": (HEALED, HIGH_FREE)})
+        self.go(box)
+        box.files["/proc/buddyinfo"], box.files["/proc/meminfo"] = FAILING, LOW_FREE  # a scan refilled the cache in 71 s
+        n = len(box.scripts)
+        rc, out = self.go(box, probe=True, dt=71, churn="pid 160023 244MB/s (lane greg-drafts-check) bfs -S dfs / -iname x")
+        self.assertEqual((rc, len(box.scripts), self.alert()), (0, n, None))
+        self.assertIn("heal-skipped", out)
+        self.assertIn("bridge answers", out)
+        self.assertIn("churn=pid 160023 244MB/s (lane greg-drafts-check)", self.heal_log())
+
+    def test_low_blocks_inside_the_heal_gap_with_the_bridge_down_heals_anyway(self):
+        box = Box(effects={"drop_caches": (HEALED, HIGH_FREE)})
+        self.go(box)
+        box.files["/proc/buddyinfo"], box.files["/proc/meminfo"] = FAILING, LOW_FREE
+        n = len(box.scripts)
+        rc, out = self.go(box, probe=[False, True], dt=71)
+        self.assertEqual(rc, 0)
+        self.assertGreater(len(box.scripts), n)
+        self.assertIn("DOWN: healing anyway", out)
+        self.assertIsNone(self.alert())  # the forced heal brought the bridge back
+
+    def test_the_alert_names_what_is_filling_the_cache(self):
+        box = Box(effects={"drop_caches": (PARTIAL, LOW_FREE)})
+        self.go(box, probe=False, churn="pid 160023 244MB/s (lane greg-drafts-check) bfs -S dfs / -iname x")
+        self.assertIn("page-cache churn: pid 160023 244MB/s (lane greg-drafts-check)", self.alert())
+
+    def test_the_same_skipped_state_is_logged_once(self):
+        box = Box(effects={"drop_caches": (HEALED, HIGH_FREE)})
+        self.go(box)
+        box.files["/proc/buddyinfo"], box.files["/proc/meminfo"] = FAILING, LOW_FREE
+        self.go(box, dt=71)
+        n = len(self.heal_log().splitlines())
+        self.go(box, dt=0)
+        self.assertEqual(len(self.heal_log().splitlines()), n)
+
+    # ---- who is filling the cache
+    def test_busiest_reader_is_the_process_with_the_biggest_read_rate_over_the_floor(self):
+        a = {1: 0, 2: 0, 3: 0}
+        b = {1: 10 * 1048576, 2: 2000 * 1048576, 3: 5 * 1048576, 4: 9999 * 1048576}  # pid 4 is new: unknown rate
+        self.assertEqual(wd.busiest_reader(a, b, 10), (2, 200.0))
+        self.assertIsNone(wd.busiest_reader({1: 0}, {1: 100 * 1048576}, 10))  # 10 MB/s is not churn
+
+    def test_describe_churn_names_the_pid_rate_lane_and_command(self):
+        snaps = iter([{7: 0}, {7: 600 * 1048576}])
+        with mock.patch.object(wd, "proc_cmd", return_value="bfs -S dfs / -iname *x*"), mock.patch.object(wd.time, "sleep"):
+            got = wd.describe_churn(lambda: next(snaps), lambda pid: "greg-drafts-check", secs=2)
+        self.assertEqual(got, "pid 7 300MB/s (lane greg-drafts-check) bfs -S dfs / -iname *x*")
+
+    def test_describe_churn_is_empty_when_nothing_reads_much(self):
+        snaps = iter([{7: 0}, {7: 1048576}])
+        with mock.patch.object(wd.time, "sleep"):
+            self.assertEqual(wd.describe_churn(lambda: next(snaps), lambda pid: "", secs=2), "")
 
     def test_heal_runs_again_after_five_minutes(self):
         box = Box(effects={"drop_caches": (PARTIAL, LOW_FREE)})
