@@ -15,6 +15,7 @@
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
 #     outbox again in the background (queue pump), so a post that failed while Windows could not reach WSL lands once it can.
+#   - the WSL-to-Windows bridge cannot be healed or still fails its 10 s probe (wsl_bridge_watchdog.py runs from every poll and raises the alert)
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
@@ -38,6 +39,18 @@ turn_done_line() {
 
 turn_done_time() {
   turn_done_line | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p'
+}
+
+# The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
+# 10 s cmd.exe probe still fails). Prints its text once per change of the file, nothing otherwise. 19 Oct: the bridge went quiet twice
+# (5:21 PM and 8:15 PM) with nothing to tell the hub.
+bridge_state="${WSL_BRIDGE_STATE:-$HOME/.claude/state/wsl-bridge}"
+bridge_alert() {
+  local m
+  m=$(stat -c %Y "$bridge_state/alert" 2>/dev/null) || return 0
+  [ "$m" = "$(cat "$bridge_state/alert.seen" 2>/dev/null)" ] && return 0
+  printf '%s' "$m" > "$bridge_state/alert.seen"
+  cat "$bridge_state/alert"
 }
 
 # When sourced (by the test script), stop here with the functions defined.
@@ -139,11 +152,24 @@ check_outbox() {
   printf '%s\n' "$w"
   exit 0
 }
+# The bridge watchdog runs from every poll, detached (a heal can take a minute and the watch must not stop for it; it takes its own lock
+# and heals at most once in five minutes). When it raises the alert the hub wakes.
+watchdog="${WSL_BRIDGE_WATCHDOG:-$(dirname "$(readlink -f "$0")")/wsl_bridge_watchdog.py}"
+check_bridge() {
+  local w
+  [ -f "$watchdog" ] && { setsid nohup timeout 300 python3 "$watchdog" >/dev/null 2>&1 & }
+  w=$(bridge_alert)
+  [ -n "$w" ] || return 0
+  echo "bridge: $w"
+  exit 0
+}
+check_bridge
 check_outbox
 check_undelivered
 check_open_questions
 end=$(( $(date +%s) + max * 60 ))
 while :; do
+  check_bridge
   check_outbox
   check_undelivered
   check_open_questions

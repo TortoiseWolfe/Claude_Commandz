@@ -18,6 +18,11 @@ mkdir -p "$state"
 exec 9>"$state/openclaw-status.lock"
 flock -n 9 || exit 0
 
+# First, the WSL-to-Windows bridge: every wsl.exe call below needs it. The watchdog checks /proc/buddyinfo for free 512 KB blocks (what each
+# Windows command's Hyper-V channel allocates), heals when they run out, and runs the 10 s cmd.exe probe. It is silent when all is well.
+# 19 Oct: the bridge went quiet at 5:21 PM and 8:15 PM; see wsl_bridge_watchdog.py.
+timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || echo "openclaw_status_refresh: wsl bridge watchdog reports a problem (see ~/.claude/state/wsl-bridge/heal.log)" >&2
+
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2

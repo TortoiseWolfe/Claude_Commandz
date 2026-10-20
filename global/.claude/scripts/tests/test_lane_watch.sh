@@ -5,6 +5,10 @@ set -euo pipefail
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_watch.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-watch.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+# The watcher runs wsl_bridge_watchdog.py from every poll: tests get a fake one and their own state folder, never the live VM or state.
+export WSL_BRIDGE_WATCHDOG="$TMP/fake-watchdog.py" WSL_BRIDGE_STATE="$TMP/bridge-state"
+export WATCHDOG_RAN="$TMP/watchdog-ran"
+printf 'import os\nopen(os.environ["WATCHDOG_RAN"], "a").write("ran\\n")\n' > "$WSL_BRIDGE_WATCHDOG"
 source "$SCRIPT"
 
 failures=0
@@ -320,6 +324,32 @@ if grep -q '^report: told .*report stale: the lane got input.*do not close it' "
   echo "ok   the report wake says report stale and not to close the lane"
 else
   echo "FAIL stale wake: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+
+# The bridge alert: printed once per change of the alert file, then silent.
+mkdir -p "$WSL_BRIDGE_STATE"
+first=$(bridge_alert)
+if [ -z "$first" ]; then echo "ok   no alert file: nothing to print"; else echo "FAIL bridge_alert printed '$first' with no alert"; failures=$((failures + 1)); fi
+echo "9:05 PM wsl bridge: free order-7+ blocks 0 (min 200) after healing, probe FAILED" > "$WSL_BRIDGE_STATE/alert"
+first=$(bridge_alert); second=$(bridge_alert)
+if [ "${first#9:05 PM wsl bridge}" != "$first" ] && [ -z "$second" ]; then echo "ok   a new alert prints once, then is silent"; else echo "FAIL bridge_alert: first='$first' second='$second'"; failures=$((failures + 1)); fi
+sleep 1; echo "9:40 PM wsl bridge: again" > "$WSL_BRIDGE_STATE/alert"
+third=$(bridge_alert)
+if [ "${third#9:40 PM}" != "$third" ]; then echo "ok   a rewritten alert prints again"; else echo "FAIL bridge_alert after rewrite: '$third'"; failures=$((failures + 1)); fi
+
+# The watcher runs the watchdog on each poll and wakes on its alert.
+rm -f "$TMP/watchdog-ran" "$WSL_BRIDGE_STATE/alert" "$WSL_BRIDGE_STATE/alert.seen"
+bridge_home="$TMP/bridgehome"; mkdir -p "$bridge_home/.claude/scripts" "$bridge_home/.claude/state"
+printf '#!/usr/bin/env bash\necho "nobody  dead"\n' > "$bridge_home/.claude/scripts/lane.sh"; chmod +x "$bridge_home/.claude/scripts/lane.sh"
+out="$TMP/bridge-out"
+( HOME="$bridge_home" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 20 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 3; echo "9:05 PM wsl bridge: probe FAILED" > "$WSL_BRIDGE_STATE/alert"
+wait "$watcher" || true
+if [ -s "$TMP/watchdog-ran" ] && grep -q '^bridge: 9:05 PM wsl bridge: probe FAILED' "$out"; then
+  echo "ok   the watcher runs the watchdog and wakes the hub on its alert"
+else
+  echo "FAIL bridge wake: ran=$(cat "$TMP/watchdog-ran" 2>/dev/null | wc -l) out=$(cat "$out")"; failures=$((failures + 1))
 fi
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
