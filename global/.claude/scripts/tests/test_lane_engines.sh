@@ -492,4 +492,54 @@ case "$(grep '^busy ' <<<"$STATUS_STALE")" in *report:stale*) checks=$((checks +
 assert_contains "$STATUS_STALE" 'report stale: the lane got input after report.md was written' 'status says why: input'
 assert_contains "$STATUS_STALE" 'report stale: a background job it started has not finished' 'status says why: job'
 
+# 3D work tier: a prompt naming data/sites/ or site-model runs on fable or opus only (his rule, 19 Oct).
+SITE_PROMPT="$TMP/site-prompt.md"
+printf '%s\n' 'Fit the walls in data/sites/tigard-01 against the overlay gate.' >"$SITE_PROMPT"
+SKILL_PROMPT="$TMP/skill-prompt.md"
+printf '%s\n' 'Read the site-model skill, then rebuild the porch.' >"$SKILL_PROMPT"
+for low in sonnet haiku claude-sonnet-5-5 default none; do
+  run_lane --dry-run "tier-$low" "$REPO" "$low" "$SITE_PROMPT"
+  assert_exit 1 "$LAST_STATUS" "$low is refused on a data/sites/ prompt"
+  assert_contains "$LAST_OUTPUT" "refusing model $low" "the refusal names the model ($low)"
+  assert_contains "$LAST_OUTPUT" 'fable or opus' "the refusal names the two allowed models ($low)"
+  assert_contains "$LAST_OUTPUT" 'lane-rules.md' "the refusal names the rule ($low)"
+  assert_not_contains "$LAST_OUTPUT" 'mkdir -p' "a refused lane makes no hand-off folder ($low)"
+done
+run_lane --dry-run tier-skill "$REPO" sonnet "$SKILL_PROMPT"
+assert_exit 1 "$LAST_STATUS" 'sonnet is refused on a prompt naming the site-model skill'
+run_lane --dry-run tier-empty "$REPO" '' "$SITE_PROMPT"
+assert_exit 1 "$LAST_STATUS" 'an empty model is refused on a site prompt'
+assert_contains "$LAST_OUTPUT" 'refusing model (none)' 'the refusal says no model was named'
+for ok in opus fable claude-opus-5-5 claude-fable-5-1 Opus; do
+  run_lane --dry-run "tier-$ok" "$REPO" "$ok" "$SITE_PROMPT"
+  assert_exit 0 "$LAST_STATUS" "$ok is allowed on a site prompt"
+  assert_contains "$LAST_OUTPUT" "claude\\ --model\\ $ok" "$ok lane gets its model"
+  assert_contains "$LAST_OUTPUT" 'effort\ high' "$ok lane runs at effort high"
+done
+run_lane --dry-run --allow-low-tier tier-override "$REPO" sonnet "$SITE_PROMPT"
+assert_exit 0 "$LAST_STATUS" '--allow-low-tier lets sonnet start on a site prompt'
+assert_contains "$LAST_OUTPUT" 'claude\ --model\ sonnet' '--allow-low-tier keeps the model asked for'
+run_lane --dry-run tier-plain "$REPO" haiku "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'a prompt without data/sites/ or site-model is unaffected (haiku)'
+run_lane --dry-run --console tier-console "$REPO" sonnet "$SITE_PROMPT"
+assert_exit 1 "$LAST_STATUS" '--console is held to the tier too'
+run_lane --dry-run --console --headless tier-headless "$REPO" haiku "$SITE_PROMPT"
+assert_exit 1 "$LAST_STATUS" '--headless is held to the tier too'
+run_lane --dry-run --engine codex tier-codex "$REPO" sonnet "$SITE_PROMPT"
+assert_not_contains "$LAST_OUTPUT" 'refusing model' 'the tier applies to Claude lanes only'
+assert_contains "$HELP_OUTPUT" '--allow-low-tier' 'help documents the tier override'
+# --resume checks the recorded model against the recorded prompt.
+printf '%s\ttier-res-low\t%s\tsonnet\tsubscription\t%s\t%s\tsess-tier-1\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$SITE_PROMPT" "$TMP/tier-r1.md" >>"$INDEX"
+printf '%s\ttier-res-fable\t%s\tfable\tsubscription\t%s\t%s\tsess-tier-2\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$SITE_PROMPT" "$TMP/tier-r2.md" >>"$INDEX"
+printf '%s\ttier-res-plain\t%s\tsonnet\tsubscription\t%s\t%s\tsess-tier-3\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/tier-r3.md" >>"$INDEX"
+run_lane --dry-run --resume tier-res-low
+assert_exit 1 "$LAST_STATUS" 'resuming a sonnet site lane is refused'
+assert_contains "$LAST_OUTPUT" 'refusing model sonnet' 'the resume refusal names the model'
+run_lane --dry-run --allow-low-tier --resume tier-res-low
+assert_exit 0 "$LAST_STATUS" '--allow-low-tier lets a sonnet site lane resume'
+run_lane --dry-run --resume tier-res-fable
+assert_exit 0 "$LAST_STATUS" 'a fable site lane resumes'
+run_lane --dry-run --resume tier-res-plain
+assert_exit 0 "$LAST_STATUS" 'a sonnet lane without site words resumes'
+
 printf 'ok - %s checks passed\n' "$checks"
