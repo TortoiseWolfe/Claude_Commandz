@@ -53,6 +53,20 @@ path no mount covers is held, not assumed to be the container's own scratch. A n
 as bound to a host folder is judged as that folder; one docker cannot answer for (daemon down, timeout, or a volume it does not know yet, which the same command may make) is held, and every
 named volume is asked about, with no cap. A quote left in an option word, or an image word that is not plausible, also marks the
 list incomplete, and a source that is not a legal volume name is judged as a folder. `docker exec` has no mounts to read and is unchanged.
+A `docker run` or `docker compose run` (also podman and docker-compose) with no CPU cap and no `timeout` in front is held with the
+one-line fix: add `--cpus N` (and a timeout), or run it through `~/.claude/scripts/docker-heavy.sh -- docker run ...`
+(19 Oct: one uncapped run took 14.6 of 16 cores and the machine stopped answering). A cap is `--cpus`, `--cpu-quota` or
+`--cpuset-cpus` among the options before the image, so a `--cpus` the container's own program is given does not count, and its value
+must be a real limit (`--cpus 0`, `--cpu-quota -1` and `$X` are not). A timeout is `timeout [options] DURATION` with a positive
+duration of at most a day (`timeout 0` is not one). Either a cap or a timeout in front clears it. A compose run has no `--cpus` flag, so
+its service is read in the compose file the way compose picks it: the `-f` files in order, else the first default file in the folder
+(`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`) plus its override file; the last file that says anything
+about the service's CPU wins, so `cpus: 0` in an override uncaps it. Only a direct `cpus`, `cpu_quota` or `cpuset` key, or
+`deploy.resources.limits.cpus`, with a positive number counts; a `${X}` value, an `include`, `<<:`, `extends` or `!reset` does not. The run stays held when it is unclear: a
+relative path or the default files with no plain `cd` before them, `COMPOSE_FILE` (command, environment or the project env file),
+`--env-file`, `--profile`, `COMPOSE_PROJECT_DIR`, a `source`, `eval` or `export` before the call, a file or service that cannot be read, or a limit set through an anchor or
+`extends`. `docker-heavy.sh` itself, and `docker ps`, `logs`, `inspect`, `stats`, `update` and `exec`, are never held.
+A lane nobody watches is refused with the fix and runs it again.
 The classifier judges what the command itself would run: it does not match text inside quoted
 message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that only write a file (including
 `git commit -m "$(cat <<'EOF' ...)"`), or
