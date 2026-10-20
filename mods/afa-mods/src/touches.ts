@@ -5,7 +5,7 @@
 // Read-only probes only. `Probe` is the part of the engine this needs (the same $.fs / $.process calls),
 // so a test hands in a fake with the same shape. Every async function here takes it first, spelled `$`.
 
-import { globBase, targetsOf, unquote } from './lib'
+import { UNLIMITED_FIX, globBase, runTargetOf, targetsOf, unquote } from './lib'
 import type { Hold, Mapped } from './lib'
 
 export type Probe = {
@@ -181,6 +181,15 @@ const hostOf = (url: string): string => {
   return scp ? `${scp[1]}/${scp[2]}` : ''
 }
 
+// What an uncapped run would take: the container it starts, and the one-line fix (the same words the refusal to a lane carries)
+function unlimitedLines(segment: string): string[] {
+  const target = runTargetOf(segment)
+  return [
+    `container from ${target ? `image or service ${target}` : 'an image the words do not name'}: no --cpus or compose cpus limit and no timeout, so it can use every core on this machine`,
+    `fix: ${UNLIMITED_FIX}`,
+  ]
+}
+
 async function forcePushLines($: Probe, segment: string): Promise<string[]> {
   const t = segment.split(/\s+/)
   const after = t.slice(t.indexOf('push') + 1)
@@ -261,6 +270,7 @@ export const RULE_SAMPLES: Record<string, string[]> = {
   'docker volume prune': ['docker volume prune -f'],
   'docker volume rm': ['docker volume rm pgdata cache', 'docker volume rm'],
   'docker compose down -v': ['docker compose down -v', 'docker compose -f ci.yml -p demo down --volumes'],
+  'docker run without limits': ['docker run --rm ada-stair-generator-site-tools', 'docker compose run --rm app make test', 'docker-compose -f ci.yml run web npm test'],
   'git push --force': ['git push --force origin main', 'git push -f', 'git push origin +feat/x'],
   'production deploy': ['vercel --prod', 'npm run deploy --production', 'redeploy prod now', 'mystery-tool --prod'],
   'tmux shared lanes': [
@@ -291,6 +301,9 @@ export async function touches($: Probe, hold: Hold, home: string): Promise<strin
         break
       case 'docker compose down -v':
         lines = await composeDownLines($, hold.segment)
+        break
+      case 'docker run without limits':
+        lines = unlimitedLines(hold.segment)
         break
       case 'git push --force':
         lines = await forcePushLines($, hold.segment)
