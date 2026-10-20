@@ -1,6 +1,6 @@
 {
   "name": "afa-mods",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "types": "./src/state.d.ts",
   "author": { "name": "TortoiseWolfe" },
   "description": "Hub band, Token Weather and Blast Radius for Claude Code sessions."
