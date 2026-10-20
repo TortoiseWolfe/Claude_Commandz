@@ -5,8 +5,8 @@
 // Read-only probes only. `Probe` is the part of the engine this needs (the same $.fs / $.process calls),
 // so a test hands in a fake with the same shape. Every async function here takes it first, spelled `$`.
 
-import { targetsOf, unquote } from './lib'
-import type { Hold } from './lib'
+import { globBase, targetsOf, unquote } from './lib'
+import type { Hold, Mapped } from './lib'
 
 export type Probe = {
   fs: {
@@ -45,40 +45,67 @@ async function ran($: Probe, argv: string[]): Promise<string | null> {
   }
 }
 
+// One path an rm names, as the words can say it
+async function rmTargetLine($: Probe, raw: string, home: string): Promise<string> {
+  const path = raw.replace(/^~(?=\/|$)/, home)
+  const variable = /\$\{?([A-Za-z_]\w*)/.exec(path)
+  if (variable || /[`$]/.test(path)) {
+    const why = variable
+      ? `the path goes through $${variable[1]}, which is only read when the command runs`
+      : 'the path is built by another command when it runs'
+    return `${path}: ${cantTell(why)}`
+  }
+  if (/[*?[\]{}]/.test(path)) return `${path}: ${cantTell('the pattern only expands when the command runs')}`
+  try {
+    const st = await $.fs.stat(path)
+    if (st.kind === 'directory') {
+      let inside = ', everything inside removed'
+      try {
+        inside = `, ${(await $.fs.list(path)).length} entries at the top level, all removed`
+      } catch {
+        // the size and the words are still true
+      }
+      return `${path} (dir, ${st.size} bytes${inside})`
+    }
+    return `${path} (${st.kind}, ${st.size} bytes)`
+  } catch {
+    return `${path} (not found)`
+  }
+}
+
 async function rmLines($: Probe, segment: string, home: string): Promise<string[]> {
   const all = targetsOf(segment).map(unquote)
   if (all.length === 0) {
     return [cantTell('rm names no path here (it may be given its paths by another command)')]
   }
   const out: string[] = []
-  for (const raw of all.slice(0, MAX_LISTED)) {
-    const path = raw.replace(/^~(?=\/|$)/, home)
-    const variable = /\$\{?([A-Za-z_]\w*)/.exec(path)
-    if (variable || /[`$]/.test(path)) {
-      const why = variable
-        ? `the path goes through $${variable[1]}, which is only read when the command runs`
-        : 'the path is built by another command when it runs'
-      out.push(`${path}: ${cantTell(why)}`)
-    } else if (/[*?[\]{}]/.test(path)) {
-      out.push(`${path}: ${cantTell('the pattern only expands when the command runs')}`)
+  for (const raw of all.slice(0, MAX_LISTED)) out.push(await rmTargetLine($, raw, home))
+  if (all.length > MAX_LISTED) out.push(`... ${all.length - MAX_LISTED} more targets not listed`)
+  return out
+}
+
+const tilde = (path: string, home: string) => (home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path)
+
+// An rm inside `docker run -v ...`: each path shown through its mount, as the folder it is on this machine
+async function containerLines($: Probe, mapped: Mapped[], home: string): Promise<string[]> {
+  const out: string[] = []
+  for (const m of mapped.slice(0, MAX_LISTED)) {
+    if (m.kind === 'volume') {
+      out.push(`${m.path}: ${m.mountAt} is ${m.volume ? `the Docker volume "${m.volume}"` : 'a Docker volume made for this container'}, not a folder on this machine`)
+    } else if (m.kind === 'unresolved') {
+      out.push(`${m.path}: ${cantTell(`${m.mountAt} is mounted from "${m.source}", a host folder that ${m.why}`)}`)
+    } else if (m.kind === 'uncovered') {
+      out.push(`${m.path}: ${cantTell(m.why)}`)
     } else {
-      try {
-        const st = await $.fs.stat(path)
-        if (st.kind === 'directory') {
-          let inside = ', everything inside removed'
-          try {
-            inside = `, ${(await $.fs.list(path)).length} entries at the top level, all removed`
-          } catch {
-            // the size and the words are still true
-          }
-          out.push(`${path} (dir, ${st.size} bytes${inside})`)
-        } else out.push(`${path} (${st.kind}, ${st.size} bytes)`)
-      } catch {
-        out.push(`${path} (not found)`)
-      }
+      const { base, glob } = globBase(m.host)
+      const folder = `${m.mountAt} is ${tilde(m.folder, home)} on this machine (a host folder mounted into the container)`
+      if (glob) {
+        const dir = await rmTargetLine($, base, home)
+        out.push(`${m.path}: ${folder}; the pattern removes what matches inside ${tilde(dir, home)}`)
+      } else out.push(`${m.path}: ${folder}; ${tilde(await rmTargetLine($, m.host, home), home)}`)
     }
   }
-  if (all.length > MAX_LISTED) out.push(`... ${all.length - MAX_LISTED} more targets not listed`)
+  if (mapped.length > MAX_LISTED) out.push(`... ${mapped.length - MAX_LISTED} more targets not listed`)
   return out
 }
 
@@ -252,7 +279,7 @@ export async function touches($: Probe, hold: Hold, home: string): Promise<strin
   try {
     switch (hold.kind) {
       case 'rm -rf':
-        lines = await rmLines($, hold.segment, home)
+        lines = hold.container ? await containerLines($, hold.container, home) : await rmLines($, hold.segment, home)
         break
       case 'docker system prune':
       case 'docker image prune':
