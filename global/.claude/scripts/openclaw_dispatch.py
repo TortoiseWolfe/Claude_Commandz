@@ -329,15 +329,30 @@ def queue_save(path, q):
     os.replace(tmp, p)
 
 
+def queue_pieces(text):
+    """-> the post as outbox items of at most ITEM_MAX characters each, cut only at paragraph or line breaks and marked "(1 of 3)".
+    19 Oct 7:12 PM: two lane lists of about 1,500 characters each went out as three chat parts in one go, twice. A long post (a lane
+    list, a report) now shows one piece per next, like any other item. Nothing is dropped: the pieces joined are the whole post."""
+    text = (text or "").strip()
+    if len(text) <= ITEM_MAX:
+        return [text]
+    pieces = [c.strip() for c in _chat_chunks(text, ITEM_MAX - len(" (10 of 10)")) if c.strip()]
+    return ["%s (%d of %d)" % (c, i, len(pieces)) for i, c in enumerate(pieces, 1)] if len(pieces) > 1 else pieces
+
+
 def queue_add(path, text, now, source="hub"):
-    """Put one post at the end of the outbox. -> its id. Raises OSError when it cannot be written."""
+    """Put one post at the end of the outbox, as one item or (when long) several. -> the id of its first item. Raises OSError when it
+    cannot be written."""
     with _queue_lock(path):
         q = queue_load(path)
-        q["seq"] += 1
-        q["items"].append({"id": q["seq"], "text": text, "source": source, "added": now, "shown": None, "attempts": 0,
-                           "next_try": now, "failing_since": None, "woke": None})
+        first = None
+        for piece in queue_pieces(text):
+            q["seq"] += 1
+            first = first or q["seq"]
+            q["items"].append({"id": q["seq"], "text": piece, "source": source, "added": now, "shown": None, "attempts": 0,
+                               "next_try": now, "failing_since": None, "woke": None})
         queue_save(path, q)
-        return q["seq"]
+        return first
 
 
 # 19 Oct 6:31 PM, after the link came back and one 1,600-character post answered seven questions at once: "overwheming me again,
@@ -369,6 +384,26 @@ def queue_tail(waiting):
     return "\n\n(%d more waiting. Say next for the next one.)" % waiting
 
 
+def queue_headline(text, limit=90):
+    """-> the first line of a post, without markdown marks, at most `limit` characters (a preview; the post itself shows whole)."""
+    line = next((l for l in (text or "").splitlines() if l.strip()), "")
+    line = re.sub(r"^[#>*\-\s]+|\*\*|__|`", "", line).strip()
+    if len(line) > limit:
+        line = line[:limit].rsplit(None, 1)[0].rstrip(",;:.") + "..."
+    return line
+
+
+def queue_nudge(waiting, nxt):
+    """The one line sent when the post showing said nothing else was waiting and something now is. 19 Oct 7:14 PM this was the
+    bare count, "(1 more waiting. Say next for the next one.)", which he read as an empty post: it now names what waits."""
+    return "Next up: %s\n(%d waiting. Say next for it.)" % (queue_headline(nxt) or "a new post", waiting)
+
+
+# A "next" seconds after a post showed is not about that post: he cannot have read it. 19 Oct 8:03-8:27 PM his chat window held two
+# "next"s while it was stuck; sent together they would have skipped a post he never saw.
+NEXT_SETTLE = 15
+
+
 def queue_pump(path, send, now):
     """Show the first post when nothing is showing and its next try is due. send(text) -> True when it landed.
     When the post showing said nothing else was waiting and something now is, one short line says so (once).
@@ -387,16 +422,16 @@ def queue_pump(path, send, now):
             if not head["shown"] and head["next_try"] > now:
                 return "later"
             hid, text, nudge = head["id"], head["text"], bool(head["shown"])
-        if nudge:  # it said nothing else was waiting, and now something is: one short line, once, so he knows to say next
-            if send(queue_tail(waiting).strip()):
-                with _queue_lock(path):
-                    q = queue_load(path)
-                    for i in q["items"]:
-                        if i["id"] == hid:
-                            i["nudged"] = now
-                    queue_save(path, q)
-                return "nudged"
-            return "showing"
+            if nudge:  # marked before it is sent: a send that lands slowly but reports a failure must not send it twice (7:14 PM)
+                head["nudged"], nxt = now, q["items"][1]["text"]
+                queue_save(path, q)
+        if nudge:  # it said nothing else was waiting, and now something is: one short line, once, naming what waits
+            try:
+                ok = send(queue_nudge(waiting, nxt))
+            except Exception as e:
+                _append(STATE / "openclaw-inject.log", "%s chat queue nudge %d raised %s" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), hid, repr(e)[:300]))
+                ok = False
+            return "nudged" if ok else "showing"
         try:
             ok = bool(send(text + queue_tail(waiting)))
         except Exception as e:  # whatever went wrong, the post stays first and is tried again
@@ -422,6 +457,8 @@ def queue_next(path, send, now, why="next"):
     tried again now instead. -> (moved: bool, what queue_pump returned)."""
     with _queue_lock(path):
         q = queue_load(path)
+        if why == "next" and q["items"] and q["items"][0]["shown"] and 0 <= now - q["items"][0]["shown"] < NEXT_SETTLE:
+            return False, "settling"
         moved = bool(q["items"] and q["items"][0]["shown"])
         if moved:
             done = q["items"].pop(0)
@@ -4076,7 +4113,7 @@ def queue_cli(args):
     if args == []:
         print("\n".join(queue_lines(path, now)) or "empty")
     elif args == ["next"]:
-        moved, r = queue_next(path, host.inject_now, now)
+        moved, r = queue_next(path, host.inject_now, now, "hub")  # the hub moving on by hand: no settle wait
         print("%s; %s" % ("moved past the post he was shown" if moved else "nothing was showing", r))
     elif args == ["pump"]:
         print(queue_pump(path, host.inject_now, now))

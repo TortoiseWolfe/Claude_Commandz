@@ -7,6 +7,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -66,7 +67,8 @@ class Outbox(td.Base):
         posts = ["Post %d: the porch columns are traced.\n\nSecond paragraph %d." % (i, i) for i in range(1, 6)]
         for p in posts:
             self.assertTrue(self.host.inject(p))
-        self.assertEqual(self.host.shown, [posts[0] + "\n\n(Nothing else waiting.)", "(1 more waiting. Say next for the next one.)"],
+        self.assertEqual(self.host.shown, [posts[0] + "\n\n(Nothing else waiting.)",
+                                          "Next up: Post 2: the porch columns are traced.\n(1 waiting. Say next for it.)"],
                          "one post shows; the rest wait, and one short line (once) says something is waiting")
         self.host.shown.pop()
         for k in range(1, 5):
@@ -100,7 +102,7 @@ class Outbox(td.Base):
         self.host.inject("two")
         self.host.inject("three")
         self.poll(None, NOW + 180)
-        self.assertEqual(self.host.shown, ["one\n\n(Nothing else waiting.)", "(1 more waiting. Say next for the next one.)"])
+        self.assertEqual(self.host.shown, ["one\n\n(Nothing else waiting.)", "Next up: two\n(1 waiting. Say next for it.)"])
         self.assertEqual(dp.queue_pump(self.box, self.host.inject_now, NOW + 999), "showing")
 
     def test_a_post_that_does_not_land_stays_first_and_is_tried_again(self):
@@ -169,6 +171,51 @@ class Outbox(td.Base):
         self.assertEqual(aside[0].read_text(), '{"items": [{"text": "held')
         self.assertEqual([i["text"] for i in self.items()], ["new"])
 
+    # 19 Oct 7:12-8:27 PM, replayed: a lane list too long for one item, a second one, a nudge that said only "(1 more waiting...)", and
+    # two "next"s his stuck chat window held and would send together.
+    LANES = "**Open lanes (16)**\n\n" + "\n".join(
+        "- **lane-%02d** (Repo%02d): report written, started 4:%02d PM. Working on: You are a lane in ~/repos/Repo%02d, finish the item." %
+        (i, i, i, i) for i in range(16)) + "\n\n9 older lanes have ended."
+
+    def test_a_long_lane_list_is_one_short_item_per_next_and_nothing_is_lost(self):
+        self.assertGreater(len(self.LANES), 1500)
+        self.host.inject(self.LANES)
+        q = self.items()
+        self.assertGreater(len(q), 1)
+        self.assertTrue(all(len(i["text"]) <= dp.ITEM_MAX for i in q), [len(i["text"]) for i in q])
+        self.assertEqual(len(self.host.shown), 1, "one piece shows, not a burst of chat parts")
+        self.assertNotIn("(part ", self.host.shown[0])
+        self.assertTrue(self.host.shown[0].endswith("(1 of %d)\n\n(%d more waiting. Say next for the next one.)" % (len(q), len(q) - 1)))
+        whole = " ".join(re.sub(r" \(\d+ of \d+\)$", "", i["text"]) for i in q)
+        self.assertEqual(whole.split(), self.LANES.split(), "the pieces joined are the whole list")
+
+    def test_the_nudge_names_what_waits_and_a_slow_landing_is_not_sent_twice(self):
+        self.host.inject("Open lanes (15): all quiet.")
+        sends = []
+
+        def slow(text):  # 7:14 PM: the post landed, but the call reported a failure
+            sends.append(text)
+            return False
+        self.host.inject_now = slow
+        self.host.inject("oc-ada-stair-generator-f41b192c is already closed.")
+        for k in range(5):
+            dp.queue_pump(self.box, slow, NOW + 60 * k)
+        self.assertEqual(sends, ["Next up: oc-ada-stair-generator-f41b192c is already closed.\n(1 waiting. Say next for it.)"],
+                         "one nudge, naming the post that waits, never a bare count and never twice")
+        self.assertTrue(sends[0].strip() and "Next up: " in sends[0])
+
+    def test_two_held_nexts_sent_together_move_one_post(self):
+        for t in ("A: the porch.", "B: the stairs.", "C: the tabs."):
+            self.host.inject(t)
+        self.host.shown.clear()
+        self.poll(self.him("next", NOW + 1000), NOW + 1005)
+        self.poll(self.him("next", NOW + 1001), NOW + 1008)
+        self.assertEqual(self.host.shown, ["B: the stairs.\n\n(1 more waiting. Say next for the next one.)"],
+                         "the second next came seconds after B showed: he has not read B, so C waits")
+        self.assertEqual([i["text"] for i in self.items()], ["B: the stairs.", "C: the tabs."])
+        self.poll(self.him("next", NOW + 1100), NOW + 1105)
+        self.assertEqual(self.host.shown[-1], "C: the tabs.\n\n(Nothing else waiting.)")
+
     def test_a_bare_host_posts_straight_away(self):
         self.assertIsNone(dp.LaneHost().queue_path)
         self.assertEqual(list(vars(dp.LaneHost())), [])
@@ -195,7 +242,7 @@ class LiveEntryPoints(td.Base):
             self.assertEqual(dp.main(["post", "second"]), 0)
             self.assertEqual(dp.chat_queue_path(), self.tmp / "t-state.chat-queue.json")
             injects = [s for s in sent if "message" in s]
-            self.assertEqual([s["message"] for s in injects], ["first\n\n(Nothing else waiting.)", "(1 more waiting. Say next for the next one.)"])
+            self.assertEqual([s["message"] for s in injects], ["first\n\n(Nothing else waiting.)", "Next up: second\n(1 waiting. Say next for it.)"])
             self.assertEqual({s["sessionKey"] for s in injects}, {"agent:replay:queue"})
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(dp.main(["queue"]), 0)
