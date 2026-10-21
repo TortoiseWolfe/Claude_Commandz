@@ -23,6 +23,10 @@ flock -n 9 || exit 0
 # 19 Oct: the bridge went quiet at 5:21 PM and 8:15 PM; see wsl_bridge_watchdog.py.
 timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || echo "openclaw_status_refresh: wsl bridge watchdog reports a problem (see ~/.claude/state/wsl-bridge/heal.log)" >&2
 
+# Harmonic Egg CI runs on this machine while its repo variable RUNNER_LABEL=workstation (harmonic-egg#351): start the runner if WSL, Docker
+# or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
+timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
+
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2

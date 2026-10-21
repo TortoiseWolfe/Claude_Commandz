@@ -62,7 +62,7 @@ cp -a ~/.claude/skills/agent-notes/. global/.claude/skills/agent-notes/
 cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.claude/scripts/
 cp ~/.claude/scripts/class_resolver.py ~/.claude/scripts/route_log.py ~/.claude/scripts/learning_baseline.py global/.claude/scripts/
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
-cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh global/.claude/scripts/
+cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh ~/.claude/scripts/he_runner_watch.sh global/.claude/scripts/
 cp ~/.claude/scripts/hub_digest.py ~/.claude/scripts/session_prime_facts.py global/.claude/scripts/
 cp ~/.claude/scripts/hub_lean.py global/.claude/scripts/
 cp ~/.claude/scripts/wsl_bridge_watchdog.py ~/.claude/scripts/lane_watch.sh global/.claude/scripts/  # authored here, tests in tests/test_wsl_bridge_watchdog.py and test_lane_watch.sh
