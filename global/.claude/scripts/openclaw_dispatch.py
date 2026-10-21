@@ -193,6 +193,12 @@ REPLY_RE = re.compile(r"^reply\s+(?P<lane>[A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*:\s
 CLOSE_RE = re.compile(r"^close\s+(?:the\s+)?(?P<lane>[A-Za-z0-9][A-Za-z0-9._-]{0,79})(?:\s+lane)?$", re.I)
 JUDGMENT_RE = re.compile(r"e-?mail|draft|repl(?:y|ies)|respond|letter|invoice|quote|proposal|contract|client", re.I)
 DOCKER_RE = re.compile(r"docker|compose|container|wsl\.exe|powershell", re.I)
+# 3D fitting, photo matching and site-model work is judgment, never execution (his rule, 19 Oct; lane.sh refuses Sonnet and Haiku on it).
+# A superset of lane.sh's own test ('data/sites/|site-model' in the prompt file), so the dispatcher moves a lane up before lane.sh refuses.
+SITE_RE = re.compile(r"data/sites/|\bsite[- ]models?\b|sketch-?up", re.I)  # the triggers lane-rules.md names
+SITE_MODELS = ("opus", "fable")  # the only models site-model work runs on, each at effort high
+SITE_MODEL = "opus"  # the default of the two: the ledger's cost per progress run is a quarter of Fable's (hub/ledger/site-model-runs.tsv)
+TIER_REFUSED = "refusing model"  # the first words of lane.sh's refusal (site_tier_ok): never retried on any tier
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", "Dockerfile")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
@@ -729,13 +735,17 @@ class LaneHost:
             argv.append("--no-connectors")
         elif getattr(self, "force_connectors_on", False):
             argv.append("--connectors")  # an email ask: lane.sh would also see "Gmail" in the prompt, but never leave it to a word match
+        if engine == "claude" and model in SITE_MODELS and SITE_RE.search(_read_text(prompt_path)):
+            argv += ["--effort", "high"]  # site-model work always runs at effort high, whatever lane.sh's default is
         argv += (["--ask", ask] if ask else []) + [name, str(dirpath), model, str(prompt_path)]
         # AFA_LANE_UNATTENDED: nobody is at this lane's window, so its Blast Radius guard must never wait for an answer (see lane.sh)
         r = self._run(argv, 180, cwd=str(dirpath), env=dict(os.environ, AFA_LANE_UNATTENDED="1"))
         if r is None:
             return False, "lane.sh did not answer within 3 minutes"
         if r.returncode != 0:
-            return False, (r.stderr.strip().splitlines() or ["lane.sh failed"])[-1][:200]
+            err = (r.stderr.strip().splitlines() or ["lane.sh failed"])
+            tier = next((l for l in err if l.startswith(TIER_REFUSED)), None)  # lane.sh's site-model tier guard: report it as it is, once
+            return False, (tier or err[-1])[:200]
         return True, "started"
 
     def live_lanes(self):
@@ -1173,9 +1183,32 @@ def facts(ctx, repo_word, what="", gh=None, now=None):
     return True, _trim("\n".join(lines), FACTS_MAX)
 
 
+def site_tier(text, engine, model):
+    """Site-model work (SITE_RE in `text`) runs on Claude, on Fable or Opus: Codex and Copilot, Sonnet, Haiku and any unknown model
+    move up to Opus; Fable and Opus stay as they are. -> (engine, model, moved)."""
+    if not SITE_RE.search(text or ""):
+        return engine, model, False
+    new = model if model in SITE_MODELS else SITE_MODEL
+    return "claude", new, (engine, model) != ("claude", new)
+
+
+def _read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def prompt_site_tier(prompt_path, engine, model):
+    """site_tier on the saved prompt file, which is what lane.sh reads (its template, his task and the context attached to it)."""
+    return site_tier(_read_text(prompt_path), engine, model)
+
+
 def choose_engine(path, client, task, workspace=False, mail=False):
-    """-> (engine, model, why). Client or foreign: Claude, Opus only for client judgment or email. Own: Codex, or
-    Claude Sonnet when the work needs Docker or wsl.exe. Email is always Claude (Gmail is a Claude connector)."""
+    """-> (engine, model, why). Site-model work: Claude Opus (effort high). Client or foreign: Claude, Opus only for client judgment or
+    email. Own: Codex, or Claude Sonnet when the work needs Docker or wsl.exe. Email is always Claude (Gmail is a Claude connector)."""
+    if SITE_RE.search(task or ""):
+        return "claude", SITE_MODEL, "site-model work: Claude Opus, effort high"
     if client:
         if JUDGMENT_RE.search(task):
             return "claude", "opus", "client repo (%s), judgment or email" % client
@@ -2182,9 +2215,10 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
     if engine == "claude":
         over = budget_over(host.week_budget(), now)  # an unknown budget is not a block here; the waiting room is the one that holds on it
         if over is not None:
-            if model == "opus":
-                model = "sonnet"
-            note = " (Sonnet only: %s)" % over
+            if not SITE_RE.search(task):  # site-model work never steps down: a cheaper tier is no saving there
+                if model == "opus":
+                    model = "sonnet"
+                note = " (Sonnet only: %s)" % over
     lane = "oc-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30], time.strftime("%m%d-%H%M", time.localtime(now)))
     n = 1
     while lane in state["lanes"]:
@@ -2201,8 +2235,13 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
         attached = attach_context(ctx, state, lane, name, hand, prompt, context, now)
     except OSError as e:
         attached = "context not attached: %s" % e
+    engine, model, moved = prompt_site_tier(prompt, engine, model)  # the attached context may name a site model too
+    if moved:
+        why, note = "site-model work: Claude Opus, effort high", ""
     ok, msg = _start_lane(host, mail, lane, path, engine, model, prompt)
     if not ok:
+        if msg.startswith(TIER_REFUSED):  # reported once, never started again on another tier
+            return "%s | start %s | refused: %s" % (stamp, name, msg), "I couldn't start a lane in %s: 3D and site-model work runs only on Fable or Opus, and the start was refused. %s" % (name, HUB_PASSES_IT_ON)
         return "%s | start %s | couldn't start: %s" % (stamp, name, msg), "I couldn't start a lane in %s, so nothing has picked up your message yet. %s" % (name, HUB_PASSES_IT_ON)
     state["lanes"][lane] = {"repo": name, "engine": engine, "model": model, "started": now, "status": "started", "report": str(report),
                             "task": task, "task_key": task_key(task)}
@@ -2521,6 +2560,7 @@ def restart_lane(ctx, host, old, text, now, ask_id=None, context=None):
     prompt.write_text(RESTART_TEMPLATE.format(
         prompt=prompt_text, old=old, new=new, when=time.strftime("%-d %b %-I:%M %p", time.localtime(now)), new_report=report,
         report="\n".join("> " + l for l in body.splitlines()) if body else "(it wrote no report)", words=json.dumps(text.strip(), ensure_ascii=False)))
+    engine, model, _moved = prompt_site_tier(prompt, engine, model)  # a site-model lane restarts on Opus or Fable, never the Sonnet its row might say
     off, on = getattr(host, "force_connectors_off", False), getattr(host, "force_connectors_on", False)
     host.force_connectors_on, host.force_connectors_off = row["connectors"] == "on", row["connectors"] == "off"
     try:
@@ -3247,7 +3287,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
 
 
 ENGINES = ("claude", "codex", "copilot")
-MODELS = ("sonnet", "opus", "haiku")
+MODELS = ("sonnet", "opus", "haiku", "fable")  # fable: a restart of a Fable lane must not fall back to Sonnet
 
 
 def worktree_parent(ctx, real):
@@ -3357,7 +3397,21 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
         attach_context(ctx, state, lane_name, name, hand, prompt_path, context, now)
     except OSError:
         pass  # the lane still starts with the prompt the pass wrote
+    engine, model, _moved = prompt_site_tier(prompt_path, engine, model)  # the pass may have chosen Sonnet or Copilot for site-model work
     ok, msg = _start_lane(host, mail, lane_name, path, engine, model, prompt_path, ask=ask_id)
+    if not ok and msg.startswith(TIER_REFUSED):
+        # lane.sh refused the model: tell him once and put his words on the hub's list. The ask does not go back to pending, so the
+        # script fallback cannot start it again on another tier.
+        with ctx.locked():
+            state = load_state(ctx.state_path)
+            a = asks_of(state).get(ask_id)
+            if a is not None:
+                a["status"] = "fallback-failed"
+                _finish(a, now, "tier refused")
+                save_state(ctx.state_path, state)
+        to_hub_list(ctx, ask_id, ask.get("task", ""), now, "lane.sh refused the model for site-model work (%s)" % msg[:120])
+        host.inject("I couldn't start that: 3D and site-model work runs only on Fable or Opus, and the start was refused. It is on the hub's list with your words.")
+        return False, "start: refused: " + msg
     if not ok:
         with ctx.locked():
             state = load_state(ctx.state_path)
@@ -3854,6 +3908,7 @@ def room_start(ctx, host, entry, now):
     prompt = hand / "prompt.md"
     prompt.write_text(entry["brief"].rstrip("\n") + "\n")
     entry["path"].unlink()
+    engine, model, _moved = prompt_site_tier(prompt, engine, model)
     ok, msg = host.start_lane(name, hit[1], engine, model, prompt)
     behind = " (was queued behind %s)" % h["after"] if h.get("after") else ""
     if not ok:
@@ -4239,6 +4294,7 @@ Repos you may start a lane in (name | folder | owner | client?). The workspace f
 
 Engine rules (from hub/lane-rules.md): {engine_rule}
 - A client repo, or anything a client repo is involved in: Claude (sonnet; opus only for client judgment or email). Never --engine codex/copilot there.
+- Anything that names a site model, the site-model skill, data/sites/ or SketchUp geometry (3D fitting, photo matching): Claude, model opus (or fable), never sonnet, haiku, codex or copilot; `start` moves it up and lane.sh refuses anything lower.
 - Work that spans repos (scan, count, compare, list across repos, anything on his GitHub as a whole): folder {root} (the workspace), Claude sonnet, and add the WORKSPACE RULES below to the prompt.
 - Code in one of his own repos (one of the "own" rows): --engine copilot, folder = that repo, copilot work rule below. If it needs Docker or wsl.exe: Claude sonnet in that repo instead.
 - Anything that involves email (reading, proofreading, editing, drafting or replying to mail, a named person's email or thread, also when the ask is a follow-up of one) starts a lane with Gmail on, in the folder of the repo it concerns, on Claude, never a lane without email access. His standing rule, 19 Oct 2:52 PM: "I don't have tokens to waste on you sending things to the wrong lane, if it envolves email then don't waste time and tokens sending it to a lane without email access, standing rule". `start` turns Gmail on for such a task; add this MAIL RULE to {{extra_rules}}: {mail_rules}
