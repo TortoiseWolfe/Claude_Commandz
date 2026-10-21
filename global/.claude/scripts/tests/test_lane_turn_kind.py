@@ -50,6 +50,10 @@ class TurnKind(unittest.TestCase):
     def test_finished_background_command_is_real(self):
         self.assertEqual(kind(user(JOB_DONE), said("The button stopped spinning without a file.")), "real")
 
+    def test_the_words_outside_the_summary_tag_do_not_count(self):
+        quoted = '<task-notification>\n<task-id>b2</task-id>\n<summary>Background command "grep Monitor event log" completed</summary>\n<result>Monitor event</result>\n</task-notification>'
+        self.assertEqual(kind(user(quoted), said("Found it.")), "real")
+
     def test_a_typed_turn_is_real(self):
         self.assertEqual(kind(user("Merge it"), said("Merged.")), "real")
 

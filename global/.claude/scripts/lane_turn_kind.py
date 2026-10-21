@@ -48,7 +48,8 @@ def turn_kind(lines):
                     asks = True
     if trigger is None:
         return "?"
-    from_monitor = trigger.startswith("<task-notification>") and "Monitor event" in trigger
+    # the wrapper's own <summary> tag, not the words anywhere in the text: a finished job whose output mentions "Monitor event" is real
+    from_monitor = trigger.startswith("<task-notification>") and "<summary>Monitor event" in trigger.split("</summary>")[0]
     if from_monitor and not asks and "?" not in "\n".join(answer):
         return "monitor"
     return "real"
