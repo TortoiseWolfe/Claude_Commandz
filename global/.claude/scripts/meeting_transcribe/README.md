@@ -78,8 +78,11 @@ A single-track file, such as an old download, works too; it just comes out unlab
   - ffprobe finds the audio tracks; ffmpeg splits them to 16 kHz mono
   - each track is transcribed with voice activity detection, and segments are labelled by track
   - segments are merged by start time and consecutive segments from the same speaker are joined
-- Tests: `~/.claude/scripts/tests/test_meeting_transcribe.py`. The Docker smoke test runs with
-  `MEETING_SMOKE=1`.
+- Tests: `tests/test_meeting_transcribe.py` (no Docker needed) runs in the default suite. The Docker smoke test
+  (`tests/smoke_meeting_transcribe.py`) is heavy, so `tests/run_meeting_smoke.sh` runs it, every docker job through
+  `docker-heavy.sh` (`run.sh` does the same when `DOCKER_HEAVY` is set). A pass writes `tests/meeting_smoke.stamp`, a hash of
+  this folder and the smoke test; `tests/test_meeting_smoke_stamp.py` fails the default suite, naming that command, whenever
+  the hash no longer matches. So a change here can't merge until the smoke has passed on it.
 
 ## Known quirks
 

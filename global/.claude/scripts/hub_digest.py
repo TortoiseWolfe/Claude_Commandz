@@ -99,6 +99,58 @@ def dispatcher_open_questions(dispatcher=None):
     return result.stdout, None
 
 
+# ---------------------------------------------------------------------------------------------
+# The live-state check: the code that reads the roadmap issue and the hub-inbox must notice when the live text no longer parses
+# ---------------------------------------------------------------------------------------------
+
+PAGE_HEADINGS = ["## Lanes running", "## Open hub-inbox items", "## Roadmap", "## Budget this week",
+                 "## ~/repos, last 10 commits", "## Tidy report"]
+PAGE_HARD_CAP = 6144
+
+
+def live_problems(roadmap_body, page):
+    """What is wrong with the page built from the live roadmap body, or [] when the live state still parses. These were the asserts of
+    a test that only ran against the real state (and so only on one machine, when someone set an env var); they run here on every
+    live build instead, so a roadmap edit that breaks parse_roadmap is noticed within the quarter hour."""
+    probs = []
+    if not (roadmap_body or "").strip():
+        return ["the roadmap issue body came back empty (gh failed or the issue changed)"]
+    rm = parse_roadmap(roadmap_body)
+    if not rm["next_session"]:
+        probs.append('no "### Next session should" text parsed from the roadmap')
+    if not rm["arcs"]:
+        probs.append("no Arc summary parsed from the roadmap")
+    if not rm["next3"]:
+        probs.append('no "Next 3 sessions" block parsed from the roadmap')
+    if len(page.encode()) >= PAGE_HARD_CAP:
+        probs.append("the page is %d bytes, over the %d cap" % (len(page.encode()), PAGE_HARD_CAP))
+    probs.extend('the page lacks the heading "%s"' % h for h in PAGE_HEADINGS if h not in page)
+    if "roadmap unavailable" in page:
+        probs.append("the page says the roadmap is unavailable")
+    if any(rx.search(page) for rx in SECRETS):
+        probs.append("secret-shaped text survived the scrub")
+    return probs
+
+
+def alert_hub(key, problems, source, now=None, state_path=None):
+    """Fail loudly: put the problem on the hub's list the way a question the front desk could not answer goes (an ask record, a hub-inbox
+    line and the wake file lane_watch.sh watches), so the hub is woken and sees it at /prep. One alert per key and day: a retry every
+    15 minutes files nothing twice. state_path: where the dispatch state lives (tests pass a temp one). -> the ask id, or None when it
+    was filed already today."""
+    import hashlib
+
+    import openclaw_dispatch as dispatch
+
+    now = time.time() if now is None else now
+    ctx = dispatch.Ctx({}, state_path=state_path or dispatch.state_file())
+    ask_id = dispatch.ask_id_for(hashlib.sha256(("%s %s" % (key, time.strftime("%Y-%m-%d", time.localtime(now)))).encode("utf-8")).hexdigest())
+    words = ("ALERT from %s, not a message of his: the live state no longer parses. %s. "
+             "Fix the parser or the text it reads, then close this." % (source, "; ".join(problems)))
+    if dispatch.file_with_hub(ctx, ask_id, words, "hub, a live-state check failed", "%s: live state parse check" % source, now):
+        return ask_id
+    return None
+
+
 def report_first_line(path, limit=140):
     """First line of a lane report.md that says something: skips blanks and heading marks."""
     try:
@@ -388,6 +440,9 @@ def main(argv=None):
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")
     ap.add_argument("--budget-file", default=str(HOME / ".claude/state/hub-digest-budget.txt"))
     ap.add_argument("--report-hours", type=int, default=24)
+    ap.add_argument("--strict", action="store_true",
+                    help="treat the inputs as live state even with --roadmap-file (a live build is always strict)")
+    ap.add_argument("--alert-state", help="dispatch state .json to file the alert in (tests); default the live one")
     a = ap.parse_args(argv)
 
     now = datetime.fromisoformat(a.now) if a.now else datetime.now()
@@ -420,6 +475,15 @@ def main(argv=None):
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error)
     page = render(secs, now, machine, a.cap)
+    if a.strict or not a.roadmap_file:
+        problems = live_problems(body, page)
+        if problems:
+            sys.stderr.write("hub_digest: the live state does not parse: %s. Not writing the page; the previous one stays.\n" % "; ".join(problems))
+            try:
+                alert_hub("hub_digest", problems, "hub_digest.py", state_path=a.alert_state)
+            except Exception as exc:  # the failure is already on stderr; a failed alert must not hide it
+                sys.stderr.write("hub_digest: could not put the alert on the hub's list: %s\n" % exc)
+            return 3
     if a.out:
         p = Path(a.out)
         p.parent.mkdir(parents=True, exist_ok=True)
