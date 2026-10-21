@@ -702,9 +702,11 @@ class Engines(Base):
     def test_own_repos_get_codex(self):
         self.assertEqual(self.engine("own-app"), ("codex", "sonnet"))
 
-    def test_a_client_repo_gets_claude_sonnet_and_opus_for_judgment_or_email(self):
+    def test_a_client_repo_gets_claude_sonnet_and_opus_for_judgment_but_never_for_email(self):
         self.assertEqual(self.engine("client-app"), ("claude", "sonnet"))
-        self.assertEqual(self.engine("client-app", "draft a reply to the email"), ("claude", "opus"))
+        self.assertEqual(self.engine("client-app", "price the proposal and check the contract terms"), ("claude", "opus"))
+        # his rule, 21 Oct 7:15 PM ("why are you burning Fable on emails!"): email is execution
+        self.assertEqual(self.engine("client-app", "draft a reply to the email"), ("claude", "sonnet"))
 
     def test_a_repo_in_client_repos_txt_or_not_owned_by_the_owner_gets_claude(self):
         self.repos_txt.write_text("# protected\n%s\n" % (self.root / "docs"))
@@ -787,7 +789,7 @@ class Budget(Base):
 
     def test_past_90_percent_projected_claude_lanes_run_on_sonnet_only(self):
         self.host.proj = 93.4
-        self.start("client-app", "draft a reply to the email")
+        self.start("client-app", "price the proposal for the contract")
         self.assertEqual(self.host.started[-1][3], "sonnet")
         self.assertIn("Sonnet only", self.host.chats[-1])
         self.assertIn("93%", self.host.chats[-1])
@@ -800,10 +802,10 @@ class Budget(Base):
 
     def test_at_or_under_90_percent_opus_is_kept_and_a_missing_projection_is_not_a_block(self):
         self.host.proj = 90.0
-        self.start("client-app", "draft a reply to the email", NOW)
+        self.start("client-app", "price the proposal for the contract", NOW)
         self.assertEqual(self.host.started[-1][3], "opus")
         self.host.proj = None
-        self.start("client-app", "draft a reply to the email", NOW + 60)
+        self.start("client-app", "price the proposal for the contract", NOW + 60)
         self.assertEqual(self.host.started[-1][3], "opus")
 
     def test_the_projection_is_only_read_for_claude_lanes(self):
@@ -1612,24 +1614,24 @@ class TheWeeksPhases(unittest.TestCase):
 class TheStepDownFollowsThePhase(Base):
     def test_phase_1_steps_a_claude_lane_down_past_90_projected(self):
         self.host.proj, self.host.used = 108, 84
-        self.start("client-app", "draft a reply to the email", ET(2026, 10, 18, 9))
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 18, 9))
         self.assertEqual(self.host.started[-1][3], "sonnet")
         self.assertIn("phase 1", self.host.chats[-1])
         self.assertIn("projected at 108%", self.host.chats[-1])
 
     def test_phase_2_keeps_opus_while_used_is_under_95_whatever_the_projection(self):
         self.host.proj, self.host.used = 108, 84
-        self.start("client-app", "draft a reply to the email", ET(2026, 10, 19, 6, 1))
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 19, 6, 1))
         self.assertEqual(self.host.started[-1][3], "opus")
         self.host.used = 96
-        self.start("client-app", "draft a reply to the email", ET(2026, 10, 19, 6, 2))
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 19, 6, 2))
         self.assertEqual(self.host.started[-1][3], "sonnet")
         self.assertIn("phase 2", self.host.chats[-1])
         self.assertIn("used at 96%", self.host.chats[-1])
 
     def test_phase_3_keeps_opus_at_any_usage(self):
         self.host.proj, self.host.used = 300, 99.5
-        self.start("client-app", "draft a reply to the email", ET(2026, 10, 20, 6, 1))
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 20, 6, 1))
         self.assertEqual(self.host.started[-1][3], "opus")
         self.assertNotIn("Sonnet only", self.host.chats[-1])
 
