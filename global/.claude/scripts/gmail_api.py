@@ -24,7 +24,7 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py drafts-list [QUERY]
 
 Credentials (mode 600, never printed): ~/.config/afa/gmail/client.json (OAuth Desktop client),
-~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). Account: jonpohlner@gmail.com.
+~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). AFA_GMAIL_ACCOUNT, if set, is the consent screen's login hint.
 """
 
 import argparse
@@ -51,7 +51,7 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
 SCOPE = "https://www.googleapis.com/auth/gmail.modify"
-ACCOUNT = "jonpohlner@gmail.com"
+ACCOUNT = os.environ.get("AFA_GMAIL_ACCOUNT", "")  # optional login hint; the repo is public, so no address lives here
 
 
 class GmailError(Exception):
@@ -113,8 +113,9 @@ def build_auth_url(client_id, redirect_uri, challenge, state):
         "state": state,
         "access_type": "offline",
         "prompt": "consent",
-        "login_hint": ACCOUNT,
     }
+    if ACCOUNT:
+        q["login_hint"] = ACCOUNT
     return AUTH_URL + "?" + urllib.parse.urlencode(q)
 
 

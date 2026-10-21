@@ -251,7 +251,7 @@ class Commands(Creds):
     def raw_with_redirects(self):
         html = ('<div>Greg, <b><a href="%s" target="_blank">cloud</a></b> and '
                 '<b><a href="%s">repo</a></b></div>') % (wrap("https://cloud.chattanooga.digital/f/4170"), wrap("https://github.com/o/r/pull/1?a=1%26b%3D2%23x"))
-        m = g.build_message("jonpohlner@gmail.com", "Re: Greg", html, reply={"message_id": "<abc@mail.gmail.com>", "references": "<abc@mail.gmail.com>"})
+        m = g.build_message("me@example.com", "Re: Greg", html, reply={"message_id": "<abc@mail.gmail.com>", "references": "<abc@mail.gmail.com>"})
         m["X-Custom"] = "keep-me"
         return m.as_bytes()
 
@@ -282,7 +282,7 @@ class Commands(Creds):
             return self.fake(method, url, headers, body, timeout)
 
         with mock.patch.object(g, "http_request", with_msg):
-            d = g.draft_create("jonpohlner@gmail.com", "", '<b><a href="https://chattanooga.digital/a">a</a></b>', reply_to="orig")
+            d = g.draft_create("me@example.com", "", '<b><a href="https://chattanooga.digital/a">a</a></b>', reply_to="orig")
         self.assertEqual(d["message"]["threadId"], "TH7")
         m = email.message_from_bytes(g.b64u_decode(self.fake.drafts[d["id"]]["message"]["raw"]), policy=email.policy.default)
         self.assertEqual((m["In-Reply-To"], m["References"], m["Subject"]), ("<o1@x>", "<o0@x> <o1@x>", "Re: Hello"))
