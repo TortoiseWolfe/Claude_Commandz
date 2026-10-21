@@ -207,6 +207,21 @@ describe('a lane deleting inside its own scratchpad', () => {
       expect([command, holds(command)]).toEqual([command, ['rm -rf']])
     }
   })
+  test('a variable counts only from the line that sets it on: an rm before it still sees it empty', () => {
+    for (const command of [
+      `rm -rf $P; P=${SP}/gd`,
+      `S=${SP}; rm -rf $P; P=$S/gd`,
+      `rm -rf b481; cd ${SP} && true`,
+      `cd $D && rm -rf b481; D=${SP}`,
+      `P=${SP}/a rm -rf $P`, // the shell expands $P before the prefix assignment takes effect
+      `S=${SP}/a; S=/home/u/repos; rm -rf $S/x`, // set twice to different things: unknown
+      `S=${SP}/a; rm -rf $S/x; S=/home/u/repos; rm -rf $S/x`,
+      `T=$(mktemp -d); T=/home/u/repos; rm -rf $T/x`,
+    ]) {
+      expect([command, holds(command).includes('rm -rf')]).toEqual([command, true])
+    }
+    expect(holds(`S=${SP}/a; rm -rf $S/x; S=/home/u/repos; echo $S`)).toEqual([])
+  })
   test('the same words held on one line are not let through by a guarded copy on another', () => {
     expect(holds(`rm -rf b481; cd ${SP} && rm -rf b481`)).toEqual(['rm -rf', 'rm -rf'])
   })

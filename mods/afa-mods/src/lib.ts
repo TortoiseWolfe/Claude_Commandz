@@ -826,11 +826,14 @@ type OwnScratchGroup = { segment: string; targets: string[] }
 // uses the same best-effort segmentation as classify, not a full shell parser.
 // A relative target counts only when a literal `cd <full path> &&` leads to it (see cwdTracker); the targets returned are the full paths.
 export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth = 0): OwnScratchGroup[] {
-  const assignments = assignmentsOf(command, env)
   const groups: OwnScratchGroup[] = []
   const failed = new Set<string>() // the same words that failed once (say, with no cd before them) never pass on another line
-  const cwdAt = cwdTracker(command, assignments, env)
-  for (const [index, { text }] of segmentsWithSeps(command).entries()) {
+  const parts = segmentsWithSeps(command)
+  const cwdAt = cwdTracker(command, env)
+  let before = '' // the command up to this segment: a variable counts only if it was set before the rm that uses it
+  for (const [index, { text }] of parts.entries()) {
+    const assignments = assignmentsOf(before, env)
+    before += text + parts[index].sep
     const cwd = cwdAt(index)
     const seg = strip(text).replace(/^\\/, '')
     if (seg === '') continue
@@ -862,8 +865,9 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
 // The folder each segment runs in, when a literal `cd <full path>` sets it. A cd counts only on a chain of && that starts a list
 // (the start, or after ; or a newline), so the later words run only if it worked: after `cd X; rm -rf a`, `cd X || ...`, a pipe,
 // a background `&`, a subshell or a substitution, the folder is unknown and a relative target keeps holding.
-function cwdTracker(command: string, assignments: Map<string, string | null>, env: ScratchEnv): (index: number) => string | undefined {
+function cwdTracker(command: string, env: ScratchEnv): (index: number) => string | undefined {
   const segs = segmentsWithSeps(command)
+  let before = ''
   const blind = /(?:^|[^$])\(|`|\$\(\s*(?:cd|pushd|popd)\b/.test(command) // a subshell or substitution may hold its own cd
   const folders: Array<string | undefined> = []
   let cwd: string | undefined
@@ -872,12 +876,15 @@ function cwdTracker(command: string, assignments: Map<string, string | null>, en
     // `a && b` splits into `a`, an empty piece between the two &, and `b`: the empty piece changes nothing
     if (i >= 1 && prev.sep === '&' && segs[i].sep === '&' && strip(segs[i].text) === '') {
       folders.push(cwd)
+      before += segs[i].text + segs[i].sep
       continue
     }
     const andBefore = i >= 2 && prev.sep === '&' && strip(prev.text) === '' && segs[i - 2].sep === '&'
     const startsList = i === 0 || prev.sep === ';' || prev.sep === '\n'
     if (!andBefore) cwd = undefined // anything but && ends what the last cd promised
     const seg = strip(segs[i].text).replace(/^\\/, '')
+    const assignments = assignmentsOf(before, env)
+    before += segs[i].text + segs[i].sep
     folders.push(cwd)
     const m = /^(cd|pushd|popd)\b\s*(.*)$/.exec(seg)
     if (m) {
@@ -917,9 +924,14 @@ function assignmentsOf(command: string, env: ScratchEnv): Map<string, string | n
   const mktemp = /(?:^|[;&|\n]\s*)([A-Za-z_]\w*)=\$\(\s*mktemp(?:\s+[^)]*)?\)/g
   for (const match of command.matchAll(mktemp)) assignments.set(match[1], null)
   const literals = /(?:^|[;&|\n]\s*)(?:export\s+)?([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g
+  const unsure = new Set<string>() // set twice to different things, or by mktemp and by hand: which one the rm sees depends on how the shell ran
   for (const match of command.matchAll(literals)) {
-    if (!match[2].startsWith('$(')) assignments.set(match[1], unquote(match[2]))
+    if (match[2].startsWith('$(')) continue
+    const value = unquote(match[2])
+    if (assignments.has(match[1]) && assignments.get(match[1]) !== value) unsure.add(match[1])
+    assignments.set(match[1], value)
   }
+  for (const name of unsure) assignments.delete(name)
   for (let pass = 0; pass < 5; pass += 1) {
     let changed = false
     for (const [name, value] of assignments) {
