@@ -10,18 +10,24 @@ also ships with vm.compaction_proactiveness=0 and vm.watermark_boost_factor=0, s
 
   wsl_bridge_watchdog.py              check; heal when free order-7+ blocks are below the threshold; re-apply the sysctl reserve if it drifted
   wsl_bridge_watchdog.py --probe      also run the 10 s `cmd.exe /c echo ok` probe when nothing needed healing (the 15-minute task)
-  wsl_bridge_watchdog.py --dry-run    report what it would do, change nothing
+  wsl_bridge_watchdog.py --dry-run    report what it would do, change nothing (prints the disk line and lists what the sweep would remove)
   wsl_bridge_watchdog.py --print-sysctl-conf   the text of /etc/sysctl.d/99-wsl-bridge.conf (this file is the one source of the values)
 
 Heal = (compact if 2 GiB or more is free) then (drop clean page cache, then compact). It needs root and has no sudo: it goes through a
 privileged alpine container (one kernel for every distro and Docker; does not depend on the bridge), then `wsl.exe -u root`.
 A heal that does not bring the blocks back, or a bridge that still fails the probe after one, writes the alert file that lane_watch.sh
 turns into a wake of the hub. Exit 0 healthy or healed, 2 not.
+
+Disk guard (20 Oct 2026): the root filesystem ran out of inodes (67,108,864 of 67,108,864 used, 431 GB of space free) because test folders
+piled up in /tmp, and every Bash call in every session failed. Every run also reads statvfs("/") and wakes the hub through the same alert
+file at 85% of inodes or 90% of space used, naming the biggest /tmp name patterns. And it removes /tmp/cc-test-* folders (the prefix
+tests/tmpdirs.py gives every test folder) older than 24 hours, nothing else: other tools keep live state in /tmp.
 """
 import argparse
 import fcntl
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -33,6 +39,15 @@ COMPACT_ONLY_MIN_FREE_KB = 2 * 1024 * 1024
 HEAL_GAP_S = 300  # never heal twice inside five minutes
 ALERT_GAP_S = 1800  # a standing failure re-wakes the hub at most every half hour
 IMAGE = "alpine:3"
+
+INODE_WARN_PCT = 85  # wake the hub at this share of inodes used ...
+SPACE_WARN_PCT = 90  # ... or this share of space used
+TMP_DIR = "/tmp"
+SWEEP_PREFIX = "cc-test-"  # tests/tmpdirs.py names every test folder this; the sweep touches nothing without it
+SWEEP_MAX_AGE_S = 24 * 3600
+SWEEP_CAP = 50000  # folders removed per run
+SCAN_CAP = 20000  # /tmp entries read to name the biggest patterns, so a /tmp with millions of entries cannot stall a run
+SWEEP_SCAN_CAP = 2000000  # /tmp entries read looking for sweep candidates (names are cheap to list; only cc-test-* names are stat-ed)
 
 # Reserve of free memory the kernel keeps by reclaiming clean cache, so freed pages can merge back into big blocks.
 #  min_free_kbytes 1 GiB: 2.5% of the 40 GB VM. WSL returns free pages to Windows (free page reporting), so it costs nothing real.
@@ -132,9 +147,9 @@ def clock12(now):
     return datetime.fromtimestamp(now).strftime("%-I:%M %p")
 
 
-def log_line(sd, line):
+def log_line(sd, line, name="heal.log"):
     os.makedirs(sd, exist_ok=True)
-    with open(os.path.join(sd, "heal.log"), "a") as f:
+    with open(os.path.join(sd, name), "a") as f:
         f.write(line + "\n")
 
 
@@ -158,6 +173,74 @@ def write_alert(sd, now, text):
     if file_age(path, now) < ALERT_GAP_S:
         return
     write_stamped(path, "%s %s\n" % (clock12(now), text), now)
+
+
+def disk_usage(statvfs=os.statvfs, path="/"):
+    """(inodes_used_pct, space_used_pct) of the filesystem at `path`, computed the way df does (space: used / (used + available))."""
+    v = statvfs(path)
+    inodes = 100.0 * (v.f_files - v.f_ffree) / v.f_files if v.f_files else 0.0
+    used = v.f_blocks - v.f_bfree
+    space = 100.0 * used / (used + v.f_bavail) if used + v.f_bavail else 0.0
+    return inodes, space
+
+
+def tmp_pattern(name):
+    """The name pattern a /tmp entry belongs to: tmpXXXXXXXX (python's mkdtemp), cc-test-*, claude-*, muse-*, ..."""
+    if name.startswith(SWEEP_PREFIX):
+        return SWEEP_PREFIX + "*"
+    if re.fullmatch(r"tmp[A-Za-z0-9_]{8}", name):
+        return "tmpXXXXXXXX"
+    head = re.split(r"[-_.]", name, maxsplit=1)
+    return head[0] + "-*" if len(head) > 1 and head[0] else name[:3] + "*"
+
+
+def tmp_top_patterns(tmp=TMP_DIR, n=3, cap=SCAN_CAP):
+    """([(pattern, count), ...] the n biggest, entries_read, capped) from at most `cap` /tmp entries."""
+    counts, seen = {}, 0
+    try:
+        with os.scandir(tmp) as it:
+            for e in it:
+                if seen >= cap:
+                    return sorted(counts.items(), key=lambda kv: -kv[1])[:n], seen, True
+                seen += 1
+                k = tmp_pattern(e.name)
+                counts[k] = counts.get(k, 0) + 1
+    except OSError:
+        pass
+    return sorted(counts.items(), key=lambda kv: -kv[1])[:n], seen, False
+
+
+def disk_line(inodes, space, patterns):
+    top, seen, capped = patterns
+    return "disk /: inodes %d%% used, space %d%% used; /tmp biggest patterns: %s%s" % (
+        round(inodes), round(space), ", ".join("%s x%d" % kv for kv in top) or "none",
+        " (first %d entries only)" % seen if capped else "")
+
+
+def sweep_old_test_dirs(now, tmp=TMP_DIR, dry_run=False, cap=SWEEP_CAP, scan_cap=SWEEP_SCAN_CAP, rmtree=shutil.rmtree):
+    """Remove /tmp/cc-test-* directories whose mtime is over 24 hours old, and nothing else. Returns the names removed (or, on a dry run,
+    that would be). A symlink is never followed or removed."""
+    hits, seen = [], 0
+    try:
+        with os.scandir(tmp) as it:
+            for e in it:
+                seen += 1
+                if seen > scan_cap or len(hits) >= cap:
+                    break
+                if not e.name.startswith(SWEEP_PREFIX):
+                    continue
+                try:
+                    if e.is_symlink() or not e.is_dir(follow_symlinks=False) or now - e.stat(follow_symlinks=False).st_mtime <= SWEEP_MAX_AGE_S:
+                        continue
+                except OSError:
+                    continue
+                hits.append(e.path)
+    except OSError:
+        return []
+    if not dry_run:
+        for path in hits:
+            rmtree(path, ignore_errors=True)
+    return [os.path.basename(h) for h in hits]
 
 
 def heal(read, root, buddy_text):
@@ -242,7 +325,30 @@ def describe_churn(snapshot=snapshot_io, lane=lane_of, secs=2):
     return "pid %d %dMB/s%s %s" % (pid, rate, " (lane %s)" % who if who else "", proc_cmd(pid)[:110])
 
 
-def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time, churn_of=None):
+def check_disk(sd, t, dry_run, statvfs, tmp_dir):
+    """Early warning on inodes and space, then the narrow /tmp sweep. A dry run prints the disk line and the sweep list, changes nothing."""
+    try:
+        inodes, space = disk_usage(statvfs)
+    except OSError:
+        inodes = space = 0.0
+    over = inodes >= INODE_WARN_PCT or space >= SPACE_WARN_PCT
+    line = disk_line(inodes, space, tmp_top_patterns(tmp_dir) if (over or dry_run) else ([], 0, False))
+    if dry_run:
+        print("dry-run: " + line)
+    elif over:
+        log_line(sd, "%s %s" % (stamp(t), line), "disk.log")
+        write_alert(sd, t, "disk nearly full (alert at %d%% of inodes or %d%% of space): %s. Clean up before Bash calls start failing." % (INODE_WARN_PCT, SPACE_WARN_PCT, line))
+    gone = sweep_old_test_dirs(t, tmp_dir, dry_run)
+    if dry_run:
+        print("dry-run: sweep would remove %d %s* folder(s) older than %dh from %s (cap %d)%s" % (
+            len(gone), SWEEP_PREFIX, SWEEP_MAX_AGE_S // 3600, tmp_dir, SWEEP_CAP, "".join("\n  " + g for g in gone[:20]) + ("\n  ..." if len(gone) > 20 else "")))
+    elif gone:
+        msg = "%s sweep: removed %d %s* folder(s) older than %dh from %s (cap %d)" % (stamp(t), len(gone), SWEEP_PREFIX, SWEEP_MAX_AGE_S // 3600, tmp_dir, SWEEP_CAP)
+        log_line(sd, msg, "disk.log")
+        print(msg)
+
+
+def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time, churn_of=None, statvfs=os.statvfs, tmp_dir=TMP_DIR):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--probe", action="store_true", help="run the bridge probe even when nothing needed healing")
     ap.add_argument("--dry-run", action="store_true")
@@ -261,6 +367,7 @@ def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.t
         return 0  # another run is healing; it will log
 
     t = now()
+    check_disk(sd, t, args.dry_run, statvfs, tmp_dir)
     buddy = read("/proc/buddyinfo")
     before = big_blocks(buddy)
     free_before = mem_free_kb(read("/proc/meminfo")) // 1024
