@@ -51,6 +51,12 @@
 #   lane.sh --send <name> <text>        type <text> into the window, Enter, confirm it was submitted
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>
+#   lane.sh [--dry-run] --recycle <name>
+#                                       give a running lane a fresh context in its own window (his rule, 20 Oct: lanes never auto-compact):
+#                                       the lane writes handoff.md in its hand-off folder, then gets /clear, then a message to read
+#                                       prompt.md, then handoff.md, then carry on; a new index row follows its new session. A lane that
+#                                       never writes handoff.md is not cleared. lane_watch.sh runs this when a lane passes LANE_RECYCLE_K.
+#   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
 #   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
@@ -58,8 +64,8 @@
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
 #
 # Effort and compaction (Claude lanes only, including --console, --headless and --resume):
-# every Claude lane gets --effort <level> and a --settings JSON with autoCompactWindow 200000, so a
-# lane compacts in place instead of growing to 300K. Default effort by model: sonnet, opus and
+# every Claude lane gets --effort <level> and a --settings JSON with autoCompactWindow 200000 as a backstop (a lane is recycled with
+# --recycle at about 120K, so it should never reach it). Default effort by model: sonnet, opus and
 # fable high, haiku no flag (it takes no effort setting). --effort <level> overrides
 # it (low, medium, high, xhigh, max); on --resume the level the lane started with is reused.
 # The level is recorded in column 10 of the index; --status shows it with the lane's context size.
@@ -124,6 +130,8 @@ Usage:
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] --resume <name>
+  lane.sh [--dry-run] --recycle <name>
+  lane.sh --ctx <name>
 
 Claude is the default engine. Codex and Copilot run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -166,6 +174,8 @@ while [ $# -gt 0 ]; do
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
     --send) mode=send; shift ;;
+    --recycle) mode=recycle; shift ;;
+    --ctx) mode=ctx; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
   esac
@@ -576,19 +586,21 @@ if [ "$mode" = status ]; then
   exit 0
 fi
 
-if [ "$mode" = send ]; then
-  [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; exit 1; }
-  name="$1"; shift; text="$*"; dir=""; id=""
+# Type <text> into a lane window and confirm it landed (used by --send and --recycle). Returns 0 only when the words are in the lane's transcript.
+send_to() {  # <name> <text...>
+  [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; return 1; }
+  local name="$1"; shift
+  text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
     IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
-      exit 1
+      return 1
     fi
   fi
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
-    || { echo "no window named $name in $SESSION" >&2; exit 1; }
+    || { echo "no window named $name in $SESSION" >&2; return 1; }
   target="$SESSION:$name"
   took() {  # poll up to ~$1 seconds for: input line empty and a spinner on screen
     local i pane
@@ -599,8 +611,8 @@ if [ "$mode" = send ]; then
     return 1
   }
   # Delivered means the words are in the lane's own transcript, not only that the input line emptied (19 Oct: "I can't have you
-  # dropping messages"). The transcript is the session's jsonl under ~/.claude/projects/<dir slug>/, else the newest one there.
-  confirmed() {  # poll up to ~$1 seconds for a user turn in the lane's transcript that holds the text sent
+  # dropping messages"). The transcript is the session's jsonl under ~/.claude/projects/<dir slug>, plus any written in the last 10 minutes.
+  confirmed() {  # poll up to ~$1 seconds for a user turn or queued message in the lane's transcript that holds the text sent
     local i
     [ -n "${dir:-}" ] || return 2
     for i in $(seq 1 $(($1 * 2))); do
@@ -611,11 +623,22 @@ try:
     files = [os.path.join(proj, f) for f in os.listdir(proj) if f.endswith(".jsonl")]
 except OSError:
     sys.exit(1)
+# The lane's own transcript plus any written in the last 10 minutes: a /clear or a resume starts a new transcript, and the index
+# row keeps the id the lane started with.
 own = os.path.join(proj, sid + ".jsonl")
-files = [own] if own in files else [f for f in files if time.time() - os.path.getmtime(f) < 600]
+files = [f for f in files if f == own or time.time() - os.path.getmtime(f) < 600]
+
+def text_of(c):
+    if isinstance(c, list):
+        c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and isinstance(x.get("text"), str))
+    return " ".join(c.split()) if isinstance(c, str) else ""
+
 for f in files:
     try:
-        lines = open(f, encoding="utf-8", errors="replace").readlines()[-400:]
+        with open(f, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4_000_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
     except OSError:
         continue
     for line in lines:
@@ -623,11 +646,19 @@ for f in files:
             o = json.loads(line)
         except ValueError:
             continue
-        m = o.get("message") if o.get("type") == "user" else None
-        c = m.get("content") if isinstance(m, dict) else None
-        if isinstance(c, list):
-            c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and isinstance(x.get("text"), str))
-        if isinstance(c, str) and want in " ".join(c.split()):
+        # A message typed while the lane is mid-turn is not a "user" turn until the turn ends. Claude Code logs it at once as
+        # a queue-operation "enqueue" (content) and then an attachment "queued_command" (prompt).
+        t = o.get("type")
+        if t == "user":
+            m = o.get("message")
+            got = text_of(m.get("content")) if isinstance(m, dict) else ""
+        elif t == "queue-operation" and o.get("operation") == "enqueue":
+            got = text_of(o.get("content"))
+        elif t == "attachment" and isinstance(o.get("attachment"), dict) and o["attachment"].get("type") == "queued_command":
+            got = text_of(o["attachment"].get("prompt"))
+        else:
+            continue
+        if want in got:
             sys.exit(0)
 sys.exit(1)
 PY
@@ -642,13 +673,120 @@ PY
   if took 6; then how="submitted"; else tmux send-keys -t "$target" C-m; if took 6; then how="submitted after a second Enter"; fi; fi
   pane="$(tmux capture-pane -e -p -t "$target")"
   if [ -z "$how" ] && ! pane_input_empty "$pane"; then
-    echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"; exit 1
+    echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"; return 1
   fi
   rc=0; confirmed "${LANE_SEND_CONFIRM_SECS:-15}" || rc=$?
-  if [ "$rc" -eq 0 ]; then echo "sent to $name: confirmed in its transcript${how:+ ($how)}"; exit 0; fi
-  if [ "$rc" -eq 2 ] && [ -n "$how" ]; then echo "sent to $name: $how (input empty, spinner showing; no index row, so no transcript to check)"; exit 0; fi
+  if [ "$rc" -eq 0 ]; then echo "sent to $name: confirmed in its transcript${how:+ ($how)}"; return 0; fi
+  if [ "$rc" -eq 2 ] && [ -n "$how" ]; then echo "sent to $name: $how (input empty, spinner showing; no index row, so no transcript to check)"; return 0; fi
   echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
-  exit 1
+  return 1
+}
+if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
+
+# --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
+if [ "$mode" = ctx ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --ctx <name>" >&2; exit 1; }
+  row="$(index_row "$1")"
+  [ -n "$row" ] || { echo "?"; exit 0; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+  case "${b:-subscription}" in codex|copilot) echo "?"; exit 0 ;; esac
+  # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
+  if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
+    id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
+  fi
+  { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
+  v="$(ctx_k "$dir" "$id")"; echo "${v%K}"
+  exit 0
+fi
+
+# --recycle <name>: hand a lane a fresh context in its own window instead of letting it auto-compact (his rule, 20 Oct: "they should never
+# have to compact on their own, that's token waste"). The lane writes handoff.md in its hand-off folder; only once that file has changed
+# and the lane is idle does it get /clear, then a message to read prompt.md, then handoff.md, then carry on. The new session id goes
+# into index.tsv as a new row, so --status, --ctx and --resume follow the new transcript. A lane that never writes handoff.md is NOT cleared.
+#   LANE_RECYCLE_IDLE_SECS (300)  how long to wait for the lane to finish its turn first
+#   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking
+if [ "$mode" = recycle ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --recycle <name>" >&2; exit 1; }
+  name="$1"
+  row="$(index_row "$name")"
+  [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+  if is_headless_billing "${b:-}" || [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
+    echo "$name is a headless lane; there is no window to recycle" >&2; exit 1
+  fi
+  [ -n "${rep:-}" ] || { echo "$name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
+  hand="$(dirname "$rep")"; handoff="$hand/handoff.md"
+  ctxk="$([ -n "${id:-}" ] && [ "$id" != - ] && ctx_k "$dir" "$id" || echo '?')"
+  msg_handoff="Hub: your context is at $ctxk, past the recycle line. Finish the step in hand, then write $handoff: what is done, what is in flight, the next step, and what to re-arm (timers, background jobs, watchers). Say nothing else and start no new work; once it is written I clear your context and send you back to prompt.md and handoff.md."
+  msg_reprime="Hub: your context was cleared (recycle, not a restart). Read $p, then $handoff, then carry on from the next step it names and re-arm what it lists. Your hand-off folder is unchanged: $hand."
+  if [ "$dry" = 1 ]; then
+    echo "recycle $name ($dir, context $ctxk):"
+    echo "  1. wait for the lane to finish its turn (up to ${LANE_RECYCLE_IDLE_SECS:-300}s)"
+    echo "  2. send: $msg_handoff"
+    echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
+    echo "  4. send: /clear"
+    echo "  5. send: $msg_reprime"
+    echo "  6. append an index row to $INDEX with the lane's new session id"
+    exit 0
+  fi
+  command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
+    || { echo "no window named $name in $SESSION" >&2; exit 1; }
+  lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
+  mkdir -p "$(dirname "$lockd")"
+  if [ -d "$lockd" ] && [ -n "$(find "$lockd" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rmdir "$lockd" 2>/dev/null || true; fi
+  mkdir "$lockd" 2>/dev/null || { echo "$name is already being recycled ($lockd)" >&2; exit 1; }
+  rlog="$HOME/.claude/state/lanes/recycle.log"
+  trap 'rmdir "$lockd" 2>/dev/null || true' EXIT
+  rfail() { echo "recycle $name FAILED: $*" >&2; printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$*" >>"$rlog"; exit 1; }
+  lane_idle() {  # no spinner and no dialog in the lane's pane
+    local pane; pane="$(tmux capture-pane -p -t "$SESSION:$name" 2>/dev/null)" || return 1
+    pane_spinner "$pane" && return 1
+    printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel' && return 1
+    return 0
+  }
+  wait_idle() {  # <secs>: idle on two looks a moment apart
+    local end=$(( $(date +%s) + $1 ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      if lane_idle; then sleep 2; lane_idle && return 0; fi
+      sleep 2
+    done
+    return 1
+  }
+  stamp() { stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none; }
+
+  wait_idle "${LANE_RECYCLE_IDLE_SECS:-300}" || rfail "the lane did not finish its turn in ${LANE_RECYCLE_IDLE_SECS:-300}s (or a dialog is waiting)"
+  before="$(stamp)"; t0="$(date +%s)"
+  send_to "$name" "$msg_handoff" >/dev/null || rfail "the hand-off request did not reach the lane"
+  end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} )); written=0
+  while [ "$(date +%s)" -lt "$end" ]; do
+    now_stamp="$(stamp)"
+    if [ "$now_stamp" != none ] && [ "$now_stamp" != "$before" ] && [ -s "$handoff" ] && [ "$(stat -c %Y "$handoff")" -ge "$t0" ] && lane_idle; then
+      sleep 2; lane_idle && { written=1; break; }
+    fi
+    sleep 2
+  done
+  [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
+
+  # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
+  cpane=""
+  tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5; tmux send-keys -t "$SESSION:$name" C-m
+  for _ in $(seq 1 20); do
+    sleep 0.5; cpane="$(tmux capture-pane -e -p -t "$SESSION:$name")"
+    pane_input_empty "$cpane" && break
+  done
+  pane_input_empty "$cpane" || rfail "/clear stayed in the input line"
+  sleep 2
+  send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
+
+  claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"; newid=""
+  for _ in $(seq 1 20); do
+    newid="$(find_session "$dir" "$t0" "$claimed")"; [ -n "$newid" ] && break; sleep 1
+  done
+  [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" >>"$INDEX"
+  printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" >>"$rlog"
+  echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid"
+  exit 0
 fi
 
 if [ "$mode" = resume ]; then

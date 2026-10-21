@@ -11,6 +11,7 @@
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
+#   - a recycle (see below) failed
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
@@ -21,6 +22,10 @@
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
 # have a tmux window), read again on every poll so a lane started after the watcher began is covered for reports, end of turn and
 # stuck dialogs. (18 Oct: armed with no names it watched nothing, and four reports and a stuck dialog sat unseen for hours.)
+# Lanes never auto-compact (his rule, 20 Oct): when a watched lane's context passes LANE_RECYCLE_K (default 120) thousand tokens and its turn
+# has ended, the poll starts `lane.sh --recycle <lane>` in the background (the lane writes handoff.md, gets /clear and a re-prime message)
+# and logs it to ~/.claude/state/lanes/recycle.log. That wakes nobody; only a FAILED recycle does. A lane is tried again after
+# LANE_RECYCLE_RETRY_SECS (default 1800).
 # Every new or changed report also goes to Jonathan's chat: the dispatcher's post-reports does it, so he reads it without the hub.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 set -u
@@ -39,6 +44,34 @@ turn_done_line() {
 
 turn_done_time() {
   turn_done_line | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p'
+}
+
+# Recycling: a lane past LANE_RECYCLE_K thousand tokens, idle (no spinner, no dialog) and not already being recycled, is handed to
+# `lane.sh --recycle` in the background. lane.sh holds .recycle-<lane>.lock while it works; the watcher reads that lock and the log.
+lane_sh="${LANE_SH:-$HOME/.claude/scripts/lane.sh}"
+recycle_k=${LANE_RECYCLE_K:-120}
+recycle_dir="${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}"
+recycle_log="$recycle_dir/recycle.log"
+recycle_retry=${LANE_RECYCLE_RETRY_SECS:-1800}
+recycle_locked() { [ -d "$recycle_dir/.recycle-$1.lock" ]; }
+# recycle_due <lane>, the lane's pane on stdin: 0 when its context is at or over the line and its turn has ended.
+recycle_due() {
+  local l=$1 pane c; pane=$(cat)
+  recycle_locked "$l" && return 1
+  command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 1
+  printf '%s\n' "$pane" | dialog_waiting && return 1
+  c=$("$lane_sh" --ctx "$l" 2>/dev/null)
+  [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$recycle_k" ]
+}
+# New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
+recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
+# Sets recycle_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
+recycle_failures() {
+  local size; recycle_fail_out=''
+  size=$(stat -c %s "$recycle_log" 2>/dev/null) || return 0
+  [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; return 0; }
+  recycle_fail_out=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log" | command grep -a $'\tFAILED\t' | awk -F'\t' '{print $2 ": " $4}')
+  recycle_log_seen=$size
 }
 
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
@@ -72,7 +105,7 @@ done
 lanes=("$@")
 auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
 start_ts=$(date +%s)
-declare -A seen seen_turn
+declare -A seen seen_turn recycling recycle_try
 report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
@@ -179,7 +212,7 @@ while :; do
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ]; then
       note=$(stale_note "$l")
-      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open until its context is full"; hit=1; other=1
+      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at about ${recycle_k}K)"; hit=1; other=1
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
@@ -193,12 +226,22 @@ while :; do
         echo "waiting on a dialog: $l"; hit=1; other=1
       fi
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
-      if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
-        done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
-        echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
+      if recycle_locked "$l"; then
+        recycling[$l]=1; seen_turn[$l]=$done_line   # the hand-off turn is ours, not news
+      else
+        if [ "${recycling[$l]:-}" = 1 ]; then recycling[$l]=0; seen_turn[$l]=$done_line; fi
+        if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
+          done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
+          echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
+        elif [ $(( $(date +%s) - ${recycle_try[$l]:-0} )) -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
+          recycle_try[$l]=$(date +%s)
+          setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
+        fi
       fi
     fi
   done
+  recycle_failures
+  while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
   a=$(ask_stamp)
   if [ "$a" != "$ask_seen" ]; then
     echo "ask: a new 'Jonathan via OpenClaw:' line is in muse-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1

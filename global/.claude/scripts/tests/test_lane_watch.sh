@@ -352,5 +352,73 @@ else
   echo "FAIL bridge wake: ran=$(cat "$TMP/watchdog-ran" 2>/dev/null | wc -l) out=$(cat "$out")"; failures=$((failures + 1))
 fi
 
+# Lanes never auto-compact (his rule, 20 Oct): past LANE_RECYCLE_K thousand tokens, with the turn ended, the watcher starts
+# `lane.sh --recycle` in the background and wakes nobody. A fake lane.sh stands in for the real one (tests/test_lane_recycle.sh has the real).
+rc_home="$TMP/rchome"; mkdir -p "$rc_home/.claude/scripts" "$rc_home/.claude/state/lanes"
+export CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
+cat > "$rc_home/.claude/scripts/lane.sh" <<'SH'
+#!/usr/bin/env bash
+lanes="$HOME/.claude/state/lanes"
+case "$1" in
+  --status) echo "rl  report:no  idle"; echo "    dir:/x model:sonnet" ;;
+  --ctx) cat "$CTX_FILE" ;;
+  --recycle)
+    echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
+    [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
+    rmdir "$lanes/.recycle-$2.lock" ;;
+esac
+SH
+chmod +x "$rc_home/.claude/scripts/lane.sh"
+cat > "$TMP/fakebin-rc.tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) echo rl ;;
+  capture-pane) cat "$RC_PANE" ;;
+esac
+SH
+mkdir -p "$TMP/fakebin-rc"; cp "$TMP/fakebin-rc.tmux" "$TMP/fakebin-rc/tmux"; chmod +x "$TMP/fakebin-rc/tmux"
+idle_pane=$(printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ')
+busy_pane=$(printf '%s\n' '⏺ Reading' '✻ Thinking… (12s · esc to interrupt)' '❯ ')
+
+# recycle_due: over the line, idle, no dialog, no recycle under way.
+lane_sh="$rc_home/.claude/scripts/lane.sh"; recycle_k=120; recycle_dir="$rc_home/.claude/state/lanes"
+expect_due() { # expect_due <yes|no> <label> <ctx> <pane>
+  local want=$1 label=$2 got=no
+  echo "$3" > "$CTX_FILE"
+  if printf '%s\n' "$4" | HOME="$rc_home" recycle_due rl; then got=yes; fi
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got"; failures=$((failures + 1)); fi
+}
+expect_due yes "recycle_due: 130K and idle fires" 130 "$idle_pane"
+expect_due yes "recycle_due: exactly the line (120K) fires" 120 "$idle_pane"
+expect_due no  "recycle_due: 119K does not" 119 "$idle_pane"
+expect_due no  "recycle_due: an unreadable context (?) does not" '?' "$idle_pane"
+expect_due no  "recycle_due: a lane mid-turn (spinner) waits for its next idle" 200 "$busy_pane"
+expect_due no  "recycle_due: a lane stuck on a dialog is not recycled" 200 "$(printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel')"
+mkdir "$recycle_dir/.recycle-rl.lock"
+expect_due no  "recycle_due: a lane already being recycled is left alone" 200 "$idle_pane"
+rmdir "$recycle_dir/.recycle-rl.lock"
+
+# Whole watcher: starts one recycle (not one per poll), and neither the recycle nor the hand-off turn wakes the hub.
+run_rc_watcher() { # run_rc_watcher <ctx> <seconds> <out>; the pane's done time changes while the recycle holds its lock
+  echo "$1" > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$idle_pane" > "$RC_PANE"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_K=120 LANE_RECYCLE_RETRY_SECS=600 \
+      timeout "$2" bash "$SCRIPT" --max-min 5 rl > "$3" 2>&1 ) &
+  rcw=$!
+  sleep 1.5; printf '%s\n' '⏺ handoff written' '✻ Worked for 1m 9s · done 1:09 PM' '❯ ' > "$RC_PANE"
+  wait "$rcw" || true
+}
+run_rc_watcher 130 9 "$TMP/rc-out1"
+if [ "$(wc -l < "$RC_CALLS")" = 1 ] && [ "$(cat "$RC_CALLS")" = rl ] && ! grep -q 'idle:\|recycle failed' "$TMP/rc-out1"; then
+  echo "ok   the watcher recycles a lane past the line once, and its hand-off turn wakes nobody"
+else
+  echo "FAIL recycle trigger: calls=$(cat "$RC_CALLS" | tr '\n' ' ') out=$(cat "$TMP/rc-out1")"; failures=$((failures + 1))
+fi
+run_rc_watcher 100 6 "$TMP/rc-out2"
+if [ ! -s "$RC_CALLS" ]; then echo "ok   a lane under the line is not recycled"; else echo "FAIL recycled at 100K: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
+: > "$RC_FAIL"
+run_rc_watcher 130 20 "$TMP/rc-out3"
+if grep -q '^recycle failed: rl: no new handoff.md' "$TMP/rc-out3"; then echo "ok   a failed recycle wakes the hub, naming the lane and why"; else echo "FAIL recycle failure not reported: $(cat "$TMP/rc-out3")"; failures=$((failures + 1)); fi
+rm -f "$RC_FAIL"
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
