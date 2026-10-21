@@ -4,7 +4,6 @@ a heal that fails or a probe that fails wakes the hub (alert file), and nothing 
 import io
 import os
 import sys
-import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -31,6 +30,11 @@ Node 0, zone   Normal  26444   9396   6932   3991   1547    317     60     60   
 LOW_FREE = "MemFree:          917504 kB\nCached:         33554432 kB\n"
 HIGH_FREE = "MemFree:        27262976 kB\nCached:          7000000 kB\n"
 SYSCTL_OK = {wd.sysctl_path(k): "%d\n" % v for k, v in wd.DESIRED.items()}
+
+
+def vfs(inodes=10, space=10):
+    """A fake os.statvfs result: `inodes` and `space` are the percent used."""
+    return lambda path: mock.Mock(f_files=1000, f_ffree=1000 - inodes * 10, f_blocks=1000, f_bfree=1000 - space * 10, f_bavail=1000 - space * 10)
 
 
 class Box:
@@ -63,17 +67,20 @@ class Box:
 class Watchdog(unittest.TestCase):
     def setUp(self):
         self.sd = fresh_dir(self)
+        self.tmp = fresh_dir(self, prefix="faketmp-")  # the fake /tmp: the tests never sweep or scan the real one
+        self.statvfs = vfs()
         self.env = mock.patch.dict(os.environ, {"WSL_BRIDGE_STATE": self.sd})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.t = 1_000_000.0
 
-    def go(self, box, *argv, probe=True, dt=0, churn=""):
+    def go(self, box, *argv, probe=True, dt=0, churn="", statvfs=None):
         self.t += dt
         out = io.StringIO()
         probes = probe if isinstance(probe, list) else [probe] * 5
         with redirect_stdout(out):
-            rc = wd.run(list(argv), read=box.read, root=box.root, probe=lambda: probes.pop(0), now=lambda: self.t, churn_of=lambda: churn)
+            rc = wd.run(list(argv), read=box.read, root=box.root, probe=lambda: probes.pop(0), now=lambda: self.t, churn_of=lambda: churn,
+                         statvfs=statvfs or self.statvfs, tmp_dir=self.tmp)
         return rc, out.getvalue()
 
     def alert(self):
@@ -163,7 +170,7 @@ class Watchdog(unittest.TestCase):
         with mock.patch.object(wd, "probe_bridge", side_effect=AssertionError("probed")):
             out = io.StringIO()
             with redirect_stdout(out):
-                self.assertEqual(wd.run([], read=box.read, root=box.root, now=lambda: self.t), 0)
+                self.assertEqual(wd.run([], read=box.read, root=box.root, now=lambda: self.t, statvfs=self.statvfs, tmp_dir=self.tmp), 0)
 
     # ---- rate limits
     def test_a_standing_outage_wakes_the_hub_once_per_half_hour(self):
@@ -266,6 +273,127 @@ class Watchdog(unittest.TestCase):
         self.assertEqual((rc, box.scripts, self.heal_log(), self.alert()), (0, [], "", None))
         self.assertIn("would-heal", out)
         self.assertFalse(os.path.exists(os.path.join(self.sd, "last-heal")))
+
+    # ---- disk guard: early warning
+    HEALTHY = dict(buddy=HEALED, meminfo=HIGH_FREE)
+
+    def test_84_percent_of_inodes_does_not_alert(self):
+        self.go(Box(**self.HEALTHY), statvfs=vfs(inodes=84, space=89))
+        self.assertIsNone(self.alert())
+
+    def test_86_percent_of_inodes_alerts_with_both_percentages_and_the_tmp_patterns(self):
+        for i in range(5):
+            os.mkdir(os.path.join(self.tmp, "tmpab%06d" % i))
+        for i in range(2):
+            os.mkdir(os.path.join(self.tmp, "cc-test-%d" % i))
+        os.mkdir(os.path.join(self.tmp, "claude-1000"))
+        rc, _ = self.go(Box(**self.HEALTHY), statvfs=vfs(inodes=86, space=40))
+        a = self.alert()
+        self.assertEqual(rc, 0)
+        self.assertIn("inodes 86% used", a)
+        self.assertIn("space 40% used", a)
+        self.assertIn("tmpXXXXXXXX x5", a)
+        self.assertIn("cc-test-* x2", a)
+        self.assertIn("claude-* x1", a)
+        self.assertIn("inodes 86%", open(os.path.join(self.sd, "disk.log")).read())
+
+    def test_91_percent_of_space_alerts(self):
+        self.go(Box(**self.HEALTHY), statvfs=vfs(inodes=10, space=91))
+        self.assertIn("space 91% used", self.alert())
+
+    def test_exactly_85_inodes_and_90_space_alert(self):
+        self.go(Box(**self.HEALTHY), statvfs=vfs(inodes=85, space=10))
+        self.assertIsNotNone(self.alert())
+        os.remove(os.path.join(self.sd, "alert"))
+        self.go(Box(**self.HEALTHY), statvfs=vfs(inodes=10, space=90))
+        self.assertIsNotNone(self.alert())
+
+    def test_a_standing_disk_alert_wakes_the_hub_once_per_half_hour(self):
+        box = Box(**self.HEALTHY)
+        full = vfs(inodes=90)
+        self.go(box, statvfs=full)
+        path = os.path.join(self.sd, "alert")
+        os.utime(path, (self.t - 100, self.t - 100))
+        mtime = os.stat(path).st_mtime
+        self.go(box, statvfs=full, dt=60)
+        self.assertEqual(os.stat(path).st_mtime, mtime)
+        self.go(box, statvfs=full, dt=wd.ALERT_GAP_S)
+        self.assertGreater(os.stat(path).st_mtime, mtime)
+
+    def test_the_pattern_scan_is_capped(self):
+        for i in range(30):
+            os.mkdir(os.path.join(self.tmp, "tmp%08d" % i))
+        top, seen, capped = wd.tmp_top_patterns(self.tmp, cap=10)
+        self.assertEqual((seen, capped, sum(c for _, c in top)), (10, True, 10))
+        self.assertIn("first 10 entries only", wd.disk_line(90, 10, (top, seen, capped)))
+
+    def test_dry_run_prints_the_disk_line_and_does_not_write_an_alert_or_log(self):
+        rc, out = self.go(Box(**self.HEALTHY), "--dry-run", statvfs=vfs(inodes=90, space=20))
+        self.assertIn("dry-run: disk /: inodes 90% used, space 20% used", out)
+        self.assertEqual((self.alert(), os.path.exists(os.path.join(self.sd, "disk.log"))), (None, False))
+
+    # ---- disk guard: the narrow sweep
+    def make_dir(self, name, age_h):
+        p = os.path.join(self.tmp, name)
+        os.mkdir(p)
+        open(os.path.join(p, "f"), "w").close()
+        t = self.t - age_h * 3600
+        os.utime(p, (t, t))
+        return p
+
+    def test_only_old_cc_test_folders_are_swept(self):
+        old = self.make_dir("cc-test-old", 25)
+        new = self.make_dir("cc-test-new", 23)
+        other_old = [self.make_dir(n, 100) for n in ("tmpabcd1234", "claude-1000", "cc-tests-nope", "xcc-test-old")]
+        lock = os.path.join(self.tmp, "muse-poll.lock")
+        open(lock, "w").close()
+        os.utime(lock, (self.t - 400 * 3600,) * 2)
+        link = os.path.join(self.tmp, "cc-test-link")
+        os.symlink(new, link)
+        os.utime(link, (self.t - 400 * 3600,) * 2, follow_symlinks=False)
+        notold = os.path.join(self.tmp, "cc-test-file")
+        open(notold, "w").close()
+        os.utime(notold, (self.t - 400 * 3600,) * 2)
+        _, out = self.go(Box(**self.HEALTHY))
+        self.assertFalse(os.path.exists(old))
+        for keep in [new, lock, link, notold] + other_old:
+            self.assertTrue(os.path.lexists(keep), keep)
+        self.assertTrue(os.path.exists(os.path.join(new, "f")))  # the symlink target was not followed
+        self.assertIn("sweep: removed 1 cc-test-* folder(s)", out)
+        self.assertIn("removed 1 cc-test-*", open(os.path.join(self.sd, "disk.log")).read())
+
+    def test_nothing_to_sweep_logs_nothing(self):
+        self.make_dir("cc-test-new", 1)
+        _, out = self.go(Box(**self.HEALTHY))
+        self.assertNotIn("sweep", out)
+        self.assertFalse(os.path.exists(os.path.join(self.sd, "disk.log")))
+
+    def test_the_sweep_stops_at_the_cap(self):
+        paths = [self.make_dir("cc-test-%d" % i, 30) for i in range(7)]
+        gone = wd.sweep_old_test_dirs(self.t, self.tmp, cap=3)
+        self.assertEqual(len(gone), 3)
+        self.assertEqual(sum(os.path.exists(p) for p in paths), 4)
+        self.assertEqual(len(wd.sweep_old_test_dirs(self.t, self.tmp, cap=3)), 3)  # the next run takes the next three
+        self.assertEqual(sum(os.path.exists(p) for p in paths), 1)
+
+    def test_the_sweep_scan_is_capped(self):
+        for i in range(10):
+            self.make_dir("cc-test-%d" % i, 30)
+        self.assertLessEqual(len(wd.sweep_old_test_dirs(self.t, self.tmp, dry_run=True, scan_cap=4)), 4)
+
+    def test_dry_run_lists_the_sweep_and_deletes_nothing(self):
+        old = self.make_dir("cc-test-old", 25)
+        other = self.make_dir("tmpabcd1234", 100)
+        _, out = self.go(Box(**self.HEALTHY), "--dry-run")
+        self.assertIn("would remove 1 cc-test-*", out)
+        self.assertIn("  cc-test-old", out)
+        self.assertNotIn("tmpabcd1234", out)
+        self.assertTrue(os.path.exists(old) and os.path.exists(other))
+        self.assertFalse(os.path.exists(os.path.join(self.sd, "disk.log")))
+
+    def test_pattern_names(self):
+        self.assertEqual([wd.tmp_pattern(n) for n in ("tmpa1B2c3D4", "cc-test-xyz", "claude-1000", "muse-poll.lock", "x", "abcdef")],
+                         ["tmpXXXXXXXX", "cc-test-*", "claude-*", "muse-*", "x*", "abc*"])
 
 
 if __name__ == "__main__":
