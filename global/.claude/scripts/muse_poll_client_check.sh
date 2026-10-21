@@ -12,13 +12,13 @@
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Senders of kind "payment" (Gusto) are kept even from no-reply addresses: their
 # handler step runs gusto_mark_paid.py, which marks the matching Stripe invoice paid. Names live only in the TSV and Gmail; this script and its prompt
-# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
+# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
 S=$HOME/.claude/scripts
 TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
 SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
-INBOX=${MUSE_CLIENT_INBOX:-$HOME/.claude/state/muse-inbox.md}
+INBOX=${MUSE_CLIENT_INBOX:-${HUB_INBOX:-${MUSE_INBOX:-$HOME/.claude/state/hub-inbox.md}}}
 LOG=$HOME/.claude/state/muse-poll.log
 CLAUDE=${MUSE_CLIENT_CLAUDE:-$HOME/.local/bin/claude}
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}

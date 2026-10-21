@@ -3,7 +3,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 const HOME = '/home/t'
 const STATE = `${HOME}/.claude/state`
 const FILES: Record<string, string> = {
-  [`${STATE}/muse-inbox.md`]: '- [ ] open\n- [ ] Client mail: reply waiting\n- [x] done\n',
+  [`${STATE}/hub-inbox.md`]: '- [ ] open\n- [ ] Client mail: reply waiting\n- [x] done\n',
   [`${STATE}/lanes/index.tsv`]:
     '2026-10-12\tdone\t/x\tm\tb\t-\t/r/done.md\ts\t-\n2026-10-12\tbusy\t/x\tm\tb\t-\t-\ts\t-\n',
   '/r/done.md': 'report',

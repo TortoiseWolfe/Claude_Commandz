@@ -13,7 +13,7 @@
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
 #   - a recycle (see below) failed
-#   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in muse-inbox.md)
+#   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in hub-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
 #     outbox again in the background (queue pump), so a post that failed while Windows could not reach WSL lands once it can.
@@ -139,7 +139,7 @@ else
   for l in "${lanes[@]}"; do watch_lane "$l"; done
 fi
 # Jonathan asking the hub from OpenClaw: openclaw_pickup.py --act touches this file when it files a "Jonathan via OpenClaw:" line
-# in muse-inbox.md. It holds only a time and an id, never the message.
+# in hub-inbox.md. It holds only a time and an id, never the message.
 ask_wake="$HOME/.claude/state/openclaw-ask.wake"
 ask_stamp() { stat -c %Y "$ask_wake" 2>/dev/null || echo none; }
 ask_seen=$(ask_stamp)
@@ -247,7 +247,7 @@ while :; do
   while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
   a=$(ask_stamp)
   if [ "$a" != "$ask_seen" ]; then
-    echo "ask: a new 'Jonathan via OpenClaw:' line is in muse-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1
+    echo "ask: a new 'Jonathan via OpenClaw:' line is in hub-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1
   fi
   if [ -n "$check" ] && bash -c "$check" >/dev/null 2>&1; then echo "check passed: $check"; hit=1; other=1; fi
   if [ $hit = 1 ]; then

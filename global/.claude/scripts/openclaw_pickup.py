@@ -561,7 +561,7 @@ def _append_line(path, line):
 
 
 def inbox_line(item, now_text):
-    """One muse-inbox line. The message is a JSON string inside quotes, with the field separator escaped."""
+    """One hub-inbox line. The message is a JSON string inside quotes, with the field separator escaped."""
     m = HUB_PREFIX.match(item["text"])
     quoted = json.dumps(" ".join(m.group(1).split())[:300], ensure_ascii=True).replace("|", "\\u007c")
     sha = item["sha256_of_original"][:8]
@@ -622,11 +622,11 @@ def act_on(item, host, sites, aliases, inbox, wake, now=None, ctx=None):
     if ask and fresh:
         return _guard(ctx, host, item, *execute(ask, host, ctx, sites, now, stamp, sha), now=now)
     if ask and not fresh:
-        _append_line(inbox, inbox_line({"text": "hub: (stale ask, not run) " + item["text"], "sha256_of_original": item["sha256_of_original"]}, stamp))
+        dispatch.inbox_append(inbox, inbox_line({"text": "hub: (stale ask, not run) " + item["text"], "sha256_of_original": item["sha256_of_original"]}, stamp))
         _wake(wake, sha, stamp)
         return "inbox", "%s | %s | not run: the message is older than %d minutes | oc-%s" % (stamp, ask[0], ACT_MAX_AGE // 60, sha)
     if HUB_PREFIX.match(item["text"]):
-        _append_line(inbox, inbox_line(item, stamp))
+        dispatch.inbox_append(inbox, inbox_line(item, stamp))
         _wake(wake, sha, stamp)
         return "inbox", "%s | hub list | put on the hub's list | oc-%s" % (stamp, sha)
     return "chat", None
@@ -820,7 +820,7 @@ def _move_on(item, host, outbox, now):
 
 
 def run_act(results, host, skp_root=SKP_ROOT, aliases_file=STATE / "openclaw-site-aliases.json",
-            inbox=STATE / "muse-inbox.md", wake=STATE / "openclaw-ask.wake", log=STATE / "openclaw-ask-results.log", now=None, ctx=None):
+            inbox=STATE / "hub-inbox.md", wake=STATE / "openclaw-ask.wake", log=STATE / "openclaw-ask-results.log", now=None, ctx=None):
     """Sweep the lanes Jonathan started (the sweep posts its own reports), act on the accepted items of one scan, then settle the chat
     messages still waiting on the model's reply. Returns the list of (kind, line). Without a ctx there is no lane menu, no sweep and
     no waiting list (tests, and anything that is not the poller)."""

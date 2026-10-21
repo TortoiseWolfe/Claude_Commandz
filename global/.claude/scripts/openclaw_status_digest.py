@@ -7,7 +7,7 @@ No model calls. Everything comes from live sources on the hub:
   - lane.sh --status: lane name, report yes/no, working/idle (dead lanes are only counted);
   - lane report.md files from the last 2 days;
   - the newest .skp per site folder;
-  - open items in muse-inbox.md, titles only;
+  - open items in hub-inbox.md, titles only;
   - GitHub (gh, one GraphQL call): per repo with open PRs or a roadmap line, the open issue and PR counts,
     open PR titles, the last merge and the roadmap's next item for it.
 
@@ -31,6 +31,7 @@ in this file or in its tests.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -856,7 +857,7 @@ def main(argv=None):
     ap.add_argument("--lane-status-file")
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
     ap.add_argument("--skp-root", default="/mnt/c/Users/JonPo/Downloads/SketchUpMake2017")
-    ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
+    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
     ap.add_argument("--people", action="append", default=None)
     ap.add_argument("--dispatch-state", default=str(HOME / ".claude/state/openclaw-dispatch.json"),
                     help="the lane dispatcher's records: the lanes started from the chat")

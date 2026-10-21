@@ -233,7 +233,7 @@ class Page(unittest.TestCase):
     def test_client_section_warns_when_the_scan_finds_more_than_the_parse(self):
         bad = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | a | b | c | d | e f g | and more\n"
         page = self.build(inbox_text=INBOX + bad)
-        self.assertIn("WARNING: 3 open client lines in the inbox, 2 parsed: grep muse-inbox.md", page)
+        self.assertIn("WARNING: 3 open client lines in the inbox, 2 parsed: grep hub-inbox.md", page)
         self.assertNotIn("WARNING", self.build())
 
     def test_client_section_lists_a_two_id_line(self):
@@ -345,7 +345,7 @@ class RealState(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             page = out.read_text()
             self.assertLess(len(page.encode()), 6144, len(page.encode()))
-            for h in ["## Lanes running", "## Open muse-inbox items", "## Roadmap", "## Budget this week",
+            for h in ["## Lanes running", "## Open hub-inbox items", "## Roadmap", "## Budget this week",
                       "## ~/repos, last 10 commits", "## Tidy report"]:
                 self.assertIn(h, page)
             self.assertIn("Next session should:", page)

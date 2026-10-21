@@ -27,6 +27,9 @@ timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || ec
 # or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
 timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
 
+# Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
+timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
+
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2

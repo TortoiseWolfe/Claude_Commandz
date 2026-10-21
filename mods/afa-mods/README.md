@@ -8,7 +8,7 @@ No network calls. The only writes go to `~/.claude/state/mods/`.
 **Hub band.** In a session started in `~/repos`, one line above the prompt:
 `/prep not run` until `/prep` has run in the session, then open lanes (rows of
 `~/.claude/state/lanes/index.tsv` from the last 3 days whose report is missing or whose
-`out.log` has no `exit` line), unticked items in `~/.claude/state/muse-inbox.md`, and
+`out.log` has no `exit` line), unticked items in `~/.claude/state/hub-inbox.md`, and
 `Client mail: N new` (unticked lines containing `Client mail:` or `Client alert:`).
 Counts are read from those private files at run time and refreshed every 5 seconds.
 

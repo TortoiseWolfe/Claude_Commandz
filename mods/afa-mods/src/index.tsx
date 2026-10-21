@@ -53,7 +53,7 @@ async function refreshBand($: Engine) {
       // unreadable lane: not counted
     }
   }
-  const { inbox, client } = countInbox(await readText($, `${state}/muse-inbox.md`).catch(() => ''))
+  const { inbox, client } = countInbox(await readText($, `${state}/hub-inbox.md`).catch(() => ''))
   const next = { lanes: open, inbox, client }
   const prev = await read($, band)
   if (JSON.stringify(prev) !== JSON.stringify(next)) await update($, band, () => next)
