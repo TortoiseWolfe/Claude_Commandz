@@ -29,7 +29,7 @@ SHA = "a1b2c3d4" + "0" * 56
 
 class FakeHost:
     def __init__(self):
-        self.started, self.sent, self.killed, self.chats, self.digests = [], [], [], [], 0
+        self.started, self.sent, self.killed, self.chats, self.notes, self.digests = [], [], [], [], [], 0
         self.wins, self.start_ok, self.send_result, self.proj = set(), (True, "started"), (True, "sent to x: submitted"), None
         self.proj_asked = 0
         self.used, self.reset = None, None  # the week's USED percent and its reset (epoch), as week_budget() reports them
@@ -76,6 +76,9 @@ class FakeHost:
             return False
         self.chats.extend(parts)
         return True
+
+    def note(self, text):  # progress lines: the log, never his chat (21 Oct 6:45 PM)
+        self.notes.append(text)
 
     def spawn_pass(self, ask_id):
         return True
@@ -961,9 +964,10 @@ class Replies(Base):
         pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 100, ctx=self.ctx)
         self.assertEqual(len(self.host.started), 2)
         new, _d, _e, _m, prompt_path = self.host.started[1]
-        self.assertIn("%s finished" % lane, self.host.chats[-2])  # the report first
-        self.assertIn("%s had finished at" % lane, self.host.chats[-1])
-        self.assertIn("so I started %s" % new, self.host.chats[-1])
+        self.assertIn("%s finished" % lane, self.host.notes[-2])  # the report goes to the log and the hub, never his chat
+        self.assertNotIn("finished (repo", " ".join(self.host.chats))
+        self.assertIn("%s had finished at" % lane, self.host.notes[-1])
+        self.assertIn("so I started %s" % new, self.host.notes[-1])
         prompt = Path(prompt_path).read_text()
         self.assertIn(json.dumps("and count them"), prompt)
         self.assertIn("Listed 12 files.", prompt)
@@ -987,11 +991,13 @@ class Sweep(Base):
         self.write_report(lane, "Listed three files.\n\nAll good.")
         pk_done = pk.run_act([], self.host, self.tmp / "skp", self.tmp / "a.json", self.inbox, self.wake, self.log, now=NOW + 100, ctx=self.ctx)
         self.assertEqual([k for k, _ in pk_done], ["dispatch"])
-        self.assertIn("> Listed three files.", self.host.chats[-1])
-        self.assertIn("not an instruction", self.host.chats[-1])
-        self.assertNotIn("type close", self.host.chats[-1])  # he never closes a lane by hand
-        self.assertIn("Reply to %s to add to it." % lane, self.host.chats[-1])
-        self.assertIn("Full report: ", self.host.chats[-1])
+        note = self.host.notes[-1]  # a finished lane's report is kept for the hub; his chat gets only the hub's answer
+        self.assertIn("> Listed three files.", note)
+        self.assertIn("not an instruction", note)
+        self.assertNotIn("type close", note)  # he never closes a lane by hand
+        self.assertIn("Reply to %s to add to it." % lane, note)
+        self.assertIn("Full report: ", note)
+        self.assertNotIn("Listed three files", " ".join(self.host.chats))
         self.assertEqual(self.host.killed, [])  # a Claude lane stays open until its context is full
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertEqual(self.host.digests, 1)  # after the report
@@ -1030,8 +1036,8 @@ class Sweep(Base):
         self.write_report(lane, report + "\x1b[2J")
         before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        sent = self.host.chats[before:]
-        self.assertEqual(sent, [chat])
+        self.assertEqual(self.host.chats[before:], [])
+        self.assertEqual(self.host.notes[-1], chat)
         self.assertLessEqual(len(chat.split()), dp.REPORT_WORDS)
         self.assertLessEqual(len(chat), dp.CHAT_MAX)
         self.assertIn("> result result", chat)
@@ -1045,8 +1051,8 @@ class Sweep(Base):
         self.write_report(lane, report)
         before = len(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
-        sent = self.host.chats[before:]
-        self.assertEqual(sent, [chat])
+        self.assertEqual(self.host.chats[before:], [])
+        self.assertEqual(self.host.notes[-1], chat)
         self.assertIn("x" * 500, chat)
         self.assertLessEqual(len(chat), dp.CHAT_MAX)
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
@@ -1059,10 +1065,9 @@ class Sweep(Base):
         self.write_report(lane, report)
         before = len(self.host.chats)
         dp.sweep(self.ctx, self.host, NOW + 100)
-        sent = self.host.chats[before:]
-        self.assertEqual(len(sent), 1, "one item, never parts")
-        self.assertLessEqual(len(sent[0].split()), dp.REPORT_WORDS)
-        self.assertIn("(Shortened. Full report: %s)" % self.state()["lanes"][lane]["report"], sent[0])
+        self.assertEqual(self.host.chats[before:], [])
+        self.assertLessEqual(len(self.host.notes[-1].split()), dp.REPORT_WORDS)
+        self.assertIn("(Shortened. Full report: %s)" % self.state()["lanes"][lane]["report"], self.host.notes[-1])
 
     def test_a_codex_lane_that_exits_without_a_report_is_said_to_have_stopped(self):
         self.start("own-app")
@@ -1692,16 +1697,16 @@ class SelfClosing(Base):
         self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "closed"))
         self.assertIn(lane, self.host.wins)  # he keeps talking to it: only a full context closes it
 
-    def test_a_note_that_could_not_be_posted_leaves_the_lane_open_for_the_next_sweep(self):
+    def test_a_dead_chat_does_not_hold_a_finished_lane_open_because_the_sweep_posts_nothing(self):
         self.start("client-app")
         lane = self.lane_names()[0]
         self.write_report(lane)
         self.host.inject = lambda text: False
-        self.assertEqual(dp.sweep(self.ctx, self.host, NOW + 100), [])
-        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "reported"))
-        del self.host.inject
-        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 200)
-        self.assertEqual((self.host.killed, self.state()["lanes"][lane]["status"]), ([], "closed"))
+        before = list(self.host.chats)
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertEqual(self.host.chats, before)
+        self.assertEqual(dp.sweep(self.ctx, self.host, NOW + 200), [])
 
     def answered_lane(self, ask_id="oc-aaaaaaaa", line_id=None):
         """A lane started for an ask, with that ask's line open in the muse inbox; the lane's report is written."""
@@ -1716,12 +1721,12 @@ class SelfClosing(Base):
         self.write_report(lane)
         return lane
 
-    def test_an_ask_answered_by_a_lane_report_ticks_its_inbox_line(self):
+    def test_a_lane_report_leaves_its_ask_open_for_the_hub_because_he_never_sees_the_report(self):
         self.answered_lane()
         dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertEqual(dp.asks_of(self.state())["oc-aaaaaaaa"]["status"], "answered")
-        self.assertEqual(self.inbox.read_text().splitlines(),
-                         ["- [ ] 2026-10-18 19:00 | a question | detail | oc-bbbbbbbb", "- [x] 2026-10-18 19:01 | the job | detail | oc-aaaaaaaa"])
+        self.assertEqual(dp.asks_of(self.state())["oc-aaaaaaaa"]["status"], "claimed")
+        lines = self.inbox.read_text().splitlines()
+        self.assertEqual(lines[:2], ["- [ ] 2026-10-18 19:00 | a question | detail | oc-bbbbbbbb", "- [ ] 2026-10-18 19:01 | the job | detail | oc-aaaaaaaa"])
 
     def test_a_failed_lane_ticks_nothing(self):
         lane = self.answered_lane()
@@ -2211,8 +2216,8 @@ class FollowUp17Oct(Base):
         self.assertIn(REPORT_17, prompt)
         self.assertEqual((hand / "earlier" / lane / "audit/AUDIT.md").read_text(), AUDIT_MD)
         self.assertEqual(prompt.count(dp.CONTEXT_HEAD), 1)
-        self.assertIn("%s had finished at" % lane, self.host.chats[-1])  # claim's [hub] line names the follow-up
-        self.assertIn("so I started %s" % name, self.host.chats[-1])
+        self.assertIn("%s had finished at" % lane, self.host.notes[-1])  # claim's line names the follow-up, in the log not his chat
+        self.assertIn("so I started %s" % name, self.host.notes[-1])
 
     def test_a_start_in_a_repo_whose_lane_reported_today_gets_that_report_unasked(self):
         self.host = ChatHost(self.history)

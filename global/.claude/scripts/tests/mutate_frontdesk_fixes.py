@@ -67,8 +67,6 @@ MUTANTS = [
     ("8", D, "a held promote keeps its finish", '                ask.pop("finished_at", None)', "                pass"),
     # followup A. a posted lane report answers its ask; a second lane can join it
     ("A", D, "a posted report leaves its ask claimed", "        needs_hub = _settle_lane_ask(state, name, chat, now)\n", "        needs_hub = None\n"),
-    ("A", D, "the ask is answered without the posted text", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"], ask["answered_at"] = "", "answered", now'),
-    ("A", D, "the ask is answered without the time", 'ask["answer"], ask["status"], ask["answered_at"] = text, "answered", now', 'ask["answer"], ask["status"] = text, "answered"'),
     ("A", D, "the first of two lanes settles the ask", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return None\n', ""),
     ("A", D, "an answered ask is never reopened by a second lane", 'reclaim = (ask["status"] in ("claimed", "answered") and', 'reclaim = (ask["status"] in ("claimed",) and'),
     ("A", D, "a second lane is never added", 'ask["lanes"] = (ask.get("lanes") or []) + [lane_name] if reclaim else [lane_name]', 'ask["lanes"] = [lane_name]'),
@@ -83,9 +81,6 @@ MUTANTS = [
     ("B", D, "the hub reason is not about mail", '"a note to Hatch or a Gmail draft: only the hub has the mail connector, so no lane or pass ran"', '"not a plain GitHub-facts question, so no pass ran"'),
     ("B", D, "a mail question can still start the facts pass", "HUB_WORK_RE.search(t) or HUB_MAIL_RE.search(t) or not QUESTION_SHAPE_RE", "HUB_WORK_RE.search(t) or not QUESTION_SHAPE_RE"),
     # dupes D. a failed lane never closes its ask; the hub can follow up on an answered one; the hub-list line is short
-    ("D", D, "a failed lane's report closes its ask", '    if state["lanes"][lane_name].get("failed"):\n        return ask_id\n', ""),
-    ("D", D, "a failed lane's ask never reaches the hub list", '    if state["lanes"][lane_name].get("failed"):\n        return ask_id\n', '    if state["lanes"][lane_name].get("failed"):\n        return None\n'),
-    ("D", D, "a failed lane with a sibling still working goes to the hub", '    if any(state["lanes"].get(n, {}).get("status") == "started" for n in ask.get("lanes", []) if n != lane_name):\n        return None\n    if state["lanes"][lane_name].get("failed"):', '    if state["lanes"][lane_name].get("failed"):'),
     ("D", D, "the hub list line posts an acknowledgement", "no pass: put on the hub's list (ask %s)\" % (stamp, ask_id), None", "no pass: put on the hub's list (ask %s)\" % (stamp, ask_id), \"On the hub's list: the hub has your message.\""),
     ("D", D, "the cap line posts an acknowledgement", "(ask %s)\" % (stamp, len(waiting), ask_id), None", "(ask %s)\" % (stamp, len(waiting), ask_id), \"%d questions waiting.\" % len(waiting)"),
     ("D", D, "the open list hides a failed job ask", '                status = "lane-failed"  # its lane failed', '                continue  # its lane failed'),

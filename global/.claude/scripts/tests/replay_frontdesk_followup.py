@@ -31,7 +31,7 @@ LOG = STATE / "openclaw-ask-results.log"
 def logged_at(lane, log=LOG):
     """When the log says this lane's report was posted (to the minute), or None."""
     for line in log.read_text().splitlines()[::-1]:
-        m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) \| report \| %s .*report posted to chat" % re.escape(lane), line)
+        m = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d) \| report \| %s .*report (?:posted to chat|handed to the hub)" % re.escape(lane), line)
         if m:
             return time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M"))
     return None

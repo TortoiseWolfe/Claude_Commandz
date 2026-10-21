@@ -247,19 +247,25 @@ class Claiming(PassBase):
         self.assertEqual(dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT + 100), [])
         self.assertEqual(self.host.started, [])
 
-    def test_a_posted_lane_report_answers_its_ask_with_the_text_and_the_time(self):
-        """17 Oct: seven lane reports reached the chat but their asks stayed "claimed", so the hub called them dropped."""
+    def test_a_finished_lane_puts_its_ask_on_the_hub_list_and_posts_nothing_to_the_chat(self):
+        """21 Oct 6:45 PM: lane reports no longer reach his chat, so a report answers nothing he has seen: the hub answers the ask."""
         self.hand()
         report = self.index_row("oc-own-app-xyz")
         dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
         report.parent.mkdir(parents=True)
         report.write_text("Counted 12 open issues. Nothing left.")
         self.host.wins.discard("oc-own-app-xyz")
+        before = list(self.host.chats)
         (line, chat), = dp.sweep(self.ctx, self.host, NOW + 120)
+        self.assertEqual(self.host.chats, before)
+        self.assertIn("Counted 12 open issues", chat)
         ask = self.ask()
-        self.assertEqual((ask["status"], ask["answered_at"], ask["answer"]), ("answered", NOW + 120, chat))
-        self.assertIn("Counted 12 open issues", ask["answer"])
-        self.assertEqual(ask["finished_by"], "lane claimed")  # the first finish stands
+        self.assertEqual(ask["status"], "claimed")
+        self.assertNotIn("answer", ask)
+        inbox = self.ctx.inbox_path.read_text()
+        self.assertEqual(inbox.count(json.dumps("do the thing")), 1)
+        self.assertIn("oc-own-app-xyz ended", inbox)
+        self.assertIn(ASK, self.ctx.wake_path.read_text())
 
     def failed_lane(self):
         self.hand()
@@ -273,7 +279,7 @@ class Claiming(PassBase):
     def test_a_failed_report_is_posted_but_does_not_answer_its_ask(self):
         chat = self.failed_lane()
         self.assertIn("failed", chat)
-        self.assertEqual(self.host.chats.count(chat), 1)
+        self.assertEqual(self.host.notes.count(chat), 1)
         ask = self.ask()
         self.assertEqual(ask["status"], "claimed")  # a failed lane answered nothing: the ask stays open
         self.assertNotIn("answer", ask)
@@ -292,16 +298,17 @@ class Claiming(PassBase):
         self.assertEqual(len(rows), 1)
         self.assertIn("lane-failed", rows[0])
 
-    def test_a_good_report_still_answers_its_ask_and_adds_nothing_to_the_hub_list(self):
+    def test_a_good_report_does_not_close_its_ask_either(self):
         self.hand()
         report = self.index_row("oc-own-app-xyz")
         dp.claim(self.ctx, ASK, "oc-own-app-xyz", NOW + 20)
         report.parent.mkdir(parents=True)
         report.write_text("Counted 12 open issues.")
         dp.sweep(self.ctx, self.host, NOW + 120)
-        self.assertEqual(self.ask()["status"], "answered")
-        self.assertFalse(self.ctx.inbox_path.exists() and self.ctx.inbox_path.read_text())
-        self.assertEqual([l for l in dp.open_question_lines(self.ctx, NOW + 300) if l.startswith(ASK)], [])
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertEqual(self.ctx.inbox_path.read_text().count(ASK), 1)
+        dp.sweep(self.ctx, self.host, NOW + 200)  # delivered: a later sweep adds nothing
+        self.assertEqual(self.ctx.inbox_path.read_text().count(ASK), 1)
 
     def test_a_dead_lane_does_not_answer_its_ask_either(self):
         self.hand()
@@ -415,7 +422,7 @@ class Claiming(PassBase):
         self.host.wins.discard("oc-own-app-xyz")
         done = dp.sweep(self.ctx, self.host, NOW + 120)
         self.assertEqual(len(done), 1, done)
-        self.assertIn("Counted 12 open issues", self.host.chats[-1])
+        self.assertIn("Counted 12 open issues", self.host.notes[-1])
 
     def test_codex_and_copilot_rows_keep_their_engine(self):
         self.hand()
@@ -473,22 +480,22 @@ class Claiming(PassBase):
         self.assertEqual(self.ask()["status"], "claimed")
         self.assertEqual(self.state()["lanes"]["oc-own-app-b"]["ask"], ASK)
 
-    def test_a_second_lane_on_an_answered_ask_reopens_it_and_its_report_answers_again(self):
+    def test_a_second_lane_on_an_ask_whose_first_lane_reported_joins_it_and_reports_to_the_hub_again(self):
         self.hand()
         a = self.index_row("oc-own-app-a")
         dp.claim(self.ctx, ASK, "oc-own-app-a", NOW)
         a.parent.mkdir(parents=True)
         a.write_text("First report.")
         dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertEqual(self.ask()["status"], "answered")
+        self.assertEqual(self.ask()["status"], "claimed")
         b = self.index_row("oc-own-app-b", begin_for="", epoch=NOW + 150)
         self.assertTrue(dp.claim(self.ctx, ASK, "oc-own-app-b", NOW + 160)[0])
         self.assertEqual(self.ask()["status"], "claimed")
         b.parent.mkdir(parents=True)
         b.write_text("Second report.")
         dp.sweep(self.ctx, self.host, NOW + 300)
-        self.assertEqual(self.ask()["status"], "answered")
-        self.assertIn("Second report.", self.ask()["answer"])
+        self.assertEqual(self.ask()["status"], "claimed")
+        self.assertEqual(self.ctx.inbox_path.read_text().count(ASK), 2)
 
     def test_a_second_lane_that_is_stale_or_already_someones_is_refused_loudly(self):
         self.hand()
@@ -626,8 +633,8 @@ class Fallback(PassBase):
         done = dp.fallback_due(self.ctx, self.host, NOW + dp.ASK_WAIT)
         self.assertEqual(len(done), 1)
         self.assertEqual(len(self.host.started), 1)
-        self.assertIn("didn't take it in 5 min", self.host.chats[-1])
-        self.assertIn("so I started it myself", self.host.chats[-1])
+        self.assertIn("didn't take it in 5 min", self.host.notes[-1])
+        self.assertIn("so I started it myself", self.host.notes[-1])
         self.assertEqual(self.ask()["status"], "fallback")
         lane = self.ask()["lanes"][0]
         self.assertEqual(self.state()["lanes"][lane]["ask"], ASK)
@@ -639,7 +646,7 @@ class Fallback(PassBase):
         dp.asks_of(state)[ASK]["pass"] = {"exit": 1}
         dp.save_state(self.ctx.state_path, state)
         self.assertEqual(len(dp.fallback_due(self.ctx, self.host, NOW + 2)), 1)
-        self.assertIn("pass failed (exit 1)", self.host.chats[-1])
+        self.assertIn("pass failed (exit 1)", self.host.notes[-1])
 
     def test_a_pass_that_ended_without_settling_anything_falls_back_at_once(self):
         self.hand()
@@ -647,7 +654,7 @@ class Fallback(PassBase):
         dp.asks_of(state)[ASK]["pass"] = {"exit": 0}
         dp.save_state(self.ctx.state_path, state)
         self.assertEqual(len(dp.fallback_due(self.ctx, self.host, NOW + 2)), 1)
-        self.assertIn("ended without starting or answering", self.host.chats[-1])
+        self.assertIn("ended without starting or answering", self.host.notes[-1])
 
     def test_it_runs_once_only(self):
         self.hand()
@@ -857,7 +864,7 @@ class PartialIsFailed(unittest.TestCase):
         base.host.wins.discard(lane)
         dp.sweep(base.ctx, base.host, NOW + 600)
         self.assertTrue(base.state()["lanes"][lane].get("failed"))
-        self.assertIn("could not read", base.host.chats[-1])
+        self.assertIn("could not read", base.host.notes[-1])
 
 
 class TheCapCountsRealWork(PassBase):
@@ -1053,8 +1060,8 @@ class StartForAnAsk(PassBase):
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
         self.assertIn("Copilot is out of usage", msg)
-        self.assertIn("Copilot is out of usage", self.host.chats[-1])
-        self.assertIn("on Claude Sonnet", self.host.chats[-1])
+        self.assertIn("Copilot is out of usage", self.host.notes[-1])
+        self.assertIn("on Claude Sonnet", self.host.notes[-1])
 
     def test_engine_codex_while_both_are_blocked_starts_claude_and_codex_alone_goes_to_copilot(self):
         self.block(codex_blocked_until=NOW + 14 * 86400)
@@ -1273,7 +1280,7 @@ class TheWaitingRoom(PassBase):
         self.assertTrue(ok, msg)
         head = (self.room / "frontdesk-5.md").read_text().splitlines()
         self.assertTrue(any(l.startswith("approved: Jonathan via receptionist, ") for l in head), head)
-        self.assertEqual(self.host.chats[-1], "frontdesk-5 is queued behind frontdesk-4; it starts by itself when that finishes")
+        self.assertEqual(self.host.notes[-1], "frontdesk-5 is queued behind frontdesk-4; it starts by itself when that finishes")
         self.assertEqual(self.host.started, [])
         self.assertEqual(self.ask()["status"], "answered")
 
@@ -1283,7 +1290,7 @@ class TheWaitingRoom(PassBase):
         ok, msg = dp.approve_entry(self.ctx, self.host, ASK, "fd-a", NOW + 5)
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][0], "fd-a")
-        self.assertEqual(self.host.chats[-1], "started fd-a")
+        self.assertEqual(self.host.notes[-1], "started fd-a")
 
     def test_a_waiting_room_entry_asking_for_blocked_copilot_starts_claude(self):
         state = self.state()
@@ -1294,7 +1301,7 @@ class TheWaitingRoom(PassBase):
         ok, msg = dp.approve_entry(self.ctx, self.host, ASK, "fd-a", NOW + 5)
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][2], "claude")
-        self.assertIn("Copilot is out of usage", self.host.chats[-1])
+        self.assertIn("Copilot is out of usage", self.host.notes[-1])
 
     def test_his_words_must_name_the_entry(self):
         self.entry("fd-a")
@@ -1331,7 +1338,7 @@ class TheWaitingRoom(PassBase):
         self.assertEqual(text, "# fd-a\n\nCount the open issues in runit.\n")
         self.assertRegex(prompt, r"/\d{4}-\d{2}-\d{2}-fd-a/prompt\.md$")
         self.assertFalse((self.room / "fd-a.md").exists())
-        self.assertEqual(self.host.chats[-1], "started fd-a")
+        self.assertEqual(self.host.notes[-1], "started fd-a")
 
     def test_an_entry_nobody_approved_never_starts(self):
         self.entry("fd-a")
@@ -1348,7 +1355,7 @@ class TheWaitingRoom(PassBase):
         self.report("fd-a")
         dp.room_due(self.ctx, self.host, NOW + 60)
         self.assertEqual([s[0] for s in self.host.started], ["fd-a", "fd-b"])
-        self.assertEqual(self.host.chats[-1], "started fd-b (was queued behind fd-a)")
+        self.assertEqual(self.host.notes[-1], "started fd-b (was queued behind fd-a)")
 
     def test_it_waits_while_the_after_lane_has_an_empty_report(self):
         self.entry("fd-b", after="fd-a", approved="x")
@@ -1370,11 +1377,11 @@ class TheWaitingRoom(PassBase):
         self.report("fd-a", "Could not read the folder: permission denied. Nothing was changed.")
         first = dp.room_due(self.ctx, self.host, NOW)
         self.assertEqual(self.host.started, [])
-        self.assertEqual(self.host.chats, ["fd-b stays queued: fd-a failed"])
+        self.assertEqual(self.host.notes, ["fd-b stays queued: fd-a failed"])
         self.assertEqual(len(first), 1)
         again = dp.room_due(self.ctx, self.host, NOW + 60)
         self.assertEqual(again, [])
-        self.assertEqual(len(self.host.chats), 1)
+        self.assertEqual(len(self.host.notes), 1)
         self.assertTrue((self.room / "fd-b.md").exists())  # the entry stays
 
     def test_a_partial_report_counts_as_failed_for_the_gate(self):
@@ -1413,7 +1420,7 @@ class TheWaitingRoom(PassBase):
         path = self.room / "fd-a.md"
         path.write_text("\n".join(l for l in path.read_text().split("\n") if not l.startswith("start-failed:")))
         dp.room_due(self.ctx, self.host, NOW + 60)
-        self.assertEqual(self.host.chats[-1], "started fd-a")  # the first try is in host.started too, so the chat says which one worked
+        self.assertEqual(self.host.notes[-1], "started fd-a")  # the first try is in host.started too, so the chat says which one worked
         self.assertFalse(path.exists())
 
     def test_an_empty_brief_does_not_start(self):
@@ -1469,18 +1476,18 @@ class TheWaitingRoom(PassBase):
     def test_a_week_projected_past_the_limit_holds_the_room_and_says_so_once(self):
         for pct in (95, 90.5):
             with self.subTest(pct=pct):
-                self.host.proj, self.host.chats = pct, []
+                self.host.proj, self.host.notes = pct, []
                 self.entry("fd-a", approved="x")
                 self.entry("fd-b", approved="x")
                 out = dp.room_due(self.ctx, self.host, NOW)
                 self.assertEqual(self.host.started, [])
                 self.assertEqual(len(out), 1)
-                self.assertEqual(self.host.chats, [
+                self.assertEqual(self.host.notes, [
                     "2 lanes are waiting in the queue: the week is projected at %d%% (phase 1, reset to Mon 6:00 AM, holds past 90%% projected). "
                     "They start when the figure is known and within the limit, or from Mon 6:00 AM, when the limit becomes 95%% used." % round(pct)])
                 self.assertEqual(self.state()["room_held"], {"phase": 1, "pct": round(pct), "count": 2})
                 self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
-                self.assertEqual(len(self.host.chats), 1)
+                self.assertEqual(len(self.host.notes), 1)
                 for f in self.room.glob("*.md"):
                     f.unlink()
                 dp.room_due(self.ctx, self.host, NOW + 120)
@@ -1492,7 +1499,7 @@ class TheWaitingRoom(PassBase):
         st = self.state()
         st.pop("room_held", None)
         dp.save_state(self.ctx.state_path, st)
-        self.host.started, self.host.chats = [], []
+        self.host.started, self.host.notes = [], []
         self.host.proj, self.host.used = proj, used
         self.runs = getattr(self, "runs", 0) + 1  # a fresh name each run: a name that already started is a copy, not an entry
         self.entry("fd-run%d" % self.runs, approved="x")
@@ -1528,7 +1535,7 @@ class TheWaitingRoom(PassBase):
 
     def test_the_hold_names_the_phase_and_its_limit_and_when_it_lifts(self):
         self.at(ET(2026, 10, 19, 9), 20, 96)
-        self.assertEqual(self.host.chats, [
+        self.assertEqual(self.host.notes, [
             "1 lane is waiting in the queue: the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95% used). "
             "They start when the figure is known and within the limit, or from Tue 6:00 AM, when there is no limit."])
         self.assertEqual(self.state()["room_held"], {"phase": 2, "pct": 96, "count": 1})
@@ -1538,9 +1545,9 @@ class TheWaitingRoom(PassBase):
         self.entry("fd-a", approved="x")
         dp.room_due(self.ctx, self.host, ET(2026, 10, 19, 5, 59))
         dp.room_due(self.ctx, self.host, ET(2026, 10, 19, 6, 1))
-        self.assertEqual(len(self.host.chats), 2)
-        self.assertIn("phase 1", self.host.chats[0])
-        self.assertIn("phase 2", self.host.chats[1])
+        self.assertEqual(len(self.host.notes), 2)
+        self.assertIn("phase 1", self.host.notes[0])
+        self.assertIn("phase 2", self.host.notes[1])
 
     def test_a_reset_in_the_report_decides_the_phase(self):
         self.host.reset = ET(2026, 10, 21, 12)
@@ -1552,15 +1559,15 @@ class TheWaitingRoom(PassBase):
         self.entry("fd-a", approved="x")
         dp.room_due(self.ctx, self.host, NOW)
         self.assertEqual(self.host.started, [])
-        self.assertEqual(len(self.host.chats), 1)
-        self.assertIn("1 lane is waiting in the queue: the week's projected figure is unknown (phase 1", self.host.chats[0])
+        self.assertEqual(len(self.host.notes), 1)
+        self.assertIn("1 lane is waiting in the queue: the week's projected figure is unknown (phase 1", self.host.notes[0])
         self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
-        self.assertEqual(len(self.host.chats), 1)
+        self.assertEqual(len(self.host.notes), 1)
 
     def test_a_projection_at_or_under_the_limit_starts_the_entry_and_clears_the_hold(self):
         for pct in (90, 50):
             with self.subTest(pct=pct):
-                self.host.started, self.host.chats = [], []
+                self.host.started, self.host.notes = [], []
                 self.host.proj = 95
                 name = "fd-%d" % pct
                 self.entry(name, approved="x")
@@ -1578,15 +1585,15 @@ class TheWaitingRoom(PassBase):
         dp.room_due(self.ctx, self.host, NOW)
         self.entry("fd-b", approved="x")
         dp.room_due(self.ctx, self.host, NOW + 60)
-        self.assertEqual(len(self.host.chats), 2)
-        self.assertIn("2 lanes are waiting", self.host.chats[1])
+        self.assertEqual(len(self.host.notes), 2)
+        self.assertIn("2 lanes are waiting", self.host.notes[1])
 
     def test_the_hold_does_not_hide_an_after_failed_note(self):
         self.host.proj = 95
         self.entry("fd-b", after="fd-a", approved="x")
         self.report("fd-a", "Could not read the folder: permission denied. Nothing was changed.")
         dp.room_due(self.ctx, self.host, NOW)
-        self.assertEqual(self.host.chats, ["fd-b stays queued: fd-a failed"])
+        self.assertEqual(self.host.notes, ["fd-b stays queued: fd-a failed"])
 
     def test_the_pickup_run_calls_the_room(self):
         self.entry("fd-a", approved="x")
@@ -2273,7 +2280,7 @@ class Diagnose(PassBase):
         self.assertEqual(self.host.spawned, [ASK, job])  # a fresh dispatch pass for the job; the question's own pass ends
         self.assertEqual(self.host.started, [])
         self.assertEqual(self.state()["lanes"], {})
-        self.assertTrue(self.host.chats[-1].startswith("handed to Claude: triage why"), self.host.chats)
+        self.assertTrue(self.host.notes[-1].startswith("handed to Claude: triage why"), self.host.notes)
 
     def test_the_question_passes_own_run_ends_promoted_not_answered_and_the_fallback_leaves_it_alone(self):
         self.asked()

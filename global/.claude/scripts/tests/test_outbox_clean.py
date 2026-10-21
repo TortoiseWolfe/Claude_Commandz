@@ -92,97 +92,42 @@ class Clean(td.Base):
     def posts(self, now):
         return dp.post_new_reports(self.ctx, self.host, now)
 
-    def test_a_long_lane_report_is_one_item_of_150_words_with_its_path(self):
+    def test_no_lane_report_reaches_the_outbox_however_long_or_often_it_is_rewritten(self):
+        # 21 Oct 6:45 PM: 43 posts piled up, 32 of them report copies from 28 lanes (no-drop-2 twice). Reports are the hub's to read.
         dp.post_new_reports(self.ctx, self.host, NOW, seed=True)
         body = "\n\n".join("## Part %d\n\nThe plan for this page is set and the redirect is in place for the move. " % k * 3 for k in range(80))
-        p = self.report("site-mail", body, NOW - 60)
-        self.assertEqual(self.posts(NOW), ["site-mail"])
-        self.assertEqual(len(self.items()), 1, "one item, never parts")
-        text = self.items()[0]["text"]
-        self.assertLessEqual(len(text.split()), dp.REPORT_WORDS)
-        self.assertNotRegex(text, r"\(\d+ of \d+\)|\(part \d+")
-        self.assertTrue(text.startswith("### site-mail\n"))
-        self.assertIn("(Shortened. Full report: %s)" % p, text)
-
-    def test_a_rewritten_report_replaces_its_unshown_item_and_after_he_saw_it_only_the_news_is_posted(self):
-        dp.post_new_reports(self.ctx, self.host, NOW, seed=True)
-        dp.queue_add(self.box, "something he is reading", NOW)  # one post showing, so the report waits behind it
+        self.report("site-mail", body, NOW - 60)
         p = self.report("site-move", PLAN, NOW - 60)
-        self.posts(NOW)
-        self.assertEqual(len(self.items()), 2)
-        os.utime(p, (NOW + 30, NOW + 30))
+        self.assertEqual(self.posts(NOW), [])
         p.write_text(PLAN_2)
         os.utime(p, (NOW + 30, NOW + 30))
-        self.posts(NOW + 60)
-        self.assertEqual(len(self.items()), 2, "replaced where it stands, not a second post")
-        self.assertIn("Update, for the hub", self.items()[1]["text"])
-        self.assertIn("16 pages move", self.items()[1]["text"], "he never saw the first version: the whole report")
-        # he reads it
-        self.host.t = NOW + 100
-        dp.queue_next(self.box, self.host.inject_now, NOW + 100, why="hub")
-        dp.queue_next(self.box, self.host.inject_now, NOW + 200, why="hub")
-        self.assertEqual(self.items(), [])
-        # the lane writes the same report again: nothing new, nothing posted
-        os.utime(p, (NOW + 300, NOW + 300))
-        self.assertEqual(self.posts(NOW + 400), [])
-        self.assertEqual(self.items(), [])
-        # and then adds one line: only that line comes
-        p.write_text(PLAN_2 + "\n\nPurge done at 11:20 PM.")
-        os.utime(p, (NOW + 500, NOW + 500))
-        self.assertEqual(self.posts(NOW + 600), ["site-move"])
-        new = self.host.shown[-1]
-        self.assertIn("Purge done at 11:20 PM.", new)
-        self.assertIn("Report updated", new)
-        self.assertNotIn("16 pages move", new)
-
-    def test_the_same_lane_in_a_new_date_folder_replaces_its_unshown_report_instead_of_piling_up(self):
-        # 21 Oct: no-drop-2 reported from 2026-10-19-no-drop-2 and again from 2026-10-21-no-drop-2; both waited in his queue
-        dp.post_new_reports(self.ctx, self.host, NOW, seed=True)
-        dp.queue_add(self.box, "something he is reading", NOW)  # one post showing, so the reports wait behind it
-        old = self.report("no-drop-2", "Old: the first fix is in.", NOW - 300)
-        self.assertEqual(self.posts(NOW), ["no-drop-2"])
-        new = self.tmp / "lanes" / "2026-10-21-no-drop-2" / "report.md"
+        new = self.tmp / "lanes" / "2026-10-21-site-move" / "report.md"  # the same lane again, from a new date folder
         new.parent.mkdir(parents=True)
         new.write_text("New: the second fix is in.")
         os.utime(new, (NOW + 100, NOW + 100))
-        self.assertEqual(self.posts(NOW + 200), ["no-drop-2"])
-        self.assertNotEqual(old, new)
-        waiting = [i for i in self.items() if not i["shown"]]
-        self.assertEqual(len(waiting), 1, "one item for the lane, not one per folder")
-        self.assertIn("New: the second fix", waiting[0]["text"])
-        self.assertNotIn("Old: the first fix", waiting[0]["text"])
-        self.assertEqual(waiting[0]["key"], "report:no-drop-2")
+        self.assertEqual(self.posts(NOW + 200), [])
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.host.shown, [])
 
-    def test_after_hours_of_a_dead_chat_the_unshown_report_copies_are_retired_and_the_hubs_answers_stay(self):
-        dp.queue_add(self.box, "**Answer for him:** merge #74 first.", NOW, answer=True)
-        self.host.up = False
-        self.assertEqual(dp.queue_pump(self.box, self.host.inject_now, NOW), "failed")  # the chat goes down on the first post
+    def test_an_old_queues_unshown_report_copies_are_dropped_and_the_hubs_answers_stay(self):
+        dp.queue_add(self.box, "**Answer for him:** merge #74 first.", NOW, answer=True)  # showing
         for n in range(3):
-            dp.queue_add(self.box, "### lane-%d\n\nreport %d" % (n, n), NOW + 60 + n, key="report:lane-%d" % n, whole=True)
+            dp.queue_add(self.box, "### lane-%d\n\nreport %d" % (n, n), NOW + 60 + n, key="report:lane-%d" % n)
         dp.queue_add(self.box, "Another answer for him.", NOW + 90)
-        # an hour in: nothing is retired yet
-        dp.queue_pump(self.box, self.host.inject_now, NOW + 3600)
-        self.assertEqual(len(self.items()), 5)
-        # past QUEUE_OUTAGE_STALE the copies go, the first post and the other answer stay
-        later = NOW + dp.QUEUE_OUTAGE_STALE + 60
-        self.assertEqual(dp.queue_pump(self.box, self.host.inject_now, later), "failed")
+        dp.queue_pump(self.box, self.host.inject_now, NOW + 100)
         self.assertEqual([i["text"] for i in self.items()], ["**Answer for him:** merge #74 first.", "Another answer for him."])
-        gone = [i for i in dp.queue_load(self.box)["done"] if i["why"].startswith("retired:")]
+        gone = [i for i in dp.queue_load(self.box)["done"] if i["why"].startswith("dropped: lane-report copy")]
         self.assertEqual(sorted(i["key"] for i in gone), ["report:lane-0", "report:lane-1", "report:lane-2"])
-        # the chat comes back: the answers show, with the right count of what waits
-        self.host.up = True
-        self.host.t = later + 700
-        self.assertEqual(dp.queue_pump(self.box, self.host.inject_now, later + 700), "shown")
-        self.assertEqual(self.host.shown, ["**Answer for him:** merge #74 first." + dp.queue_tail(1)])
 
-    def test_a_report_copy_that_is_first_in_line_is_kept_even_in_a_long_outage(self):
-        dp.queue_add(self.box, "### lane-a\n\nreport", NOW, key="report:lane-a", whole=True)
-        self.host.up = False
-        dp.queue_pump(self.box, self.host.inject_now, NOW)
-        later = NOW + dp.QUEUE_OUTAGE_STALE + 60
-        dp.queue_add(self.box, "### lane-b\n\nreport", later - 5, key="report:lane-b", whole=True)
-        dp.queue_pump(self.box, self.host.inject_now, later)
-        self.assertEqual([i["key"] for i in self.items()], ["report:lane-a"])
+    def test_a_report_copy_he_was_already_shown_is_not_dropped(self):
+        dp.queue_add(self.box, "### lane-a\n\nreport", NOW, key="report:lane-a")
+        q = dp.queue_load(self.box)
+        q["items"][0]["shown"] = NOW  # an old queue: this one was on screen before the rule
+        dp.queue_save(self.box, q)
+        dp.queue_add(self.box, "An answer.", NOW + 5)
+        q = dp.queue_load(self.box)
+        self.assertEqual(dp._queue_clean(q, NOW + 10), 0)
+        self.assertEqual([i.get("key") for i in q["items"]][0], "report:lane-a")
 
     def test_a_record_from_before_texts_were_kept_still_posts_nothing_for_an_unchanged_report(self):
         # the live record held 411 report times and texts for 4 when this shipped: an old entry has its mtime only

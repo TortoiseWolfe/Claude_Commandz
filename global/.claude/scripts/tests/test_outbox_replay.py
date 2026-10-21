@@ -67,7 +67,7 @@ class Replay(td.Base):
         dp.queue_add(self.box, REPORT, NOW - 1500)
         dp.queue_pump(self.box, self.host.inject_now, NOW - 1500)
         pieces = len(dp.queue_pieces(REPORT))
-        self.assertGreater(pieces, 1)
+        self.assertEqual(pieces, 1, "an answer is one post now")
         for n in range(pieces):
             dp.queue_next(self.box, self.host.inject_now, NOW - 1400 + 120 * n, "next")
         self.assertEqual(len(dp.queue_load(self.box)["done"]), pieces)

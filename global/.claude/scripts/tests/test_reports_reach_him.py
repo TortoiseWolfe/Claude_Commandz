@@ -7,6 +7,7 @@
   - a picture is described in words with the Windows path (the web chat draws only inline base64 images, and a post is cut into parts).
 The PC and OpenClaw are fakes; the names in the people fixture are invented."""
 
+import json
 import os
 import re
 import sys
@@ -50,183 +51,52 @@ class ReportPosts(unittest.TestCase):
         self.host.chats.clear()
 
 
-class TheFirstRunOnlyRecords(ReportPosts):
-    def test_reports_that_exist_when_the_state_is_new_are_not_posted(self):
-        self.report("old-one", "Done: an old report.")
-        self.report("old-two", "Done: another.")
+class ReportsAreRecordedAndNeverPosted(ReportPosts):
+    """21 Oct 6:45 PM: lane-report copies in his chat were "horrible UX" (43 piled up while the chat was down). The hub reads a report
+    when lane_watch.sh wakes it and tells him what he needs in one answer, so post_new_reports records and posts nothing."""
+
+    def test_a_new_report_is_recorded_and_nothing_reaches_the_chat(self):
+        self.seeded()
+        p = self.report("harmonic-egg-mail", "Done: the renewal card is waiting.")
         self.assertEqual(self.run_posts(), [])
         self.assertEqual(self.host.chats, [])
-        self.report("new-one", "Done: written after the first run.")
-        self.assertEqual(self.run_posts(), ["new-one"])
+        data = json.loads(self.ctx.reports_posted_path.read_text())
+        self.assertIn(str(p), data["posted"])
+        self.assertEqual(data["texts"][str(p)]["last"], "Done: the renewal card is waiting.")
 
-    def test_seeding_posts_nothing_and_records_every_report(self):
-        self.report("a", "Done.")
-        self.assertEqual(self.run_posts(seed=True), [])
-        self.assertEqual(self.host.chats, [])
-        self.assertEqual(self.run_posts(), [])
-
-
-class TheStampLineNamesTheRepo(ReportPosts):
-    """19 Oct: "I don't know what repo each is in reference to, you can put it at the top near the time stamps". The repo comes from
-    the lane's folder in the lane index; a folder it cannot place leaves the stamp line as it was, never a guess."""
-
-    def setUp(self):
-        super().setUp()
-        self.root = self.tmp / "repos"
-        self.root.mkdir()
-        self.index = self.tmp / "index.tsv"
-        self.ctx = dp.Ctx({}, self.tmp / "dispatch.json", self.lanes, index_path=self.index, root=self.root)
-
-    def indexed(self, lane, dirpath, date="2026-10-18"):
-        with open(self.index, "a") as fh:
-            fh.write("\t".join([date, lane, str(dirpath), "sonnet", "subscription", "-", "-", "x", "?", "-"]) + "\n")
-
-    def stamp_line(self, lane):
-        self.seeded()
-        self.report(lane, "Done: it works.")
-        self.run_posts()
-        return self.host.chats[0].split("\n")[1]
-
-    def test_a_plain_repo_is_named_on_the_stamp_line(self):
-        self.indexed("fix-nav", self.root / "ScriptHammer")
-        self.assertRegex(self.stamp_line("fix-nav"), r"^\*ScriptHammer \u00b7 report written (?:[A-Z][a-z]{2} )?\d{1,2}:\d{2} (AM|PM)\*$")
-
-    def test_a_folder_inside_a_repo_names_that_repo(self):
-        self.indexed("deep", self.root / "TurtleWolfe" / "stream" / "can-we-build-it")
-        self.assertTrue(self.stamp_line("deep").startswith("*TurtleWolfe \u00b7 report written "))
-
-    def test_a_worktree_names_its_parent_repo(self):
-        self.indexed("wt-lane", self.root / ".worktrees" / "SpokeToWork--fix-login")
-        self.assertTrue(self.stamp_line("wt-lane").startswith("*SpokeToWork \u00b7 report written "))
-
-    def test_a_director_worktree_names_its_parent_repo(self):
-        self.indexed("wf-lane", self.root / ".worktrees" / "Claude_Commandz-wf-ab12cd")
-        self.assertTrue(self.stamp_line("wf-lane").startswith("*Claude_Commandz \u00b7 report written "))
-
-    def test_the_hub_is_the_workspace(self):
-        self.indexed("hub-lane", self.root)
-        self.assertTrue(self.stamp_line("hub-lane").startswith("*workspace (hub) \u00b7 report written "))
-
-    def test_a_lane_not_in_the_index_keeps_the_old_stamp_line(self):
-        self.assertRegex(self.stamp_line("nobody-knows"), r"^\*Report written (?:[A-Z][a-z]{2} )?\d{1,2}:\d{2} (AM|PM)\*$")
-
-    def test_a_folder_outside_the_repos_keeps_the_old_stamp_line(self):
-        self.indexed("elsewhere", "/tmp/somewhere/else")
-        self.assertTrue(self.stamp_line("elsewhere").startswith("*Report written "))
-
-    def test_the_same_name_in_two_places_without_a_date_match_is_not_guessed(self):
-        self.indexed("again", self.root / "ScriptHammer", date="2026-10-01")
-        self.indexed("again", self.root / "SpokeToWork", date="2026-10-02")
-        self.assertTrue(self.stamp_line("again").startswith("*Report written "))
-
-    def test_the_same_name_in_two_places_takes_the_row_of_the_report_date(self):
-        self.indexed("again", self.root / "ScriptHammer", date="2026-10-18")
-        self.indexed("again", self.root / "SpokeToWork", date="2026-10-02")
-        self.assertTrue(self.stamp_line("again").startswith("*ScriptHammer \u00b7 "))
-
-    def test_the_report_itself_is_unchanged(self):
-        self.indexed("fix-nav", self.root / "ScriptHammer")
-        self.seeded()
-        self.report("fix-nav", "Done: it works.\n\n- one\n- two\n")
-        self.run_posts()
-        self.assertTrue(self.host.chats[0].endswith("\n\nDone: it works.\n\n- one\n- two"), self.host.chats[0])
-        self.assertTrue(self.host.chats[0].startswith("### fix-nav\n"))
-
-
-class OneFormattedPostPerReport(ReportPosts):
-    def test_a_new_report_is_one_post_with_the_lane_as_heading_and_the_text_whole(self):
-        self.seeded()
-        self.report("harmonic-egg-mail", "Done: the renewal card is waiting.\n\n- Cards: 3\n- Next: his answers\n")
-        self.assertEqual(self.run_posts(), ["harmonic-egg-mail"])
-        self.assertEqual(len(self.host.chats), 1)
-        text = self.host.chats[0]
-        self.assertTrue(text.startswith("### harmonic-egg-mail\n"), text)
-        self.assertIn("Done: the renewal card is waiting.\n\n- Cards: 3\n- Next: his answers", text)
-        self.assertRegex(text, r"\b\d{1,2}:\d{2} (AM|PM)\b")
-        self.assertNotRegex(text, r"\b(?:1[3-9]|2[0-3]):\d{2}\b")
-
-    def test_a_second_run_posts_nothing(self):
-        self.seeded()
-        self.report("late-lane", "Done: x.")
-        self.run_posts()
-        self.assertEqual(self.run_posts(), [])
-        self.assertEqual(len(self.host.chats), 1)
-
-    def test_a_report_that_changes_is_posted_again_once(self):
+    def test_a_changed_report_is_recorded_again_and_still_not_posted(self):
         self.seeded()
         p = self.report("late-lane", "Done: first version.")
         self.run_posts()
         p.write_text("Done: second version.")
         os.utime(p, (time.time() - 100, time.time() - 100))
-        self.assertEqual(self.run_posts(), ["late-lane"])
         self.assertEqual(self.run_posts(), [])
-        self.assertEqual(len(self.host.chats), 2)
-        self.assertIn("second version", self.host.chats[1])
+        data = json.loads(self.ctx.reports_posted_path.read_text())
+        self.assertEqual(data["texts"][str(p)]["last"], "Done: second version.")
+        self.assertEqual(self.host.chats, [])
 
-    def test_a_long_report_is_one_post_of_150_words_with_its_path(self):
-        self.seeded()
-        body = "\n\n".join("Paragraph %d. %s" % (i, "word " * 60) for i in range(1, 30))
-        self.report("long-lane", body)
-        self.run_posts()
-        self.assertEqual(len(self.host.chats), 1, "one post, never parts")
-        post = self.host.chats[0]
-        self.assertLessEqual(len(post.split()), dp.REPORT_WORDS)
-        self.assertNotRegex(post, r"\(part \d+ of \d+\)")
-        self.assertIn("Paragraph 1.", post)
-        self.assertIn("(Shortened. Full report: %s)" % (self.lanes / "2026-10-18-long-lane" / "report.md"), post)
+    def test_seeding_and_plain_runs_post_nothing_and_record_every_report(self):
+        self.report("a", "Done.")
+        self.report("b", "Done too.")
+        self.assertEqual(self.run_posts(seed=True), [])
+        self.assertEqual(self.run_posts(), [])
+        self.assertEqual(len(json.loads(self.ctx.reports_posted_path.read_text())["posted"]), 2)
+        self.assertEqual(self.host.chats, [])
 
     def test_the_text_is_cleaned_of_control_characters(self):
         self.seeded()
-        self.report("tty-lane", "Done:\x1b[31m red\x00 text.")
+        p = self.report("tty-lane", "Done:\x1b[31m red\x00 text.")
         self.run_posts()
-        self.assertNotRegex(self.host.chats[0], r"[\x00-\x08\x0b-\x1f\x7f]")
-
-    def test_an_empty_report_is_not_posted(self):
-        self.seeded()
-        self.report("blank-lane", "   \n")
-        self.assertEqual(self.run_posts(), [])
-        self.assertEqual(self.host.chats, [])
-
-    def test_a_report_still_being_written_waits_for_the_next_run(self):
-        self.seeded()
-        self.report("busy-lane", "Done: half", age=2)
-        self.assertEqual(self.run_posts(), [])
-        p = self.lanes / "2026-10-18-busy-lane" / "report.md"
-        t = time.time() - 60
-        os.utime(p, (t, t))
-        self.assertEqual(self.run_posts(), ["busy-lane"])
-
-    def test_a_post_that_could_not_land_is_tried_again_next_run(self):
-        self.seeded()
-        self.report("retry-lane", "Done: x.")
-        real = self.host.inject
-        self.host.inject = lambda text: False
-        self.assertEqual(self.run_posts(), [])
-        self.host.inject = real
-        self.assertEqual(self.run_posts(), ["retry-lane"])
-
-    def test_a_lane_the_dispatcher_started_is_left_to_its_own_sweep(self):
-        self.seeded()
-        p = self.report("oc-own-app-1", "Done: its sweep posts this.")
-        state = dp.load_state(self.ctx.state_path)
-        state["lanes"]["oc-own-app-1"] = {"repo": "own-app", "status": "started", "report": str(p), "started": NOW}
-        dp.save_state(self.ctx.state_path, state)
-        self.assertEqual(self.run_posts(), [])
-        self.assertEqual(self.host.chats, [])
+        last = json.loads(self.ctx.reports_posted_path.read_text())["texts"][str(p)]["last"]
+        self.assertNotRegex(last, r"[\x00-\x08\x0b-\x1f\x7f]")
 
     def test_folders_that_are_not_lanes_are_ignored(self):
         self.seeded()
         (self.lanes / "context").mkdir(parents=True)
         (self.lanes / "context" / "report.md").write_text("not a lane")
         (self.lanes / "queue").mkdir()
-        self.assertEqual(self.run_posts(), [])
-
-    def test_two_lanes_with_reports_are_two_posts(self):
-        self.seeded()
-        self.report("one", "Done: one.")
-        self.report("two", "Done: two.")
-        self.assertEqual(sorted(self.run_posts()), ["one", "two"])
-        self.assertEqual(len(self.host.chats), 2)
+        self.run_posts()
+        self.assertEqual(json.loads(self.ctx.reports_posted_path.read_text())["posted"], {})
 
 
 class TheCommandLine(unittest.TestCase):

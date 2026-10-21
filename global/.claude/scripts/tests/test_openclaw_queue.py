@@ -190,32 +190,33 @@ class Outbox(td.Base):
         "- **lane-%02d** (Repo%02d): report written, started 4:%02d PM. Working on: You are a lane in ~/repos/Repo%02d, finish the item." %
         (i, i, i, i) for i in range(16)) + "\n\n9 older lanes have ended."
 
-    def test_a_long_lane_list_is_one_short_item_per_next_and_nothing_is_lost(self):
+    def test_a_long_lane_list_is_one_post_shown_whole(self):
         self.assertGreater(len(self.LANES), 1500)
         self.host.inject(self.LANES)
         q = self.items()
-        self.assertGreater(len(q), 1)
-        self.assertTrue(all(len(i["text"]) <= dp.ITEM_MAX for i in q), [len(i["text"]) for i in q])
-        self.assertEqual(len(self.host.shown), 1, "one piece shows, not a burst of chat parts")
-        self.assertNotIn("(part ", self.host.shown[0])
-        self.assertTrue(self.host.shown[0].endswith("(1 of %d)\n\n(%d more waiting. Say next for the next one.)" % (len(q), len(q) - 1)))
-        whole = " ".join(re.sub(r" \(\d+ of \d+\)$", "", i["text"]) for i in q)
-        self.assertEqual(whole.split(), self.LANES.split(), "the pieces joined are the whole list")
+        self.assertEqual([i["text"] for i in q], [self.LANES.strip()], "one answer is one post")
+        self.assertEqual(self.host.shown, [self.LANES.strip() + "\n\n(Nothing else waiting.)"])
+        self.assertNotRegex(self.host.shown[0], r"\(\d+ of \d+\)")
 
-    def test_a_very_long_report_is_five_pieces_and_the_last_says_where_the_whole_is(self):
-        body = "\n\n".join("## Section %d\n\n" % k + "The plan for this site is sorted and the renewal is set for next year. " * 6 for k in range(70))
-        report = "### client-mail\n*client-site \u00b7 report written 8:06 PM*\n\n" + body
-        self.assertGreater(len(report), 25000)
-        with mock.patch.object(dp, "STATE", self.tmp / "state"):
-            self.host.inject(report)
+    def test_a_post_past_the_chat_limit_is_still_one_item_and_the_chat_gets_every_part_at_once(self):
+        # 21 Oct 6:45 PM: "five part reviews ... horrible UX". The outbox never splits an answer; only the chat's own limit does.
+        body = "\n\n".join("## Section %d\n\n" % k + "The plan for this site is sorted and the renewal is set for next year. " * 6 for k in range(14))
+        self.assertGreater(len(body), dp.CHAT_MAX * 2)
+        self.host.inject(body)
         q = self.items()
-        self.assertEqual(len(q), 5, "not 61 nexts")
-        self.assertTrue(all(len(i["text"]) <= dp.ITEM_MAX + 200 for i in q))
-        self.assertTrue(q[0]["text"].startswith("### client-mail") and q[0]["text"].endswith("(1 of 5)"))
-        m = re.search(r"Full text is stored at: (\S+)\) \(5 of 5\)$", q[4]["text"])
-        self.assertIsNotNone(m, q[2]["text"])
-        self.assertTrue(m.group(1).startswith(str(self.tmp)))
-        self.assertEqual(Path(m.group(1)).read_text().strip(), report.strip(), "the whole report is kept")
+        self.assertEqual([i["text"] for i in q], [body.strip()], "one item, whole")
+        parts = dp._chat_parts(body.strip())
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= dp.CHAT_MAX for p in parts))
+        joined = " ".join(re.sub(r" \(part \d+ of \d+\)$", "", p) for p in parts)
+        self.assertEqual(joined.split(), body.split(), "nothing trimmed")
+
+    def test_two_answers_stay_two_items_and_a_single_one_is_never_cut_into_nexts(self):
+        self.host.inject("First answer.")
+        self.host.inject("Second answer, " + "long " * 300)
+        q = self.items()
+        self.assertEqual(len(q), 2)  # the one showing and the one waiting: the long second answer is ONE item
+        self.assertEqual(q[1]["text"], ("Second answer, " + "long " * 300).strip())
 
     def test_the_nudge_names_what_waits_and_a_slow_landing_is_not_sent_twice(self):
         self.host.inject("Open lanes (15): all quiet.")
@@ -333,7 +334,7 @@ class LiveEntryPoints(td.Base):
     def test_a_flood_post_is_refused_before_it_reaches_the_outbox(self):
         with mock.patch.dict(os.environ, self.env()), contextlib.redirect_stderr(io.StringIO()) as err, \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(dp.main(["post", "x" * 1600]), 1)
+            self.assertEqual(dp.main(["post", "x" * (dp.ITEM_MAX + 100)]), 1)
             self.assertFalse(dp.chat_queue_path().exists())
         self.assertIn("over %d characters" % dp.ITEM_MAX, err.getvalue())
 
