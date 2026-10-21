@@ -395,6 +395,15 @@ class Host(dispatch.LaneHost):
         except ValueError:
             return None
 
+    intake_dir = DEFAULT_DEST
+
+    def fetch_media(self, name, max_bytes):
+        """The text of one file the gateway saved from his chat, read as the openclaw user (a read). None if it cannot be read."""
+        if not MEDIA_NAME_RE.fullmatch(name or ""):
+            return None
+        r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c", 'head -c %d "%s/%s"' % (int(max_bytes), INBOUND, name)], 60)
+        return r.stdout if r and r.returncode == 0 else None
+
     def sleep(self, s):
         time.sleep(s)
 
@@ -411,8 +420,103 @@ def normalize_history(obj):
             c = "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text" and isinstance(x.get("text"), str))
         ts = m.get("timestamp")
         out.append({"role": m.get("role"), "provider": m.get("provider"), "text": c if isinstance(c, str) else "",
-                    "ts_ms": ts if type(ts) is int else 0})
+                    "ts_ms": ts if type(ts) is int else 0, "media": _media_of(m)})
     return out
+
+
+# 21 Oct 7:00 PM: he pasted a 6 KB text file into the chat; the gateway saved it (media/inbound) and the history row names it under
+# __openclaw.media, but the intake copy kept only the typed line, so the hub got "absorb this ... ::" and nothing else.
+INBOUND = "/home/openclaw/.openclaw/media/inbound"
+MEDIA_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
+ATTACH_FETCH_MAX = 2_000_000  # a text attachment bigger than this stays in the gateway's folder; the hub gets its path
+ATTACH_INLINE_MAX = 2000  # characters of a text attachment carried inside his message; a longer one is a saved copy and its path
+TEXT_TYPES = ("text/", "application/json", "application/xml", "application/x-ndjson")
+NOT_TEXT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _media_of(m):
+    """The files attached to one chat.history row: [{"name": the saved file's name, "file": his file name, "type", "size"}]."""
+    meta = m.get("__openclaw")
+    media = meta.get("media") if isinstance(meta, dict) else None
+    out = []
+    for x in media if isinstance(media, list) else []:
+        url = x.get("url") if isinstance(x, dict) else None
+        name = url[len("media://inbound/"):] if isinstance(url, str) and url.startswith("media://inbound/") else ""  # a name with a "/" in it fails the pattern
+        if not MEDIA_NAME_RE.fullmatch(name):
+            continue
+        size, kind, fname = x.get("sizeBytes"), x.get("contentType"), x.get("fileName")
+        out.append({"name": name, "file": fname if isinstance(fname, str) and MEDIA_NAME_RE.fullmatch(fname) else name,
+                    "type": kind if isinstance(kind, str) else "", "size": size if type(size) is int else None})
+    return out
+
+
+def resolve_attachments(host, media):
+    """Copy each text attachment from the gateway's folder into the intake folder (private, 0700) and read it. -> a list of
+    {"name", "file", "type", "size", "path": where the hub reads it, "text": its words when it is text and small enough}. Anything
+    else (a picture, a huge file) keeps only its path in the gateway's folder."""
+    out, dest = [], getattr(host, "intake_dir", None)
+    for m in media:
+        a = dict(m, path="%s/%s (in the OpenClawGateway distro)" % (INBOUND, m["name"]))
+        if m["type"].startswith(TEXT_TYPES) and (m["size"] is None or m["size"] <= ATTACH_FETCH_MAX) and hasattr(host, "fetch_media"):
+            data = host.fetch_media(m["name"], ATTACH_FETCH_MAX)
+            if isinstance(data, str) and not NOT_TEXT_RE.search(data):
+                a["text"] = data
+                if dest:
+                    try:
+                        d = Path(dest) / "attachments"
+                        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        f = d / m["name"]
+                        tmp = d / (".tmp-" + m["name"])
+                        tmp.write_text(data, encoding="utf-8")
+                        os.chmod(tmp, 0o600)
+                        tmp.replace(f)
+                        a["path"] = str(f)
+                    except OSError:
+                        pass
+        out.append(a)
+    return out
+
+
+def attachment_block(a):
+    """One attachment as it reads inside his message: its words when it is small text, else where it is saved."""
+    size = "%d bytes" % a["size"] if a.get("size") is not None else "size unknown"
+    text = (a.get("text") or "").strip()
+    if text and len(text) <= ATTACH_INLINE_MAX:
+        return "[attached %s, %s]\n%s" % (a["file"], size, text)
+    return "[attached %s, %s, saved at %s]" % (a["file"], size, a["path"])
+
+
+def with_attachments(text, atts):
+    return "\n\n".join([text] + [attachment_block(a) for a in atts]) if atts else text
+
+
+def attachments_for(history, e, host, cache):
+    """His message's attachments, found in Main session by its time and text like its reply is. Each row is resolved once per poll."""
+    want = _norm(e["text"])
+    for m in history or []:
+        if m["role"] == "user" and m.get("media") and _norm(m["text"]) == want and abs(m["ts_ms"] / 1000 - e["ts"]) <= MATCH_TOL:
+            key = tuple(x["name"] for x in m["media"])
+            if key not in cache:
+                cache[key] = resolve_attachments(host, m["media"])
+            m["attachments"] = cache[key]
+            return cache[key]
+    return []
+
+
+def note_in_intake(host, sha, atts):
+    """The intake copy of his message names its attachments (and carries a small one's words), so it is whole on disk."""
+    dest = getattr(host, "intake_dir", None)
+    if not dest or not atts or not sha:
+        return
+    p = Path(dest) / (sha + ".json")
+    try:
+        item = json.loads(p.read_text())
+        item["attachments"] = [{k: a[k] for k in ("file", "type", "size", "path", "text") if k in a and (k != "text" or len(a[k].strip()) <= ATTACH_INLINE_MAX)} for a in atts]
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(item))
+        tmp.replace(p)
+    except (OSError, ValueError):
+        pass
 
 
 def _norm(t):
@@ -657,7 +761,7 @@ def chat_context(history, item, run):
     hist = []
     for m in history[:last + 1]:
         who = _who(m)
-        text = re.sub(r"^\s*\[hub\]\s*", "", m["text"]) if who == "hub" else m["text"]
+        text = re.sub(r"^\s*\[hub\]\s*", "", m["text"]) if who == "hub" else with_attachments(m["text"], m.get("attachments") or [])
         if who and (text.strip() or who == "Jonathan"):
             hist.append({"who": who, "text": text, "ts": m["ts_ms"] / 1000})
     return {"his_ts": item["ts"], "reply": "\n\n".join(m["text"].strip() for m in run if m["text"].strip()), "history": hist}
@@ -666,7 +770,8 @@ def chat_context(history, item, run):
 def _file_unsettled(ctx, e, why, now, log, filed, reply=None):
     """One of his messages the poller cannot settle goes on the hub's list with his words and wakes the hub: never a silent drop. A
     receptionist reply that was found but could not be run (a hub line came first) goes with it, so the hub can carry out its marker."""
-    line, ask_id = dispatch.unsettled_to_hub(ctx, e["sha"], e["ts"], e["text"], why, now, reply)
+    his = {"his_ts": e["ts"], "reply": reply or "", "history": [{"who": "Jonathan", "text": e["text"], "ts": e["ts"]}]}  # so the hub list shows his message
+    line, ask_id = dispatch.unsettled_to_hub(ctx, e["sha"], e["ts"], e["text"], why, now, reply, his)
     line += " | oc-%s" % e["sha"][:8]
     _append_line(log, line)
     if ask_id:
@@ -697,14 +802,21 @@ def settle_pending(queue, host, sites, aliases, ctx, now, log):
             else:
                 waiting.append(e)  # unreadable: try again next poll
         return waiting, filed
-    waiting, done = [], filed
+    waiting, done, cache = [], filed, {}
     for e in live:
         status, got = find_reply(history, e, now)
         if status == "wait":
             waiting.append(e)
             continue
+        try:
+            atts = attachments_for(history, e, host, cache)
+        except Exception:  # an attachment that cannot be read never loses his message
+            atts = []
+        if atts:
+            note_in_intake(host, e["sha"], atts)
+        words, e = e, (dict(e, text=with_attachments(e["text"], atts)) if atts else e)  # the hub gets his typed line and what he attached
         if status == "none":
-            _file_unsettled(ctx, e, "no reply to it could be found in Main session (%s)" % got, now, log, filed, _reply_after(history, e))
+            _file_unsettled(ctx, e, "no reply to it could be found in Main session (%s)" % got, now, log, filed, _reply_after(history, words))
             continue
         try:
             result = _run_marker(e, got, history, host, sites, aliases, ctx, now, log)
@@ -906,7 +1018,9 @@ def main(argv=None):
             print(quote_untrusted(r["stored"]))
     print("pickup: %s" % (", ".join("%d %s" % (n, v) for v, n in sorted(counts.items())) or "folder empty"))
     if a.act:
-        for kind, line in run_act(results, dispatch.queued(Host()), a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos(), hand_off_first=True)):
+        host = dispatch.queued(Host())
+        host.intake_dir = a.dest
+        for kind, line in run_act(results, host, a.skp_root, ctx=dispatch.Ctx(dispatch.load_repos(), hand_off_first=True)):
             print("act: %s%s" % (kind, " | " + line if line else ""))
     return 0
 

@@ -450,7 +450,7 @@ class Gates(Reply):
                 return R()
 
         h = Rec().main_history()
-        self.assertEqual(h, [{"role": "assistant", "provider": "google", "text": "hi", "ts_ms": 1}])
+        self.assertEqual(h, [{"role": "assistant", "provider": "google", "text": "hi", "ts_ms": 1, "media": []}])
         argv, stdin = calls[0]
         self.assertIn("chat.history", argv[-1])
         self.assertEqual(json.loads(stdin), {"sessionKey": "agent:main:main", "limit": pk.HISTORY_WINDOW})
