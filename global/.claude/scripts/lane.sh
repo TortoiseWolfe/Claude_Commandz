@@ -718,11 +718,22 @@ PY
     done
     return 1
   }
+  # A permission dialog on the lane's screen would take these keystrokes as its answer (a digit picks an option, Enter accepts the default),
+  # and a lane that is mid-turn can raise one at any moment. So look before typing and again before every Enter; tmux has no atomic
+  # "type if no dialog", so this narrows the race to the gap between one look and the keys that follow it (a security review of c0baa36).
+  dialog_up() { tmux capture-pane -p -t "$target" 2>/dev/null | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'; }
+  if dialog_up; then echo "sent to $name: NOT SENT (a dialog is on its screen; typing would answer it)"; return 1; fi
   tmux send-keys -t "$target" -l -- "$text"
   sleep 0.3
+  if dialog_up; then
+    tmux send-keys -t "$target" C-u
+    echo "sent to $name: NOT SUBMITTED (a dialog came up while the text was typed; no Enter was sent)"; return 1
+  fi
   tmux send-keys -t "$target" C-m
   how=""
-  if took 6; then how="submitted"; else tmux send-keys -t "$target" C-m; if took 6; then how="submitted after a second Enter"; fi; fi
+  if took 6; then how="submitted"
+  elif dialog_up; then echo "sent to $name: NOT SUBMITTED (a dialog came up after the Enter; no second Enter was sent)"; return 1
+  else tmux send-keys -t "$target" C-m; if took 6; then how="submitted after a second Enter"; fi; fi
   pane="$(tmux capture-pane -e -p -t "$target")"
   if [ -z "$how" ] && ! pane_input_empty "$pane"; then
     echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"; return 1
@@ -823,14 +834,14 @@ if [ "$mode" = recycle ]; then
     printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel' && return 1
     return 0
   }
-  wait_no_dialog() {  # <secs>: no dialog on screen; a working lane is fine, the request queues into its turn
+  wait_no_dialog() {  # <secs>: no dialog on screen (looked at least once); a working lane is fine, the request queues into its turn
     local end=$(( $(date +%s) + $1 )) pane
-    while [ "$(date +%s)" -lt "$end" ]; do
+    while :; do
       pane="$(tmux capture-pane -p -t "$SESSION:$name" 2>/dev/null)" || return 1
       printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel' || return 0
+      [ "$(date +%s)" -lt "$end" ] || return 1
       sleep 2
     done
-    return 1
   }
   wait_idle() {  # <secs>: idle on two looks a moment apart
     local end=$(( $(date +%s) + $1 ))
@@ -857,7 +868,10 @@ if [ "$mode" = recycle ]; then
 
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
   cpane=""
-  tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5; tmux send-keys -t "$SESSION:$name" C-m
+  wait_no_dialog 30 || rfail "a dialog came up before /clear was typed; the lane was NOT cleared"
+  tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5
+  wait_no_dialog 0 || { tmux send-keys -t "$SESSION:$name" C-u; rfail "a dialog came up while /clear was typed; no Enter was sent"; }
+  tmux send-keys -t "$SESSION:$name" C-m
   for _ in $(seq 1 20); do
     sleep 0.5; cpane="$(tmux capture-pane -e -p -t "$SESSION:$name")"
     pane_input_empty "$cpane" && break
