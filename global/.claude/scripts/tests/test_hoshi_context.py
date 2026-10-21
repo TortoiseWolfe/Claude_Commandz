@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_status_digest as dg  # noqa: E402
 from test_openclaw_status_digest import Base as DigestBase  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 KEY = "agent:fd9test:probe-1"
 
@@ -31,7 +32,7 @@ def ok():
 
 class HubPostReachesContext(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(fresh_dir(self))
         self.calls = []
         self.host = dp.LaneHost()
         self.host.sleep = lambda s: None

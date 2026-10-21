@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from tmpdirs import PREFIX, disk_full, run_env  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
@@ -152,8 +153,10 @@ MUTANTS = [
 
 def run(mutant_dir, shell):
     if shell:
-        return subprocess.run(["bash", "tests/test_lane_watch.sh"], cwd=mutant_dir, capture_output=True, text=True, timeout=300)
-    return subprocess.run([sys.executable, "-m", "unittest", *PY_TESTS], cwd=mutant_dir / "tests", capture_output=True, text=True, timeout=300)
+        return subprocess.run(["bash", "tests/test_lane_watch.sh"], cwd=mutant_dir, capture_output=True, text=True, timeout=300,
+                              env=run_env(mutant_dir))
+    return subprocess.run([sys.executable, "-m", "unittest", *PY_TESTS], cwd=mutant_dir / "tests", capture_output=True, text=True, timeout=300,
+                          env=run_env(mutant_dir))
 
 
 def main():
@@ -165,12 +168,14 @@ def main():
         if src.count(old) != 1:
             rows.append((change, name, "PATTERN FOUND %d TIMES" % src.count(old), "-"))
             continue
-        d = Path(tempfile.mkdtemp())
+        d = Path(tempfile.mkdtemp(prefix=PREFIX + "mutant-"))
         try:
             shutil.copytree(SCRIPTS, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "graphify-out"))
             (d / rel).write_text(src.replace(old, new, 1))
             r = run(d, rel == W)
-            if r.returncode == 0:
+            if disk_full(r):
+                rows.append((change, name, "INVALID (disk full)", "?"))
+            elif r.returncode == 0:
                 rows.append((change, name, "SURVIVED (tests green)", "0"))
             else:
                 m = re.search(r"FAILED \((.*)\)", r.stderr)

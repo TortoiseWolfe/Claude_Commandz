@@ -217,13 +217,16 @@ class Replay(td.Base):
 
         def local(cmd, **kw):
             self.assertEqual(cmd[:6], ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--"])
-            return real(["bash", "-s"], **kw)
+            self.assertNotIn("$HOME", " ".join(cmd), "the text never reaches the command line")
+            return real(cmd[6:], **kw)
         dp.queue_add(self.box, "It's `done`; $HOME and \"quotes\" stay as typed.", NOW)
-        text = dp.outbox_view(self.box, NOW)
+        # whatever the view holds is written as is: a line that would end a heredoc, a command substitution
+        text = dp.outbox_view(self.box, NOW) + "__OCOUTBOX_EOF__\n$(touch pwned)\n"
         with mock.patch.object(dp, "OUTBOX_FILE", str(target)), mock.patch.object(dp.subprocess, "run", local):
             self.assertTrue(dp.LaneHost().push_outbox(text))
         self.assertEqual(target.read_text(), text)
         self.assertEqual([p.name for p in target.parent.iterdir()], ["OUTBOX.md"], "no temp file left behind")
+        self.assertFalse((Path.cwd() / "pwned").exists() or (target.parent / "pwned").exists())
 
     def test_the_hubs_own_words_never_state_a_count(self):
         for bad in ("That was the last item.", "Nothing else waiting.", "2 more waiting.", "Say next for the rest."):

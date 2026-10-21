@@ -16,6 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import usage_ledger as u  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                GIT_AUTHOR_NAME="T", GIT_COMMITTER_NAME="T", GIT_COMMITTER_EMAIL="dev@example.com",
@@ -55,7 +56,7 @@ def tool_result(ts, cwd, session="s1"):
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="ledgertest")
+        self.tmp = fresh_dir(self, prefix="ledgertest")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.env = u.Env(os.path.join(self.tmp, "home"))
         os.makedirs(self.env.repos_root)

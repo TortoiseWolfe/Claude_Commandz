@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import class_resolver as cr  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 SENDERS = "client\trepo_dir\tkind\tgmail_from\nAcme Co\t~/repos/acme-site\tmail\tlist.acme-mail.example\nAcme Co\t~/repos/acme-site\tmail\tboss@acme-mail.example\n"
 CLIENT_REPOS = "# comment\n~/repos/harmonic-egg\n\n~/repos/listed-pub-but-client\n"
@@ -25,7 +26,7 @@ class Env:
     """A temp home with the five lists, each one writable or removable by the test."""
 
     def __init__(self):
-        self.home = tempfile.mkdtemp()
+        self.home = fresh_dir(self)
         h = Path(self.home)
         (h / "repos/hub").mkdir(parents=True)
         (h / ".config/panel").mkdir(parents=True)

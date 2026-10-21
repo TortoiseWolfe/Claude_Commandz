@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from tmpdirs import PREFIX, disk_full, run_env  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent / "openclaw_status_digest.py"
@@ -51,20 +52,24 @@ def main():
         if old not in src:
             rows.append((name, "PATTERN NOT FOUND", "-"))
             continue
-        d = Path(tempfile.mkdtemp())
+        d = Path(tempfile.mkdtemp(prefix=PREFIX + "mutant-"))
         (d / "tests").mkdir()
         (d / "openclaw_status_digest.py").write_text(src.replace(old, new, 1))
         shutil.copy(TESTS, d / "tests" / TESTS.name)
-        r = subprocess.run([sys.executable, "-m", "unittest", "test_openclaw_status_digest"], cwd=d / "tests",
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run([sys.executable, "-m", "unittest", "test_openclaw_status_digest"], cwd=d / "tests",
+                               capture_output=True, text=True, timeout=600, env=run_env(d))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
         m = re.search(r"FAILED \((.*)\)", r.stderr)
-        if r.returncode == 0:
+        if disk_full(r):
+            rows.append((name, "INVALID (disk full)", "?"))
+        elif r.returncode == 0:
             rows.append((name, "SURVIVED (suite green)", "0"))
         else:
             n = sum(int(x) for x in re.findall(r"=(\d+)", m.group(1))) if m else "?"
             rows.append((name, "killed", str(n)))
             red += 1
-        shutil.rmtree(d, ignore_errors=True)
     for name, verdict, n in rows:
         print(f"{verdict:24} red={n:>3}  {name}")
     print(f"\n{red} of {len(MUTANTS)} mutants killed")

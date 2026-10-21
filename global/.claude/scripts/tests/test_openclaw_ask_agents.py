@@ -91,7 +91,8 @@ class Refusals(unittest.TestCase):
             self.assertTrue(held.endswith("This is not a Gemini or API limit."))
 
     def test_the_live_text_stays_under_the_agents_file_cap(self):
-        self.assertLess(len(LIVE), 8000)
+        # the rest of the live AGENTS.md takes about 13,850 of its 20,000 characters (20 Oct 2026); at 6,812 the update was refused
+        self.assertLess(len(LIVE), 6000)
 
 
 class FrontdeskSeven(unittest.TestCase):

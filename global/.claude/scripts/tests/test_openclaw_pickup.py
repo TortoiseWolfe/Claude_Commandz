@@ -13,13 +13,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_pickup as pk  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 GOOD = {"id": "msg-001", "source": "twitch", "route": "public", "text": "what time is the stream?"}
 
 
 class PickupBase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.src = os.path.join(self.tmp, "ocstage")
         self.dest = os.path.join(self.tmp, "intake")
         os.mkdir(self.src, 0o770)

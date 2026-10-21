@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jev_precheck as jp  # noqa: E402
 import ledger_log  # noqa: E402
 import muse_jev  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 NOTE = "Hi Claude, which Node version does the ScriptHammer-Expo lane pin? NOTE-TEXT-MARKER"
 GOOD = {
@@ -39,7 +40,7 @@ class FakeResponse(io.BytesIO):
 
 class MuseJevTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         key = os.path.join(self.tmp, "api-key")
         Path(key).write_text("ts_SECRETTYPESAFEKEY")

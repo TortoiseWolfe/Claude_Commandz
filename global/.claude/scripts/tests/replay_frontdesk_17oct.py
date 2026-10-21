@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 from test_openclaw_pass import PassBase  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 STATE = Path.home() / ".claude/state"
 LEDGER = Path(sys.argv[1]) if len(sys.argv) > 1 else STATE / "openclaw-dispatch.json"
@@ -44,7 +45,7 @@ class Replay(PassBase):
     def runTest(self):
         old = json.loads(LEDGER.read_text())["asks"]
         rows = sorted(((k, a) for k, a in old.items() if a.get("kind") == "question"), key=lambda r: r[1]["created"])
-        self.ctx.context_dir = Path(tempfile.mkdtemp())
+        self.ctx.context_dir = Path(fresh_dir(self))
         self.host.behave = None
         chats, line_of, long_words, exact_words, sent = {}, {}, 0, 0, []
         repeats = []  # (ask id, reply) for an exact re-send of a question that is still open

@@ -21,13 +21,14 @@ import openclaw_dispatch as dp  # noqa: E402
 import openclaw_status_digest as dg  # noqa: E402
 from test_openclaw_dispatch import NOW, FakeHost  # noqa: E402
 from test_openclaw_status_digest import PEOPLE, SENDERS, Base as DigestBase  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 HOOK = Path(__file__).resolve().parent.parent / "openclaw_ask_hook"
 
 
 class ReportPosts(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(fresh_dir(self))
         self.lanes = self.tmp / "lanes"
         self.ctx = dp.Ctx({}, self.tmp / "dispatch.json", self.lanes)
         self.host = FakeHost()

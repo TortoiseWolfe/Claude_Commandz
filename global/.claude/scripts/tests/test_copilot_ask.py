@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tmpdirs import fresh_dir  # noqa: E402
 
 SCRIPT = str(Path(__file__).resolve().parent.parent / "copilot_ask.sh")
 FAKE_COPILOT = """#!/usr/bin/env bash
@@ -24,7 +25,7 @@ echo "reply"
 
 class CopilotAskTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.bin = os.path.join(self.tmp, "bin")
         os.mkdir(self.bin)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_status_digest as dg  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 PEOPLE = """# People
 <details>
@@ -107,7 +108,7 @@ HAZARDS = [
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp())
+        self.d = Path(fresh_dir(self))
         (self.d / "people.md").write_text(PEOPLE)
         (self.d / "senders.tsv").write_text(SENDERS)
         self.names = dg.load_names([self.d / "people.md", self.d / "senders.tsv"])
@@ -590,8 +591,8 @@ class Projects(Base):
         import subprocess
         import textwrap
         here = Path(dg.__file__).resolve().parent
-        for home, expect in ((here, "found"), (Path(tempfile.mkdtemp()), "none")):
-            d = Path(tempfile.mkdtemp())
+        for home, expect in ((here, "found"), (Path(fresh_dir(self)), "none")):
+            d = Path(fresh_dir(self))
             shutil.copy(here / "openclaw_status_digest.py", d)
             driver = textwrap.dedent("""
                 import sys

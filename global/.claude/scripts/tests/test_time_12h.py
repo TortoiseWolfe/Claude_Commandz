@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HERE))
 import hub_digest as hd  # noqa: E402
 import openclaw_status_digest as dg  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 # A clock written the 24-hour way: two-digit hour 00-23, minutes, and no AM/PM after it.
 MILITARY = re.compile(r"(?<![\w:.])(?:[01]\d|2[0-3]):[0-5]\d(?!\d|:\d|\.\d|\s?[AaPp]\.?[Mm]\b)")
@@ -64,7 +65,7 @@ class SourcesPrintTwelveHour(unittest.TestCase):
         now = datetime(2026, 10, 18, 13, 30)
         self.assertRegex(hd._stamp(now), r"^Sun 18 Oct 1:30 PM ")
         self.assertNotIn("%H", hd.GIT_DATE)
-        d = Path(tempfile.mkdtemp())
+        d = Path(fresh_dir(self))
         env = dict(os.environ, GIT_AUTHOR_DATE="2026-10-18T21:53:00", GIT_COMMITTER_DATE="2026-10-18T21:53:00",
                    GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.test", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.test")
         subprocess.run(["git", "init", "-q", str(d)], check=True)
@@ -75,7 +76,7 @@ class SourcesPrintTwelveHour(unittest.TestCase):
 
     def test_hub_digest_report_lines_and_prose(self):
         now = datetime(2026, 10, 18, 22, 0)
-        lanes = Path(tempfile.mkdtemp())
+        lanes = Path(fresh_dir(self))
         p = lanes / "2026-10-18-some-lane"
         p.mkdir()
         (p / "report.md").write_text("Cause: from 09:10 every call failed.\n")

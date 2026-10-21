@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tmpdirs import fresh_dir  # noqa: E402
 
 HOOK = Path(__file__).resolve().parent.parent / "openclaw_handoff_hook"
 
@@ -42,7 +43,7 @@ def msgs(*texts, ts=T0):
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class Handoff(unittest.TestCase):
     def setUp(self):
-        self.d = Path(tempfile.mkdtemp())
+        self.d = Path(fresh_dir(self))
         (self.d / "MEMORY.md").write_text("<!-- openclaw-status:begin -->\nstatus\n<!-- openclaw-status:end -->\n\n# Durable\nfact\n")
 
     def run_js(self, spec):

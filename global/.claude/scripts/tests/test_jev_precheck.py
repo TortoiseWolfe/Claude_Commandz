@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jev_precheck as jp  # noqa: E402
 import ledger_log  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 DIFF = '+++ b/app.py\n+owner = "jane.doe@planted-mail.org"  # SECRET-DIFF-MARKER\n+print("hello")\n'
 ACCEPT = "- prints hello\n- ACCEPT-MARKER"
@@ -32,7 +33,7 @@ class FakeResponse(io.BytesIO):
 
 class JevTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.key = os.path.join(self.tmp, "api-key")
         Path(self.key).write_text(KEY)

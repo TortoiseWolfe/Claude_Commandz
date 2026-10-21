@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import learning_baseline as lb  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
 
@@ -19,7 +20,7 @@ def ts(s):
 
 class T(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp()
+        self.d = fresh_dir(self)
         self.db = os.path.join(self.d, "l.db")
         self.out = os.path.join(self.d, "learning", "b.jsonl")
         con = sqlite3.connect(self.db)
