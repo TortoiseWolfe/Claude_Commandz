@@ -145,7 +145,8 @@ class TheStartLineNamesTheLane(Lanes):
         self.index_row("oc-own-app-%s" % ASK[3:])
         ok, msg = dp.claim(self.ctx, ASK, "oc-own-app-%s" % ASK[3:], NOW + 5, self.host)
         self.assertTrue(ok, msg)
-        line = self.host.chats[-1]
+        self.assertEqual(self.host.chats, [])  # a start line is progress: the log, not his chat
+        line = self.host.notes[-1]
         self.assertTrue(line.startswith("oc-own-app-%s started: count the open issues." % ASK[3:]), line)
         self.assertIn("Say stop to cancel.", line)
 
@@ -171,8 +172,9 @@ class TheStartLineNamesTheLane(Lanes):
         prompt = self.ctx.lanes_dir / ("%s-%s" % (time.strftime("%F", time.localtime(NOW)), lane)) / "prompt.md"
         ok, msg = dp.start_for_ask(self.ctx, self.host, ask_id=ASK, lane_name=lane, dirpath=self.root / "own-app", model="sonnet", prompt_path=prompt, now=NOW + 5)
         self.assertTrue(ok, msg)
-        started = [c for c in self.host.chats if c.startswith(lane + " started")]
-        self.assertEqual(len(started), 1, self.host.chats)
+        started = [c for c in self.host.notes if c.startswith(lane + " started")]
+        self.assertEqual(len(started), 1, self.host.notes)
+        self.assertEqual(self.host.chats, [])
         self.assertIn("Say stop to cancel.", started[0])
 
 
