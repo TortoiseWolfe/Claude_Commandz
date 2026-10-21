@@ -1,5 +1,6 @@
 """Tests for meeting_transcribe. Unit tests need no GPU or Docker; the smoke
 test (set MEETING_SMOKE=1) runs the real container end to end."""
+import glob
 import importlib.util
 import os
 import shutil
@@ -101,13 +102,15 @@ class RunShRefusals(unittest.TestCase):
 
 # Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in. It pulls a Debian image, downloads a whisper model and runs a
 # full transcription in Docker, which is heavy batch work on the one shared engine (it belongs behind docker-heavy.sh, not in every
-# suite run), and it writes ~/meetings/test. The argument and path checks above run every time. Run it by hand after changing
+# suite run). Its transcript goes to a throwaway MEETINGS_ROOT under ~/.cache, never ~/meetings. The argument and path checks above run every time. Run it by hand after changing
 # meeting_transcribe: MEETING_SMOKE=1 python3 -m pytest tests/test_meeting_transcribe.py
 @unittest.skipUnless(os.environ.get("MEETING_SMOKE") == "1", "set MEETING_SMOKE=1")
 class Smoke(unittest.TestCase):
     def test_two_track_end_to_end(self):
         home = os.path.expanduser("~")
         work = fresh_dir(self, prefix="mt-smoke-", dir=os.path.join(home, ".cache"))
+        root = fresh_dir(self, prefix="mt-smoke-out-", dir=os.path.join(home, ".cache"))
+        env = dict(os.environ, MEETINGS_ROOT=root)
         try:
             script = (
                 "set -e; cd /w; "
@@ -124,12 +127,12 @@ class Smoke(unittest.TestCase):
             subprocess.run([RUN, "--download-model", os.environ.get("MEETING_SMOKE_MODEL", "small")], check=True)
             r = subprocess.run([RUN, os.path.join(work, "t.mkv"), "--client", "test",
                                 "--title", "smoke", "--speakers", "Jon,Other", "--model", os.environ.get("MEETING_SMOKE_MODEL", "small")],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=env)
             print(r.stdout, r.stderr)
             self.assertEqual(r.returncode, 0, r.stderr)
-            out = subprocess.run("ls -d ~/meetings/test/*-smoke", shell=True,
-                                 capture_output=True, text=True).stdout.strip()
-            md = open(os.path.join(out, "transcript.md")).read()
+            out = glob.glob(os.path.join(root, "test", "*-smoke"))
+            self.assertEqual(len(out), 1, out)
+            md = open(os.path.join(out[0], "transcript.md")).read()
             print(md)
             low = md.lower()
             self.assertLess(low.index("jon:"), low.index("other:"))
@@ -137,7 +140,6 @@ class Smoke(unittest.TestCase):
             self.assertIn("engineers", low)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-            shutil.rmtree(os.path.expanduser("~/meetings/test"), ignore_errors=True)
 
 
 if __name__ == "__main__":
