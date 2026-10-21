@@ -457,6 +457,32 @@ assert_exit 0 "$LAST_STATUS" '--send exits 0 once the words are in the transcrip
 assert_contains "$LAST_OUTPUT" 'confirmed in its transcript' '--send says it found the words in the transcript'
 rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
 
+# A message typed while the lane is mid-turn is not a "user" turn in its transcript until the turn ends: Claude Code logs it at once as a
+# queue-operation "enqueue", then an attachment "queued_command" (seen in real lane transcripts, 21 Oct). --send used to print
+# NOT IN ITS TRANSCRIPT for every message that landed on a working lane.
+MID='Hub: one correction to your prompt, write the report to the lane folder'
+printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"Hub:  one correction to your prompt, write the report to the lane folder"}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane "$MID"
+assert_exit 0 "$LAST_STATUS" '--send exits 0 for a message queued on a working lane (enqueue record)'
+assert_contains "$LAST_OUTPUT" 'confirmed in its transcript' 'a queued message counts as delivered'
+printf '%s\n' '{"type":"attachment","attachment":{"type":"queued_command","prompt":"'"$MID"'"}}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane "$MID"
+assert_exit 0 "$LAST_STATUS" '--send exits 0 once the queued message reaches the lane (queued_command record)'
+# Only an enqueue holds the words as input: a dequeue record with the same content is not delivery.
+printf '%s\n' '{"type":"queue-operation","operation":"dequeue","content":"'"$MID"'"}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane "$MID"
+assert_exit 1 "$LAST_STATUS" '--send still fails when no record holds the words as input'
+assert_contains "$LAST_OUTPUT" 'NOT IN ITS TRANSCRIPT' 'the real failure is still reported'
+rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+
+# After /clear or a resume the lane writes a new transcript while the index row still names the old id: --send checks the recent ones too.
+printf '%s\tstale-id-lane\t%s\tsonnet\tsubscription\t%s\t%s\told-sess\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/stale-id.md" >>"$HOME_TEST/.claude/state/lanes/index.tsv"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"You are a lane"}}' >"$HOME_TEST/.claude/projects/$SLUG/old-sess.jsonl"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"Hub: after the clear, carry on"}}' >"$HOME_TEST/.claude/projects/$SLUG/new-sess.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=stale-id-lane run_lane --send stale-id-lane 'Hub: after the clear, carry on'
+assert_exit 0 "$LAST_STATUS" '--send finds the words in the lane new transcript when the index id is the old one'
+rm -f "$HOME_TEST/.claude/projects/$SLUG/old-sess.jsonl" "$HOME_TEST/.claude/projects/$SLUG/new-sess.jsonl"
+
 status_with_pane() {
   TMUX_PANE_FILE="$1" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane HOME="$HOME_TEST" PATH="$BIN:$PATH" \
     TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1
