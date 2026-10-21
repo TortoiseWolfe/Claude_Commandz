@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex and
 # GitHub Copilot can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -38,6 +38,12 @@
 # matching, site models) starts or resumes only on fable or opus, each at effort high.
 # sonnet, haiku or any other model name is refused, on start, --console, --headless and --resume alike. --allow-low-tier bypasses it.
 #
+# Mail tier (his rule, 21 Oct 7:15 PM: "why are you burning Fable on emails!"; one day of mail lanes on fable and opus was $85 of $303):
+# client email is execution, so a Claude lane doing mail starts, resumes and switches on sonnet only. A mail lane is one whose name ends
+# in -mail, whose prompt opens with the absorb-template header ("# Absorb lane:"), or whose prompt is about drafting or answering email.
+# fable and opus are refused unless --allow-high-tier "<reason>" is given; the override is logged to
+# ~/.claude/state/lanes/tier-overrides.log. Site-model prompts keep their own rule above.
+#
 # --ask <oc-id>: this lane answers an OpenClaw ask ("Jonathan via OpenClaw:", ask oc-xxxxxxxx). Once the window is up and the lane is in
 # index.tsv, lane.sh runs `openclaw_dispatch.py claim <id> <name>`, which registers the lane so its finish, failure or stall is
 # posted to Jonathan's OpenClaw chat, and cancels the five-minute fallback that would otherwise start the job a second time.
@@ -49,6 +55,9 @@
 #                                       and no report from the last 3 days. "report:yes" is not "done": a lane stays open
 #                                       until its context is full (his rule, 19 Oct), so a report never means close the window.
 #   lane.sh --send <name> <text>        type <text> into the window, Enter, confirm it was submitted
+#   lane.sh --model <name> <model>      switch a running lane's model (types /model into it), then put back the USER default model that
+#                                       /model saves (it moved the hub's own default to sonnet on 21 Oct); the index row follows. The
+#                                       settings file is touched only through user_model.py, which prints just the model key.
 #   lane.sh [--dry-run] [--console] --resume <name>
 #                                       fresh window running claude --resume <session-id> --model <m> in <dir>
 #   lane.sh [--dry-run] --recycle <name>
@@ -135,10 +144,11 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
-  lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] --resume <name>
+  lane.sh [--dry-run] --model <name> <model>
+  lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] [--allow-high-tier "<reason>"] --resume <name>
   lane.sh [--dry-run] --recycle <name>
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
@@ -157,10 +167,13 @@ Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and
 --connectors keeps connectors; --no-connectors disables them even when the name or prompt would enable them.
 A Claude lane whose prompt names data/sites/ or site-model (3D and photo-match work) runs only on fable or opus;
 sonnet and haiku are refused there. --allow-low-tier overrides that.
+A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
+fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
+--model <name> <model> switches a running lane and puts back the user default model that /model would otherwise change.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; recycle_at_opt=; recycle_at_set=0
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; recycle_at_opt=; recycle_at_set=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -183,12 +196,19 @@ while [ $# -gt 0 ]; do
     --ask=*) ask_id="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
     --allow-low-tier) allow_low_tier=1; shift ;;
+    --allow-high-tier)
+      [ $# -ge 2 ] && [ -n "${2// /}" ] || { echo "--allow-high-tier needs a reason in words, e.g. --allow-high-tier \"a claim-check pass\"" >&2; exit 1; }
+      allow_high_reason="$2"; shift 2 ;;
+    --allow-high-tier=*)
+      [ -n "${1#*=}" ] || { echo "--allow-high-tier needs a reason in words" >&2; exit 1; }
+      allow_high_reason="${1#*=}"; shift ;;
     --connectors) connectors_opt=1; no_connectors=0; shift ;;
     --no-connectors) no_connectors=1; connectors_opt=0; shift ;;
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
     --send) mode=send; shift ;;
+    --model) mode=model; shift ;;
     --recycle) mode=recycle; shift ;;
     --ctx) mode=ctx; shift ;;
     --recycle-point) mode=point; shift ;;
@@ -383,6 +403,33 @@ site_tier_ok() {  # <model> <prompt-file>
   grep -qE 'data/sites/|site-model' -- "$2" 2>/dev/null || return 0
   case "${1,,}" in *opus*|*fable*) return 0 ;; esac
   echo "refusing model ${1:-(none)}: the prompt names data/sites/ or site-model, and 3D fitting, photo matching and site-model work runs only on fable or opus, each at effort high; never Sonnet or Haiku (rule: ~/repos/hub/lane-rules.md, 19 Oct). Pass --allow-low-tier to override." >&2
+  return 1
+}
+
+# Mail is execution, never judgment (his rule, 21 Oct 7:15 PM: "why are you burning Fable on emails!"; "over 300 dollars on one fucking
+# email"): the co-op mail lane redrafted one reply six times on fable and opus for $85 of a $303 day. A lane whose name ends in -mail,
+# whose prompt opens with the absorb-template header, or whose prompt is about drafting or answering email runs on sonnet; fable and opus
+# are refused unless --allow-high-tier "<reason>" is given, and the override is logged. A site-model prompt keeps its own rule (fable or opus).
+LANE_TIER_LOG="${LANE_TIER_LOG:-$HOME/.claude/state/lanes/tier-overrides.log}"
+mail_lane() {  # <name> <prompt-file>
+  [[ "$1" == *-mail ]] && return 0
+  [ -n "${2:-}" ] && [ -r "$2" ] || return 1
+  grep -qiE '^# *absorb lane:' -- "$2" 2>/dev/null && return 0
+  grep -qiE '\b(draft|redraft|answer|reply|respond|proof-?[[:space:]]?read|polish)[a-z]*\b[^.?!]{0,60}\be-?mails?\b|\be-?mails?\b[^.?!]{0,30}\b(draft|reply|replies|thread)\b' -- "$2" 2>/dev/null
+}
+mail_tier_ok() {  # <model> <name> <prompt-file> [verb]
+  case "${1,,}" in *opus*|*fable*) ;; *) return 0 ;; esac
+  mail_lane "$2" "${3:-}" || return 0
+  grep -qE 'data/sites/|site-model' -- "${3:-/nonexistent}" 2>/dev/null && return 0
+  if [ -n "$allow_high_reason" ]; then
+    if [ "$dry" = 1 ]; then echo "# would log the mail-tier override for $2 ($1) to $LANE_TIER_LOG"
+    else
+      mkdir -p "$(dirname "$LANE_TIER_LOG")"
+      printf '%s\t%s\t%s\tmail\t%s\n' "$(date -Is)" "$2" "$1" "$(tr '\t\n' '  ' <<<"$allow_high_reason")" >>"$LANE_TIER_LOG"
+    fi
+    return 0
+  fi
+  echo "refusing mail model $1 for $2: email work (drafting, answering, absorbing client mail) is execution and runs on sonnet, never fable or opus (his rule, 21 Oct 7:15 PM). Use sonnet, or pass --allow-high-tier \"<reason>\" (logged to $LANE_TIER_LOG)." >&2
   return 1
 }
 
@@ -746,6 +793,47 @@ PY
 }
 if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
 
+# --model <name> <model>: switch a running lane's model. Claude Code's /model also saves the choice as the USER default model, which moved
+# the hub's own default to sonnet on 21 Oct, so read the default first and put it back after (user_model.py prints only the model key).
+if [ "$mode" = model ]; then
+  [ $# -eq 2 ] || { echo "usage: lane.sh [--dry-run] --model <name> <model>" >&2; exit 1; }
+  name="$1"; newm="$2"
+  is_claude_model "$newm" || { echo "--model needs a Claude model name (opus, sonnet, haiku, fable or claude-...), got: $newm" >&2; exit 1; }
+  row="$(index_row "$name")"
+  [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  site_tier_ok "$newm" "${p:-}" || exit 1
+  mail_tier_ok "$newm" "$name" "${p:-}" || exit 1
+  um="$(cd "$(dirname "$0")" && pwd -P)/user_model.py"
+  python3 -I "$um" check >/dev/null 2>&1 \
+    || { echo "cannot switch $name: the user default model cannot be read back and restored safely, and /model would change it" >&2; exit 1; }
+  before="$(python3 -I "$um" get)"
+  if [ "$dry" = 1 ]; then
+    echo "would type '/model $newm' into $name, then restore the user default model (${before})"
+    exit 0
+  fi
+  rc=0; send_to "$name" "/model $newm" || rc=$?
+  changed=0; calm=0
+  for _ in $(seq 1 "${LANE_MODEL_POLLS:-12}"); do  # /model saves the default a moment after it runs: restore until it has settled
+    now="$(python3 -I "$um" get)"
+    if [ "$now" != "$before" ]; then
+      changed=1; calm=0
+      if [ "$before" = - ]; then python3 -I "$um" unset; else python3 -I "$um" set "$before"; fi
+    else
+      calm=$((calm + 1))
+      [ "$changed" = 1 ] && [ "$calm" -ge 2 ] && break
+    fi
+    sleep 0.5
+  done
+  [ "$rc" -eq 0 ] || exit "$rc"
+  tmp="$(mktemp)"
+  awk -F'\t' -v OFS='\t' -v n="$name" -v m="$newm" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[4]=m; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
+    && cat "$tmp" >"$INDEX"
+  rm -f "$tmp"
+  echo "model: $name now on $newm; the user default model is still ${before}"
+  exit 0
+fi
+
 # --recycle-point <name>: the lane's own recycle line in K tokens, as a bare number (lane_watch.sh reads it for each lane it watches).
 if [ "$mode" = point ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --recycle-point <name>" >&2; exit 1; }
@@ -910,6 +998,7 @@ if [ "$mode" = resume ]; then
   fi
   [ "$b" = console ] && console=1
   site_tier_ok "$m" "${p:-}" || exit 1
+  mail_tier_ok "$m" "$name" "${p:-}" || exit 1
   if [ "$dry" = 0 ]; then
     command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
     if tmux has-session -t "$SESSION" 2>/dev/null \
@@ -956,6 +1045,7 @@ if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
   exit 1
 fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
+[ "$engine" != claude ] || mail_tier_ok "$model" "$name" "$prompt" || exit 1
 guard_external_engine || exit 1
 
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"

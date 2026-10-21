@@ -22,6 +22,7 @@ token- and reset-link-shaped text is scrubbed from every line before it is writt
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -311,8 +312,26 @@ def _stamp(now):
     return now.strftime("%a %d %b %-I:%M %p") + " " + time.tzname[time.localtime().tm_isdst > 0]
 
 
+SPEND_TOP = 3
+
+
+def spend_section(spend):
+    """Top lanes by API-equivalent spend today (lane_spend.py --json). 21 Oct: $303 went in one day, $85 of it on one mail lane, unseen.
+    spend: the parsed JSON, a string (why it is unavailable), or None (not measured)."""
+    title = f"Lane spend today (API-equivalent, top {SPEND_TOP}; a lane past $25 wakes the hub)"
+    if isinstance(spend, str):
+        return (title, [f"- unavailable: {one_line(spend, 200)}"])
+    if not isinstance(spend, dict):
+        return (title, ["- not measured"])
+    lanes = spend.get("lanes") or []
+    lines = [f"- {l['name']}: ${l['usd']:.0f} ({'+'.join(sorted(l.get('families') or {}, key=lambda k: -l['families'][k]))})"
+             for l in lanes[:SPEND_TOP]]
+    lines.append(f"- all lanes and the hub together: ${spend.get('total', 0):.0f}")
+    return (title, lines)
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
-                   report_hours=24, open_questions_text="", open_questions_error=None):
+                   report_hours=24, open_questions_text="", open_questions_error=None, spend=None):
     sections = []
 
     if open_questions_error:
@@ -328,6 +347,8 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if dead:
         lines.append(f"- {dead} older lanes have ended")
     sections.append(("Lanes running", lines or ["- none"]))
+
+    sections.append(spend_section(spend))
 
     reps = lane_reports(lanes_dir, now, report_hours)
     rl = [f"- {mt.strftime('%a %-I:%M %p')} {name}: {one_line(first, 105) or 'report written'}" for mt, name, first in reps[:8]]
@@ -442,6 +463,7 @@ def main(argv=None):
     ap.add_argument("--report-hours", type=int, default=24)
     ap.add_argument("--strict", action="store_true",
                     help="treat the inputs as live state even with --roadmap-file (a live build is always strict)")
+    ap.add_argument("--spend-file", help="lane_spend.py --json output to use instead of reading the live ledger")
     ap.add_argument("--alert-state", help="dispatch state .json to file the alert in (tests); default the live one")
     a = ap.parse_args(argv)
 
@@ -471,9 +493,21 @@ def main(argv=None):
     else:
         open_questions_text, open_questions_error = dispatcher_open_questions()
 
+    spend = None
+    if a.spend_file:
+        try:
+            spend = json.loads(Path(a.spend_file).read_text())
+        except (OSError, ValueError) as exc:
+            spend = "could not read the spend file: %s" % type(exc).__name__
+    elif not a.roadmap_file:
+        raw = _run([sys.executable, str(Path(__file__).resolve().parent / "lane_spend.py"), "--json"], timeout=90)
+        try:
+            spend = json.loads(raw)
+        except ValueError:
+            spend = "lane_spend.py gave no readable answer"
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
-                          open_questions_text=open_questions_text, open_questions_error=open_questions_error)
+                          open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend)
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)

@@ -18,6 +18,8 @@
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
 #     outbox again in the background (queue pump), so a post that failed while Windows could not reach WSL lands once it can.
 #   - the WSL-to-Windows bridge cannot be healed or still fails its 10 s probe (wsl_bridge_watchdog.py runs from every poll and raises the alert)
+#   - a lane has cost over $LANE_SPEND_LIMIT (default 25) dollars of API-equivalent spend today (lane_spend.py, from the usage ledger),
+#     once per lane per day. 21 Oct: $303 went in one day, $85 on one mail lane redrafting a reply, and nothing said so until night.
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
@@ -87,6 +89,31 @@ recycle_failures() {
   [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; return 0; }
   recycle_fail_out=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log" | command grep -a $'\tFAILED\t' | awk -F'\t' '{print $2 ": " $4}')
   recycle_log_seen=$size
+}
+
+# Spend alarm. spend_check sets spend_out (one "<lane>\t<usd>\t<models>" per lane that has newly passed the limit today). It asks the ledger at
+# most every LANE_WATCH_SPEND_SECS (default 300; the stamp is a file, so a re-armed watcher keeps the spacing) and names a lane once a day
+# (.spend-alarm-<date> in $recycle_dir lists the lanes already named), so a lane that stays over the limit does not wake the hub again.
+spend_limit=${LANE_SPEND_LIMIT:-25}
+spend_every=${LANE_WATCH_SPEND_SECS:-300}
+spend_cmd=${LANE_SPEND_CMD:-"python3 $(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_spend.py"}
+spend_check() {
+  local now last f out usd n fam
+  spend_out=''
+  now=$(date +%s); last=$(cat "$recycle_dir/.spend-checked" 2>/dev/null)
+  [[ "$last" =~ ^[0-9]+$ ]] && [ $(( now - last )) -lt "$spend_every" ] && return 0
+  printf '%s' "$now" > "$recycle_dir/.spend-checked"
+  f="$recycle_dir/.spend-alarm-$(date +%F)"
+  out=$(timeout 90 $spend_cmd --over "$spend_limit" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r usd n fam; do
+    [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || continue   # the "total" line and anything else
+    [ -n "$n" ] || continue
+    grep -qxF -- "$n" "$f" 2>/dev/null && continue
+    printf '%s\n' "$n" >> "$f"
+    spend_out+="$n"$'\t'"$usd"$'\t'"$fam"$'\n'
+  done <<<"$out"
+  find "$recycle_dir" -maxdepth 1 -name '.spend-alarm-*' -mtime +3 -delete 2>/dev/null
+  return 0
 }
 
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
@@ -263,6 +290,10 @@ while :; do
   done
   recycle_failures
   while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
+  spend_check
+  while IFS=$'\t' read -r n usd fam; do
+    [ -n "$n" ] && { echo "spend: lane $n has cost \$$usd API-equivalent today ($fam), past the \$$spend_limit line. Read what it is doing; a mail lane belongs on sonnet (lane.sh --model $n sonnet) and an open-ended one needs a stop. Named once today."; hit=1; other=1; }
+  done <<<"$spend_out"
   a=$(ask_stamp)
   if [ "$a" != "$ask_seen" ]; then
     echo "ask: a new 'Jonathan via OpenClaw:' line is in hub-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1

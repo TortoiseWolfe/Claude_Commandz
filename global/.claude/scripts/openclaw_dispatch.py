@@ -19,7 +19,7 @@ lane. A repo is looked up in a table built on the PC from hub/repos.tsv (kind=re
 up in this module's own state file. Neither is ever a path, an argv word or a shell word taken from text.
 
 The engine follows ~/repos/CLAUDE.md "Rules for every repo": a client repo (hub/client-senders.tsv, hub/client-repos.txt,
-~/repos/CD) or any repo not owned by TortoiseWolfe gets Claude (Sonnet; Opus for client judgment or email); Jonathan's own
+~/repos/CD) or any repo not owned by TortoiseWolfe gets Claude (Sonnet; Opus for client judgment such as an invoice, quote or contract, never for email); Jonathan's own
 repos get Codex, or Claude Sonnet when the work needs Docker or wsl.exe. When Codex is out of usage, own repos use Copilot;
 when Copilot is out of usage too, they use Claude Sonnet. A block lasts until the "try again at <date>" the engine
 prints, else until the 1st (monthly quota), else 12 hours.
@@ -191,7 +191,16 @@ LANE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 START_RE = re.compile(r"^start\s+(?P<repo>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\s*:\s*(?P<task>.+)$", re.I | re.S)
 REPLY_RE = re.compile(r"^reply\s+(?P<lane>[A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*:\s*(?P<text>.+)$", re.I | re.S)
 CLOSE_RE = re.compile(r"^close\s+(?:the\s+)?(?P<lane>[A-Za-z0-9][A-Za-z0-9._-]{0,79})(?:\s+lane)?$", re.I)
-JUDGMENT_RE = re.compile(r"e-?mail|draft|repl(?:y|ies)|respond|letter|invoice|quote|proposal|contract|client", re.I)
+# Client judgment: money and agreements. Email is not judgment (his rule, 21 Oct 7:15 PM: "why are you burning Fable on emails!"): drafting,
+# answering and absorbing mail is execution and runs on Sonnet (MAIL_TIER_MODEL), so its words are not in this list.
+JUDGMENT_RE = re.compile(r"invoice|quote|proposal|contract|client", re.I)
+MAIL_TIER_MODEL = "sonnet"
+HIGH_TIER = ("opus", "fable")  # the models a mail lane never runs on (lane.sh refuses them too, mail_tier_ok)
+# lane.sh's mail_lane() in Python: a lane named *-mail, a prompt that opens with the absorb-template header, or a prompt about
+# drafting or answering email.
+ABSORB_HEAD_RE = re.compile(r"^#\s*absorb lane:", re.I | re.M)
+MAIL_PROMPT_RE = re.compile(r"\b(?:draft|redraft|answer|reply|respond|proof-?\s?read|polish)[a-z]*\b[^.?!\n]{0,60}\be-?mails?\b"
+                            r"|\be-?mails?\b[^.?!\n]{0,30}\b(?:draft|reply|replies|thread)\b", re.I)
 DOCKER_RE = re.compile(r"docker|compose|container|wsl\.exe|powershell", re.I)
 # 3D fitting, photo matching and site-model work is judgment, never execution (his rule, 19 Oct; lane.sh refuses Sonnet and Haiku on it).
 # A superset of lane.sh's own test ('data/sites/|site-model' in the prompt file), so the dispatcher moves a lane up before lane.sh refuses.
@@ -1206,19 +1215,40 @@ def _read_text(path):
         return ""
 
 
-def prompt_site_tier(prompt_path, engine, model):
-    """site_tier on the saved prompt file, which is what lane.sh reads (its template, his task and the context attached to it)."""
-    return site_tier(_read_text(prompt_path), engine, model)
+def mail_lane(name, text, mail=False):
+    """True when lane.sh's mail tier would hold this lane to Sonnet: the dispatcher knows it is an email ask, or its name ends in -mail,
+    or its prompt opens with the absorb-template header or is about drafting or answering email. Site-model work keeps its own rule."""
+    if SITE_RE.search(text or ""):
+        return False
+    return bool(mail or str(name or "").endswith("-mail") or ABSORB_HEAD_RE.search(text or "") or MAIL_PROMPT_RE.search(text or ""))
+
+
+def mail_tier(name, text, engine, model, mail=False):
+    """Mail is execution: a Claude lane doing email never starts on Opus or Fable (lane.sh would refuse it). -> the model to start on."""
+    if engine == "claude" and model in HIGH_TIER and mail_lane(name, text, mail):
+        return MAIL_TIER_MODEL
+    return model
+
+
+def prompt_site_tier(prompt_path, engine, model, name="", mail=False):
+    """site_tier on the saved prompt file, which is what lane.sh reads (its template, his task and the context attached to it), then the
+    mail tier on the same text. -> (engine, model, moved); moved is true only when site-model work was moved up."""
+    text = _read_text(prompt_path)
+    engine, model, moved = site_tier(text, engine, model)
+    return engine, mail_tier(name, text, engine, model, mail), moved
 
 
 def choose_engine(path, client, task, workspace=False, mail=False):
-    """-> (engine, model, why). Site-model work: Claude Opus (effort high). Client or foreign: Claude, Opus only for client judgment or
-    email. Own: Codex, or Claude Sonnet when the work needs Docker or wsl.exe. Email is always Claude (Gmail is a Claude connector)."""
+    """-> (engine, model, why). Site-model work: Claude Opus (effort high). Client or foreign: Claude, Opus only for client judgment
+    (invoice, quote, contract), never for email. Own: Codex, or Claude Sonnet when the work needs Docker or wsl.exe. Email is always
+    Claude (Gmail is a Claude connector) and always Sonnet."""
     if SITE_RE.search(task or ""):
         return "claude", SITE_MODEL, "site-model work: Claude Opus, effort high"
     if client:
+        if mail_lane("", task, mail):
+            return "claude", MAIL_TIER_MODEL, "client repo (%s), email is execution: Sonnet" % client
         if JUDGMENT_RE.search(task):
-            return "claude", "opus", "client repo (%s), judgment or email" % client
+            return "claude", "opus", "client repo (%s), judgment" % client
         return "claude", "sonnet", "client repo (%s)" % client
     if workspace:  # the workspace folder holds client repos too: only Claude may read it (the skip rule is prompt text, so keep it on Anthropic)
         return "claude", "sonnet", "workspace folder, Claude only"
@@ -2219,7 +2249,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
         attached = attach_context(ctx, state, lane, name, hand, prompt, context, now)
     except OSError as e:
         attached = "context not attached: %s" % e
-    engine, model, moved = prompt_site_tier(prompt, engine, model)  # the attached context may name a site model too
+    engine, model, moved = prompt_site_tier(prompt, engine, model, lane, mail)  # the attached context may name a site model too
     if moved:
         why, note = "site-model work: Claude Opus, effort high", ""
     ok, msg = _start_lane(host, mail, lane, path, engine, model, prompt)
@@ -2544,7 +2574,7 @@ def restart_lane(ctx, host, old, text, now, ask_id=None, context=None):
     prompt.write_text(RESTART_TEMPLATE.format(
         prompt=prompt_text, old=old, new=new, when=time.strftime("%-d %b %-I:%M %p", time.localtime(now)), new_report=report,
         report="\n".join("> " + l for l in body.splitlines()) if body else "(it wrote no report)", words=json.dumps(text.strip(), ensure_ascii=False)))
-    engine, model, _moved = prompt_site_tier(prompt, engine, model)  # a site-model lane restarts on Opus or Fable, never the Sonnet its row might say
+    engine, model, _moved = prompt_site_tier(prompt, engine, model, new)  # a site-model lane restarts on Opus or Fable, never the Sonnet its row might say; a mail lane on Sonnet
     off, on = getattr(host, "force_connectors_off", False), getattr(host, "force_connectors_on", False)
     host.force_connectors_on, host.force_connectors_off = row["connectors"] == "on", row["connectors"] == "off"
     try:
@@ -3385,7 +3415,7 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
         attach_context(ctx, state, lane_name, name, hand, prompt_path, context, now)
     except OSError:
         pass  # the lane still starts with the prompt the pass wrote
-    engine, model, _moved = prompt_site_tier(prompt_path, engine, model)  # the pass may have chosen Sonnet or Copilot for site-model work
+    engine, model, _moved = prompt_site_tier(prompt_path, engine, model, lane_name, mail)  # the pass may have chosen Sonnet or Copilot for site-model work, or Opus or Fable for email
     ok, msg = _start_lane(host, mail, lane_name, path, engine, model, prompt_path, ask=ask_id)
     if not ok and msg.startswith(TIER_REFUSED):
         # lane.sh refused the model: tell him once and put his words on the hub's list. The ask does not go back to pending, so the
@@ -3827,7 +3857,7 @@ def room_start(ctx, host, entry, now):
     prompt = hand / "prompt.md"
     prompt.write_text(entry["brief"].rstrip("\n") + "\n")
     entry["path"].unlink()
-    engine, model, _moved = prompt_site_tier(prompt, engine, model)
+    engine, model, _moved = prompt_site_tier(prompt, engine, model, name)
     ok, msg = host.start_lane(name, hit[1], engine, model, prompt)
     behind = " (was queued behind %s)" % h["after"] if h.get("after") else ""
     if not ok:
@@ -4214,11 +4244,11 @@ Repos you may start a lane in (name | folder | owner | client?). The workspace f
 {table}
 
 Engine rules (from hub/lane-rules.md): {engine_rule}
-- A client repo, or anything a client repo is involved in: Claude (sonnet; opus only for client judgment or email). Never --engine codex/copilot there.
+- A client repo, or anything a client repo is involved in: Claude (sonnet; opus only for client judgment such as an invoice, quote or contract). Never --engine codex/copilot there.
 - Anything that names a site model, the site-model skill, data/sites/ or SketchUp geometry (3D fitting, photo matching): Claude, model opus (or fable), never sonnet, haiku, codex or copilot; `start` moves it up and lane.sh refuses anything lower.
 - Work that spans repos (scan, count, compare, list across repos, anything on his GitHub as a whole): folder {root} (the workspace), Claude sonnet, and add the WORKSPACE RULES below to the prompt.
 - Code in one of his own repos (one of the "own" rows): --engine copilot, folder = that repo, copilot work rule below. If it needs Docker or wsl.exe: Claude sonnet in that repo instead.
-- Anything that involves email (reading, proofreading, editing, drafting or replying to mail, a named person's email or thread, also when the ask is a follow-up of one) starts a lane with Gmail on, in the folder of the repo it concerns, on Claude, never a lane without email access. His standing rule, 19 Oct 2:52 PM: "I don't have tokens to waste on you sending things to the wrong lane, if it envolves email then don't waste time and tokens sending it to a lane without email access, standing rule". `start` turns Gmail on for such a task; add this MAIL RULE to {{extra_rules}}: {mail_rules}
+- Anything that involves email (reading, proofreading, editing, drafting or replying to mail, a named person's email or thread, also when the ask is a follow-up of one) starts a lane with Gmail on, in the folder of the repo it concerns, on Claude Sonnet (email is execution, never opus or fable: his rule, 21 Oct 7:15 PM, "why are you burning Fable on emails!"), never a lane without email access. His standing rule, 19 Oct 2:52 PM: "I don't have tokens to waste on you sending things to the wrong lane, if it envolves email then don't waste time and tokens sending it to a lane without email access, standing rule". `start` turns Gmail on for such a task; add this MAIL RULE to {{extra_rules}}: {mail_rules}
 - If the answer is a short fact you can state without looking at any repo (what a command is, what this receptionist can do), do not start a lane: run python3 {me} say {ask} "<your answer, plain words>".
 - The waiting room holds lanes the hub has already planned (name | waits for | approved or not | what it is). If his words name one of them ("queue frontdesk-5 ...", "go ahead with frontdesk-5"), it is NOT a repo job: run python3 {me} approve {ask} <name>. That approves it if it is not yet and answers the chat itself (queued behind its earlier lane, or started now). Then stop; never start a lane for it.
 {room_block}

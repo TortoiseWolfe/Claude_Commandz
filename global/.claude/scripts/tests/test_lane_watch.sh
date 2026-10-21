@@ -476,5 +476,40 @@ echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; date +%s > "$rc_home/.claude/state/lane
 if [ ! -s "$RC_CALLS" ]; then echo "ok   a re-armed watcher honours the retry time of the one before it"; else echo "FAIL second watcher recycled again at once: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
 : > "$TURN_FILE"
 
+# Spend alarm: a lane past the limit today wakes the hub once per lane per day; the ledger is asked no more than every few minutes.
+sp_home="$TMP/sp-home"; mkdir -p "$sp_home/.claude/state/lanes"
+sp_cmd="$TMP/fake-spend.sh"; sp_calls="$TMP/spend-calls"; sp_args="$TMP/spend-args"; : > "$sp_calls"
+cat > "$sp_cmd" <<'SH'
+#!/usr/bin/env bash
+echo x >> "$SPEND_CALLS"; echo "$*" > "$SPEND_ARGS"
+printf '62.48\tacme-mail\tfable\n30.12\tmail-two\tfable+opus\ntotal\t318.11\t79.53\n'
+SH
+chmod +x "$sp_cmd"
+sp_run() { HOME="$sp_home" OPENCLAW_RECONCILE=/nonexistent LANE_SPEND_CMD="$sp_cmd" SPEND_CALLS="$sp_calls" SPEND_ARGS="$sp_args" \
+  LANE_WATCH_SPEND_SECS="${1:-0}" bash "$SCRIPT" --max-min 0 2>&1 || true; }
+out=$(sp_run)
+if printf '%s\n' "$out" | grep -q '^spend: lane acme-mail has cost \$62.48 API-equivalent today (fable), past the \$25 line' \
+   && printf '%s\n' "$out" | grep -q '^spend: lane mail-two has cost \$30.12 .*(fable+opus)' && ! printf '%s\n' "$out" | grep -q 'total'; then
+  echo "ok   a lane past the limit wakes the hub with its cost and models (the total line is not a lane)"
+else echo "FAIL spend wake: $out"; failures=$((failures + 1)); fi
+if grep -qx -- '--over 25' "$sp_args"; then echo "ok   the ledger is asked for lanes at or over 25 dollars"; else echo "FAIL spend args: $(cat "$sp_args")"; failures=$((failures + 1)); fi
+out=$(sp_run)
+if ! printf '%s\n' "$out" | grep -q '^spend:' && [ "$out" = "heartbeat: nothing new in 0 min" ]; then
+  echo "ok   a lane already named today does not wake the hub again"
+else echo "FAIL spend named twice: $out"; failures=$((failures + 1)); fi
+before=$(wc -l < "$sp_calls")
+out=$(sp_run 600)
+if [ "$(wc -l < "$sp_calls")" = "$before" ]; then echo "ok   the ledger is not asked again inside LANE_WATCH_SPEND_SECS (a re-armed watcher keeps the spacing)"
+else echo "FAIL spend throttle: calls $before -> $(wc -l < "$sp_calls")"; failures=$((failures + 1)); fi
+printf '62.48\tacme-mail\tfable\n30.12\tmail-two\tfable+opus\n41.00\tthird\tsonnet\ntotal\t400\t10\n' > "$TMP/fake-out.txt"
+printf '#!/usr/bin/env bash\ncat "%s"\n' "$TMP/fake-out.txt" > "$sp_cmd"
+out=$(sp_run)
+if [ "$(printf '%s\n' "$out" | grep -c '^spend:')" = 1 ] && printf '%s\n' "$out" | grep -q '^spend: lane third has cost \$41.00'; then
+  echo "ok   a lane that crosses later in the day is named, the earlier ones are not repeated"
+else echo "FAIL spend later crossing: $out"; failures=$((failures + 1)); fi
+printf '#!/usr/bin/env bash\nexit 1\n' > "$sp_cmd"; rm -f "$sp_home"/.claude/state/lanes/.spend-alarm-*
+out=$(sp_run)
+if [ "$out" = "heartbeat: nothing new in 0 min" ]; then echo "ok   a failing ledger read wakes nobody and stops nothing"; else echo "FAIL spend failure: $out"; failures=$((failures + 1)); fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

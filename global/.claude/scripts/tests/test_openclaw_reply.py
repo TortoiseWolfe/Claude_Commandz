@@ -124,8 +124,11 @@ class Acts(Reply):
         self.go(self.flow("Sending to the hub: start client-app: fix the header"))
         self.assertEqual(self.host.started[0][2:4], ("claude", "sonnet"))
         self.setUp()
-        self.go(self.flow("Sending to the hub: start client-app: draft an email to the owner"))
+        self.go(self.flow("Sending to the hub: start client-app: price the proposal for the contract"))
         self.assertEqual(self.host.started[0][2:4], ("claude", "opus"))
+        self.setUp()
+        self.go(self.flow("Sending to the hub: start client-app: draft an email to the owner"))
+        self.assertEqual(self.host.started[0][2:4], ("claude", "sonnet"))   # email is execution, never opus (21 Oct)
 
     def test_the_budget_guard_still_holds_it(self):
         for i in range(dp.MAX_RUNNING):
