@@ -277,6 +277,10 @@ QUEUE_BACKOFF = (30, 60, 120, 240, 480, 600)  # seconds before try 2, 3, ...; th
 QUEUE_WAKE_AFTER = 15 * 60
 QUEUE_REWAKE = 60 * 60
 QUEUE_DONE_KEEP = 500  # posts he has already seen and moved past, kept for the record
+# 21 Oct: the web chat was down from Tue 1:46 PM to Wed ~6:15 PM and 32 lane-report copies from 28 lanes piled up behind 11 hub answers;
+# he retired all 43 by hand. Every lane report also wakes the hub (lane_watch.sh), which acts on it, so once the first post has failed for
+# this long a report copy that has not been shown is retired instead of waiting for a "next" it would only make stale.
+QUEUE_OUTAGE_STALE = 2 * 3600
 NEXT_RE = re.compile(r"^\s*(?:ok(?:ay)?[,.\s]+)?(?:next|next one|next please|go on|continue)\s*[.!]*\s*$", re.I)
 
 
@@ -347,6 +351,20 @@ def queue_load(path):
     q.setdefault("done", [])
     q.setdefault("seq", 0)
     return q
+
+
+def _queue_retire_reports(q, now):
+    """A long outage (the first post has failed for QUEUE_OUTAGE_STALE): move every unshown lane-report copy but the first post to done.
+    Hub answers and other posts stay. -> how many were retired."""
+    head = q["items"][0] if q["items"] else None
+    if not head or head["shown"] or not head.get("failing_since") or now - head["failing_since"] < QUEUE_OUTAGE_STALE:
+        return 0
+    gone = [i for i in q["items"][1:] if not i["shown"] and str(i.get("key", "")).startswith("report:")]
+    for i in gone:
+        i["done"], i["why"] = now, "retired: the chat was unreachable for hours and the hub already has the report"
+    q["done"] = (q["done"] + gone)[-QUEUE_DONE_KEEP:]
+    q["items"] = [i for i in q["items"] if i not in gone]
+    return len(gone)
 
 
 def queue_save(path, q):
@@ -614,7 +632,7 @@ def queue_pump(path, send, now):
             return "busy"  # another process is sending the first post right now
         with _queue_lock(path):
             q = queue_load(path)
-            if _queue_clean(q, now):  # "N more waiting" counts real posts only (19 Oct 11:10 PM: 10 of 20 were acknowledgements)
+            if _queue_clean(q, now) | bool(_queue_retire_reports(q, now)):  # "N more waiting" counts real posts only (19 Oct 11:10 PM: 10 of 20 were acknowledgements)
                 queue_save(path, q)
             if not q["items"]:
                 return "empty"
@@ -3612,7 +3630,7 @@ def post_new_reports(ctx, host, now=None, seed=False):
                 body = _report_text(p)
                 if not body:
                     continue
-                key = "report:" + p
+                key = "report:" + name  # the lane, not the folder: a new date folder's report replaces the lane's older unshown one
                 rec = texts.get(p) or {}
                 waiting = bool(getattr(host, "queue_path", None)) and queue_waiting_key(host.queue_path, key)
                 base = rec.get("base") if waiting else rec.get("last")  # the version he has seen
