@@ -28,6 +28,9 @@ lanes) it never waits: force pushes and production deploys are denied with a rea
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.
 Regenerable caches and paths strictly inside `/tmp`, `$TMPDIR`, or an individual lane's scratch
 area are allowed without a prompt and logged as `allowed (own scratch)`.
+That includes a path built from variables the command sets itself (`S=/tmp/x; P=$S/prof; rm -rf $P`) and a relative one after a literal
+`cd /full/path &&` that starts a list (`cd /tmp/x && rm -rf b481`); the log shows the full path. A `cd` followed by `;`, `||`, a pipe, `&` or a subshell
+proves nothing (if it fails the rm runs elsewhere), a variable nothing set or set empty still collapses to nothing, and a path that climbs out with `..` is judged where it lands.
 A lane the dispatcher started (`AFA_LANE_UNATTENDED=1`, set by `lane.sh`) never waits either: a delete
 inside its own folder, a worktree or its scratchpad, by a full path, runs and is logged as
 `allowed (lane folder)`; anything else held is refused with a plain reason the lane can act on.

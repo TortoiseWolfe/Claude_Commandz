@@ -87,6 +87,18 @@ add_row cx-lane codex -
 lane --ctx cx-lane
 [ "$LAST_OUT" = '?' ] || fail "--ctx for a Codex lane prints ?, got: $LAST_OUT"; ok
 
+# --turn says whether the lane's last turn only answered a Monitor event (lane_watch.sh then does not wake the hub), from its transcript.
+MON='<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: \"download progress\"</summary>\n<event>10%</event>\n</task-notification>'
+printf '{"type":"user","message":{"role":"user","content":"%s"}}\n{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"10 percent, still going."}]}}\n' "$MON" >"$PROJ/old-sess.jsonl"
+lane --turn rl-lane
+[ "$LAST_OUT" = monitor ] || fail "--turn on a Monitor tick answered without a question prints monitor, got: $LAST_OUT"; ok
+printf '{"type":"user","message":{"role":"user","content":"merge it"}}\n{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Merged."}]}}\n' >"$PROJ/old-sess.jsonl"
+lane --turn rl-lane
+[ "$LAST_OUT" = real ] || fail "--turn on a typed turn prints real, got: $LAST_OUT"; ok
+lane --turn nobody
+[ "$LAST_OUT" = '?' ] || fail "--turn for an unknown lane prints ?, got: $LAST_OUT"; ok
+usage_rec 130000 >"$PROJ/old-sess.jsonl"
+
 # --recycle --dry-run shows the steps in order and touches nothing.
 reset_fake
 lane --dry-run --recycle rl-lane

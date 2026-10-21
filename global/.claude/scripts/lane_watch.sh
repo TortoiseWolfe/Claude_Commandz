@@ -8,7 +8,8 @@
 #     hub ONCE: it waits until no new question has come for LANE_WATCH_BATCH_QUIET seconds (default 60), at most LANE_WATCH_BATCH_MAX
 #     (default 180), then prints the whole list. Each wake after the hub's cache has gone cold costs $1.2 to $1.6 against $0.05 warm.
 #   - a watched lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
-#   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub
+#   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
+#     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
 #   - a recycle (see below) failed
@@ -230,7 +231,9 @@ while :; do
         recycling[$l]=1; seen_turn[$l]=$done_line   # the hand-off turn is ours, not news
       else
         if [ "${recycling[$l]:-}" = 1 ]; then recycling[$l]=0; seen_turn[$l]=$done_line; fi
-        if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
+        if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
+          seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
+        elif [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
           done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
           echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
         elif [ $(( $(date +%s) - ${recycle_try[$l]:-0} )) -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
