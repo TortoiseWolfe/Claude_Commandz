@@ -92,7 +92,7 @@ class Refusals(unittest.TestCase):
 
     def test_the_live_text_stays_under_the_agents_file_cap(self):
         # the rest of the live AGENTS.md takes about 13,850 of its 20,000 characters (20 Oct 2026); at 6,812 the update was refused
-        self.assertLess(len(LIVE), 6000)
+        self.assertLess(len(LIVE), 6100)  # 21 Oct: the live AGENTS.md was 19,830 with a 5,986 section, so 13,844 is the rest; 6,100 leaves it under 20,000
 
 
 class FrontdeskSeven(unittest.TestCase):
@@ -172,7 +172,8 @@ class Examples(unittest.TestCase):
         import openclaw_pickup as pk
         self.assertEqual(pk.parse_menu("open the model", {"porch": Path("x")}, {}), ("open_model", None))
         self.assertIn("Never ask which one", LIVE)
-        self.assertIn("Never tell him what you cannot do", LIVE)
+        self.assertIn("Never tell him what a worker, the hub or Hatch can't do", LIVE)  # 21 Oct 6:55 PM: "I don't care what it can't do, I know it's delegating!"
+        self.assertIn("say who has the job and when he'll hear back", LIVE)
         self.assertIn("Already in hand", LIVE)
         self.assertIn("reports/", LIVE)
 
