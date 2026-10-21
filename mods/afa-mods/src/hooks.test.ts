@@ -237,6 +237,35 @@ describe('blast radius, unattended lane', () => {
       expect(seen.log).toContain('allowed (lane folder) | rm -rf')
     })
   }
+  // 19 Oct, 11:35 PM to midnight: these held three lanes until the hub answered by hand. Every target is in the lane's own scratchpad.
+  const SP = '/tmp/claude-1000/-home-t-repos-harmonic-egg/0a1b2c3d/scratchpad'
+  for (const [what, command] of [
+    ['a profile folder built from two variables', `S=${SP}/gd; P=$S/prof; rm -rf $P; mkdir -m 700 $P`],
+    ['a relative folder after a literal cd', `cd ${SP} && rm -rf b481 && mkdir b481`],
+  ] as const) {
+    test(`runs without a hold: ${what}`, async ($, on) => {
+      const { seen, run } = await lane(on, command)
+      const r = await run($)
+      expect(r.deny).toBeUndefined()
+      expect(seen.asked).toBe(false)
+      expect(seen.log).toContain('allowed (own scratch) | rm -rf')
+    })
+  }
+  for (const [what, command] of [
+    ['a variable nobody set', 'rm -rf $P'],
+    ['a variable set to nothing', 'P=; rm -rf $P'],
+    ['a folder in home', 'rm -rf ~/x'],
+    ['a glob after a cd to /tmp', 'cd /tmp && rm -rf *'],
+    ['a scratchpad path that climbs out with ..', `rm -rf ${SP}/../../../../../home/t/x`],
+    ['a relative folder after a cd that may have failed', `cd ${SP}; rm -rf b481`],
+  ] as const) {
+    test(`still holds: ${what}`, async ($, on) => {
+      const { seen, run } = await lane(on, command)
+      const r = await run($)
+      expect(r.deny).toContain('did not wait')
+      expect(seen.asked).toBe(false)
+    })
+  }
   test('refuses a delete inside its folder when a link on the way leads out of it', async ($, on) => {
     const { seen, run } = await lane(on, `rm -rf ${HAND}/repo/build`, { [`${HAND}/repo`]: `${HOME}/repos/ScriptHammer` })
     const r = await run($)

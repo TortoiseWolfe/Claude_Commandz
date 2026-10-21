@@ -355,13 +355,14 @@ fi
 # Lanes never auto-compact (his rule, 20 Oct): past LANE_RECYCLE_K thousand tokens, with the turn ended, the watcher starts
 # `lane.sh --recycle` in the background and wakes nobody. A fake lane.sh stands in for the real one (tests/test_lane_recycle.sh has the real).
 rc_home="$TMP/rchome"; mkdir -p "$rc_home/.claude/scripts" "$rc_home/.claude/state/lanes"
-export CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
+export TURN_FILE="$TMP/rc-turn" CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
 cat > "$rc_home/.claude/scripts/lane.sh" <<'SH'
 #!/usr/bin/env bash
 lanes="$HOME/.claude/state/lanes"
 case "$1" in
   --status) echo "rl  report:no  idle"; echo "    dir:/x model:sonnet" ;;
   --ctx) cat "$CTX_FILE" ;;
+  --turn) cat "${TURN_FILE:-/dev/null}" ;;
   --recycle)
     echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
     [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
@@ -419,6 +420,18 @@ if [ ! -s "$RC_CALLS" ]; then echo "ok   a lane under the line is not recycled";
 run_rc_watcher 130 20 "$TMP/rc-out3"
 if grep -q '^recycle failed: rl: no new handoff.md' "$TMP/rc-out3"; then echo "ok   a failed recycle wakes the hub, naming the lane and why"; else echo "FAIL recycle failure not reported: $(cat "$TMP/rc-out3")"; failures=$((failures + 1)); fi
 rm -f "$RC_FAIL"
+
+# 19 Oct 11:59 PM: a lane watching a download with Monitor ended a 2-second turn on every progress line, and each one woke the hub. A turn that
+# only answered a Monitor event and asked nothing (lane.sh --turn says monitor) wakes nobody; any other end of turn still does.
+echo monitor > "$TURN_FILE"
+run_rc_watcher 50 6 "$TMP/mon-out1"
+if ! grep -q 'idle:' "$TMP/mon-out1"; then echo "ok   a turn that only answered a Monitor event wakes nobody"; else echo "FAIL monitor tick woke the hub: $(cat "$TMP/mon-out1")"; failures=$((failures + 1)); fi
+echo real > "$TURN_FILE"
+run_rc_watcher 50 8 "$TMP/mon-out2"
+if grep -q '^idle: rl ended a turn (1:09)' "$TMP/mon-out2"; then echo "ok   any other end of turn still wakes the hub"; else echo "FAIL real end of turn did not wake: $(cat "$TMP/mon-out2")"; failures=$((failures + 1)); fi
+: > "$TURN_FILE"
+run_rc_watcher 50 8 "$TMP/mon-out3"
+if grep -q '^idle: rl ended a turn' "$TMP/mon-out3"; then echo "ok   a turn the transcript cannot classify wakes the hub"; else echo "FAIL unknown turn did not wake: $(cat "$TMP/mon-out3")"; failures=$((failures + 1)); fi
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

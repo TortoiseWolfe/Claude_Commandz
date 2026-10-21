@@ -6,6 +6,7 @@ import {
   countInbox,
   explain,
   hasExitLine,
+  ownScratchTargets,
   realPathVerdict,
   recentLanes,
   unattendedRmPaths,
@@ -151,6 +152,63 @@ describe('blast radius classifier', () => {
     expect(classify('rm -rf /home/u/.expo', 0, { home: '/home/u' }).map(h => h.kind)).toEqual(['rm -rf'])
     expect(classify('rm -rf /home/u/app/.expo', 0, { home: '/home/u' })).toEqual([])
     expect(kinds('rm -rf ~/repos/app/.expo')).toEqual([])
+  })
+})
+
+// 19 Oct, 11:35 PM to midnight: three lanes stalled on delete dialogs whose every target was inside their own scratchpad.
+describe('a lane deleting inside its own scratchpad', () => {
+  const SP = '/tmp/claude-1000/-home-u-repos-app/1234-abcd/scratchpad'
+  const env = { home: '/home/u' }
+  const holds = (command: string) => classify(command, 0, env).map(h => h.kind)
+  test('variables built from earlier literal variables resolve (he-lift-move, P=$S/prof)', () => {
+    expect(holds(`S=${SP}/gd; P=$S/prof; rm -rf $P; mkdir -m 700 $P`)).toEqual([])
+    expect(holds(`S=${SP}/gd\nP=\${S}/prof\nrm -rf $P`)).toEqual([])
+  })
+  test('a relative target after a literal cd && resolves (rp-reset-453, cd <scratchpad> && rm -rf b481)', () => {
+    expect(holds(`cd ${SP} && rm -rf b481 && mkdir b481`)).toEqual([])
+    expect(holds(`cd ${SP} && cd gd && rm -rf q`)).toEqual([])
+    expect(holds(`S=${SP}; cd $S/gd && rm -rf prof`)).toEqual([])
+  })
+  test('the full path the lane rule asks for passes too, and so does a mktemp variable on a later line (21 Oct)', () => {
+    expect(holds(`rm -rf ${SP}/gd/q`)).toEqual([])
+    expect(holds('cd ~/repos\nT=$(mktemp -d) && git checkout-index -a --prefix=$T/ && ls $T\nrm -rf $T')).toEqual([])
+  })
+  test('the logged targets are the resolved full paths', () => {
+    expect(ownScratchTargets(`cd ${SP} && rm -rf b481`, env).map(g => g.targets)).toEqual([[`${SP}/b481`]])
+  })
+  test('everything that does not resolve still holds', () => {
+    for (const command of [
+      'rm -rf $P', // never set: it would collapse to rm -rf
+      'P=; rm -rf $P',
+      'P=""; rm -rf $P',
+      'S=; P=$S/prof; rm -rf $P', // an empty link in the chain
+      'P=$S/prof; rm -rf $P', // S never set
+      'S=$S; rm -rf $S',
+      'rm -rf ~/x',
+      'cd /tmp && rm -rf *',
+      'cd /tmp && rm -rf ../home/u/x',
+      `rm -rf ${SP}/../../../../../home/u/x`,
+      `cd ${SP} && rm -rf ../../../../../home/u/x`,
+      `S=${SP}; rm -rf $S/../../../../../home/u/x`,
+      `cd ${SP}; rm -rf b481`, // if the cd fails the rm runs where the shell was
+      `cd ${SP} || true; rm -rf b481`,
+      `false || cd ${SP} && rm -rf b481`,
+      `cd ${SP} && true; rm -rf b481`,
+      `cd ${SP} & rm -rf b481`,
+      `cd ${SP} | rm -rf b481`,
+      `(cd ${SP}; rm -rf b481)`,
+      `cd ${SP} && rm -rf b481 || rm -rf c`,
+      'cd /home/u/repos/app && rm -rf build',
+      'cd $UNSET && rm -rf b481',
+      'cd - && rm -rf b481',
+      `cd $(pwd) && rm -rf b481`,
+      `cd ${SP} && sh -c 'rm -rf b481'`,
+    ]) {
+      expect([command, holds(command)]).toEqual([command, ['rm -rf']])
+    }
+  })
+  test('the same words held on one line are not let through by a guarded copy on another', () => {
+    expect(holds(`rm -rf b481; cd ${SP} && rm -rf b481`)).toEqual(['rm -rf', 'rm -rf'])
   })
 })
 

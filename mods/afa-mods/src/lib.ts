@@ -150,14 +150,14 @@ function withoutTextHeredocs(command: string): string {
 
 // The command split at shell separators (& | ; newline ( ) ` $( ), but not inside quotes: "a; b" is one word. Inside double
 // quotes, $( ) and backticks still run, so they still split. Heredoc bodies that only write a file are left out.
-export function segmentsOf(command: string): string[] {
+export function segmentsWithSeps(command: string): Array<{ text: string; sep: string }> {
   const text = withoutTextHeredocs(command)
-  const out: string[] = []
+  const out: Array<{ text: string; sep: string }> = []
   let cur = ''
   let q: '' | "'" | '"' = ''
   const resume: { close: string; depth: number }[] = [] // a double quote waiting for its $( ) or ` ` to close
-  const flush = () => {
-    out.push(cur)
+  const flush = (sep: string) => {
+    out.push({ text: cur, sep })
     cur = ''
   }
   for (let i = 0; i < text.length; i += 1) {
@@ -177,7 +177,7 @@ export function segmentsOf(command: string): string[] {
         q = ''
         cur += c
       } else if (c === '`' || (c === '$' && text[i + 1] === '(')) {
-        flush()
+        flush(c === '`' ? '`' : '$(')
         resume.push({ close: c === '`' ? '`' : ')', depth: 0 })
         q = ''
         if (c === '$') i += 1
@@ -189,11 +189,11 @@ export function segmentsOf(command: string): string[] {
       if (c === '(' && top.close === ')') top.depth += 1
       if (c === top.close && top.depth > 0 && c === ')') {
         top.depth -= 1
-        flush()
+        flush(')')
         continue
       }
       if (c === top.close) {
-        flush()
+        flush(c)
         resume.pop()
         q = '"'
         continue
@@ -203,14 +203,16 @@ export function segmentsOf(command: string): string[] {
       q = c
       cur += c
     } else if (c === '$' && text[i + 1] === '(') {
-      flush()
+      flush('$(')
       i += 1
-    } else if ('&|;\n()`'.includes(c)) flush()
+    } else if ('&|;\n()`'.includes(c)) flush(c)
     else cur += c
   }
-  flush()
+  flush('')
   return out
 }
+
+export const segmentsOf = (command: string): string[] => segmentsWithSeps(command).map(x => x.text)
 
 // A quoted piece that is one word (`"--prod"`) is an argument the shell would unquote, so it stays; a quoted message with spaces is text and goes.
 const QUOTED = /'([^']*)'|"((?:\\.|[^"\\])*)"/g
@@ -822,11 +824,15 @@ type OwnScratchGroup = { segment: string; targets: string[] }
 
 // Returns targets from rm -rf segments that are safe scratch locations. This
 // uses the same best-effort segmentation as classify, not a full shell parser.
+// A relative target counts only when a literal `cd <full path> &&` leads to it (see cwdTracker); the targets returned are the full paths.
 export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth = 0): OwnScratchGroup[] {
   const assignments = assignmentsOf(command, env)
   const groups: OwnScratchGroup[] = []
-  for (const raw of segmentsOf(command)) {
-    const seg = strip(raw).replace(/^\\/, '')
+  const failed = new Set<string>() // the same words that failed once (say, with no cd before them) never pass on another line
+  const cwdAt = cwdTracker(command, assignments, env)
+  for (const [index, { text }] of segmentsWithSeps(command).entries()) {
+    const cwd = cwdAt(index)
+    const seg = strip(text).replace(/^\\/, '')
     if (seg === '') continue
     const wrapped = /^(?:ba|z)?sh\s+-c\s+(.*)$/.exec(seg)
     if (wrapped && depth < 3) {
@@ -844,22 +850,91 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
       !flags.some(f => /^-[^-]*f/.test(f) || f === '--force')
     ) continue
     const targets = t.slice(1).filter(x => !x.startsWith('-')).map(unquote)
-    if (targets.length > 0 && targets.every(target => isOwnScratch(target, assignments, env))) {
-      groups.push({ segment: seg, targets })
+    // a relative word is joined to the folder a guarded cd led to; with none, it stays relative and is held
+    const full = targets.map(x => (cwd && x !== '' && !/^[/~$]/.test(x) ? `${cwd}/${x}` : x))
+    if (full.length > 0 && full.every(target => isOwnScratch(target, assignments, env))) {
+      groups.push({ segment: seg, targets: full })
+    } else failed.add(seg)
+  }
+  return groups.filter(g => !failed.has(g.segment))
+}
+
+// The folder each segment runs in, when a literal `cd <full path>` sets it. A cd counts only on a chain of && that starts a list
+// (the start, or after ; or a newline), so the later words run only if it worked: after `cd X; rm -rf a`, `cd X || ...`, a pipe,
+// a background `&`, a subshell or a substitution, the folder is unknown and a relative target keeps holding.
+function cwdTracker(command: string, assignments: Map<string, string | null>, env: ScratchEnv): (index: number) => string | undefined {
+  const segs = segmentsWithSeps(command)
+  const blind = /(?:^|[^$])\(|`|\$\(\s*(?:cd|pushd|popd)\b/.test(command) // a subshell or substitution may hold its own cd
+  const folders: Array<string | undefined> = []
+  let cwd: string | undefined
+  for (let i = 0; i < segs.length; i += 1) {
+    const prev = segs[i - 1]
+    // `a && b` splits into `a`, an empty piece between the two &, and `b`: the empty piece changes nothing
+    if (i >= 1 && prev.sep === '&' && segs[i].sep === '&' && strip(segs[i].text) === '') {
+      folders.push(cwd)
+      continue
+    }
+    const andBefore = i >= 2 && prev.sep === '&' && strip(prev.text) === '' && segs[i - 2].sep === '&'
+    const startsList = i === 0 || prev.sep === ';' || prev.sep === '\n'
+    if (!andBefore) cwd = undefined // anything but && ends what the last cd promised
+    const seg = strip(segs[i].text).replace(/^\\/, '')
+    folders.push(cwd)
+    const m = /^(cd|pushd|popd)\b\s*(.*)$/.exec(seg)
+    if (m) {
+      const word = unquote(m[2].trim())
+      const guarded = m[1] === 'cd' && !blind && (startsList || andBefore)
+      cwd = guarded && word !== '' && !/\s/.test(word) ? literalFolder(word, cwd, assignments, env) : undefined
     }
   }
-  return groups
+  return index => folders[index]
+}
+
+// A folder word written out in full, once ~ and the command's own literal variables are filled in; undefined for anything else.
+function literalFolder(word: string, cwd: string | undefined, assignments: Map<string, string | null>, env: ScratchEnv): string | undefined {
+  let w = word
+  if (w === '~' || w.startsWith('~/')) {
+    if (!env.home) return undefined
+    w = env.home + w.slice(1)
+  }
+  w = w.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (m, a?: string, b?: string) => {
+    const value = assignments.get((a ?? b) as string)
+    return typeof value === 'string' ? value : m
+  })
+  if (/[$*?[\]{}`~]/.test(w)) return undefined
+  if (!w.startsWith('/')) {
+    if (!cwd) return undefined
+    w = `${cwd}/${w}`
+  }
+  return normalizePath(w)
 }
 
 // Variables the command sets itself: a literal value, or null for one set from `mktemp` (a fresh temp folder, path unknown).
+// A value that names another variable set earlier to a literal is filled in (S=/tmp/x; P=$S/prof gives P=/tmp/x/prof); one that
+// names a variable nothing set keeps its `$`, so a target built from it stays held.
 function assignmentsOf(command: string, env: ScratchEnv): Map<string, string | null> {
   const assignments = new Map<string, string | null>()
   if (env.tmpdir) assignments.set('TMPDIR', env.tmpdir)
-  const mktemp = /(?:^|[;&|]\s*)([A-Za-z_]\w*)=\$\(\s*mktemp(?:\s+[^)]*)?\)/g
+  const mktemp = /(?:^|[;&|\n]\s*)([A-Za-z_]\w*)=\$\(\s*mktemp(?:\s+[^)]*)?\)/g
   for (const match of command.matchAll(mktemp)) assignments.set(match[1], null)
-  const literals = /(?:^|[;&|]\s*)(?:export\s+)?([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g
+  const literals = /(?:^|[;&|\n]\s*)(?:export\s+)?([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g
   for (const match of command.matchAll(literals)) {
     if (!match[2].startsWith('$(')) assignments.set(match[1], unquote(match[2]))
+  }
+  for (let pass = 0; pass < 5; pass += 1) {
+    let changed = false
+    for (const [name, value] of assignments) {
+      if (typeof value !== 'string' || !value.includes('$')) continue
+      const next = value.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (m, a?: string, b?: string) => {
+        const ref = (a ?? b) as string
+        const other = ref === name ? undefined : assignments.get(ref)
+        return typeof other === 'string' && !other.includes('$') ? other : m
+      })
+      if (next !== value) {
+        assignments.set(name, next)
+        changed = true
+      }
+    }
+    if (!changed) break
   }
   return assignments
 }

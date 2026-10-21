@@ -57,6 +57,8 @@
 #                                       prompt.md, then handoff.md, then carry on; a new index row follows its new session. A lane that
 #                                       never writes handoff.md is not cleared. lane_watch.sh runs this when a lane passes LANE_RECYCLE_K.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
+#   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
+#                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
 #   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
@@ -176,6 +178,7 @@ while [ $# -gt 0 ]; do
     --send) mode=send; shift ;;
     --recycle) mode=recycle; shift ;;
     --ctx) mode=ctx; shift ;;
+    --turn) mode=turn; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
   esac
@@ -684,8 +687,9 @@ PY
 if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
 
 # --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
-if [ "$mode" = ctx ]; then
-  [ $# -eq 1 ] || { echo "usage: lane.sh --ctx <name>" >&2; exit 1; }
+# --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
+if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
@@ -695,6 +699,11 @@ if [ "$mode" = ctx ]; then
     id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
   fi
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
+  if [ "$mode" = turn ]; then
+    f="$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")/$id.jsonl"
+    python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_turn_kind.py" "$f" 2>/dev/null || echo "?"
+    exit 0
+  fi
   v="$(ctx_k "$dir" "$id")"; echo "${v%K}"
   exit 0
 fi

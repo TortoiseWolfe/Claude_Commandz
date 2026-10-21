@@ -65,7 +65,7 @@ cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
 cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh ~/.claude/scripts/he_runner_watch.sh global/.claude/scripts/
 cp ~/.claude/scripts/hub_digest.py ~/.claude/scripts/session_prime_facts.py global/.claude/scripts/
 cp ~/.claude/scripts/hub_lean.py global/.claude/scripts/
-cp ~/.claude/scripts/wsl_bridge_watchdog.py ~/.claude/scripts/lane_watch.sh global/.claude/scripts/  # authored here, tests in tests/test_wsl_bridge_watchdog.py and test_lane_watch.sh (lane.sh: test_lane_engines.sh and test_lane_recycle.sh)
+cp ~/.claude/scripts/wsl_bridge_watchdog.py ~/.claude/scripts/lane_watch.sh ~/.claude/scripts/lane_turn_kind.py global/.claude/scripts/  # authored here, tests in tests/test_wsl_bridge_watchdog.py, test_lane_watch.sh and test_lane_turn_kind.py (lane.sh: test_lane_engines.sh and test_lane_recycle.sh)
 # openclaw_harden.sh, openclaw_uid.sh, openclaw_pickup.py, openclaw_dispatch.py, openclaw_local.py, openclaw_frontdesk_cost.py, openclaw_handoff_install.sh, openclaw_handoff_hook/ and tests/{test_openclaw_harden.py,test_openclaw_handoff.py,test_openclaw_handoff_install.py,openclaw_fake_gemini.py,test_openclaw_uid_stage.sh,
 # test_openclaw_pickup.py,test_openclaw_dispatch.py,test_openclaw_pass.py,test_openclaw_local.py,test_openclaw_frontdesk_cost.py} are authored here and run inside the OpenClawGateway distro or against its drop folder
 # (not from ~/.claude): do not cp over them, and run them only from this repo.
