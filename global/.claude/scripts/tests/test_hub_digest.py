@@ -255,6 +255,22 @@ class Page(unittest.TestCase):
         self.assertIn("## Lanes running\n- none", page)
         self.assertIn("- clean", page)
 
+    def test_spend_section_shows_the_top_three_lanes_by_cost_today(self):
+        spend = {"lanes": [{"name": "acme-mail", "usd": 62.48, "families": {"fable": 60.0, "opus": 2.48}},
+                           {"name": "b-lane", "usd": 30.1, "families": {"opus": 30.1}},
+                           {"name": "c-lane", "usd": 20.0, "families": {"sonnet": 20.0}},
+                           {"name": "d-lane", "usd": 5.0, "families": {"sonnet": 5.0}}], "other": 1.0, "total": 118.0}
+        page = self.build(spend=spend)
+        for needle in ["## Lane spend today (API-equivalent, top 3", "- acme-mail: $62 (fable+opus)", "- b-lane: $30 (opus)",
+                       "- c-lane: $20 (sonnet)", "all lanes and the hub together: $118"]:
+            self.assertIn(needle, page)
+        self.assertNotIn("d-lane", page)
+
+    def test_spend_section_says_so_when_it_could_not_be_measured(self):
+        self.assertIn("- not measured", self.build())
+        self.assertIn("- unavailable: lane_spend.py gave no readable answer", self.build(spend="lane_spend.py gave no readable answer"))
+        self.assertIn("- all lanes and the hub together: $0", self.build(spend={"lanes": [], "total": 0}))
+
     def test_cap_holds_with_a_huge_inbox_and_log(self):
         inbox = "\n".join(f"- [ ] 2026-10-1{i % 9} 10:00 | Waiting on Hatch: item {i} " + "word " * 60 + "| detail | r-{i}" for i in range(80))
         log = "\n".join(f"abc{i:04d} 16 10:00 " + "message " * 40 for i in range(10))
@@ -292,18 +308,20 @@ class Cli(unittest.TestCase):
                                                  "    Invented user words stay out of the digest.\n")):
                 (d / name).write_text(text)
             (d / "lanes").mkdir()
+            (d / "spend.json").write_text('{"lanes": [{"name": "mail-x", "usd": 41.2, "families": {"fable": 41.2}}], "other": 0, "total": 41.2}')
             out = d / "state" / "hub-digest.md"
             r = subprocess.run([sys.executable, str(HERE.parent / "hub_digest.py"), "--out", str(out),
                                 "--roadmap-file", str(d / "roadmap.md"), "--lane-status-file", str(d / "lanes.txt"),
                                 "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"),
                                 "--budget-file", str(d / "budget.txt"), "--lanes-dir", str(d / "lanes"),
                                 "--git-repo", str(d), "--open-questions-file", str(d / "questions.txt"),
-                                "--now", "2026-10-16T21:00:00"],
+                                "--spend-file", str(d / "spend.json"), "--now", "2026-10-16T21:00:00"],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             page = out.read_text()
             self.assertIn("Waiting on Hatch (2)", page)
             self.assertNotIn("Invented user words stay out of the digest.", page)
+            self.assertIn("- mail-x: $41 (fable)", page)
             self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))
             self.assertLess(len(page.encode()), 6144)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
