@@ -27,8 +27,8 @@
 # in thousand tokens: set at start with --recycle-at, else the default for its kind of work), the poll starts `lane.sh --recycle <lane>` in
 # the background, mid-turn if need be (the lane finishes the step in hand, writes handoff.md, gets /clear and a re-prime message) and logs it
 # to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
-# 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. A lane is tried again after
-# LANE_RECYCLE_RETRY_SECS (default 300). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
+# 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
+# LANE_RECYCLE_RETRY_SECS (default 300), counted across re-armed watchers (.recycle-<lane>.tried). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
 # Every new or changed report also goes to Jonathan's chat: the dispatcher's post-reports does it, so he reads it without the hub.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 set -u
@@ -56,6 +56,13 @@ recycle_dir="${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}"
 recycle_log="$recycle_dir/recycle.log"
 recycle_retry=${LANE_RECYCLE_RETRY_SECS:-300}
 recycle_locked() { [ -d "$recycle_dir/.recycle-$1.lock" ]; }
+# Seconds since the watcher (this one or an earlier one the hub re-armed) last started a recycle for the lane; big if never. Kept in a
+# file, not in memory, because the hub re-arms the watcher every few minutes and a retry timer that dies with it never spaces anything.
+recycle_tried_age() {
+  local m; m=$(cat "$recycle_dir/.recycle-$1.tried" 2>/dev/null)
+  [[ "$m" =~ ^[0-9]+$ ]] || { echo 999999; return; }
+  echo $(( $(date +%s) - m ))
+}
 # recycle_line <lane>: the lane's own line in K tokens (LANE_RECYCLE_K overrides it for every lane; 100 if lane.sh cannot say).
 recycle_line() {
   local k=${LANE_RECYCLE_K:-}
@@ -113,7 +120,7 @@ done
 lanes=("$@")
 auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
 start_ts=$(date +%s)
-declare -A seen seen_turn recycling recycle_try
+declare -A seen seen_turn recycling
 report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
@@ -238,14 +245,18 @@ while :; do
         recycling[$l]=1; seen_turn[$l]=$done_line   # the hand-off turn is ours, not news
       else
         if [ "${recycling[$l]:-}" = 1 ]; then recycling[$l]=0; seen_turn[$l]=$done_line; fi
+        # The recycle check comes BEFORE the end-of-turn checks and does not depend on them. (21 Oct 2:16-2:25 PM: coop-site went 100K to
+        # 153K with no recycle because the check sat in the else-branch of the turn checks, and a lane answering Monitor events ends a
+        # turn nearly every poll, so almost every pass took a turn branch and skipped it.)
+        if [ "$(recycle_tried_age "$l")" -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
+          date +%s > "$recycle_dir/.recycle-$l.tried"
+          setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
+        fi
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
           seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
         elif [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
           done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
           echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
-        elif [ $(( $(date +%s) - ${recycle_try[$l]:-0} )) -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
-          recycle_try[$l]=$(date +%s)
-          setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
         fi
       fi
     fi

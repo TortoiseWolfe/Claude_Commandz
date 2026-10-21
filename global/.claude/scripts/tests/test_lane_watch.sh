@@ -375,7 +375,11 @@ cat > "$TMP/fakebin-rc.tmux" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
   list-windows) echo rl ;;
-  capture-pane) cat "$RC_PANE" ;;
+  capture-pane)
+    if [ -n "${RC_TICK:-}" ]; then   # a lane that ends a turn between every two looks (it answers Monitor events)
+      n=$(( $(cat "$RC_TICK" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$RC_TICK"
+      printf '%s\n' '⏺ tick' "✻ Worked for 2s · done 3:$(printf %02d $((n % 60))) PM" '❯ '
+    else cat "$RC_PANE"; fi ;;
 esac
 SH
 mkdir -p "$TMP/fakebin-rc"; cp "$TMP/fakebin-rc.tmux" "$TMP/fakebin-rc/tmux"; chmod +x "$TMP/fakebin-rc/tmux"
@@ -415,7 +419,7 @@ echo 120 > "$POINT_FILE"
 
 # Whole watcher: starts one recycle (not one per poll), and neither the recycle nor the hand-off turn wakes the hub.
 run_rc_watcher() { # run_rc_watcher <ctx> <seconds> <out>; the pane's done time changes while the recycle holds its lock
-  echo "$1" > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$idle_pane" > "$RC_PANE"
+  echo "$1" > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$idle_pane" > "$RC_PANE"; rm -f "$rc_home/.claude/state/lanes/.recycle-rl.tried"
   ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
       timeout "$2" bash "$SCRIPT" --max-min 5 rl > "$3" 2>&1 ) &
   rcw=$!
@@ -430,7 +434,7 @@ else
 fi
 # A lane in the middle of a long turn (spinner on screen the whole time) is recycled all the same: 21 Oct, a 15-minute turn took a lane from
 # 120K to the 168K backstop and it compacted, because the old trigger waited for the turn to end.
-echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$busy_pane" > "$RC_PANE"
+echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$busy_pane" > "$RC_PANE"; rm -f "$rc_home/.claude/state/lanes/.recycle-rl.tried"
 ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
     timeout 6 bash "$SCRIPT" --max-min 5 rl > "$TMP/rc-outbusy" 2>&1 ) || true
 if [ "$(cat "$RC_CALLS")" = rl ]; then echo "ok   the watcher recycles a lane past its line while its turn is still running"; else echo "FAIL no mid-turn recycle: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/rc-outbusy")"; failures=$((failures + 1)); fi
@@ -452,6 +456,25 @@ if grep -q '^idle: rl ended a turn (1:09)' "$TMP/mon-out2"; then echo "ok   any 
 : > "$TURN_FILE"
 run_rc_watcher 50 8 "$TMP/mon-out3"
 if grep -q '^idle: rl ended a turn' "$TMP/mon-out3"; then echo "ok   a turn the transcript cannot classify wakes the hub"; else echo "FAIL unknown turn did not wake: $(cat "$TMP/mon-out3")"; failures=$((failures + 1)); fi
+
+# 21 Oct 2:16-2:25 PM: coop-site went 100K to 153K with no recycle although the watcher was re-armed 15 times. The recycle check sat in the
+# else-branch of the end-of-turn checks, and a lane answering Monitor events ends a turn between nearly every two polls, so it was skipped.
+# The fake tmux below ends a turn between every two looks.
+tick_watcher() { # tick_watcher <turn-kind> <seconds> <out>
+  echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; echo "$1" > "$TURN_FILE"; : > "$TMP/rc-tick"; rm -f "$rc_home/.claude/state/lanes/.recycle-rl.tried"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" RC_TICK="$TMP/rc-tick" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+      timeout "$2" bash "$SCRIPT" --max-min 5 rl > "$3" 2>&1 ) || true
+}
+tick_watcher monitor 6 "$TMP/tick-out1"
+if [ "$(cat "$RC_CALLS")" = rl ]; then echo "ok   a lane that ends a Monitor turn on every poll is still recycled past its line"; else echo "FAIL tick lane (monitor) not recycled: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/tick-out1")"; failures=$((failures + 1)); fi
+tick_watcher real 6 "$TMP/tick-out2"
+if [ "$(cat "$RC_CALLS")" = rl ] && grep -q '^idle: rl' "$TMP/tick-out2"; then echo "ok   a pass that reports an end of turn also starts the recycle (it does not wait for the next pass)"; else echo "FAIL tick lane (real): calls=$(cat "$RC_CALLS") out=$(cat "$TMP/tick-out2")"; failures=$((failures + 1)); fi
+# The retry spacing outlives the watcher: the hub re-arms it every few minutes, and a second watcher must not start a second recycle at once.
+echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; date +%s > "$rc_home/.claude/state/lanes/.recycle-rl.tried"; printf '%s\n' "$busy_pane" > "$RC_PANE"
+( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+    timeout 4 bash "$SCRIPT" --max-min 5 rl > "$TMP/tick-out3" 2>&1 ) || true
+if [ ! -s "$RC_CALLS" ]; then echo "ok   a re-armed watcher honours the retry time of the one before it"; else echo "FAIL second watcher recycled again at once: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
+: > "$TURN_FILE"
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
