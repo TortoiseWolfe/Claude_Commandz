@@ -23,10 +23,12 @@
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
 # have a tmux window), read again on every poll so a lane started after the watcher began is covered for reports, end of turn and
 # stuck dialogs. (18 Oct: armed with no names it watched nothing, and four reports and a stuck dialog sat unseen for hours.)
-# Lanes never auto-compact (his rule, 20 Oct): when a watched lane's context passes LANE_RECYCLE_K (default 120) thousand tokens and its turn
-# has ended, the poll starts `lane.sh --recycle <lane>` in the background (the lane writes handoff.md, gets /clear and a re-prime message)
-# and logs it to ~/.claude/state/lanes/recycle.log. That wakes nobody; only a FAILED recycle does. A lane is tried again after
-# LANE_RECYCLE_RETRY_SECS (default 1800).
+# Lanes never auto-compact (his rule, 20 Oct): when a watched lane's context passes its OWN recycle line (`lane.sh --recycle-point <lane>`,
+# in thousand tokens: set at start with --recycle-at, else the default for its kind of work), the poll starts `lane.sh --recycle <lane>` in
+# the background, mid-turn if need be (the lane finishes the step in hand, writes handoff.md, gets /clear and a re-prime message) and logs it
+# to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
+# 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. A lane is tried again after
+# LANE_RECYCLE_RETRY_SECS (default 300). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
 # Every new or changed report also goes to Jonathan's chat: the dispatcher's post-reports does it, so he reads it without the hub.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 set -u
@@ -47,22 +49,27 @@ turn_done_time() {
   turn_done_line | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p'
 }
 
-# Recycling: a lane past LANE_RECYCLE_K thousand tokens, idle (no spinner, no dialog) and not already being recycled, is handed to
-# `lane.sh --recycle` in the background. lane.sh holds .recycle-<lane>.lock while it works; the watcher reads that lock and the log.
+# Recycling: a lane past its recycle line, with no dialog waiting and not already being recycled, is handed to
+# `lane.sh --recycle` in the background, whether or not its turn is running. lane.sh holds .recycle-<lane>.lock while it works; the watcher reads that lock and the log.
 lane_sh="${LANE_SH:-$HOME/.claude/scripts/lane.sh}"
-recycle_k=${LANE_RECYCLE_K:-120}
 recycle_dir="${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}"
 recycle_log="$recycle_dir/recycle.log"
-recycle_retry=${LANE_RECYCLE_RETRY_SECS:-1800}
+recycle_retry=${LANE_RECYCLE_RETRY_SECS:-300}
 recycle_locked() { [ -d "$recycle_dir/.recycle-$1.lock" ]; }
-# recycle_due <lane>, the lane's pane on stdin: 0 when its context is at or over the line and its turn has ended.
+# recycle_line <lane>: the lane's own line in K tokens (LANE_RECYCLE_K overrides it for every lane; 100 if lane.sh cannot say).
+recycle_line() {
+  local k=${LANE_RECYCLE_K:-}
+  [[ "$k" =~ ^[0-9]+$ ]] || k=$("$lane_sh" --recycle-point "$1" 2>/dev/null)
+  [[ "$k" =~ ^[0-9]+$ ]] || k=100
+  echo "$k"
+}
+# recycle_due <lane>, the lane's pane on stdin: 0 when its context is at or over its line, a working lane included.
 recycle_due() {
   local l=$1 pane c; pane=$(cat)
   recycle_locked "$l" && return 1
-  command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 1
   printf '%s\n' "$pane" | dialog_waiting && return 1
   c=$("$lane_sh" --ctx "$l" 2>/dev/null)
-  [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$recycle_k" ]
+  [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$(recycle_line "$l")" ]
 }
 # New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
 recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
@@ -213,7 +220,7 @@ while :; do
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ]; then
       note=$(stale_note "$l")
-      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at about ${recycle_k}K)"; hit=1; other=1
+      echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole

@@ -355,7 +355,7 @@ fi
 # Lanes never auto-compact (his rule, 20 Oct): past LANE_RECYCLE_K thousand tokens, with the turn ended, the watcher starts
 # `lane.sh --recycle` in the background and wakes nobody. A fake lane.sh stands in for the real one (tests/test_lane_recycle.sh has the real).
 rc_home="$TMP/rchome"; mkdir -p "$rc_home/.claude/scripts" "$rc_home/.claude/state/lanes"
-export TURN_FILE="$TMP/rc-turn" CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
+export POINT_FILE="$TMP/rc-point" TURN_FILE="$TMP/rc-turn" CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
 cat > "$rc_home/.claude/scripts/lane.sh" <<'SH'
 #!/usr/bin/env bash
 lanes="$HOME/.claude/state/lanes"
@@ -363,6 +363,7 @@ case "$1" in
   --status) echo "rl  report:no  idle"; echo "    dir:/x model:sonnet" ;;
   --ctx) cat "$CTX_FILE" ;;
   --turn) cat "${TURN_FILE:-/dev/null}" ;;
+  --recycle-point) cat "${POINT_FILE:-/dev/null}" ;;
   --recycle)
     echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
     [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
@@ -381,8 +382,8 @@ mkdir -p "$TMP/fakebin-rc"; cp "$TMP/fakebin-rc.tmux" "$TMP/fakebin-rc/tmux"; ch
 idle_pane=$(printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ')
 busy_pane=$(printf '%s\n' '⏺ Reading' '✻ Thinking… (12s · esc to interrupt)' '❯ ')
 
-# recycle_due: over the line, idle, no dialog, no recycle under way.
-lane_sh="$rc_home/.claude/scripts/lane.sh"; recycle_k=120; recycle_dir="$rc_home/.claude/state/lanes"
+# recycle_due: over the lane's own line, no dialog, no recycle under way; a working lane counts (a long turn outruns the backstop).
+lane_sh="$rc_home/.claude/scripts/lane.sh"; recycle_dir="$rc_home/.claude/state/lanes"; echo 120 > "$POINT_FILE"
 expect_due() { # expect_due <yes|no> <label> <ctx> <pane>
   local want=$1 label=$2 got=no
   echo "$3" > "$CTX_FILE"
@@ -393,16 +394,29 @@ expect_due yes "recycle_due: 130K and idle fires" 130 "$idle_pane"
 expect_due yes "recycle_due: exactly the line (120K) fires" 120 "$idle_pane"
 expect_due no  "recycle_due: 119K does not" 119 "$idle_pane"
 expect_due no  "recycle_due: an unreadable context (?) does not" '?' "$idle_pane"
-expect_due no  "recycle_due: a lane mid-turn (spinner) waits for its next idle" 200 "$busy_pane"
+expect_due yes "recycle_due: a lane mid-turn (spinner) is recycled too, its turn may not end before the backstop" 130 "$busy_pane"
+expect_due no  "recycle_due: a lane mid-turn under its line is left alone" 119 "$busy_pane"
 expect_due no  "recycle_due: a lane stuck on a dialog is not recycled" 200 "$(printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel')"
 mkdir "$recycle_dir/.recycle-rl.lock"
 expect_due no  "recycle_due: a lane already being recycled is left alone" 200 "$idle_pane"
 rmdir "$recycle_dir/.recycle-rl.lock"
 
+# Each lane has its own line (lane.sh --recycle-point): 90K fires at 95K, 150K does not at 140K, no answer falls back to 100K, and
+# LANE_RECYCLE_K, when set, overrides all of them.
+echo 90 > "$POINT_FILE";  expect_due yes "recycle_due: a lane with its own line of 90K fires at 95K" 95 "$idle_pane"
+echo 90 > "$POINT_FILE";  expect_due no  "recycle_due: ... and not at 89K" 89 "$idle_pane"
+echo 150 > "$POINT_FILE"; expect_due no  "recycle_due: a lane with its own line of 150K is left alone at 140K" 140 "$idle_pane"
+: > "$POINT_FILE";        expect_due yes "recycle_due: no answer from lane.sh falls back to 100K (fires at 100K)" 100 "$idle_pane"
+: > "$POINT_FILE";        expect_due no  "recycle_due: ... and not at 99K" 99 "$idle_pane"
+echo 90 > "$POINT_FILE"
+got=no; echo 95 > "$CTX_FILE"; if printf '%s\n' "$idle_pane" | LANE_RECYCLE_K=120 HOME="$rc_home" recycle_due rl; then got=yes; fi
+if [ "$got" = no ]; then echo "ok   LANE_RECYCLE_K overrides the lane's own line"; else echo "FAIL LANE_RECYCLE_K did not override"; failures=$((failures + 1)); fi
+echo 120 > "$POINT_FILE"
+
 # Whole watcher: starts one recycle (not one per poll), and neither the recycle nor the hand-off turn wakes the hub.
 run_rc_watcher() { # run_rc_watcher <ctx> <seconds> <out>; the pane's done time changes while the recycle holds its lock
   echo "$1" > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$idle_pane" > "$RC_PANE"
-  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_K=120 LANE_RECYCLE_RETRY_SECS=600 \
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
       timeout "$2" bash "$SCRIPT" --max-min 5 rl > "$3" 2>&1 ) &
   rcw=$!
   sleep 1.5; printf '%s\n' '⏺ handoff written' '✻ Worked for 1m 9s · done 1:09 PM' '❯ ' > "$RC_PANE"
@@ -414,6 +428,12 @@ if [ "$(wc -l < "$RC_CALLS")" = 1 ] && [ "$(cat "$RC_CALLS")" = rl ] && ! grep -
 else
   echo "FAIL recycle trigger: calls=$(cat "$RC_CALLS" | tr '\n' ' ') out=$(cat "$TMP/rc-out1")"; failures=$((failures + 1))
 fi
+# A lane in the middle of a long turn (spinner on screen the whole time) is recycled all the same: 21 Oct, a 15-minute turn took a lane from
+# 120K to the 168K backstop and it compacted, because the old trigger waited for the turn to end.
+echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$busy_pane" > "$RC_PANE"
+( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+    timeout 6 bash "$SCRIPT" --max-min 5 rl > "$TMP/rc-outbusy" 2>&1 ) || true
+if [ "$(cat "$RC_CALLS")" = rl ]; then echo "ok   the watcher recycles a lane past its line while its turn is still running"; else echo "FAIL no mid-turn recycle: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/rc-outbusy")"; failures=$((failures + 1)); fi
 run_rc_watcher 100 6 "$TMP/rc-out2"
 if [ ! -s "$RC_CALLS" ]; then echo "ok   a lane under the line is not recycled"; else echo "FAIL recycled at 100K: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
 : > "$RC_FAIL"

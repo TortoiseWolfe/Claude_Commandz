@@ -351,6 +351,54 @@ assert_not_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' 'a ten-column row
 run_lane --dry-run --connectors --resume res-off
 assert_not_contains "$LAST_OUTPUT" 'disableClaudeAiConnectors' '--connectors turns them on at resume'
 
+# Each lane has its own recycle line (--recycle-at, else the default for its kind of work) and its backstop follows it. Claude Code compacts
+# at about 0.84 x autoCompactWindow, so the window is (line + 60K) / 0.84 rounded up to 10K and capped at 200000.
+plain() { printf '%s' "$1" | tr -d '\\'; }
+rk_of() { awk -F'\t' -v n="$1" '$2==n{c=$12} END{print c}' "$INDEX"; }
+win_of() { printf '%s' "$LAST_COMMAND" | python3 -c '
+import json, shlex, sys
+w = shlex.split(sys.stdin.read())
+print(json.loads(w[w.index("--settings") + 1])["autoCompactWindow"])'; }
+run_lane rk-default "$REPO" sonnet "$PROMPT"
+[ "$(rk_of rk-default)" = 100 ] || fail "a plain code lane records the 100K default, got: $(rk_of rk-default)"; checks=$((checks + 1))
+[ "$(win_of)" = 200000 ] || fail 'a 100K line gets the 200000 window (the cap)'; checks=$((checks + 1))
+run_lane --recycle-at 60 rk-sixty "$REPO" sonnet "$PROMPT"
+[ "$(rk_of rk-sixty)" = 60 ] || fail "--recycle-at 60 is stored in the index row, got: $(rk_of rk-sixty)"; checks=$((checks + 1))
+[ "$(win_of)" = 150000 ] || fail "a 60K line gets a 150000 backstop (60+60=120K / 0.84 = 143K, rounded up), got $(win_of)"; checks=$((checks + 1))
+run_lane --recycle-at=80 rk-eighty "$REPO" sonnet "$PROMPT"
+[ "$(rk_of rk-eighty)" = 80 ] && [ "$(win_of)" = 170000 ] || fail "--recycle-at=80: row 80, window 170000, got $(rk_of rk-eighty) / $(win_of)"; checks=$((checks + 1))
+LANE_WINDOW_CAP=160000 run_lane rk-capped "$REPO" sonnet "$PROMPT"
+[ "$(win_of)" = 160000 ] || fail 'LANE_WINDOW_CAP caps the backstop below the line plus room'; checks=$((checks + 1))
+OPS_PROMPT="$TMP/ops-prompt.md"; echo 'Check the Traefik routes and the Portainer stack for the deploy' >"$OPS_PROMPT"
+run_lane rk-ops "$REPO" sonnet "$OPS_PROMPT"
+[ "$(rk_of rk-ops)" = 110 ] || fail "an ops lane (primes at 57K) defaults to 110K, got: $(rk_of rk-ops)"; checks=$((checks + 1))
+SITE_PROMPT="$TMP/site-prompt.md"; echo 'Fit the photos for data/sites/carbarns and write the SketchUp geometry' >"$SITE_PROMPT"
+run_lane --allow-low-tier rk-site "$REPO" opus "$SITE_PROMPT"
+[ "$(rk_of rk-site)" = 100 ] || fail "a site-model lane defaults to 100K, got: $(rk_of rk-site)"; checks=$((checks + 1))
+for bad in 30 151 abc ''; do
+  run_lane --recycle-at "$bad" rk-bad "$REPO" sonnet "$PROMPT"
+  assert_exit 1 "$LAST_STATUS" "--recycle-at '$bad' is refused"
+done
+assert_contains "$LAST_OUTPUT" '40 to 150' 'the refusal names the range'
+run_lane --recycle-at 90 --status
+assert_exit 1 "$LAST_STATUS" '--recycle-at only applies to a start or a resume'
+# --recycle-point and --resume: the stored value wins, a row without one falls back to the kind's default, --recycle-at overrides on resume.
+printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsession-rk\t-\thigh\toff\t70\n' "$(date +%F)" rk-stored "$REPO" "$PROMPT" "$TMP/r.md" >>"$INDEX"
+printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsession-rk2\t-\thigh\toff\n' "$(date +%F)" rk-old "$REPO" "$OPS_PROMPT" "$TMP/r.md" >>"$INDEX"
+run_lane --recycle-point rk-stored
+[ "$LAST_OUTPUT" = 70 ] || fail "--recycle-point reads the stored 70, got: $LAST_OUTPUT"; checks=$((checks + 1))
+run_lane --recycle-point rk-old
+[ "$LAST_OUTPUT" = 110 ] || fail "a row without the column falls back to its kind (ops: 110), got: $LAST_OUTPUT"; checks=$((checks + 1))
+run_lane --recycle-point no-such-lane
+[ "$LAST_OUTPUT" = 100 ] || fail "an unknown lane answers the plain default, got: $LAST_OUTPUT"; checks=$((checks + 1))
+run_lane --dry-run --resume rk-stored
+assert_contains "$(plain "$LAST_OUTPUT")" '"autoCompactWindow":160000' 'resume reuses the stored 70K line: backstop 160000'
+run_lane --dry-run --recycle-at 100 --resume rk-stored
+assert_contains "$(plain "$LAST_OUTPUT")" '"autoCompactWindow":200000' '--recycle-at overrides the stored line at resume'
+# fill_ids rewrites the index; it must keep the twelfth column.
+run_lane --status
+[ "$(rk_of rk-stored)" = 70 ] || fail "--status (fill_ids) dropped the recycle line, got: $(rk_of rk-stored)"; checks=$((checks + 1))
+
 # --status shows the connectors value, and still reads ten-column rows.
 STATUS_CONN="$(TMUX_HAS_SESSION=1 TMUX_WINDOWS='lean-opus lean-mail old-row' HOME="$HOME_TEST" PATH="$BIN:$PATH" \
   TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1)"
