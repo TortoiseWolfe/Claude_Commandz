@@ -143,6 +143,7 @@ GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
           ("jobs", re.compile(r"^job:", re.I)),
           ("hub", re.compile(r"^hub:", re.I))]
 STALE_WAIT_DAYS = 5   # a "Waiting on ..." line older than this is flagged: the hub sends one reminder or closes it with a reason
+OWNER_PREFIX = re.compile(r"^(?:waiting on |job:|question:|hub:)", re.I)  # the canonical owners (the legacy "[CC>MUSE]" start stays under other when a line is unreadable)
 CLIENT_LINE = re.compile(r"^client (?:mail|alert):", re.I)
 
 
@@ -180,7 +181,14 @@ def open_inbox(text):
         if not m:
             raw = OPEN_ANY.match(line)
             if raw:
-                groups["other"].append((raw.group(1) or "?", raw.group(2).strip()))
+                day, text = raw.group(1) or "?", raw.group(2).strip()
+                title = text.split(" | ")[0].strip()  # a line with more fields than OPEN_LINE reads still has its owner prefix up front
+                for g, rx in GROUPS:
+                    if OWNER_PREFIX.match(title) and rx.match(title):
+                        groups[g].append((day, re.sub(r"^waiting on \w+:\s*", "", title, flags=re.I)))
+                        break
+                else:
+                    groups["other"].append((day, text))
             continue
         day, title = m.group(2), m.group(3).strip()
         detail = " | ".join(part.strip() for part in (m.group(4), m.group(5)) if part)
