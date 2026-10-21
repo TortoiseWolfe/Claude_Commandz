@@ -34,7 +34,7 @@ from pathlib import Path
 
 HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hub_digest import one_line, report_first_line, tidy_summary  # noqa: E402
+from hub_digest import alert_hub, one_line, report_first_line, tidy_summary  # noqa: E402
 
 HUB_REPO = "TortoiseWolfe/workspace"
 STAMP = re.compile(r"<!-- roadmap-stamp v1 [^>]*-->")
@@ -117,6 +117,31 @@ def replace_field(body, field, new):
         raise Fail(f"could not find the existing {field} block in the body (looked for {rx})")
     s, e = span
     return "\n".join(lines[:s] + new.split("\n") + lines[e:])
+
+
+def body_problems(body):
+    """What stops this script editing the live roadmap body, or [] when it still can. The body is the one place these edits land, so
+    before anything is posted its three fields must be found and replaced by themselves without changing a byte (an identity edit).
+    These were the asserts of a test that ran only against the real body on one machine; they run here on every facts step instead."""
+    if not (body or "").strip():
+        return ["the roadmap issue body came back empty"]
+    lines = body.split("\n")
+    probs = []
+    for field, find, name in (("arc", lambda: _details_span(lines, r"<summary><b>Arc \d+\b"), "an Arc <details> block"),
+                              ("next3", lambda: _details_span(lines, r"<summary><b>Next 3 sessions"), 'a "Next 3 sessions" <details> block'),
+                              ("next-should", lambda: _section_span(lines, r"###\s+Next session should\b"), 'a "### Next session should" section')):
+        try:
+            span = find()
+            if not span:
+                probs.append("no %s in the body" % name)
+                continue
+            s, e = span
+            text = "\n".join(lines[s:e] if field != "next-should" else lines[s + 1:e]).strip("\n")
+            if replace_field(body, field, text) != body:
+                probs.append("replacing %s with itself changed the body" % name)
+        except Fail as exc:
+            probs.append("%s: %s" % (name, exc))
+    return probs
 
 
 def refresh_stamp(body, sha, branch, generated, issue):
@@ -339,7 +364,7 @@ def drift(args, mode, extra=()):
 # ---------------------------------------------------------------------------------------------
 
 
-UNATTENDED_FIXED = ("repo", "machine", "dir", "lanes_dir", "inbox", "inbox_archive", "state_dir", "drift_hook", "now")
+UNATTENDED_FIXED = ("repo", "machine", "dir", "lanes_dir", "inbox", "inbox_archive", "state_dir", "drift_hook", "now", "alert_state")
 
 
 def unattended_guard(ap, a):
@@ -377,6 +402,7 @@ def main(argv=None):
     ap.add_argument("--state-dir", default=str(HOME / ".claude/state/session-prime"))
     ap.add_argument("--drift-hook", default=str(HOME / ".claude/hooks/roadmap-drift.sh"))
     ap.add_argument("--now", help="ISO time (tests)")
+    ap.add_argument("--alert-state", help="dispatch state .json to file a live-body alert in (tests); default the live one")
     a = ap.parse_args(argv)
     try:
         if os.environ.get("AFA_LANE_UNATTENDED") == "1":
@@ -409,6 +435,16 @@ def run(a):
             sp = state_path(a, g["repo"])
             sp.parent.mkdir(parents=True, exist_ok=True)
             sp.write_text(json.dumps({"issue": g["num"], "read_at": g["updated_at"], "read_on": generated}))
+        if g["repo"] == HUB_REPO:  # the hub roadmap is the live body every post edits: say so loudly, and wake the hub, when it stops parsing
+            problems = body_problems(g["body"])
+            if problems:
+                print("\nsession_prime_facts: the live hub roadmap body no longer parses: %s. A post would fail or damage it." % "; ".join(problems),
+                      file=sys.stderr)
+                try:
+                    alert_hub("session_prime_facts", problems, "session_prime_facts.py", state_path=a.alert_state)
+                except Exception as exc:  # the failure is already on stderr; a failed alert must not hide it
+                    print("session_prime_facts: could not put the alert on the hub's list: %s" % exc, file=sys.stderr)
+                return 7
         return 0
 
     if not g["machine"] or g["machine"].upper() == "UNKNOWN":

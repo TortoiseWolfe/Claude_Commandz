@@ -1,0 +1,6 @@
+{
+ "hash": "c061acced759c5e4a339d1fb6dd96b0574391e4de615e6d39ac187976d256ade",
+ "date": "2026-10-21 17:27",
+ "sha": "7cb093b691d6133ebc1a0a5dead2d2f34d6e9662",
+ "note": "sha is the commit the smoke ran on top of; the hash is what the guard checks"
+}

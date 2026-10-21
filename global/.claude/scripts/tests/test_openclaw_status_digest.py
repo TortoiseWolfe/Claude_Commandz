@@ -304,6 +304,17 @@ class Parsers(Base):
         self.assertTrue(rm["next_session"].startswith("Start:"))
         self.assertNotIn("Second paragraph", rm["next_session"])
 
+    def test_blocks_that_open_with_details_and_summary_on_one_line_still_parse(self):
+        # 21 Oct: the live roadmap's Next 3 block opens as <details><summary> on one line, and parse_roadmap read it as missing.
+        # The hub_digest live check found it the first time it ran against the real body.
+        body = ("<details><summary><b>Arc 7: Example</b> (1 open, 0 done)</summary>\n\n- [ ] Invented open item\n</details>\n\n"
+                "<details><summary><b>Next 3 sessions</b>: invented plan.</summary>\n\n**Session +1 (hub):** invented first.\n"
+                "- invented item\n</details>\n")
+        rm = dg.parse_roadmap(body)
+        self.assertEqual([a["open"] for a in rm["arcs"]], [1])
+        self.assertEqual(rm["next3"][0], "Next 3 sessions: invented plan.")
+        self.assertIn("Session +1 (hub):", rm["next3"])
+
     def test_lane_status(self):
         live, dead = dg.parse_lane_status(LANE_STATUS)
         self.assertEqual(live, [("tap-roof", "yes", "idle"), ("tap-walls", "no", "working")])
