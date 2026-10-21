@@ -253,7 +253,7 @@ else
 fi
 sleep 1
 if [ -s "$TMP/posted-mark" ]; then
-  echo "ok   a report asks the dispatcher to post new reports to the chat"
+  echo "ok   a report asks the dispatcher to record new reports (it posts nothing to the chat)"
 else
   echo "FAIL report did not call post-reports"; failures=$((failures + 1))
 fi
