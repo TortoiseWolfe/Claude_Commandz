@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 from test_openclaw_dispatch import ET, NOW, SHA, Base, FakeHost  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 ASK = dp.ask_id_for(SHA)
 
@@ -848,6 +849,7 @@ class PartialIsFailed(unittest.TestCase):
     def test_the_sweep_marks_such_a_lane_failed_and_says_so(self):
         base = PassBase("setUp")
         base.setUp()
+        self.addCleanup(base.doCleanups)  # a hand-made case: its own cleanups (its temp folder) run with this test's
         base.ctx.hand_off_first = False
         base.start(task="scan the repos")
         lane = base.lane_names()[0]
@@ -1722,9 +1724,9 @@ class Questions(PassBase):
         seen = {}
         host = dp.LaneHost()
         host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: seen.update(env=env) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, verbs=dp.QUESTION_VERBS, ask=ASK)
+        host.claude_pass("p", Path(fresh_dir(self)), 5, verbs=dp.QUESTION_VERBS, ask=ASK)
         self.assertEqual(seen["env"]["AFA_OC_PASS"], ASK)
-        host.claude_pass("p", Path(tempfile.mkdtemp()), 5, ask="not an ask")
+        host.claude_pass("p", Path(fresh_dir(self)), 5, ask="not an ask")
         self.assertEqual(seen["env"]["AFA_OC_PASS"], "1")
 
     def test_a_pass_cannot_act_on_another_ask(self):
@@ -2440,7 +2442,7 @@ class Diagnose(PassBase):
     def test_the_real_question_call_writes_the_mail_clamp_into_its_own_folder_only(self):
         host = dp.LaneHost()
         host._run = lambda argv, timeout, cwd=None, stdin=None, env=None: type("R", (), {"returncode": 0, "stdout": "{}"})()
-        mine, other = Path(tempfile.mkdtemp(dir=self.tmp)), Path(tempfile.mkdtemp(dir=self.tmp))
+        mine, other = Path(fresh_dir(self, dir=self.tmp)), Path(fresh_dir(self, dir=self.tmp))
         host.claude_pass("hello", mine, 10, verbs=dp.QUESTION_VERBS, ask=ASK, mcp_tools=dp.QUESTION_MAIL_TOOLS)
         conf = json.loads((mine / ".claude" / "settings.json").read_text())
         (entry,) = conf["hooks"]["PreToolUse"]

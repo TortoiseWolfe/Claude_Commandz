@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import panel_gate as g  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 CLEAN = lambda diff: "clean"  # noqa: E731
 
@@ -283,7 +284,7 @@ class SecretScanTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def run_cli(self, diff_text, *extra, scanner=CLEAN, cls="public", terms="Acme Corp\n"):
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         diff, out, tf = (os.path.join(d, n) for n in ("in.diff", "out.diff", "terms.txt"))
         Path(diff).write_text(diff_text, encoding="utf-8")
@@ -330,7 +331,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.sentinels(stdout)["GATE"], "local")
 
     def test_unreadable_terms_file_fails_closed(self):
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         diff, out = os.path.join(d, "in.diff"), os.path.join(d, "out.diff")
         Path(diff).write_text(SAMPLE, encoding="utf-8")
@@ -340,7 +341,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.sentinels(buf.getvalue())["GATE"], "skip")
 
     def test_missing_diff_fails_closed(self):
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -522,7 +523,7 @@ if __name__ == "__main__":
 class UnlistedRepoTests(unittest.TestCase):
     def setUp(self):
         import tempfile, json
-        self.d = tempfile.mkdtemp()
+        self.d = fresh_dir(self)
         self.path = os.path.join(self.d, "classes.json")
         with open(self.path, "w") as f:
             json.dump({"repos": {"PublicRepo": "public", "OwnRepo": "own"}}, f)

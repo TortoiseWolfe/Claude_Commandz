@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 from test_openclaw_pass import PassBase  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 STATE = Path.home() / ".claude/state"
 SEVEN = ("oc-16cd92d0", "oc-d296ae6c", "oc-ab70e557", "oc-33876df9", "oc-11c7e8f1", "oc-bb085874", "oc-ef23efba")
@@ -80,7 +81,7 @@ class Replay(PassBase):
         with_text = [k for k in SEVEN if after[k].get("answer") and after[k].get("answered_at")]
         print("1 posted lane reports   %d of 8 lane notes posted; of the 7 asks, %d now answered, %d carry the posted text and a time (before: 0 of 7)" % (len(posted), len(answered), len(with_text)))
         # backfill on a copy of the real ledger
-        copy = Path(tempfile.mkdtemp()) / "dispatch.json"
+        copy = Path(fresh_dir(self)) / "dispatch.json"
         shutil.copy2(ledger, copy)
         ctx2 = dp.Ctx(self.ctx.repos, copy, self.tmp / "lanes", self.senders, self.repos_txt, self.root, **self.private_paths())
         done = backfill(ctx2, SEVEN)
@@ -102,7 +103,7 @@ class Replay(PassBase):
         task = old["asks"][HATCH]["task"]
         self.host.spawned.clear()
         self.host.started.clear()
-        ctx3 = dp.Ctx(self.ctx.repos, Path(tempfile.mkdtemp()) / "d.json", self.tmp / "lanes", self.senders, self.repos_txt, self.root, hand_off_first=True, **self.private_paths())
+        ctx3 = dp.Ctx(self.ctx.repos, Path(fresh_dir(self)) / "d.json", self.tmp / "lanes", self.senders, self.repos_txt, self.root, hand_off_first=True, **self.private_paths())
         line, chat = dp.hand_off(ctx3, self.host, HATCH, "own-app", task, time.time())
         row = dp.load_state(ctx3.state_path)["asks"][HATCH]
         print("2 note to Hatch         ask %s (%r): passes started %d, lanes started %d; ask %s, on the hub's list: %s" % (

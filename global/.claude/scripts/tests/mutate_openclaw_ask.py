@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from tmpdirs import PREFIX, disk_full, run_env  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
@@ -57,7 +58,7 @@ MUTANTS = [
     (DISPATCH, "truth: a failed write is remembered as written", '    if ok:\n        seen.write_text(body)', '    if True:\n        seen.write_text(body)'),
     (DISPATCH, "truth: the answer is posted as a plain post", '        return LaneHost._post(self, text, True)', '        return LaneHost._post(self, text, False)'),
     (DISPATCH, "truth: a post does not refresh the outbox file", '        queue_pump(self.queue_path, self.inject_now, self.clock())\n        mirror = getattr(self, "mirror_outbox", None)\n        if mirror:', '        queue_pump(self.queue_path, self.inject_now, self.clock())\n        mirror = None\n        if mirror:'),
-    (DISPATCH, "truth: the outbox file is written to the wrong place", "('set -eu\\nf=%s\\ntmp", "('set -eu\\nf=%s.x\\ntmp"),
+    (DISPATCH, "truth: the outbox file is written to the wrong place", "'set -eu; f=$1; tmp=", "'set -eu; f=$1.x; tmp="),
     (DISPATCH, "truth: the hub may state a count", '    talk = [n for n, p in enumerate(items, 1) if QUEUE_TALK_RE.search(p)]', '    talk = []'),
     (DISPATCH, "truth: say may state a count", '    if QUEUE_TALK_RE.search(text):\n        return False, item_problem("say"', '    if False:\n        return False, item_problem("say"'),
     (DISPATCH, "truth: any mention of a last thing is refused", 'r"\\blast (?:item|post)\\b|', 'r"\\blast \\w+\\b|'),
@@ -369,13 +370,14 @@ MUTANTS = [
 
 def _copy():
     """The whole scripts folder (every module a test imports, e.g. hub_digest) and its tests, in a temp folder."""
-    d = Path(tempfile.mkdtemp()) / "scripts"
+    d = Path(tempfile.mkdtemp(prefix=PREFIX + "mutant-")) / "scripts"
     shutil.copytree(SCRIPTS, d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
     return d
 
 
 def _run(d):
-    return subprocess.run([sys.executable, "-m", "unittest", *TESTS], cwd=d / "tests", capture_output=True, text=True, timeout=600)
+    return subprocess.run([sys.executable, "-m", "unittest", *TESTS], cwd=d / "tests", capture_output=True, text=True, timeout=600,
+                          env=run_env(d.parent))
 
 
 def main():
@@ -397,10 +399,15 @@ def main():
             rows.append((name, "PATTERN NOT FOUND", "-"))
             continue
         d = _copy()
-        (d / rel).write_text(src.replace(old, new, 1))
-        r = _run(d)
+        try:
+            (d / rel).write_text(src.replace(old, new, 1))
+            r = _run(d)
+        finally:
+            shutil.rmtree(d.parent, ignore_errors=True)
         m = re.search(r"FAILED \((.*)\)", r.stderr)
-        if "ImportError" in r.stderr or "ModuleNotFoundError" in r.stderr:
+        if disk_full(r):
+            rows.append((name, "INVALID (disk full)", "?"))
+        elif "ImportError" in r.stderr or "ModuleNotFoundError" in r.stderr:
             rows.append((name, "BROKEN (import error)", "?"))
         elif r.returncode == 0:
             rows.append((name, "SURVIVED (suite green)", "0"))
@@ -408,7 +415,6 @@ def main():
             n = sum(int(x) for x in re.findall(r"=(\d+)", m.group(1))) if m else "?"
             rows.append((name, "killed", str(n)))
             red += 1
-        shutil.rmtree(d.parent, ignore_errors=True)
     for name, verdict, n in rows:
         print(f"{verdict:24} red={n:>3}  {name}")
     print(f"\n{red} of {len(mutants)} mutants killed")

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tmpdirs import fresh_dir  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "openclaw_ask_install.sh"
 
@@ -33,7 +34,7 @@ FAKE_OPENCLAW = "#!/usr/bin/env bash\necho \"Hooks (1/1 ready)\"; echo \"hub-ask
 
 class Install(unittest.TestCase):
     def run_apply(self, wsl_text=FAKE_WSL):
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         bindir, home = Path(d, "bin"), Path(d, "home")
         bindir.mkdir()
         home.mkdir()

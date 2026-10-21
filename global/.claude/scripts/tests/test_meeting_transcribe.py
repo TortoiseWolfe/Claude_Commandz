@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from tmpdirs import fresh_dir  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MT = os.path.join(os.path.dirname(HERE), "meeting_transcribe")
@@ -106,7 +107,7 @@ class RunShRefusals(unittest.TestCase):
 class Smoke(unittest.TestCase):
     def test_two_track_end_to_end(self):
         home = os.path.expanduser("~")
-        work = tempfile.mkdtemp(prefix="mt-smoke-", dir=os.path.join(home, ".cache"))
+        work = fresh_dir(self, prefix="mt-smoke-", dir=os.path.join(home, ".cache"))
         try:
             script = (
                 "set -e; cd /w; "

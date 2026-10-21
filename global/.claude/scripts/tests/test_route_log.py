@@ -12,11 +12,12 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import route_log as rl  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 
 class RouteLog(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp()
+        self.d = fresh_dir(self)
         self.path = os.path.join(self.d, "sub/route-log.jsonl")
 
     def test_append_and_read_with_mode_600(self):

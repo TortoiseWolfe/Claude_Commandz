@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_pickup as pk  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 NOW = 1_800_000_000
 MENU = "open the newest porch model"
@@ -64,7 +65,7 @@ class FakeHost:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(fresh_dir(self))
         self.skp = self.tmp / "skp"
         for site, name in (("site-a", "m008b-outlines.skp"), ("site-b", "n008-archival.skp")):
             (self.skp / site).mkdir(parents=True)
@@ -297,7 +298,7 @@ class Intake(unittest.TestCase):
                 pk.validate(json.dumps(base | {"ts": bad}).encode())
 
     def test_a_writers_temp_file_is_skipped_silently_and_the_renamed_file_is_taken(self):
-        tmp = Path(tempfile.mkdtemp())
+        tmp = Path(fresh_dir(self))
         src, dest = tmp / "s", tmp / "d"
         src.mkdir(mode=0o770)
         os.chmod(src, 0o770)

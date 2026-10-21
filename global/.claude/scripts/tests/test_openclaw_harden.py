@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tmpdirs import fresh_dir  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "openclaw_harden.sh"
 
@@ -22,7 +23,7 @@ esac
 
 
 def patch_for(cfg, env=None, hook_installed=False):
-    d = Path(tempfile.mkdtemp())
+    d = Path(fresh_dir(None))
     (d / "bin").mkdir()
     f = d / "bin" / "openclaw"
     f.write_text(FAKE)
@@ -161,7 +162,7 @@ class VerifyGate(unittest.TestCase):
         providers = cfg.setdefault("models", {}).setdefault("providers", {})
         for m in chain:
             providers.setdefault(m.split("/", 1)[0], {})
-        d = Path(tempfile.mkdtemp())
+        d = Path(fresh_dir(self))
         (d / "bin").mkdir()
         f = d / "bin" / "openclaw"
         f.write_text(FAKE)

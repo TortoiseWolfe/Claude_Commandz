@@ -21,6 +21,7 @@ import state_guard  # noqa: E402,F401  first: no test of this suite (or of the m
 import openclaw_dispatch as dp  # noqa: E402
 import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 NOW = 1_800_000_000
 SHA = "a1b2c3d4" + "0" * 56
@@ -107,7 +108,7 @@ class Base(unittest.TestCase):
         return {"index_path": self.tmp / "index.tsv", "flag_path": self.tmp / "pass.flag", "results_log": self.tmp / "results.log"}
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(fresh_dir(self))
         live_state(self, self.tmp / "state")
         self.root = self.tmp / "repos"
         for name in ("own-app", "own-docker", "client-app", "foreign", "docs"):
@@ -1433,7 +1434,7 @@ class MainSessionOnly(Base):
         output from such a folder, so the answer to a typed "lanes" never reached the chat. A fake wsl.exe does the same."""
         import subprocess
         import textwrap
-        d = Path(tempfile.mkdtemp())
+        d = Path(fresh_dir(self))
         (d / "bin").mkdir()
         fake = d / "bin" / "wsl.exe"
         fake.write_text("#!/usr/bin/env bash\npwd -P >/dev/null 2>&1 || exit 1\ncat >/dev/null\necho '{\"ok\": true}'\n")
@@ -1494,7 +1495,7 @@ class MainSessionOnly(Base):
 
     def test_the_test_state_file_needs_the_test_flag_and_stays_outside_the_live_folder(self):
         live = dp.STATE / "openclaw-dispatch.json"
-        tmp = Path(tempfile.mkdtemp()) / "s.json"
+        tmp = Path(fresh_dir(self)) / "s.json"
         self.env(AFA_OC_TEST=None, AFA_OC_STATE_FILE=str(tmp))
         self.assertEqual(dp.state_file(), live)
         self.env(AFA_OC_TEST="1")
@@ -1639,11 +1640,11 @@ class TheHostBudget(unittest.TestCase):
 
     def test_the_budget_carries_used_and_the_reset_the_report_names(self):
         calls = []
-        b = self.host(self.REPORT, calls).week_budget(Path(tempfile.mkdtemp()) / "p.json", NOW)
+        b = self.host(self.REPORT, calls).week_budget(Path(fresh_dir(self)) / "p.json", NOW)
         self.assertEqual(b, {"projected": 106.5, "used": 83.97, "reset": ET(2026, 10, 21, 12)})
 
     def test_a_cache_from_before_the_reset_is_not_trusted_after_it(self):
-        tmp, calls = Path(tempfile.mkdtemp()) / "p.json", []
+        tmp, calls = Path(fresh_dir(self)) / "p.json", []
         host = self.host(self.REPORT, calls)
         before = ET(2026, 10, 21, 11, 50)
         host.week_budget(tmp, before)
@@ -1653,7 +1654,7 @@ class TheHostBudget(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_an_old_cache_without_used_is_a_miss(self):
-        tmp, calls = Path(tempfile.mkdtemp()) / "p.json", []
+        tmp, calls = Path(fresh_dir(self)) / "p.json", []
         tmp.write_text(json.dumps({"at": NOW, "pct": 50}))
         self.host(self.REPORT, calls).week_budget(tmp, NOW + 10)
         self.assertEqual(len(calls), 1)
@@ -1661,7 +1662,7 @@ class TheHostBudget(unittest.TestCase):
 
 class Projection(unittest.TestCase):
     def test_the_projection_is_cached_for_half_an_hour(self):
-        tmp = Path(tempfile.mkdtemp()) / "proj.json"
+        tmp = Path(fresh_dir(self)) / "proj.json"
         calls = []
         host = dp.LaneHost()
         host._run = lambda argv, timeout, cwd=None, stdin=None: calls.append(argv) or type("R", (), {"returncode": 0, "stdout": json.dumps({"projection": {"projected_pct": 61.5, "used_pct": 40.0}}), "stderr": ""})()
@@ -1674,7 +1675,7 @@ class Projection(unittest.TestCase):
     def test_a_failed_report_run_is_none(self):
         host = dp.LaneHost()
         host._run = lambda *a, **k: None
-        self.assertIsNone(host.projection_pct(Path(tempfile.mkdtemp()) / "p.json", NOW))
+        self.assertIsNone(host.projection_pct(Path(fresh_dir(self)) / "p.json", NOW))
 
 
 if __name__ == "__main__":

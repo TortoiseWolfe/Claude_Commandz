@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ledger_log  # noqa: E402
 import panel_review as pr  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 CLEAN = lambda diff: "clean"  # noqa: E731
 SPEC = "Add an owner greeting. Contact ops at ops@corp.io."
@@ -287,7 +288,7 @@ class PacerTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def test_defaults_when_no_file(self):
@@ -400,7 +401,7 @@ class ConfigTests(unittest.TestCase):
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.clock = FakeClock()
         self.net = FakeNet(self.clock)
@@ -825,7 +826,7 @@ class RealRunCmdTests(unittest.TestCase):
 
     def test_a_timeout_kills_the_whole_process_group_and_still_removes_the_dir(self):
         import time
-        pidfile = os.path.join(tempfile.mkdtemp(), "grandchild.pid")
+        pidfile = os.path.join(fresh_dir(self), "grandchild.pid")
         self.addCleanup(shutil.rmtree, os.path.dirname(pidfile), True)
         code = ("import os, subprocess, sys, time\n"
                 "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
@@ -1343,7 +1344,7 @@ class HardRuleTests(unittest.TestCase):
 
 class LedgerLogTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.path = os.path.join(self.tmp, "new", "ledger", "panel.jsonl")
 

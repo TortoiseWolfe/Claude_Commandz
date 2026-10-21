@@ -483,6 +483,10 @@ def outbox_view(path, now):
     return "\n".join(lines) + "\n"
 
 
+OUTBOX_WRITE = ('set -eu; f=$1; tmp=$(mktemp "$(dirname "$f")/.outbox.XXXXXX"); trap \'rm -f "$tmp"\' EXIT; '
+                'cat > "$tmp"; chmod 644 "$tmp"; mv "$tmp" "$f"; trap - EXIT; echo ok')
+
+
 def outbox_mirror(path, push, now):
     """Write OUTBOX.md when what the queue holds changed since the last write. push(text) -> True once written. Only the live
     queue is mirrored: a test queue never reaches the receptionist. -> "pushed" | "same" | "failed" | "not live"."""
@@ -876,16 +880,14 @@ class LaneHost:
         return outbox_mirror(getattr(self, "queue_path", None), self.push_outbox, self.clock())
 
     def push_outbox(self, text):
-        """Write OUTBOX.md in OpenClaw's workspace (hub -> OpenClaw only, a temp file moved into place). -> True once written."""
-        script = ('set -eu\nf=%s\ntmp=$(mktemp "$(dirname "$f")/.outbox.XXXXXX")\ntrap \'rm -f "$tmp"\' EXIT\n'
-                  "cat > \"$tmp\" <<'__OCOUTBOX_EOF__'\n%s__OCOUTBOX_EOF__\nchmod 644 \"$tmp\"\nmv \"$tmp\" \"$f\"\necho ok\n" %
-                  (shlex.quote(OUTBOX_FILE), text.replace("__OCOUTBOX_EOF__", "")))
+        """Write OUTBOX.md in OpenClaw's workspace (hub -> OpenClaw only, a temp file moved into place). -> True once written.
+        A fixed command; the text travels on stdin and is never part of any shell text."""
+        argv = ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--", "bash", "-c", OUTBOX_WRITE, "_", OUTBOX_FILE]
         try:
-            r = subprocess.run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--", "bash", "-s"], input=script,
-                               capture_output=True, text=True, timeout=30)
+            r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
             return False
-        return r.returncode == 0 and "ok" in r.stdout
+        return r.returncode == 0 and r.stdout.strip() == "ok"
 
     def inject_now(self, text):
         """Post a note into Main session (gateway chat.inject): no agent run, no channel delivery. Only that session, or in a live test

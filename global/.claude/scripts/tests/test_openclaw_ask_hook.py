@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 HANDLER = HERE.parent / "openclaw_ask_hook" / "handler.js"
 sys.path.insert(0, str(HERE.parent))
 import openclaw_pickup as pk  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 DRIVER = """
 const m = await import(process.argv[1]);
@@ -29,7 +30,7 @@ OK = {"type": "message", "action": "received", SESSION_FIELD: "agent:main:dashbo
 @unittest.skipUnless(shutil.which("node"), "node not installed")
 class Hook(unittest.TestCase):
     def run_events(self, events, drop=None):
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         drop = drop or os.path.join(d, "drop")
         os.makedirs(drop, exist_ok=True)
         env = dict(os.environ, HUBASK_DROP=drop)
@@ -94,7 +95,7 @@ class Hook(unittest.TestCase):
         e[SESSION_FIELD] = "agent:main:discord:g1"
         e["context"]["channelId"] = "discord"
         e["context"]["content"] = "SECRET-TEXT-123"
-        d = tempfile.mkdtemp()
+        d = fresh_dir(self)
         r = subprocess.run(["node", "--input-type=module", "-e", DRIVER, str(HANDLER), json.dumps([e, {"type": "command"}])],
                            capture_output=True, text=True, env=dict(os.environ, HUBASK_DROP=d), timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)

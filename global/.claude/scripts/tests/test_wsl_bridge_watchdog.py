@@ -12,6 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import wsl_bridge_watchdog as wd  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 # /proc/buddyinfo copied from ~/.claude/state/wsl-bridge/2026-10-19-evidence.txt, 8:17 PM, 33 h up: cmd.exe timed out at 10 s.
 FAILING = """\
@@ -61,7 +62,7 @@ class Box:
 
 class Watchdog(unittest.TestCase):
     def setUp(self):
-        self.sd = tempfile.mkdtemp()
+        self.sd = fresh_dir(self)
         self.env = mock.patch.dict(os.environ, {"WSL_BRIDGE_STATE": self.sd})
         self.env.start()
         self.addCleanup(self.env.stop)

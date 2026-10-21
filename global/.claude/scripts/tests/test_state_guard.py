@@ -13,6 +13,7 @@ import state_guard  # noqa: E402
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 import test_openclaw_dispatch as td  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 
 class Guard(unittest.TestCase):
@@ -28,7 +29,9 @@ class Guard(unittest.TestCase):
         try:
             self.refused(lambda: open(probe, "a").close())
             self.refused(lambda: Path(probe).write_text("x"))
-            self.refused(lambda: os.replace(tempfile.mkstemp()[1], probe))
+            src = os.path.join(fresh_dir(self), "src")
+            open(src, "w").close()
+            self.refused(lambda: os.replace(src, probe))
             self.refused(lambda: os.remove(probe))
         finally:
             if os.path.exists(probe):  # only if the guard failed; never left behind

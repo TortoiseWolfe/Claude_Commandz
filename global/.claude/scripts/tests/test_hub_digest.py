@@ -15,6 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import hub_digest as hd  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 NOW = datetime(2026, 10, 16, 21, 0)
 
@@ -211,7 +212,7 @@ class Scrub(unittest.TestCase):
 
 class Page(unittest.TestCase):
     def build(self, **kw):
-        args = dict(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=tempfile.mkdtemp(), inbox_text=INBOX,
+        args = dict(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX,
                     git_log="abc1234 16 10:00 Merge a thing\ndef5678 16 09:00 Another", tidy_text=TIDY,
                     budget="Week resets Wed: used 1%", now=NOW)
         args.update(kw)

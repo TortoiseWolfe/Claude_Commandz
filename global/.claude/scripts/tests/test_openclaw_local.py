@@ -8,6 +8,7 @@ import json
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from tmpdirs import fresh_dir  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parent.parent / "openclaw_local.py"
 spec = importlib.util.spec_from_file_location("openclaw_local", SCRIPT)
@@ -114,7 +115,7 @@ class Rules(unittest.TestCase):
 class Workspace(unittest.TestCase):
     def test_reminder_goes_only_into_the_test_agents_copy(self):
         import tempfile, os
-        st = tempfile.mkdtemp()
+        st = fresh_dir(self)
         os.makedirs(os.path.join(st, "workspace"))
         main_agents = os.path.join(st, "workspace", "MEMORY.md")
         Path(main_agents).write_text("rules\n")

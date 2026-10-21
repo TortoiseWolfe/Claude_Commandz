@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "session_prime_facts.py"
 sys.path.insert(0, str(HERE.parent))
 import session_prime_facts as sp  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 BODY = """**Purpose:** roadmap.
 
@@ -428,7 +429,7 @@ class UnattendedGuard(unittest.TestCase):
         return ap, ap.parse_args(list(argv))
 
     def test_the_usual_post_flags_pass_from_the_hand_folder(self):
-        hand = tempfile.mkdtemp()
+        hand = fresh_dir(self)
         for name in ("arc.md", "n3.md"):
             Path(hand, name).write_text("x")
         os.environ["AFA_LANE_HAND"] = hand
@@ -449,8 +450,8 @@ class UnattendedGuard(unittest.TestCase):
                     sp.unattended_guard(ap, a)
 
     def test_text_to_post_must_come_from_the_hand_folder(self):
-        hand = tempfile.mkdtemp()
-        outside = tempfile.mkdtemp()
+        hand = fresh_dir(self)
+        outside = fresh_dir(self)
         Path(outside, "arc.md").write_text("x")
         os.environ["AFA_LANE_HAND"] = hand
         try:

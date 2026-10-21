@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import codex_review as cr  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 CLEAN = lambda text: "clean"  # noqa: E731
 PLAN = "GOAL: add a README section\n1. write section\n   accept: grep -q Usage README.md\n"
@@ -43,7 +44,7 @@ class Runner:
 
 class CodexTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
         self.plan = os.path.join(self.tmp, "plan.md")
         Path(self.plan).write_text(PLAN)
