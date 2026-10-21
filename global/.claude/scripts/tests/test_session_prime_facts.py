@@ -422,7 +422,7 @@ class UnattendedGuard(unittest.TestCase):
     def parse(self, *argv):
         import argparse
         ap = argparse.ArgumentParser()
-        for flag, default in (("--repo", None), ("--dir", os.getcwd()), ("--machine", None), ("--lanes-dir", "L"), ("--inbox", "I"),
+        for flag, default in (("--repo", None), ("--dir", os.getcwd()), ("--machine", None), ("--lanes-dir", "L"), ("--inbox", "I"), ("--inbox-archive", "IA"),
                               ("--state-dir", "S"), ("--drift-hook", "H"), ("--now", None), ("--arc", None), ("--next3", None),
                               ("--next-should", None), ("--note", None)):
             ap.add_argument(flag, default=default)
@@ -442,7 +442,7 @@ class UnattendedGuard(unittest.TestCase):
             os.environ.pop("AFA_LANE_HAND")
 
     def test_the_hook_and_the_other_aimed_flags_are_refused(self):
-        for argv in (("--drift-hook", "/tmp/x.sh"), ("--state-dir", "/tmp/s"), ("--lanes-dir", "/tmp"), ("--inbox", "/etc/passwd"),
+        for argv in (("--drift-hook", "/tmp/x.sh"), ("--state-dir", "/tmp/s"), ("--lanes-dir", "/tmp"), ("--inbox", "/etc/passwd"), ("--inbox-archive", "/etc"),
                      ("--repo", "other/repo"), ("--machine", "NX-01"), ("--now", "2026-01-01T00:00:00")):
             with self.subTest(argv=argv):
                 ap, a = self.parse(*argv)

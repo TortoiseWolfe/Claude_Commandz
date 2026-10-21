@@ -21,7 +21,7 @@ expect_eq() {
   printf 'PASS: %s\n' "$name"
 }
 
-expected='- [ ] 2026-10-13 17:20 | Weekly transcript: fetch "Weekly Notes Oct 13" from YouTube | for the ~/repos director: run lane notes-transcript-2026-10-13 | weekly-notes-2026-10-13'
+expected='- [ ] 2026-10-13 17:20 | Job: Weekly transcript: fetch "Weekly Notes Oct 13" from YouTube | for the ~/repos director: run lane notes-transcript-2026-10-13 | weekly-notes-2026-10-13'
 actual=$(HOME="$HOME_TEST" WEEKLY_TRANSCRIPTS_TSV="$CONFIG" MUSE_INBOX="$INBOX" \
   "$SCRIPT" --weekly-dry-run '2026-10-13' '17:20')
 expect_eq 'due Tuesday after the configured time' "$expected" "$actual"

@@ -6,7 +6,7 @@
 Every tray message of his (the intake folder) must end in one of three places:
   (a) delivered into a live lane (a "reply X | sent" line: the send is only called sent once his words are in the lane's transcript)
   (b) a lane started or restarted carrying his words (started, restarted as, a pass that a lane claimed)
-  (c) on the hub's list: an ask the hub holds open, or one the hub answered itself, or a muse-inbox line
+  (c) on the hub's list: an ask the hub holds open, or one the hub answered itself, or a hub-inbox line
 The receptionist answering a plain chat message itself, a menu verb it carried out (lanes, stop, close) and a question it asked him
 back (which lane did he mean) also count as delivered. Anything else is undelivered: a refusal, "nothing run", a reply meant for a lane
 that a question lane answered instead, an answer that says it could not forward him, a pass whose lanes all failed with no answer, or
@@ -114,7 +114,7 @@ def judge_line(line, m, asks, state, now, inbox_text):
             whys = [_with_lanes(judge_ask(a, now), a, state) for a in found]
             return None if None in whys else whys[0]
         if kind == "hub" and m["id"] in inbox_text:
-            return None  # a muse-inbox line (a "hub:" message or a stale typed ask)
+            return None  # a hub-inbox line (a "hub:" message or a stale typed ask)
         return "the line says the hub has it, but no ask or inbox line holds it"
     parts = line.split(" | ")
     return (" | ".join(parts[1:3]) if len(parts) > 2 else line)[:160]

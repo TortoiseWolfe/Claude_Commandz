@@ -31,7 +31,7 @@ ok 'the timestamp-as-ID line is not NEW' 0 "$(printf '%s\n' "$out" | grep -c '17
 ok 'the drop is logged' 1 "$(grep -c 'client check: dropped malformed line.*1792119952000' "$ST/muse-poll.log")"
 
 rec() { MUSE_STATE=$ST bash "$HERE/muse_poll_record.sh" "$@"; }
-: >"$ST/muse-inbox.md"
+: >"$ST/hub-inbox.md"
 if rec client-seen "1792119952000" 2>/dev/null; then ok 'client-seen refuses a 13-digit timestamp' refused accepted; fi
 ok 'client-seen refuses a 13-digit timestamp' 0 "$(grep -c 1792119952000 "$ST/client-mail-seen.txt" 2>/dev/null || true)"
 rec client-seen "1a14c8be4df08299" && ok 'client-seen takes a 16-hex ID' 1 "$(grep -c 1a14c8be4df08299 "$ST/client-mail-seen.txt")"

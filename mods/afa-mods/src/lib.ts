@@ -2,7 +2,7 @@
 
 export type Band = { lanes: number; inbox: number; client: number }
 
-// Open lines (- [ ]) in muse-inbox.md. Client mail and client alerts are
+// Open lines (- [ ]) in hub-inbox.md. Client mail and client alerts are
 // counted apart from the rest so a line never shows twice.
 export function countInbox(md: string): { inbox: number; client: number } {
   let inbox = 0
