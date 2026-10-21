@@ -1,0 +1,13 @@
+diff --git a/util.py b/util.py
+--- a/util.py
++++ b/util.py
+@@ -1 +1,9 @@
+ import os
++
++
++def last_n(items, n):
++    return items[len(items) - n + 1:]
++
++
++def print_report(path):
++    os.system("echo report for " + path)

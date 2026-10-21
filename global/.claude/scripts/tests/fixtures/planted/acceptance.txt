@@ -1,0 +1,3 @@
+- last_n([1,2,3,4], 2) returns [3, 4]
+- last_n of n larger than the list returns the whole list
+- print_report is safe for any file name

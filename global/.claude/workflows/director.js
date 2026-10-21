@@ -513,6 +513,11 @@ You may only use Read, Grep and Glob.`,
       { label: `review:${it.id}`, phase: 'Review', agentType: 'reviewer-senior', fallbackAgentType: 'general-purpose', model: 'opus', effort: 'high', schema: VERDICT_SCHEMA })
     reviewRounds++
     if (firstReviewPass === null) { firstReviewPass = !!lastVerdict && lastVerdict.verdict === 'pass'; jevAtFirstReview = lastCheck.jev; panelAtFirstReview = lastCheck.panel }
+    // Score the panel against Opus's first verdict (the shadow counter behind "15 clean changes, then live"). Advisory: a failure here changes nothing.
+    if (firstReviewPass !== null && lastCheck.panel && lastVerdict && panelClass !== 'client') {
+      const panelLog = lastCheck.reviewDiff.replace(/-review\.diff$/, '-panel.log')
+      await sh(`python3 ~/.claude/scripts/panel_scoreboard.py add --repo '${name.replace(/'/g, '')}' --ref '${it.id.replace(/'/g, '')}' --class ${panelClass} --panel-json '${panelLog}' --claude-verdict ${lastVerdict.verdict} --claude-blocking ${(lastVerdict.blocking || []).length} --note director; echo "__RC_SCOREBOARD=$?__"`, `scoreboard:${it.id}`, 'Review')
+    }
     if (lastVerdict && lastVerdict.verdict === 'pass') {
       return { id: it.id, status: 'ready', branch: `wf/${it.id}`, worktree: wt, head: lastCheck.head, startTier: it.tier, tier, escalated, workerRounds, reviewRounds, firstCheckPass, firstReviewPass, jevAtFirstReview, panelAtFirstReview, notes: lastVerdict.notes || '' }
     }
