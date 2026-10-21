@@ -322,7 +322,7 @@ def parse_roadmap(body):
     i, n = 0, len(lines)
     while i < n:
         line = lines[i]
-        m = re.match(r"<summary><b>(Arc \d+[^<]*)</b>(.*?)\((\d+) open, (\d+) done\)</summary>", line)
+        m = re.match(r"(?:<details[^>]*>)?<summary><b>(Arc \d+[^<]*)</b>(.*?)\((\d+) open, (\d+) done\)</summary>", line)  # <details> may share the line
         if m:
             arc = {"head": f"{m.group(1).strip()}{m.group(2).rstrip()}".strip(), "open": int(m.group(3)),
                    "done": int(m.group(4)), "items": []}
@@ -335,7 +335,7 @@ def parse_roadmap(body):
                 i += 1
             arcs.append(arc)
             continue
-        if re.match(r"<summary><b>Next 3 sessions</b>", line):
+        if re.match(r"(?:<details[^>]*>)?<summary><b>Next 3 sessions</b>", line):  # 21 Oct: the live block opens as <details><summary> on one line
             next3.append(re.sub(r"<[^>]+>", "", line))
             i += 1
             while i < n and lines[i].rstrip() != "</details>":

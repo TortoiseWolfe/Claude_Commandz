@@ -1,9 +1,10 @@
 """session_prime_facts.py: the facts, the field replacement, the stamp and the post guard.
-Fixtures are invented; `gh` is a fake on PATH and the git repo is a throwaway. Set SESSION_PRIME_REAL=1 to
-also run against the live hub (read-only: facts mode and an identity replacement on the real body)."""
+Fixtures are invented; `gh` is a fake on PATH and the git repo is a throwaway. Nothing here reads the live hub: the script checks
+the live roadmap body itself on every facts step (body_problems) and files an alert with the hub when it stops parsing."""
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -424,7 +425,7 @@ class UnattendedGuard(unittest.TestCase):
         ap = argparse.ArgumentParser()
         for flag, default in (("--repo", None), ("--dir", os.getcwd()), ("--machine", None), ("--lanes-dir", "L"), ("--inbox", "I"), ("--inbox-archive", "IA"),
                               ("--state-dir", "S"), ("--drift-hook", "H"), ("--now", None), ("--arc", None), ("--next3", None),
-                              ("--next-should", None), ("--note", None)):
+                              ("--next-should", None), ("--note", None), ("--alert-state", None)):
             ap.add_argument(flag, default=default)
         return ap, ap.parse_args(list(argv))
 
@@ -489,33 +490,76 @@ class UnattendedGuard(unittest.TestCase):
             os.environ.pop("AFA_LANE_UNATTENDED", None)
 
 
-# Reviewed 19 Oct 2026 (/code-review of the skip): until today this skip sat on UnattendedGuard above (3d1a881 put that class
-# between the decorator and this one), so the five hermetic guard tests never ran and these two live ones ran on every default
-# run. These two stay opt-in: they call the live gh and read the live roadmap body, so they need NX-01's login and network and
-# would fail on a fresh restore or the tower. Editing and Cli cover the same parsing hermetically. Run them by hand after changing
-# how the body is read or replaced: SESSION_PRIME_REAL=1 python3 -m pytest tests/test_session_prime_facts.py
-@unittest.skipUnless(os.environ.get("SESSION_PRIME_REAL"), "set SESSION_PRIME_REAL=1 to run against the live hub")
-class RealState(unittest.TestCase):
-    def test_facts_mode_on_the_live_hub(self):
-        r = subprocess.run([sys.executable, str(SCRIPT), "--dry-run", "--dir", str(Path.home() / "repos")],
-                           capture_output=True, text=True, timeout=120)
+class BodyIdentity(unittest.TestCase):
+    """The old env-gated RealState test replaced each field of the real body by itself and expected no change. The same on invented
+    bodies of the real shape (details blocks, and the older ### sections), so it runs on every machine."""
+
+    def spans(self, body):
+        lines = body.split("\n")
+        return lines, sp._details_span(lines, r"<summary><b>Arc 1\b"), sp._details_span(lines, r"<summary><b>Next 3 sessions"), \
+            sp._section_span(lines, r"###\s+Next session should\b")
+
+    def test_each_field_of_a_details_body_replaces_by_itself_unchanged(self):
+        lines, arc, n3, ns = self.spans(BODY)
+        self.assertEqual(sp.replace_field(BODY, "arc", "\n".join(lines[arc[0]:arc[1]])), BODY)
+        self.assertEqual(sp.replace_field(BODY, "next3", "\n".join(lines[n3[0]:n3[1]])), BODY)
+        self.assertEqual(sp.replace_field(BODY, "next-should", "\n".join(lines[ns[0] + 1:ns[1]]).strip("\n")), BODY)
+        self.assertEqual(sp.body_problems(BODY), [])
+
+    def test_each_field_of_a_section_body_replaces_by_itself_unchanged(self):
+        lines = SECTION_BODY.split("\n")
+        for field, rx in (("arc", r"###\s+Active arc\b"), ("next3", r"###\s+Next 3 sessions\b")):
+            s, e = sp._section_span(lines, rx)
+            # a ### block loses the blank line before its closing --- (replace_field strips the new text's edge newlines): same text
+            squeeze = lambda t: re.sub(r"\n{2,}", "\n", t)  # noqa: E731
+            self.assertEqual(squeeze(sp.replace_field(SECTION_BODY, field, "\n".join(lines[s:e]))), squeeze(SECTION_BODY), field)
+        s, e = sp._section_span(lines, r"###\s+Next session should\b")
+        self.assertEqual(sp.replace_field(SECTION_BODY, "next-should", "\n".join(lines[s + 1:e]).strip("\n")), SECTION_BODY)
+
+    def test_body_problems_names_what_is_missing(self):
+        for broken, word in ((BODY.replace("### Next session should", "### Next up"), "Next session should"),
+                             (BODY.replace("<summary><b>Arc 1", "<summary><b>Phase 1").replace("<summary><b>Arc 2", "<summary><b>Phase 2"), "Arc"),
+                             (BODY.replace("<summary><b>Next 3 sessions", "<summary><b>Coming"), "Next 3 sessions"),
+                             ("", "empty")):
+            probs = sp.body_problems(broken)
+            self.assertTrue(any(word in x for x in probs), (word, probs))
+
+
+class LiveBodyAlert(unittest.TestCase):
+    """The live half of the old RealState test: facts mode on the hub repo checks the body it just read. Uses Cli's fake gh and repo."""
+    setUp, tearDown, write_issue, run_cli = Cli.setUp, Cli.tearDown, Cli.write_issue, Cli.run_cli
+
+    def alert_args(self):
+        return ["--alert-state", str(Path(self.tmp.name) / "astate" / "openclaw-dispatch.json")]
+
+    def test_facts_mode_prints_the_headline_the_drift_line_and_the_facts_marker(self):
+        r = self.run_cli("--dry-run", *self.alert_args(), repo=sp.HUB_REPO)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("session-prime facts for TortoiseWolfe/workspace#1", r.stdout)
+        self.assertIn("session-prime facts for %s#7" % sp.HUB_REPO, r.stdout)
         self.assertIn("drift:", r.stdout)
         self.assertIn("--- facts for the comment ---", r.stdout)
+        self.assertFalse((Path(self.tmp.name) / "astate").exists())  # a body that parses files nothing
 
-    def test_identity_replacement_on_the_live_body(self):
-        body = subprocess.run(["gh", "issue", "view", "1", "-R", sp.HUB_REPO, "--json", "body", "-q", ".body"],
-                              capture_output=True, text=True, timeout=60).stdout
-        self.assertGreater(len(body), 10000)
-        lines = body.split("\n")
-        s, e = sp._details_span(lines, r"<summary><b>Arc 1\b")
-        self.assertEqual(sp.replace_field(body, "arc", "\n".join(lines[s:e])), body)
-        s, e = sp._details_span(lines, r"<summary><b>Next 3 sessions")
-        self.assertEqual(sp.replace_field(body, "next3", "\n".join(lines[s:e])), body)
-        s, e = sp._section_span(lines, r"###\s+Next session should\b")
-        text = "\n".join(lines[s + 1:e]).strip("\n")
-        self.assertEqual(sp.replace_field(body, "next-should", text), body)
+    def test_a_hub_body_that_no_longer_parses_fails_loudly_and_wakes_the_hub_once(self):
+        self.write_issue("2026-10-16T20:30:00Z", body=BODY.replace("### Next session should", "### Next up"))
+        r = self.run_cli("--dry-run", *self.alert_args(), repo=sp.HUB_REPO)
+        self.assertEqual(r.returncode, 7)
+        self.assertIn("--- facts for the comment ---", r.stdout)  # the facts still print
+        self.assertIn("no longer parses", r.stderr)
+        self.assertIn("Next session should", r.stderr)
+        astate = Path(self.tmp.name) / "astate"
+        inbox = (astate / "hub-inbox.md").read_text()
+        self.assertEqual(inbox.count("- [ ] "), 1)
+        self.assertIn("ALERT from session_prime_facts.py", inbox)
+        self.assertTrue((astate / "openclaw-ask.wake").exists())
+        self.assertEqual(self.run_cli("--dry-run", *self.alert_args(), repo=sp.HUB_REPO).returncode, 7)
+        self.assertEqual((astate / "hub-inbox.md").read_text().count("- [ ] "), 1)  # one alert a day
+
+    def test_another_repo_is_not_checked(self):
+        self.write_issue("2026-10-16T20:30:00Z", body="a body with no roadmap shape")
+        r = self.run_cli("--dry-run", *self.alert_args(), repo="o/other")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((Path(self.tmp.name) / "astate").exists())
 
 
 if __name__ == "__main__":

@@ -1,13 +1,11 @@
 """hub_digest.py: the hub's status page stays small and private, and carries what /prep needs.
-Fixtures are invented. Set HUB_DIGEST_REAL=1 to also run the page against this machine's live state
-(the gh call, lane.sh, the real inbox, the real roadmap)."""
+Fixtures are invented; nothing here reads this machine's live state (hub_digest.py checks that itself on every live build)."""
 
 import os
 import re
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -329,30 +327,93 @@ class Decode(unittest.TestCase):
         self.assertTrue(out.startswith("lane ") and out.endswith(" ok"), out)
 
 
-# Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in, so a default run reports 1 skip and is not
-# a clean pass. It runs hub_digest.py against this machine's live gh call, lane.sh, inbox and roadmap, so it needs
-# NX-01's state and network and would fail on a fresh restore or the tower. Every behaviour it checks (sections,
-# size cap, 0600 mode, secret scrubbing) is covered hermetically by Cli and the section tests above. Run it by hand
-# after changing how the digest reads live state: HUB_DIGEST_REAL=1 python3 -m pytest tests/test_hub_digest.py
-@unittest.skipUnless(os.environ.get("HUB_DIGEST_REAL"), "set HUB_DIGEST_REAL=1 to run against the live state")
-class RealState(unittest.TestCase):
-    def test_live_page_is_small_complete_and_clean(self):
+class LiveState(unittest.TestCase):
+    """The old env-gated RealState test ran the digest against the real roadmap and skipped everywhere else. Its asserts now run twice:
+    on invented text of the real shape here (every machine, every run), and on the live text inside hub_digest.py itself, which fails
+    loudly and files an alert with the hub when the live roadmap stops parsing."""
+
+    def page(self, body=ROADMAP):
+        return hd.render(hd.build_sections(roadmap_body=body, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX,
+                                           git_log="abc1234 16 10:00 Merge a thing", tidy_text=TIDY,
+                                           budget="Week resets Wed: used 1%", now=NOW), NOW, "NX-01", hd.CAP_DEFAULT)
+
+    def test_a_page_from_roadmap_shaped_text_is_small_complete_and_clean(self):
+        page = self.page()
+        self.assertLess(len(page.encode()), 6144)
+        for h in hd.PAGE_HEADINGS:
+            self.assertIn(h, page)
+        self.assertIn("Next session should:", page)
+        self.assertNotIn("roadmap unavailable", page)
+        for rx in hd.SECRETS:
+            self.assertIsNone(rx.search(page), rx.pattern)
+        self.assertEqual(hd.live_problems(ROADMAP, page), [])
+
+    def test_live_problems_names_each_way_the_roadmap_can_stop_parsing(self):
+        cases = {
+            "": "empty",
+            ROADMAP.replace("### Next session should", "### Next up"): "Next session should",
+            ROADMAP.replace("<summary><b>Arc 1", "<summary><b>Phase 1"): "Arc summary",
+            ROADMAP.replace("<summary><b>Next 3 sessions</b>", "<summary><b>Coming sessions</b>"): "Next 3 sessions",
+        }
+        for body, word in cases.items():
+            probs = hd.live_problems(body, self.page(body))
+            self.assertTrue(any(word in x for x in probs), (word, probs))
+
+    def test_live_problems_catches_an_oversized_page_and_a_missing_section(self):
+        page = self.page()
+        self.assertTrue(any("over the" in x for x in hd.live_problems(ROADMAP, page + "x" * 7000)))
+        self.assertTrue(any("## Tidy report" in x for x in hd.live_problems(ROADMAP, page.replace("## Tidy report", "## Tidy"))))
+
+
+class LiveAlert(unittest.TestCase):
+    def run_digest(self, d, roadmap, *extra):
+        (d / "roadmap.md").write_text(roadmap)
+        for name, text in (("lanes.txt", LANE_STATUS), ("inbox.md", INBOX), ("tidy.txt", TIDY), ("budget.txt", "Week resets Wed: used 1%\n")):
+            (d / name).write_text(text)
+        (d / "lanes").mkdir(exist_ok=True)
+        return subprocess.run([sys.executable, str(HERE.parent / "hub_digest.py"), "--out", str(d / "out" / "hub-digest.md"),
+                               "--roadmap-file", str(d / "roadmap.md"), "--lane-status-file", str(d / "lanes.txt"),
+                               "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"), "--budget-file", str(d / "budget.txt"),
+                               "--lanes-dir", str(d / "lanes"), "--git-repo", str(d), "--open-questions-file", str(d / "nq.txt"),
+                               "--alert-state", str(d / "state" / "openclaw-dispatch.json"), "--now", "2026-10-16T21:00:00", *extra],
+                              capture_output=True, text=True)
+
+    def test_a_broken_roadmap_fails_loudly_keeps_the_previous_page_and_wakes_the_hub_once(self):
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "page.md"
-            t0 = time.time()
-            r = subprocess.run([sys.executable, str(HERE.parent / "hub_digest.py"), "--out", str(out)],
-                               capture_output=True, text=True, timeout=120)
+            d = Path(d)
+            (d / "nq.txt").write_text("none\n")
+            good = self.run_digest(d, ROADMAP, "--strict")
+            self.assertEqual(good.returncode, 0, good.stderr)
+            before = (d / "out" / "hub-digest.md").read_text()
+            self.assertFalse((d / "state" / "hub-inbox.md").exists())
+
+            broken = ROADMAP.replace("### Next session should", "### Next up")
+            bad = self.run_digest(d, broken, "--strict")
+            self.assertEqual(bad.returncode, 3, bad.stderr)
+            self.assertIn("the live state does not parse", bad.stderr)
+            self.assertIn("Next session should", bad.stderr)
+            self.assertEqual((d / "out" / "hub-digest.md").read_text(), before)  # the previous page stays
+            inbox = (d / "state" / "hub-inbox.md").read_text()
+            self.assertEqual(inbox.count("- [ ] "), 1)
+            self.assertIn("ALERT from hub_digest.py", inbox)
+            self.assertTrue((d / "state" / "openclaw-ask.wake").exists())  # what lane_watch.sh wakes the hub on
+            self.assertIn("oc-", (d / "state" / "openclaw-dispatch.json").read_text())
+
+            again = self.run_digest(d, broken, "--strict")  # the next 15-minute run
+            self.assertEqual(again.returncode, 3)
+            self.assertEqual((d / "state" / "hub-inbox.md").read_text().count("- [ ] "), 1)  # one alert a day, not one a run
+
+    def test_a_hermetic_build_is_not_checked_unless_asked(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "nq.txt").write_text("none\n")
+            r = self.run_digest(d, "no roadmap shape here at all")
             self.assertEqual(r.returncode, 0, r.stderr)
-            page = out.read_text()
-            self.assertLess(len(page.encode()), 6144, len(page.encode()))
-            for h in ["## Lanes running", "## Open hub-inbox items", "## Roadmap", "## Budget this week",
-                      "## ~/repos, last 10 commits", "## Tidy report"]:
-                self.assertIn(h, page)
-            self.assertIn("Next session should:", page)
-            self.assertNotIn("roadmap unavailable", page)
-            for rx in hd.SECRETS:
-                self.assertIsNone(rx.search(page), rx.pattern)
-            self.assertLess(time.time() - t0, 90)
+            self.assertFalse((d / "state").exists())
+
+    def test_the_refresh_script_keeps_the_digests_stderr(self):
+        line = next(x for x in (HERE.parent / "openclaw_status_refresh.sh").read_text().splitlines() if x.startswith("timeout") and "hub_digest.py" in x)
+        self.assertNotIn("2>/dev/null", line)
 
 
 if __name__ == "__main__":

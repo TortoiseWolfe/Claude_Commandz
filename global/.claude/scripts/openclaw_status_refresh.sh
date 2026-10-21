@@ -32,7 +32,9 @@ timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "opencla
 
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
-timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" 2>/dev/null || echo "openclaw_status_refresh: hub-digest build failed" >&2
+# A live state that no longer parses (the roadmap text changed shape) makes the digest builder exit 3 with the reason on stderr (kept, not
+# discarded) and put an alert on the hub's list, which wakes the hub; the previous page stays.
+timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
 
 # Every lane's new or changed report.md goes into his chat here, so a result reaches him with no hub session open (this task is
 # the safety net; lane_watch.sh does the same the moment a report lands). One post per report version; the first run only records.
