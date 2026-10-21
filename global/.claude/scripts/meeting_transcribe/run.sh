@@ -3,6 +3,8 @@
 #   run.sh INPUT --client NAME --title SLUG [--speakers "A,B"] [--model M] [--language L]
 #   run.sh --download-model NAME     (the ONLY mode with network access)
 # MEETINGS_ROOT overrides ~/meetings (used by tests; same refusals apply).
+# DOCKER_HEAVY=<path to docker-heavy.sh> sends every docker build/run through it (one heavy job at a time, memory/CPU caps,
+# timeout); smoke.sh sets it. DOCKER_HEAVY_ARGS (e.g. "--timeout 900") is passed to it.
 set -euo pipefail
 umask 077
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,8 +14,18 @@ ROOT="${MEETINGS_ROOT:-$HOME/meetings}"
 
 die() { echo "run.sh: $*" >&2; exit 1; }
 
+# docker, through docker-heavy.sh for the jobs that are heavy (build, run) when DOCKER_HEAVY is set
+dk() {
+  if [ -n "${DOCKER_HEAVY:-}" ] && { [ "$1" = build ] || [ "$1" = run ]; }; then
+    # shellcheck disable=SC2086  # DOCKER_HEAVY_ARGS is a word list
+    "$DOCKER_HEAVY" ${DOCKER_HEAVY_ARGS:-} -- docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
 ensure_image() {
-  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" "$HERE" >&2
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || dk build -t "$IMAGE" "$HERE" >&2
 }
 
 # Refuse a path under ~/repos or inside any git work tree.
@@ -33,7 +45,7 @@ if [ "${1:-}" = "--download-model" ]; then
   [ -n "${2:-}" ] || die "--download-model needs a model name"
   ensure_image
   docker volume create "$VOLUME" >/dev/null
-  docker run --rm --gpus all -e HF_HOME=/models -v "$VOLUME":/models \
+  dk run --rm --gpus all -e HF_HOME=/models -v "$VOLUME":/models \
     --entrypoint python3 "$IMAGE" -c \
     'import sys; from faster_whisper.utils import download_model as d; print(d(sys.argv[1]))' "$2"
   exit 0
@@ -64,7 +76,7 @@ ensure_image
 IN_DIR="$(dirname "$(realpath "$INPUT")")"
 IN_BASE="$(basename "$INPUT")"
 
-docker run --rm --gpus all --network none \
+dk run --rm --gpus all --network none \
   --user "$(id -u):$(id -g)" -e HF_HUB_OFFLINE=1 \
   -v "$IN_DIR":/input:ro -v "$OUT":/out -v "$VOLUME":/models:ro \
   "$IMAGE" "/input/$IN_BASE" --out /out --speakers "$SPEAKERS" \

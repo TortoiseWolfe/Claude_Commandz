@@ -1,13 +1,10 @@
-"""Tests for meeting_transcribe. Unit tests need no GPU or Docker; the smoke
-test (set MEETING_SMOKE=1) runs the real container end to end."""
-import glob
+"""Tests for meeting_transcribe. These need no GPU or Docker. The end-to-end smoke test is smoke_meeting_transcribe.py, run by
+run_meeting_smoke.sh; test_meeting_smoke_stamp.py fails this suite whenever the transcriber changed since the smoke last passed."""
 import importlib.util
 import os
-import shutil
 import subprocess
 import tempfile
 import unittest
-from tmpdirs import fresh_dir  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MT = os.path.join(os.path.dirname(HERE), "meeting_transcribe")
@@ -99,47 +96,28 @@ class RunShRefusals(unittest.TestCase):
         r = subprocess.run([RUN, "--download-model"], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
 
-
-# Reviewed 19 Oct 2026 (/code-review of the skip): this stays opt-in. It pulls a Debian image, downloads a whisper model and runs a
-# full transcription in Docker, which is heavy batch work on the one shared engine (it belongs behind docker-heavy.sh, not in every
-# suite run). Its transcript goes to a throwaway MEETINGS_ROOT under ~/.cache, never ~/meetings. The argument and path checks above run every time. Run it by hand after changing
-# meeting_transcribe: MEETING_SMOKE=1 python3 -m pytest tests/test_meeting_transcribe.py
-@unittest.skipUnless(os.environ.get("MEETING_SMOKE") == "1", "set MEETING_SMOKE=1")
-class Smoke(unittest.TestCase):
-    def test_two_track_end_to_end(self):
-        home = os.path.expanduser("~")
-        work = fresh_dir(self, prefix="mt-smoke-", dir=os.path.join(home, ".cache"))
-        root = fresh_dir(self, prefix="mt-smoke-out-", dir=os.path.join(home, ".cache"))
-        env = dict(os.environ, MEETINGS_ROOT=root)
-        try:
-            script = (
-                "set -e; cd /w; "
-                "espeak-ng -s 140 -w a.wav 'Let us review the budget for next quarter.'; "
-                "espeak-ng -s 140 -w b.wav 'I agree, we should hire two more engineers.'; "
-                "ffmpeg -v error -y -i a.wav -i b.wav -filter_complex "
-                "'[0:a]apad=pad_dur=12[x];[1:a]adelay=6000|6000[y]' "
-                "-map '[x]' -map '[y]' -c:a aac -ar 16000 t.mkv"
-            )
-            subprocess.run(["docker", "run", "--rm", "-v", work + ":/w", "debian:bookworm-slim",
-                            "bash", "-c", "apt-get update -qq >/dev/null && "
-                            "apt-get install -y -qq espeak-ng ffmpeg >/dev/null && " + script],
-                           check=True)
-            subprocess.run([RUN, "--download-model", os.environ.get("MEETING_SMOKE_MODEL", "small")], check=True)
-            r = subprocess.run([RUN, os.path.join(work, "t.mkv"), "--client", "test",
-                                "--title", "smoke", "--speakers", "Jon,Other", "--model", os.environ.get("MEETING_SMOKE_MODEL", "small")],
-                               capture_output=True, text=True, env=env)
-            print(r.stdout, r.stderr)
+    def test_docker_goes_through_docker_heavy_when_asked(self):
+        # run.sh builds and runs through DOCKER_HEAVY (docker-heavy.sh) when set, so the smoke is one capped, timed heavy job
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "log")
+            fake_docker = os.path.join(d, "bin", "docker")
+            os.makedirs(os.path.dirname(fake_docker))
+            with open(fake_docker, "w") as f:
+                f.write("#!/bin/sh\necho \"PLAIN $*\" >> %s\n" % log)
+            heavy = os.path.join(d, "heavy.sh")
+            with open(heavy, "w") as f:
+                f.write("#!/bin/sh\necho \"HEAVY $*\" >> %s\n" % log)
+            os.chmod(fake_docker, 0o755)
+            os.chmod(heavy, 0o755)
+            env = dict(os.environ, PATH=os.path.dirname(fake_docker) + ":" + os.environ["PATH"], DOCKER_HEAVY=heavy,
+                       DOCKER_HEAVY_ARGS="--timeout 7")
+            r = subprocess.run([RUN, "--download-model", "tiny"], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
-            out = glob.glob(os.path.join(root, "test", "*-smoke"))
-            self.assertEqual(len(out), 1, out)
-            md = open(os.path.join(out[0], "transcript.md")).read()
-            print(md)
-            low = md.lower()
-            self.assertLess(low.index("jon:"), low.index("other:"))
-            self.assertIn("budget", low)
-            self.assertIn("engineers", low)
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+            lines = open(log).read().splitlines()
+            heavy_lines = [ln for ln in lines if ln.startswith("HEAVY ")]
+            self.assertEqual(len(heavy_lines), 1, lines)
+            self.assertTrue(heavy_lines[0].startswith("HEAVY --timeout 7 -- docker run "), heavy_lines[0])
+            self.assertTrue(all(not ln.startswith("PLAIN run") and not ln.startswith("PLAIN build") for ln in lines), lines)
 
 
 if __name__ == "__main__":
