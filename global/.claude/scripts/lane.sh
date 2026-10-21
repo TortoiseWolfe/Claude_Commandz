@@ -55,19 +55,26 @@
 #                                       give a running lane a fresh context in its own window (his rule, 20 Oct: lanes never auto-compact):
 #                                       the lane writes handoff.md in its hand-off folder, then gets /clear, then a message to read
 #                                       prompt.md, then handoff.md, then carry on; a new index row follows its new session. A lane that
-#                                       never writes handoff.md is not cleared. lane_watch.sh runs this when a lane passes LANE_RECYCLE_K.
+#                                       never writes handoff.md is not cleared. The request goes to the lane at once, even mid-turn (a long turn would never end first): it
+#                                       finishes the step in hand and writes handoff.md as its next action. lane_watch.sh runs this when a
+#                                       lane passes its own recycle line.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
+#   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
+#                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
+#   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150, default by kind: see default_recycle_k)
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )
+#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; empty = default for its kind)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
 #
 # Effort and compaction (Claude lanes only, including --console, --headless and --resume):
-# every Claude lane gets --effort <level> and a --settings JSON with autoCompactWindow 200000 as a backstop (a lane is recycled with
-# --recycle at about 120K, so it should never reach it). Default effort by model: sonnet, opus and
+# every Claude lane gets --effort <level> and a --settings JSON with an autoCompactWindow as a backstop (a lane is recycled with
+# --recycle at its own line, so it should never reach it). The backstop follows the line: window_for gives min(200000, (line + 60K) / 0.84),
+# because Claude Code compacts at about 0.84 x the window, not at the window (measured on 265 real auto compactions in lanes started
+# with 200000: median 168K, lowest 165.5K). Default effort by model: sonnet, opus and
 # fable high, haiku no flag (it takes no effort setting). --effort <level> overrides
 # it (low, medium, high, xhigh, max); on --resume the level the lane started with is reused.
 # The level is recorded in column 10 of the index; --status shows it with the lane's context size.
@@ -128,12 +135,14 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] --resume <name>
   lane.sh [--dry-run] --recycle <name>
   lane.sh --ctx <name>
+  lane.sh --recycle-point <name>
+  (start and --resume also take --recycle-at <K>)
 
 Claude is the default engine. Codex and Copilot run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -143,7 +152,7 @@ and lines starting with # are ignored. Both list files must be regular readable 
 --headless is only for Claude with --console.
 --ask <oc-id> claims an OpenClaw ask for this lane (its result then reaches Jonathan's OpenClaw chat).
 Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
-they also compact in place at 200K tokens.
+they are recycled at their own line (--recycle-at <K>, default by kind of work) and compact in place only as a backstop above it.
 Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
 --connectors keeps connectors; --no-connectors disables them even when the name or prompt would enable them.
 A Claude lane whose prompt names data/sites/ or site-model (3D and photo-match work) runs only on fable or opus;
@@ -151,7 +160,7 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; recycle_at_opt=; recycle_at_set=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -164,6 +173,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--effort requires low, medium, high, xhigh, or max" >&2; exit 1; }
       effort_opt="$2"; shift 2 ;;
     --effort=*) effort_opt="${1#*=}"; shift ;;
+    --recycle-at)
+      [ $# -ge 2 ] || { echo "--recycle-at requires a number of K tokens (40 to 150)" >&2; exit 1; }
+      recycle_at_opt="$2"; recycle_at_set=1; shift 2 ;;
+    --recycle-at=*) recycle_at_opt="${1#*=}"; recycle_at_set=1; shift ;;
     --ask)
       [ $# -ge 2 ] || { echo "--ask requires an ask id (oc-xxxxxxxx)" >&2; exit 1; }
       ask_id="$2"; shift 2 ;;
@@ -178,6 +191,7 @@ while [ $# -gt 0 ]; do
     --send) mode=send; shift ;;
     --recycle) mode=recycle; shift ;;
     --ctx) mode=ctx; shift ;;
+    --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
@@ -194,6 +208,11 @@ case "$effort_opt" in
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
 esac
 
+if [ "$recycle_at_set" = 1 ]; then
+  [[ "$recycle_at_opt" =~ ^[0-9]+$ ]] && [ "$recycle_at_opt" -ge 40 ] && [ "$recycle_at_opt" -le 150 ] \
+    || { echo "--recycle-at needs a whole number of K tokens from 40 to 150 (Claude Code compacts at about 168K), got: $recycle_at_opt" >&2; exit 1; }
+  case "$mode" in start|resume) ;; *) echo "--recycle-at only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+fi
 [ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
 [ -z "$ask_id" ] || [ "$mode" = start ] || { echo "--ask only applies when starting a lane" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
@@ -219,15 +238,15 @@ find_session() {
 # Fill blank session ids in the index (column 8) where a transcript can be found.
 fill_ids() {
   [ -s "$INDEX" ] || return 0
-  local tmp claimed d n dir m b p r id st eff conn
+  local tmp claimed d n dir m b p r id st eff conn rk
   tmp="$(mktemp)"
   claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
-  while IFS="$TAB" read -r d n dir m b p r id st eff conn; do
+  while IFS="$TAB" read -r d n dir m b p r id st eff conn rk; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(find_session "$dir" "$st" "$claimed")"
       [ -n "$id" ] && claimed="$claimed $id"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" >>"$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:-}" >>"$tmp"
   done <"$INDEX"
   cat "$tmp" >"$INDEX"; rm -f "$tmp"
 }
@@ -394,15 +413,45 @@ lane_connectors() {  # <name> <prompt-file>
   else echo off; fi
 }
 
-# Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction at 200K,
+# The recycle line and the backstop, per lane (Jonathan, 21 Oct: "this assumes all lanes should be hard coded to the same context?").
+# Measured on 427 lane transcripts (lane-recycle report, 21 Oct): a median lane primes at 42-57K; one turn of a busy lane adds a median
+# 18-75K and a p90 of 100-130K tokens, so a line that waits for the turn to end is overrun; and Claude Code's autoCompactWindow W fires at
+# about 0.84 x W (265 real auto compactions, median 168K, lowest 165.5K), not at W. Hence: the line fires mid-turn, and the backstop sits
+# LANE_BACKSTOP_ROOM_K (60) above the line where the model's window allows. Kinds differ little in cost (flat 80-100K, plateau to 160K);
+# a cycle must give at least 50K of working room above its priming, which puts the ops default (primes at 57K) 10K higher.
+lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | code
+  local t; t="$(head -c 6000 -- "$1" 2>/dev/null | tr 'A-Z' 'a-z')$(tr 'A-Z' 'a-z' <<<"$2")"
+  if command grep -qE 'data/sites|site-model|sketchup|photogrammetry|blender' <<<"$t"; then echo 3d
+  elif [ "${3:--}" = on ] || command grep -qE 'gmail|inbox|email|absorb|\bmail\b' <<<"$t"; then echo mail
+  elif command grep -qE 'portainer|traefik|nextcloud|docker compose|deploy|watchdog|cron|systemd|\bops\b' <<<"$t"; then echo ops
+  else echo code; fi
+}
+default_recycle_k() {  # <kind> -> K tokens
+  case "$1" in
+    ops) echo 110 ;;
+    mail|code|3d) echo 100 ;;
+    *) echo 100 ;;
+  esac
+}
+lane_recycle_k() {  # <stored value or empty> <prompt-file> <dir> <connectors> -> K tokens
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then echo "$1"; else default_recycle_k "$(lane_kind "${2:-}" "${3:-}" "${4:--}")"; fi
+}
+window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (200000: the window of every tier a lane runs on)
+  local cap=${LANE_WINDOW_CAP:-200000} w
+  w=$(( ((${1:-100} + ${LANE_BACKSTOP_ROOM_K:-60}) * 100000 / 84 + 9999) / 10000 * 10000 ))
+  [ "$w" -le "$cap" ] || w=$cap
+  echo "$w"
+}
+
+# Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction backstop from window_for,
 # plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
 # The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
-claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name]
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K]
   local json p s r
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
-  json='{"autoCompactWindow":200000'
+  json='{"autoCompactWindow":'"$(window_for "${4:-100}")"
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
   json+=',"enabledPlugins":{'
@@ -540,7 +589,7 @@ if [ "$mode" = status ]; then
       pane_e="$(tmux capture-pane -e -p -t "$SESSION:$w" 2>/dev/null || true)"
       pane="$(strip_ansi <<<"$pane_e")"
       row="$(index_row "$w")"
-      IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"${row:-}"
+      IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"${row:-}"
       if [ -z "$row" ]; then
         rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
@@ -579,7 +628,7 @@ if [ "$mode" = status ]; then
   # Index lanes from the last 3 days with no window and no report.
   if [ -s "$INDEX" ]; then
     cutoff="$(date -d '3 days ago' +%F)"
-    while IFS="$TAB" read -r d n dir m b p rep id st eff conn; do
+    while IFS="$TAB" read -r d n dir m b p rep id st eff conn rk; do
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
@@ -596,7 +645,7 @@ send_to() {  # <name> <text...>
   text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
-    IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+    IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
       return 1
@@ -686,13 +735,23 @@ PY
 }
 if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
 
+# --recycle-point <name>: the lane's own recycle line in K tokens, as a bare number (lane_watch.sh reads it for each lane it watches).
+if [ "$mode" = point ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --recycle-point <name>" >&2; exit 1; }
+  row="$(index_row "$1")"
+  if [ -z "$row" ]; then default_recycle_k code; exit 0; fi
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  lane_recycle_k "${rk:-}" "${p:-}" "${dir:-}" "${conn:--}"
+  exit 0
+fi
+
 # --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
 if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
   case "${b:-subscription}" in codex|copilot) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
@@ -712,30 +771,41 @@ fi
 # have to compact on their own, that's token waste"). The lane writes handoff.md in its hand-off folder; only once that file has changed
 # and the lane is idle does it get /clear, then a message to read prompt.md, then handoff.md, then carry on. The new session id goes
 # into index.tsv as a new row, so --status, --ctx and --resume follow the new transcript. A lane that never writes handoff.md is NOT cleared.
-#   LANE_RECYCLE_IDLE_SECS (300)  how long to wait for the lane to finish its turn first
+# The request is typed at once, mid-turn if need be: Claude Code queues it and the lane sees it after the tool call in flight. Waiting for
+# the turn to end first failed (21 Oct, this lane: one 15-minute turn from 120K to the 168K backstop, "did not finish its turn in 300s",
+# then an auto compaction). Only a dialog on screen holds the request back, since typing would answer the dialog.
+# A recycle within LANE_RECYCLE_THRASH_SECS (1200) of the lane's previous start or recycle means its working set is bigger than its line:
+# the new row's line goes up 20K, to at most 0.84 x the window cap - 40K.
+#   LANE_RECYCLE_IDLE_SECS (300)  how long a dialog may hold the request back
 #   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking
 if [ "$mode" = recycle ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --recycle <name>" >&2; exit 1; }
   name="$1"
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
   if is_headless_billing "${b:-}" || [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
     echo "$name is a headless lane; there is no window to recycle" >&2; exit 1
   fi
   [ -n "${rep:-}" ] || { echo "$name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
   hand="$(dirname "$rep")"; handoff="$hand/handoff.md"
   ctxk="$([ -n "${id:-}" ] && [ "$id" != - ] && ctx_k "$dir" "$id" || echo '?')"
-  msg_handoff="Hub: your context is at $ctxk, past the recycle line. Finish the step in hand, then write $handoff: what is done, what is in flight, the next step, and what to re-arm (timers, background jobs, watchers). Say nothing else and start no new work; once it is written I clear your context and send you back to prompt.md and handoff.md."
+  rk_now="$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")"
+  rk_next="$rk_now"
+  if [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ]; then
+    rk_next=$(( rk_now + 20 )); rk_ceiling=$(( ${LANE_WINDOW_CAP:-200000} * 84 / 100000 - 40 ))
+    [ "$rk_next" -le "$rk_ceiling" ] || rk_next=$(( rk_ceiling > rk_now ? rk_ceiling : rk_now ))
+  fi
+  msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff: what is done, what is in flight, the next step, and what to re-arm (timers, background jobs, watchers). Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md."
   msg_reprime="Hub: your context was cleared (recycle, not a restart). Read $p, then $handoff, then carry on from the next step it names and re-arm what it lists. Your hand-off folder is unchanged: $hand."
   if [ "$dry" = 1 ]; then
     echo "recycle $name ($dir, context $ctxk):"
-    echo "  1. wait for the lane to finish its turn (up to ${LANE_RECYCLE_IDLE_SECS:-300}s)"
+    echo "  1. wait only for any dialog on its screen to clear (up to ${LANE_RECYCLE_IDLE_SECS:-300}s); a lane mid-turn is not waited for"
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
     echo "  4. send: /clear"
     echo "  5. send: $msg_reprime"
-    echo "  6. append an index row to $INDEX with the lane's new session id"
+    echo "  6. append an index row to $INDEX with the lane's new session id and recycle line ${rk_next}K"
     exit 0
   fi
   command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
@@ -753,6 +823,15 @@ if [ "$mode" = recycle ]; then
     printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel' && return 1
     return 0
   }
+  wait_no_dialog() {  # <secs>: no dialog on screen; a working lane is fine, the request queues into its turn
+    local end=$(( $(date +%s) + $1 )) pane
+    while [ "$(date +%s)" -lt "$end" ]; do
+      pane="$(tmux capture-pane -p -t "$SESSION:$name" 2>/dev/null)" || return 1
+      printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel' || return 0
+      sleep 2
+    done
+    return 1
+  }
   wait_idle() {  # <secs>: idle on two looks a moment apart
     local end=$(( $(date +%s) + $1 ))
     while [ "$(date +%s)" -lt "$end" ]; do
@@ -763,7 +842,7 @@ if [ "$mode" = recycle ]; then
   }
   stamp() { stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none; }
 
-  wait_idle "${LANE_RECYCLE_IDLE_SECS:-300}" || rfail "the lane did not finish its turn in ${LANE_RECYCLE_IDLE_SECS:-300}s (or a dialog is waiting)"
+  wait_no_dialog "${LANE_RECYCLE_IDLE_SECS:-300}" || rfail "a dialog stayed on the lane's screen for ${LANE_RECYCLE_IDLE_SECS:-300}s, so the hand-off request was not typed"
   before="$(stamp)"; t0="$(date +%s)"
   send_to "$name" "$msg_handoff" >/dev/null || rfail "the hand-off request did not reach the lane"
   end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} )); written=0
@@ -792,9 +871,9 @@ if [ "$mode" = recycle ]; then
     newid="$(find_session "$dir" "$t0" "$claimed")"; [ -n "$newid" ] && break; sleep 1
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" >>"$INDEX"
-  printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" >>"$rlog"
-  echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" >>"$INDEX"
+  printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
+  echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
   exit 0
 fi
 
@@ -804,7 +883,7 @@ if [ "$mode" = resume ]; then
   fill_ids
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
   if is_headless_billing "${b:-}"; then
     echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
     exit 1
@@ -827,7 +906,8 @@ if [ "$mode" = resume ]; then
   eff="$(lane_effort "$m" "${eff:-}")"
   # Reuse the recorded connectors choice; a row from before the column was started with them on.
   if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
-  flags="$(claude_lane_flags "$eff" "$conn" "$name")"
+  rk="${recycle_at_opt:-$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")}"
+  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk")"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
@@ -908,10 +988,11 @@ fi
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
-eff="-"; flags=""; conn="-"
+eff="-"; flags=""; conn="-"; rk=""
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name")"; eff="${eff:--}"
+  rk="${recycle_at_opt:-$(default_recycle_k "$(lane_kind "$prompt" "$dir" "$conn")")}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
@@ -1010,8 +1091,8 @@ if [ "$dry" = 0 ]; then
   if [ "$engine" != claude ]; then lane_billing="$engine"
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" >>"$INDEX"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:-}" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
 fi
