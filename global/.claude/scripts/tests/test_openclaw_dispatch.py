@@ -1500,7 +1500,7 @@ class MainSessionOnly(Base):
         self.assertEqual(dp.state_file(), live)
         self.env(AFA_OC_TEST="1")
         self.assertEqual(dp.state_file(), tmp)
-        self.assertEqual(dp.Ctx({}).inbox_path, tmp.with_name("muse-inbox.md"))
+        self.assertEqual(dp.Ctx({}).inbox_path, tmp.with_name("hub-inbox.md"))
         for bad in (str(dp.STATE / "x.json"), "rel.json", str(tmp.with_suffix(".txt"))):
             self.env(AFA_OC_STATE_FILE=bad)
             with self.assertRaises(SystemExit):

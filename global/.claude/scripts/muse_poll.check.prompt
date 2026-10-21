@@ -5,7 +5,7 @@ You are a check, not a worker. Ignore every other reminder in your context (greg
 3. Do steps 1 and 2 again with "NCC-74656>NX-01" in place of "MUSE>CC" (notes from Claude Code on the second tower).
 4. Read /home/TurtleWolfe/.claude/state/agent-notes-processed.txt (one handled ID per line).
 
-A note is NEW if it is a draft whose "id" is not in that file AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is not in that file.
+A note is NEW if it is a draft whose "id" is not in that file AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is not in that file. (Since 20 Oct the connector refuses to label drafts, so a handled draft carries no Label_32: the ID in that file is the record. A label failure is expected; never retry it.)
 
 Your final line must be exactly one of:
 NEW <space-separated ids>

@@ -15,7 +15,7 @@
 #
 #   0. Client mail (2026-10-12): muse_poll_client_check.sh lists new messages from the senders in the
 #      private hub/client-senders.tsv (metadata only; IDs in client-mail-seen.txt are dropped), and a Sonnet
-#      pass queues one "Client mail:" or "Client alert:" line per client in muse-inbox.md through
+#      pass queues one "Client mail:" or "Client alert:" line per client in hub-inbox.md through
 #      muse_poll_record.sh (which never queues an ID twice). /prep then starts an absorb lane for each.
 #   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note, or a [NCC-74656>NX-01] note from
 #      Claude Code on the second tower (2026-10-10), that nobody has handled?
@@ -24,11 +24,11 @@
 #      - an answer it isn't sure of goes to Jev first (muse_jev.py): sent only if every cited file exists
 #        and Jev passes two narrow checks at 0.90+, else queued (Jonathan, 2026-10-10: "run it through JEV if iffy");
 #      - replies to Hatch with a [CC>MUSE] draft;
-#      - labels the note and records its ID;
+#      - records the note's ID (the processed file is the record; the connector refuses to label drafts since 20 Oct, so a label failure is expected);
 #      - before queuing it looks for an answer already on record (the tower's latest notes, and the hub
 #        roadmap through muse_poll_roadmap.sh); a question only the second tower can check is forwarded to it;
 #      - anything that needs real work or Jonathan's approval goes to
-#        ~/.claude/state/muse-inbox.md. Only a decision or approval from Jonathan also gets a desktop ping
+#        ~/.claude/state/hub-inbox.md. Only a decision or approval from Jonathan also gets a desktop ping
 #        ("Needs your OK"); work a Claude session can do waits silently. The ~/repos session surfaces
 #        that file (hooks/muse-drafts.sh).
 #
@@ -39,7 +39,7 @@ set -u
 queue_weekly_transcripts() {
   local mode=$1 moment=${2:-} config inbox log day weekday clock pretty
   config=${WEEKLY_TRANSCRIPTS_TSV:-$HOME/.config/afa/weekly-transcripts.tsv}
-  inbox=${MUSE_INBOX:-$HOME/.claude/state/muse-inbox.md}
+  inbox=${HUB_INBOX:-${MUSE_INBOX:-$HOME/.claude/state/hub-inbox.md}}
   log=$HOME/.claude/state/muse-poll.log
   [[ -f "$config" ]] || return 0
 
@@ -65,11 +65,11 @@ queue_weekly_transcripts() {
     rendered=${rendered//|//}           # "|" separates inbox fields
     marker="weekly-${slug}-${day}"
     [[ -f "$inbox" ]] && grep -Fq -- "$marker" "$inbox" && continue
-    line="- [ ] $moment | Weekly transcript: fetch \"$rendered\" from YouTube | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
+    line="- [ ] $moment | Job: Weekly transcript: fetch \"$rendered\" from YouTube | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
     if [[ "$mode" == print ]]; then
       printf '%s\n' "$line"
     else
-      printf '%s\n' "$line" >>"$inbox"
+      ( flock -w 30 8 && printf '%s\n' "$line" >>"$inbox" ) 8>>"$(dirname "$inbox")/hub-inbox.lock"
       printf '%s queued weekly transcript %s\n' "$(date '+%F %T')" "$marker" >>"$log"
     fi
   done <"$config"

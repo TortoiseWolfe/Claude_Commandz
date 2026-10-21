@@ -7,10 +7,10 @@ re-reading the roadmap body, MEMORY.md, the whole muse inbox and the briefing fi
                 [--report-hours H]
 
 No model calls and no Gmail (the client-mail poller already checks Gmail and queues "Client mail:" /
-"Client alert:" lines in the muse inbox). Sources, all local except one gh call:
+"Client alert:" lines in the hub inbox). Sources, all local except one gh call:
   - lane.sh --status and the lane report.md files written in the last day (first line of each);
-  - open receptionist questions, then muse-inbox items grouped by who we wait on (OpenClaw, Hatch, the tower,
-    Jonathan, jobs, other),
+  - open receptionist questions, then hub-inbox items grouped by who we wait on (OpenClaw, Hatch, the tower,
+    Jonathan, jobs, hub, other), a wait older than 5 days marked "chase or close",
     with the open client lines listed apart;
   - the roadmap issue: active arc, the Next 3 sessions, "Next session should";
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
@@ -22,6 +22,7 @@ token- and reset-link-shaped text is scrubbed from every line before it is writt
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -132,11 +133,16 @@ def lane_reports(lanes_dir, now, hours):
     return out
 
 
+# The canonical owner prefixes (muse_poll_record.sh refuses any other): Waiting on Hatch, Waiting on tower, Job, Client mail,
+# Client alert, Question, Hub. "Jonathan via OpenClaw" is the receptionist's own line, a Question in all but name; older lines
+# used "Waiting on Jonathan" and "[CC>MUSE]".
 GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
           ("Hatch", re.compile(r"^waiting on hatch|^\[CC>MUSE\]", re.I)),
           ("the tower", re.compile(r"^waiting on (?:the )?tower", re.I)),
-          ("Jonathan", re.compile(r"^waiting on jonathan", re.I)),
-          ("jobs", re.compile(r"^job:", re.I))]
+          ("Jonathan", re.compile(r"^waiting on jonathan|^question:", re.I)),
+          ("jobs", re.compile(r"^job:", re.I)),
+          ("hub", re.compile(r"^hub:", re.I))]
+STALE_WAIT_DAYS = 5   # a "Waiting on ..." line older than this is flagged: the hub sends one reminder or closes it with a reason
 CLIENT_LINE = re.compile(r"^client (?:mail|alert):", re.I)
 
 
@@ -149,6 +155,17 @@ CLIENT_SCAN = re.compile(r"^- \[ \] .*\bClient (?:mail|alert):")
 def count_open_client_lines(text):
     """Plain scan, no line pattern: unticked lines that mention a client mail or alert anywhere."""
     return sum(1 for line in text.splitlines() if CLIENT_SCAN.match(line))
+
+
+def wait_age_days(day, now):
+    """Days since an inbox line's "MM-DD" stamp, read in now's year (or the year before when that date is still ahead)."""
+    try:
+        d = datetime(now.year, int(day[:2]), int(day[3:5]))
+    except ValueError:
+        return 0
+    if d > now:
+        d = d.replace(year=now.year - 1)
+    return (now - d).days
 
 
 def open_inbox(text):
@@ -263,18 +280,21 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     cl = [f"- {d} {one_line(t, 60)} | {one_line(det, 50)} | {i}" for d, t, det, i in clients]
     seen = count_open_client_lines(inbox_text or "")
     if seen != len(clients):
-        cl.insert(0, f"WARNING: {seen} open client lines in the inbox, {len(clients)} parsed: grep muse-inbox.md")
+        cl.insert(0, f"WARNING: {seen} open client lines in the inbox, {len(clients)} parsed: grep hub-inbox.md")
     sections.append(("Open client lines (the poller queued them; read the thread before an absorb lane)", cl or ["- none"]))
     il = []
-    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "other"]:
+    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "hub", "other"]:
         items = groups[g]
         if not items:
             continue
-        il.append(f"{'Waiting on ' + g if g in ('Hatch', 'the tower', 'Jonathan') else g.capitalize()} ({len(items)}):")
-        il.extend(f"- {d} {one_line(t, 105)}" for d, t in items[:5])
+        waits = g in ("Hatch", "the tower", "Jonathan")
+        il.append(f"{'Waiting on ' + g if waits else g.capitalize()} ({len(items)}):")
+        for d, t in items[:5]:
+            age = wait_age_days(d, now) if waits else 0
+            il.append(f"- {d} {one_line(t, 105)}" + (f" ({age} days: chase or close)" if age > STALE_WAIT_DAYS else ""))
         if len(items) > 5:
             il.append(f"- and {len(items) - 5} more")
-    sections.append(("Open muse-inbox items", il or ["- none"]))
+    sections.append(("Open hub-inbox items", il or ["- none"]))
 
     # Roadmap
     rm = parse_roadmap(roadmap_body or "")
@@ -354,7 +374,7 @@ def main(argv=None):
     ap.add_argument("--roadmap-file")
     ap.add_argument("--lane-status-file")
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
-    ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
+    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
     ap.add_argument("--open-questions-file", help="openclaw_dispatch.py open output to use instead of reading live state")
     ap.add_argument("--git-repo", default=str(HOME / "repos"))
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")

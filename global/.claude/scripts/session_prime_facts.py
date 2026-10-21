@@ -300,7 +300,7 @@ def gather(args, now):
              prs_opened=po, prs_closed=pc, lanes=[], inbox=[], tidy=[])
     if private_hub:
         f["lanes"] = lanes_closed(args.lanes_dir, since)
-        f["inbox"] = ticked_since(_read(args.inbox), since)
+        f["inbox"] = ticked_since(inbox_text(args, since), since)
         f["tidy"] = tidy_summary(sh(["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=40, check=False))
     return dict(repo=repo, num=num, machine=machine, body=iss["body"], updated_at=iss["updatedAt"], last_comment=last,
                 branch=branch, tip_sha=tip_sha, facts=f, private_hub=private_hub)
@@ -311,6 +311,17 @@ def _read(p):
         return Path(p).read_text(errors="replace")
     except OSError:
         return ""
+
+
+def inbox_text(args, since):
+    """The board plus the archive months it may have been moved into (hub_inbox_archive.py), so a done item is listed
+    for the week it was ticked whichever file holds it now. Archive files are named YYYY-MM.md by the month of the last touch."""
+    parts = []
+    adir = Path(args.inbox_archive)
+    if adir.is_dir():
+        floor = since.astimezone().strftime("%Y-%m")
+        parts = [_read(p) for p in sorted(adir.glob("????-??.md")) if p.stem >= floor]
+    return "\n".join(parts + [_read(args.inbox)])
 
 
 def state_path(args, repo):
@@ -328,7 +339,7 @@ def drift(args, mode, extra=()):
 # ---------------------------------------------------------------------------------------------
 
 
-UNATTENDED_FIXED = ("repo", "machine", "dir", "lanes_dir", "inbox", "state_dir", "drift_hook", "now")
+UNATTENDED_FIXED = ("repo", "machine", "dir", "lanes_dir", "inbox", "inbox_archive", "state_dir", "drift_hook", "now")
 
 
 def unattended_guard(ap, a):
@@ -361,7 +372,8 @@ def main(argv=None):
     ap.add_argument("--note", help="file: extra comment sections (Roadmap changes, Watch)")
     ap.add_argument("--session", default=os.environ.get("CLAUDE_SESSION_ID", ""))
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
-    ap.add_argument("--inbox", default=str(HOME / ".claude/state/muse-inbox.md"))
+    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
+    ap.add_argument("--inbox-archive", default=str(HOME / ".claude/state/hub-inbox-archive"))
     ap.add_argument("--state-dir", default=str(HOME / ".claude/state/session-prime"))
     ap.add_argument("--drift-hook", default=str(HOME / ".claude/hooks/roadmap-drift.sh"))
     ap.add_argument("--now", help="ISO time (tests)")
