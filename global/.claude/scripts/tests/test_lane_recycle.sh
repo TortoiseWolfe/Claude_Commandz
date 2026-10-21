@@ -171,6 +171,14 @@ assert_contains "$LAST_OUT" 'dialog' 'the failure names the dialog'
 [ ! -e "$ST/sent.log" ] || fail 'typed into a lane that was on a dialog'; ok
 printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"
 
+# --send (which --recycle uses) looks for a dialog before typing and before each Enter, so its keys never answer a permission prompt.
+reset_fake; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
+lane --send rl-lane 'hello 1'
+assert_exit 1 "$LAST_RC" '--send to a lane on a dialog is refused'
+assert_contains "$LAST_OUT" 'NOT SENT' 'the refusal says nothing was sent'
+[ ! -e "$ST/sent.log" ] && [ ! -s "$ST/pending" ] || fail 'keys were typed into a dialog'; ok
+printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"
+
 # Each lane has its own line, kept in a twelfth index column across a recycle. A first recycle after a long run keeps it; one within 20
 # minutes of the lane's start or last recycle means its working set outgrew the line, so the next line is 20K higher (never above
 # 0.84 x the window cap - 40K = 128K).
