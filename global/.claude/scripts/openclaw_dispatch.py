@@ -3024,7 +3024,7 @@ def file_with_hub(ctx, ask_id, words, route, why, now, extra=None):
     return True
 
 
-def unsettled_to_hub(ctx, sha, ts, text, why, now, reply=None):
+def unsettled_to_hub(ctx, sha, ts, text, why, now, reply=None, context=None):
     """A message of his that the poller could not settle (Main session unreadable, the hand-off crashed, or it waited out its age): file it as
     a question already with the hub, with his words whole, so it is never dropped without a trace. One ask per message (sha and time), so a
     retry after a crash files nothing twice. -> (log line, ask id) or (log line, None) when it was filed already."""
@@ -3034,6 +3034,7 @@ def unsettled_to_hub(ctx, sha, ts, text, why, now, reply=None):
     if not file_with_hub(ctx, ask_id, words, "hub, front desk could not settle it",
                          "front desk: %s; the question is his words as written, and the receptionist may have said it was sending this to the hub" % why, now, extra):
         return "%s | unsettled | already on the hub's list (ask %s)" % (_stamp(now), ask_id), None
+    save_context(ctx, ask_id, context)
     return "%s | unsettled | %s: put on the hub's list (ask %s)" % (_stamp(now), why, ask_id), ask_id
 
 
