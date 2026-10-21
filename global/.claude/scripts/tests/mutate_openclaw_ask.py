@@ -71,6 +71,7 @@ MUTANTS = [
     (DISPATCH, "plain: a fallback start failure says the hub has it twice", 'if " | started " not in line and HUB_PASSES_IT_ON not in chat:', 'if " | started " not in line:'),
     (DISPATCH, "once: the Next up nudge is sent on every poll", 'head.get("shown_waiting") == 0 and not head.get("nudged")):', 'head.get("shown_waiting") == 0):'),
     ("openclaw_ask_hook/agents_live.md", "truth: the receptionist may ask for next with nothing waiting", 'When it says nothing is waiting, never ask him to say next. ', ''),
+    ("openclaw_ask_hook/agents_live.md", "truth: the receptionist may tell him what a worker or Hatch can't do", "Never tell him what a worker, the hub or Hatch can't do or isn't set up for, and never hand him a step the hub can take: say who has the job and when he'll hear back. ", ''),
     (DISPATCH, "freeze: the nudge is a bare count", 'ok = send(queue_nudge(waiting, nxt))', 'ok = send(queue_tail(waiting).strip())'),
     (DISPATCH, "freeze: a slow nudge is sent again", 'head["nudged"], nxt = now, q["items"][1]["text"]', 'nxt = q["items"][1]["text"]'),
     (DISPATCH, "freeze: held nexts skip a post", 'if why == "next" and q["items"] and q["items"][0]["shown"] and 0 <=', 'if False and q["items"] and q["items"][0]["shown"] and 0 <='),
