@@ -1103,6 +1103,7 @@ class Sweep(Base):
     def test_copilot_usage_or_quota_limit_blocks_it_then_falls_back_to_claude(self):
         state = self.state()
         state["codex_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
+        state["agy_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
         dp.save_state(self.ctx.state_path, state)
 
         for i, limit in enumerate(("usage limit", "quota limit")):
@@ -1123,7 +1124,7 @@ class Sweep(Base):
             self.start("own-app", "Claude fallback %d" % i, started + 200)
             self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
             self.assertIn("on Claude Sonnet", self.host.chats[-1])
-            self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
+            self.assertIn("Codex, Copilot and agy are out of usage", self.host.chats[-1])
 
         self.start("own-app", "Copilot is available again", started + 101 + dp.COPILOT_BLOCK_SECONDS)
         self.assertEqual(self.host.started[-1][2], "copilot")
@@ -1134,12 +1135,57 @@ class Sweep(Base):
         dp.save_state(self.ctx.state_path, state)
 
     def test_copilot_chosen_directly_while_blocked_starts_claude_and_says_so(self):
-        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS)
+        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS, agy_blocked_until=NOW + dp.AGY_BLOCK_SECONDS)
         with unittest.mock.patch.object(dp, "choose_engine", return_value=("copilot", "sonnet", "own repo")):
             self.start("own-app")
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
         self.assertIn("on Claude Sonnet", self.host.chats[-1])
+        self.assertIn("Copilot and agy are out of usage", self.host.chats[-1])
+
+    def test_copilot_blocked_falls_to_agy_before_claude(self):
+        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS)
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("copilot", "sonnet", "own repo")):
+            self.start("own-app")
+        self.assertEqual(self.host.started[-1][2], "agy")
         self.assertIn("Copilot is out of usage", self.host.chats[-1])
+
+    def agy_lane_with_log(self, text, started=NOW):
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("agy", "sonnet", "own repo")):
+            self.start("own-app", "task at %d" % started, started)
+        self.assertEqual(self.host.started[-1][2], "agy")
+        lane = self.host.started[-1][0]
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\nexit 1\n")
+        return lane
+
+    def test_agy_quota_wording_blocks_agy_for_five_hours_then_claude_starts(self):
+        self.assertEqual(dp.AGY_BLOCK_SECONDS, 5 * 3600)
+        for i, text in enumerate(("RESOURCE_EXHAUSTED: try later", "You have exceeded your quota", "Rate limit hit", "HTTP 429 Too Many Requests", "resource_exhausted")):
+            started = NOW + i * 10 * 3600
+            self.block(agy_blocked_until=0)
+            self.agy_lane_with_log(text, started)
+            (line, chat), = dp.sweep(self.ctx, self.host, started + 100)
+            self.assertIn("agy says it is out of usage", chat)
+            self.assertEqual(self.state()["agy_blocked_until"], started + 100 + dp.AGY_BLOCK_SECONDS)
+        self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 200)[0], "claude")
+        self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 101 + dp.AGY_BLOCK_SECONDS)[0], "agy")
+
+    def test_agy_denied_command_is_not_a_quota_block_and_goes_to_the_hub_list(self):
+        lane = self.agy_lane_with_log("jetski: no output produced\na tool required the 'command' permission that headless mode cannot prompt for, so it was auto-denied")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state().get("agy_blocked_until", 0), 0)
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertIn("lane %s failed" % lane, Path(self.ctx.inbox_path).read_text())
+
+    def test_agy_report_is_delivered_like_a_codex_report(self):
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("agy", "sonnet", "own repo")):
+            self.start("own-app")
+        lane = self.host.started[-1][0]
+        self.write_report(lane)
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertEqual(self.state()["lanes"][lane]["engine"], "agy")
 
     def test_one_choice_honors_every_block(self):
         now = NOW
@@ -1147,10 +1193,17 @@ class Sweep(Base):
         self.assertEqual(dp.resolve_engine({}, "codex", now)[0], "codex")
         self.assertEqual(dp.resolve_engine({}, "copilot", now)[0], "copilot")
         self.assertEqual(dp.resolve_engine({"codex_blocked_until": now + 1}, "codex", now)[0], "copilot")
-        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "copilot", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "copilot", now)[0], "agy")
         self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "codex", now)[0], "codex")
-        self.assertEqual(dp.resolve_engine(out, "codex", now)[0], "claude")
-        self.assertEqual(dp.resolve_engine(out, "copilot", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine(out, "codex", now)[0], "agy")
+        self.assertEqual(dp.resolve_engine(out, "copilot", now)[0], "agy")
+        self.assertEqual(dp.resolve_engine(out, "codex", now)[1:], ("own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"))
+        every = dict(out, agy_blocked_until=now + 100)
+        self.assertEqual(dp.resolve_engine(every, "codex", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine(every, "copilot", now)[0], "claude")
+        self.assertEqual(dp.resolve_engine({"agy_blocked_until": now + 1}, "agy", now)[:2], ("claude", "own repo, agy is out of usage"))
+        self.assertEqual(dp.resolve_engine({"agy_blocked_until": now + 1}, "codex", now)[0], "codex")
+        self.assertEqual(dp.resolve_engine({"codex_blocked_until": now + 1, "agy_blocked_until": now + 1}, "codex", now)[0], "copilot")
         self.assertEqual(dp.resolve_engine(out, "claude", now)[0], "claude")
         self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now}, "copilot", now)[0], "copilot")  # lapsed
 
@@ -1273,10 +1326,16 @@ class Sweep(Base):
         dp.save_state(self.ctx.state_path, state)
 
         self.start("own-app")
+        self.assertEqual(self.host.started[-1][2], "agy")
+        self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
+
+        state["agy_blocked_until"] = NOW + dp.AGY_BLOCK_SECONDS
+        dp.save_state(self.ctx.state_path, state)
+        self.start("own-app", "second")
 
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
         self.assertIn("on Claude Sonnet", self.host.chats[-1])
-        self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
+        self.assertIn("Codex, Copilot and agy are out of usage", self.host.chats[-1])
 
     def test_an_ordinary_codex_failure_does_not_block_codex(self):
         self.start("own-app")

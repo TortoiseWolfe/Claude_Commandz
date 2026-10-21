@@ -109,6 +109,9 @@ EVENT_MAX = 1500  # how much of a hub post the front desk's next turn is shown (
 REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
+AGY_BLOCK_SECONDS = 5 * 3600  # Antigravity's limits refresh on a rolling window, so its block is short
+# What agy prints when its quota is spent. A denied command ("jetski: no output produced") is not a quota block.
+AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|quota|rate[\s_-]*limit|\b429\b", re.I)
 MONTHLY_QUOTA_RE = re.compile(r"monthly\s+quota", re.I)  # a monthly quota frees on the 1st, not in 12 hours
 TRY_AGAIN_RE = re.compile(r"try\s+again\s+at\s+(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?"
                           r"(?:,?\s+(?P<hour>\d{1,2}):(?P<min>\d{2})\s*(?P<ampm>[AaPp])\.?[Mm]\.?)?")
@@ -243,6 +246,9 @@ COPILOT_WORK_RULE = (
     "If you change files, clone the repo into your lane folder ({hand}/repo, from this checkout's origin: git clone \"$(git remote get-url origin)\" {hand}/repo), "
     "work on a branch there, and commit and push from that clone. Never make a git worktree and never write outside your working directory or your lane folder."
 )
+# agy edits files but cannot run any command (not even git), so it works in the checkout and the hub branches, tests and commits.
+AGY_WORK_RULE = ("You cannot run commands, so you cannot use git: edit the files in this checkout directly, and say in your report the exact commands "
+                 "the hub must run to test and commit. Never write outside your working directory or your lane folder.")
 # A report that says the work was not done because the lane was not allowed or able to do it is a failure, whatever the lane called it.
 # Two signs are needed: something stopped it (BLOCKED_RE) and the task was left undone (NOTHING_RE).
 BLOCKED_RE = re.compile(r"permission denied|operation not permitted|not permitted|permission problem|permissions? (?:error|issue)|"
@@ -1259,18 +1265,29 @@ def choose_engine(path, client, task, workspace=False, mail=False):
     return "codex", "sonnet", "own repo"  # the model name only has to be a Claude one: lane.sh then passes no -m to Codex
 
 
+ENGINE_CHAIN = (("codex", "Codex"), ("copilot", "Copilot"), ("agy", "agy"))  # free code engines in fallback order; Claude is the last resort
+
+
 def resolve_engine(state, engine, now):
     """The one place a usage block is honored, for every way a lane starts (the script's start, the pass's start, the waiting room).
-    Codex blocked goes to Copilot, or to Claude when Copilot is blocked too; Copilot blocked goes to Claude. -> (engine, why | None, note)."""
-    codex = state.get("codex_blocked_until", 0) > now
-    copilot = state.get("copilot_blocked_until", 0) > now
-    if engine == "codex" and codex:
-        if copilot:
-            return "claude", "own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"
-        return "copilot", "own repo, Codex is out of usage", " (Codex is out of usage)"
-    if engine == "copilot" and copilot:
-        return "claude", "own repo, Copilot is out of usage", " (Copilot is out of usage)"
-    return engine, None, ""
+    Codex blocked goes to Copilot, then agy, then Claude; Copilot blocked goes to agy, then Claude; agy blocked goes to Claude.
+    -> (engine, why | None, note)."""
+    names = [e for e, _ in ENGINE_CHAIN]
+    if engine not in names:
+        return engine, None, ""
+    skipped = []
+    for e, label in ENGINE_CHAIN[names.index(engine):]:
+        if state.get(e + "_blocked_until", 0) > now:
+            skipped.append(label)
+            continue
+        return (e, None, "") if not skipped else (e,) + _out_of_usage(skipped)
+    return ("claude",) + _out_of_usage(skipped)
+
+
+def _out_of_usage(skipped):
+    who = skipped[0] if len(skipped) == 1 else ", ".join(skipped[:-1]) + " and " + skipped[-1]
+    words = "%s %s out of usage" % (who, "is" if len(skipped) == 1 else "are")
+    return "own repo, " + words, " (%s)" % words
 
 
 def try_again_at(tail, now):
@@ -1707,7 +1724,10 @@ def _sweep(ctx, host, now=None):
                     lane["note"] = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
                 elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit|monthly\s+quota", tail, re.I):
                     block_until(state, "copilot_blocked_until", tail, now, COPILOT_BLOCK_SECONDS)
-                    lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
+                    lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on agy, or Claude Sonnet."
+                elif lane["engine"] == "agy" and AGY_QUOTA_RE.search(tail):
+                    block_until(state, "agy_blocked_until", tail, now, AGY_BLOCK_SECONDS)
+                    lane["note"] = " agy says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
         if lane.get("status") not in ("reported", "dead") or lane.get("delivered"):
             continue
         answered_in_chat = False
@@ -2242,7 +2262,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
     report = hand / "report.md"
     prompt = hand / "prompt.md"
     hand.mkdir(parents=True, exist_ok=True)
-    work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else WORK_RULE
+    work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else AGY_WORK_RULE if engine == "agy" else WORK_RULE
     extra = (WORKSPACE_RULES if name == WORKSPACE else "") + (MAIL_RULES if mail else "")
     prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report, work_rule=work_rule, extra_rules=extra))
     try:
@@ -2459,7 +2479,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
         else:
             line, chat = do_start(ctx, host, repo, text, now, ask_id, context)
         return line.replace(" | start ", " | reply %s: follow-up | " % name, 1), chat
-    if lane.get("engine") in ("codex", "copilot"):
+    if lane.get("engine") in ("codex", "copilot", "agy"):
         with ctx.locked():
             state = load_state(ctx.state_path)
             lane = state["lanes"].get(name)
@@ -2548,7 +2568,7 @@ def restart_lane(ctx, host, old, text, now, ask_id=None, context=None):
     if not rows:
         return "%s | reply %s | couldn't restart: lane.sh has no record of it" % (stamp, old), ""
     row = rows[-1]
-    engine = row["billing"] if row["billing"] in ("codex", "copilot") else "claude"
+    engine = row["billing"] if row["billing"] in ("codex", "copilot", "agy") else "claude"
     model = row["model"] if row["model"] in MODELS else "sonnet"
     problem, hit = vet_start(ctx, row["dir"], engine, model)
     if problem:
@@ -2779,7 +2799,7 @@ def do_lanes(ctx, host, now):
         except ValueError:
             started = 0
         report = lane.get("report") or (f[6] if f else "")
-        engine = lane.get("engine") or (f[4] if f and f[4] in ("codex", "copilot") else "claude")
+        engine = lane.get("engine") or (f[4] if f and f[4] in ("codex", "copilot", "agy") else "claude")
         if _nonempty(report):
             body = _report_text(report)
             st = "failed" if lane.get("failed") or report_failure(body) else "report written"
@@ -3282,7 +3302,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
         hit, parent = listed_repo(ctx, real)
         repo = (hit or parent or (os.path.basename(real),))[0]
         if lane_name not in state["lanes"]:
-            state["lanes"][lane_name] = {"repo": repo, "engine": row[4] if row[4] in ("codex", "copilot") else "claude", "model": row[3],
+            state["lanes"][lane_name] = {"repo": repo, "engine": row[4] if row[4] in ("codex", "copilot", "agy") else "claude", "model": row[3],
                                          "started": now, "status": "started", "report": row[6], "task_key": ask.get("task_key"), "ask": ask_id}
             if is_test():
                 state["lanes"][lane_name]["test"] = True
@@ -3304,7 +3324,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
     return True, "claimed %s for %s" % (lane_name, ask_id)
 
 
-ENGINES = ("claude", "codex", "copilot")
+ENGINES = ("claude", "codex", "copilot", "agy")
 MODELS = ("sonnet", "opus", "haiku", "fable")  # fable: a restart of a Fable lane must not fall back to Sonnet
 
 
@@ -4259,7 +4279,7 @@ To start a lane:
    running-lane cap, and starts the lane under this ask. It refuses a second lane for the same ask. If it refuses or fails, say so in one line and stop.
    `start` also appends what the task line refers to: his latest messages and the receptionist's whole message verbatim, and the report and
    files of earlier lanes in that repo (copied into the lane's folder). Do not copy any of that into the prompt yourself; keep the task as quoted.{followup}
-Usage: python3 {me} start <ask> [--engine claude|codex|copilot] <lane> <folder> <model> <prompt-file>
+Usage: python3 {me} start <ask> [--engine claude|codex|copilot|agy] <lane> <folder> <model> <prompt-file>
 
 PROMPT TEMPLATE (fill the four braces, keep the rest):
 <<<TEMPLATE
