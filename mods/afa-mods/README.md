@@ -34,6 +34,11 @@ proves nothing (if it fails the rm runs elsewhere), a variable nothing set or se
 A lane the dispatcher started (`AFA_LANE_UNATTENDED=1`, set by `lane.sh`) never waits either: a delete
 inside its own folder, a worktree or its scratchpad, by a full path, runs and is logged as
 `allowed (lane folder)`; anything else held is refused with a plain reason the lane can act on.
+Every lane `lane.sh` starts sets `AFA_LANE=1` (the hub does not). In such a lane two holds whose fix can be named are not a dialog: a
+relative `rm -rf` (the refusal says to write the full absolute path, `cd /a/b && rm -rf c` becoming `rm -rf /a/b/c`) and a `docker run`
+without limits (it names both fixes, `timeout <secs> docker run --cpus <n> --memory <m> ...` or `~/.claude/scripts/docker-heavy.sh -- docker ...`).
+The lane corrects the command and runs it again; the log shows `denied (fix named)`. Every other hold keeps the dialog, and the hub always does.
+The text of a python, node or `cat` heredoc is not shell, so its parentheses no longer hide a `cd` from the check above.
 The question and every refusal (the lane refusals, the non-interactive denial, and the guard-failure
 denial too) say in words what the command does, why it was held, and **what it would touch**: each
 path with `(dir, N bytes, ...)`, `(file, N bytes)` or `(not found)`; the branch and remote host of a
@@ -57,7 +62,7 @@ as bound to a host folder is judged as that folder; one docker cannot answer for
 named volume is asked about, with no cap. A quote left in an option word, or an image word that is not plausible, also marks the
 list incomplete, and a source that is not a legal volume name is judged as a folder. `docker exec` has no mounts to read and is unchanged.
 A `docker run` or `docker compose run` (also podman and docker-compose) with no CPU cap and no `timeout` in front is held with the
-one-line fix: add `--cpus N` (and a timeout), or run it through `~/.claude/scripts/docker-heavy.sh -- docker run ...`
+one-line fix: add `--cpus N` (and a timeout), as `timeout <secs> docker run --cpus <n> --memory <m> ...`, or run it through `~/.claude/scripts/docker-heavy.sh -- docker ...`
 (19 Oct: one uncapped run took 14.6 of 16 cores and the machine stopped answering). A cap is `--cpus`, `--cpu-quota` or
 `--cpuset-cpus` among the options before the image, so a `--cpus` the container's own program is given does not count, and its value
 must be a real limit (`--cpus 0`, `--cpu-quota -1` and `$X` are not). A timeout is `timeout [options] DURATION` with a positive
