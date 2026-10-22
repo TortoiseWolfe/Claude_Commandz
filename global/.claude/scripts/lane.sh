@@ -137,10 +137,14 @@ INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
 TAB=$'\t'
 
-# A lane the OpenClaw dispatcher started (AFA_LANE_UNATTENDED=1, or a name starting oc-) has nobody at its window. Its Claude
-# process gets AFA_LANE_UNATTENDED=1 and AFA_LANE_HAND=<its hand-off folder>, which the afa-mods Blast Radius guard reads: such a
-# lane is never asked "Run it?", it is allowed a delete inside its own folder, a worktree or the scratchpad and refused the rest.
+# Every Claude lane gets AFA_LANE=1, which tells the afa-mods Blast Radius guard this is a lane and not the hub: a hold it can
+# name the fix for (a relative rm after a cd, a docker run without limits) comes back to the lane as a refusal saying how to fix
+# the command, instead of a "Run it?" dialog that idles the lane until the hub answers. A lane the OpenClaw dispatcher started
+# (AFA_LANE_UNATTENDED=1, or a name starting oc-) has nobody at its window at all. It also gets AFA_LANE_UNATTENDED=1 and
+# AFA_LANE_HAND=<its hand-off folder>: such a lane is never asked "Run it?", it is allowed a delete inside its own folder, a
+# worktree or the scratchpad and refused the rest.
 lane_env_prefix() {
+  printf 'AFA_LANE=1 '
   if [ "${AFA_LANE_UNATTENDED:-}" = 1 ] || [[ "$1" == oc-* ]]; then
     printf 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=%q ' "$2"
   fi

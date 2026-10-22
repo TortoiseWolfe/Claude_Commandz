@@ -305,7 +305,7 @@ function timeoutIn(words: string[]): boolean {
 }
 
 export const UNLIMITED_FIX =
-  'add --cpus N (and a timeout in front), or run it through ~/.claude/scripts/docker-heavy.sh -- docker run ...'
+  'add --cpus N (and a timeout in front), as "timeout <secs> docker run --cpus <n> --memory <m> ...", or run it through "~/.claude/scripts/docker-heavy.sh -- docker ..."'
 
 // detached: -d / --detach, so the container outlives a timeout in front of the docker command and only a cap limits it
 export type RunCall = { mode: 'run' | 'compose'; timeout: boolean; detached: boolean; capped: boolean; service?: string; image?: string; files: string[]; projectDir?: string }
@@ -496,7 +496,7 @@ function trackCd(seg: string, command: string, scope: Scope): void {
   const m = /^(?:(cd)|pushd|popd)\b\s*(.*)$/.exec(seg)
   if (!m) return
   const arg = unquote(m[2].trim())
-  const dir = m[1] && arg !== '' && !/\s/.test(arg) && !command.includes('(') ? resolveHostPath(arg, scope) : undefined
+  const dir = m[1] && arg !== '' && !/\s/.test(arg) && !withoutTextHeredocs(command).includes('(') ? resolveHostPath(arg, scope) : undefined
   scope.cwd = dir && 'path' in dir ? dir.path : undefined
 }
 
@@ -868,7 +868,8 @@ export function ownScratchTargets(command: string, env: ScratchEnv = {}, depth =
 function cwdTracker(command: string, env: ScratchEnv): (index: number) => string | undefined {
   const segs = segmentsWithSeps(command)
   let before = ''
-  const blind = /(?:^|[^$])\(|`|\$\(\s*(?:cd|pushd|popd)\b/.test(command) // a subshell or substitution may hold its own cd
+  // text a heredoc only writes (a python script's parens) is not shell, so it blinds nothing
+  const blind = /(?:^|[^$])\(|`|\$\(\s*(?:cd|pushd|popd)\b/.test(withoutTextHeredocs(command)) // a subshell or substitution may hold its own cd
   const folders: Array<string | undefined> = []
   let cwd: string | undefined
   for (let i = 0; i < segs.length; i += 1) {
@@ -1093,6 +1094,16 @@ export function explain(hold: Hold): { what: string; why: string } {
 }
 
 export type LaneEnv = { home: string; hand?: string; tmpdir?: string }
+
+// A lane (AFA_LANE=1) is not asked "Run it?" about a hold whose fix can be named: the refusal says the fix and the lane runs the
+// corrected command. A hold with no fix here keeps the dialog. Only a relative path in an rm and a docker run without limits have one.
+export function laneFix(hold: Hold): string | undefined {
+  if (hold.kind === 'docker run without limits') return `Fix: ${UNLIMITED_FIX}. Then run it again.`
+  if (hold.kind === 'rm -rf' && !hold.container && targetsOf(hold.segment).map(unquote).some(x => x !== '' && !/^[/~$]/.test(x))) {
+    return 'Fix: use the full absolute path, written out in full (for "cd /a/b && rm -rf c" write "rm -rf /a/b/c"): a relative name depends on the folder the shell is in, which the guard cannot confirm. Then run it again.'
+  }
+  return undefined
+}
 
 // A lane nobody watches (AFA_LANE_UNATTENDED=1, set by lane.sh) may delete only inside: its own hand-off
 // folder (AFA_LANE_HAND) or a worktree under ~/repos/.worktrees. The path must be written out in full: no

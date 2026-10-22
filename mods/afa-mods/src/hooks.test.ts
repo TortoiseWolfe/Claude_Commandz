@@ -689,3 +689,91 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     expect(seen.asked).toContain('docker run without limits')
   })
 })
+
+// A lane (lane.sh sets AFA_LANE=1) is not left on a "Run it?" dialog for a hold whose fix can be named; the hub (no AFA_LANE) still gets the dialog.
+describe('blast radius, lane denies what it can name the fix for', () => {
+  const SP = '/tmp/claude-1000/-home-t-repos-harmonic-egg/0a1b2c3d/scratchpad'
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}) => {
+    setup(on, vars)
+    const seen = { asked: '', log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+
+  // 22 Oct 7:18 AM, harmonicegg-mail: a python heredoc with parens sat between the cd and the rm, and hid the cd from the guard.
+  const PY = `cd ${SP} && rm -rf em && mkdir em && python3 - <<'EOF'\nimport os\nD=os.path.expanduser("~/x")\nprint(os.getcwd())\nEOF\ndate`
+  for (const [who, vars] of [['hub', {}], ['lane', { AFA_LANE: '1' }]] as const) {
+    test(`a python heredoc between a cd and an rm no longer hides the cd: the rm runs as the scratch folder it is (${who})`, async ($, on) => {
+      const { seen, r } = await go($, on, PY, vars)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeUndefined()
+      expect(seen.log).toContain('allowed (own scratch) | rm -rf')
+    })
+  }
+  test('a cd inside a real subshell still hides the folder', async ($, on) => {
+    const { seen } = await go($, on, `cd ${SP} && (cd /x) && rm -rf em`)
+    expect(seen.asked).toContain('rm -rf')
+  })
+  const RELATIVE = 'cd /home/t/work; rm -rf build'
+  test('relative rm: the lane is denied with the full-path fix and not asked', async ($, on) => {
+    const { seen, r } = await go($, on, RELATIVE, { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toContain('use the full absolute path')
+    expect(r.deny).toContain('rm -rf /a/b/c')
+    expect(r.deny).toContain('Then run it again')
+    expect(seen.log).toContain('denied (fix named) | rm -rf')
+  })
+  test('relative rm: the hub still gets the dialog', async ($, on) => {
+    const { seen, r } = await go($, on, RELATIVE)
+    expect(seen.asked).toContain('Blast Radius stopped a command')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('rm with a full path that is held anyway is not a fixable hold: the lane still gets the dialog', async ($, on) => {
+    const { seen } = await go($, on, 'rm -rf /home/t/precious', { AFA_LANE: '1' })
+    expect(seen.asked).toContain('Blast Radius stopped a command')
+  })
+  const DOCKER = [
+    'docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest -color',
+    "docker run --rm -v /home/t/repos/he:/app -w /app node:22 node --test test/*.test.js",
+  ]
+  for (const command of DOCKER) {
+    test(`docker run without limits: the lane is denied naming both fixes (${command.slice(0, 40)})`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE: '1' })
+      expect(seen.asked).toBe('')
+      expect(r.deny).toContain('timeout <secs> docker run --cpus <n> --memory <m> ...')
+      expect(r.deny).toContain('~/.claude/scripts/docker-heavy.sh -- docker ...')
+      expect(r.deny).toContain('Then run it again')
+    })
+    test(`docker run without limits: the hub still gets the dialog (${command.slice(0, 40)})`, async ($, on) => {
+      const { seen, r } = await go($, on, command)
+      expect(seen.asked).toContain('docker run without limits')
+      expect(r.deny).toContain('refused at the prompt')
+    })
+  }
+  test('a fixable hold next to one that is not: the lane is told the fix and that the other will ask Jonathan', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker run img; docker system prune -f', { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toContain('docker run without limits')
+    expect(r.deny).toContain('also holds docker system prune')
+  })
+  test('a hold with no named fix keeps the dialog in a lane', async ($, on) => {
+    const { seen } = await go($, on, 'docker system prune -f', { AFA_LANE: '1' })
+    expect(seen.asked).toContain('docker system prune')
+  })
+  test('the lane fix applies when the run is fixed: a capped run goes through', async ($, on) => {
+    const { seen, r } = await go($, on, 'timeout 600 docker run --cpus 4 --memory 4g img', { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+})
