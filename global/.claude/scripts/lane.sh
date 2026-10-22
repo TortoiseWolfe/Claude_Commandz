@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Start a lane in its own tmux window. Claude Code is the default engine; Codex and
-# GitHub Copilot can be selected with --engine.
+# Start a lane in its own tmux window. Claude Code is the default engine; Codex,
+# GitHub Copilot and Google Antigravity (agy) can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -33,6 +33,11 @@
 # ~/repos/hub/client-repos.txt, as well as ~/repos/CD. If either list is missing,
 # unreadable, or not a regular file, either external engine is refused. --allow-client bypasses the guard.
 # The model argument is passed through to Codex/Copilot only when it is not a Claude model.
+# --engine agy runs agy -p --mode accept-edits --sandbox (Google Antigravity, free quota). It is EDIT-ONLY:
+# headless agy cannot run commands and --dangerously-skip-permissions is never used. The prompt copy gets a
+# header telling the lane to write report.md with the commands the hub must run. Same client guard as above.
+# The model is passed through when it is one of agy's own (gemini-*, gpt-oss-*, claude-*-4-6*); any other
+# name (a Claude Code alias) becomes gemini-3.8-flash-high (see agy_model).
 #
 # 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/ or site-model (3D fitting, photo
 # matching, site models) starts or resumes only on fable or opus, each at effort high.
@@ -74,7 +79,7 @@
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; empty = default for its kind)
+#   date  name  dir  model  billing(console|subscription; codex|copilot|agy)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; empty = default for its kind)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
@@ -144,7 +149,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -154,7 +159,7 @@ Usage:
   lane.sh --recycle-point <name>
   (start and --resume also take --recycle-at <K>)
 
-Claude is the default engine. Codex and Copilot run headless and write to out.log.
+Claude is the default engine. Codex, Copilot and agy run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
 Codex and Copilot refuse repositories listed in client-senders.tsv or client-repos.txt,
 and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
@@ -179,7 +184,7 @@ while [ $# -gt 0 ]; do
     --dry-run) dry=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --engine)
-      [ $# -ge 2 ] || { echo "--engine requires claude, codex, or copilot" >&2; exit 1; }
+      [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, or agy" >&2; exit 1; }
       engine="$2"; shift 2 ;;
     --engine=*) engine="${1#*=}"; shift ;;
     --effort)
@@ -219,8 +224,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$engine" in
-  claude|codex|copilot) ;;
-  *) echo "unknown engine: $engine (choose claude, codex, or copilot)" >&2; exit 1 ;;
+  claude|codex|copilot|agy) ;;
+  *) echo "unknown engine: $engine (choose claude, codex, copilot, or agy)" >&2; exit 1 ;;
 esac
 
 case "$effort_opt" in
@@ -386,6 +391,14 @@ guard_external_engine() {
       ;;
   esac
   return 0
+}
+
+# agy's own model names pass through; a Claude Code alias or anything unknown becomes the free default.
+agy_model() {
+  case "$1" in
+    gemini-*|gpt-oss-*|claude-*-4-6*) printf '%s' "$1" ;;
+    *) printf 'gemini-3.8-flash-high' ;;
+  esac
 }
 
 is_claude_model() {
@@ -560,7 +573,7 @@ else:
 }
 
 is_headless_billing() {
-  case "$1" in codex|copilot) return 0 ;; *) return 1 ;; esac
+  case "$1" in codex|copilot|agy) return 0 ;; *) return 1 ;; esac
 }
 
 # Colour-coded pane text (tmux capture-pane -e) in, plain text out.
@@ -664,8 +677,8 @@ if [ "$mode" = status ]; then
       fi
       printf '%-18s report:%-3s %-7s %s%s\n' "$w" "$wrote" "$state" "$last" "$sug"
       ctx="?"
-      case "${b:-subscription}" in codex|copilot) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
-      case "${b:-subscription}" in codex|copilot) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
+      case "${b:-subscription}" in codex|copilot|agy) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
+      case "${b:-subscription}" in codex|copilot|agy) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
       printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
@@ -851,7 +864,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
-  case "${b:-subscription}" in codex|copilot) echo "?"; exit 0 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
@@ -1041,7 +1054,7 @@ if [ "$engine" != claude ] && [ "$console" = 1 ]; then
   exit 1
 fi
 if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
-  echo "--headless applies only to Claude with --console; Codex and Copilot are already headless" >&2
+  echo "--headless applies only to Claude with --console; Codex, Copilot and agy are already headless" >&2
   exit 1
 fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
@@ -1067,9 +1080,14 @@ fi
 if [ "$dry" = 1 ]; then
   echo "mkdir -p $hand"
   [ "$prompt" = "$hprompt" ] || echo "cp $prompt $hprompt"
+  [ "$engine" != agy ] || echo "# prepend the agy edit-only header to $hprompt"
 else
   mkdir -p "$hand"
   [ "$prompt" = "$hprompt" ] || cp "$prompt" "$hprompt"
+  if [ "$engine" = agy ]; then
+    { printf 'You can edit files but cannot run commands. Make the change, then write %s/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit.\n\n' "$hand"
+      cat -- "$hprompt"; } >"$hprompt.agy" && mv "$hprompt.agy" "$hprompt"
+  fi
 fi
 
 # A repo gets its graphify graph when sustained work starts there; code-only extraction is free.
@@ -1113,6 +1131,9 @@ if [ "$engine" != claude ]; then
     cmd+=" -c sandbox_workspace_write.network_access=true"
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
+  elif [ "$engine" = agy ]; then
+    cmd="cd $(printf %q "$dir") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --add-dir $(printf %q "$hand") --model $(printf %q "$(agy_model "$model")")"
+    cmd+=" >$out_cmd 2>&1"
   else
     cmd="cd $(printf %q "$dir") && copilot -p \"$prompt_cmd\" --allow-all-tools --log-dir $(printf %q "$hand") --add-dir $(printf %q "$hand")"
     if ! is_claude_model "$model"; then cmd+=" --model $(printf %q "$model")"; fi
