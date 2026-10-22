@@ -148,7 +148,15 @@ export function forwarderIsPlain(text: string): boolean {
 
 // ---- the remote commands: each must be a read ----
 
-const ENV_OK = new Set(['HOME', 'COMPOSER_HOME', 'TZ', 'LANG', 'LC_ALL'])
+// The remote environment words a read may set, each with the values it may take: HOME and COMPOSER_HOME only to the two scratch folders
+// (they decide where a tool keeps its cache and which config it loads), the rest to a plain name.
+const ENV_OK: Record<string, RegExp> = {
+  HOME: /^\/tmp$/,
+  COMPOSER_HOME: /^\/tmp\/composer$/,
+  TZ: /^[A-Za-z_/+-]{1,40}$/,
+  LANG: /^(?:C|C\.UTF-8|en_US\.UTF-8)$/,
+  LC_ALL: /^(?:C|C\.UTF-8|en_US\.UTF-8)$/,
+}
 const PLAIN = /^[\w./:,@%+=-]*$/
 
 const PLAIN_READERS = new Set(['echo', 'printf', 'true', 'pwd', 'ls', 'cat', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'cut', 'wc', 'tr', 'stat', 'du', 'df', 'test', '[', 'uname', 'whoami', 'id', 'hostname', 'basename', 'dirname', 'readlink', 'realpath'])
@@ -156,14 +164,27 @@ const PLAIN_READERS = new Set(['echo', 'printf', 'true', 'pwd', 'ls', 'cat', 'he
 const DRUSH_SUBCOMMANDS = new Set(['status', 'st', 'core:status', 'core-status', 'state:get', 'sget', 'watchdog:show', 'ws', 'wd-show', 'pm:list', 'pml', 'pm-list', 'pm:security', 'config:get', 'cget', 'config:status', 'cst', 'core:requirements', 'requirements', 'sqlq', 'sql:query', 'sql-query', 'version'])
 const DRUSH_GLOBAL = /^(?:--no-ansi|--ansi|-v|-vv|-vvv|--verbose|--quiet|-q|--uri=[\w.:/-]+)$/
 const DRUSH_OPTION = /^--(?:format|fields|field|filter|severity|count|type|status|uri|package|extra-sort|limit|offset)=[\w .,:*@/-]*$|^--(?:pipe|full|no-ansi|ansi|extended|detail)$/
-const SQL_READ = /^\s*(?:select|show|describe|desc|explain)\b/i
-const SQL_BAD = /\b(?:into|outfile|dumpfile|for\s+update|lock\s+in\s+share|sleep|benchmark|get_lock|release_lock|load_file|call|set|handler)\b|;|--|\/\*|#/i
+const SQL_READ = /^\s*(?:select|show|describe|desc|explain\s+select)\b/i
+const SQL_BAD = /\b(?:into|outfile|dumpfile|for\s+update|lock\s+in\s+share|sleep|benchmark|get_lock|release_lock|load_file|call|set|handler|delete|update|insert|replace|merge|truncate|alter|drop|create|grant|revoke|analyze|optimize|repair|lock|unlock|nextval|setval|lo_export|lo_import|master_pos_wait|sys_exec|sys_eval|pg_\w+)\b|;|--|\/\*|#/i
 
 const COMPOSER_SUBCOMMANDS = new Set(['outdated', 'audit', 'show', 'diff', 'licenses', 'why', 'why-not', 'depends', 'prohibits', 'validate', 'status', '--version', 'about'])
-const COMPOSER_OPTION = /^(?:--(?:direct|no-ansi|ansi|locked|no-dev|minor-only|patch-only|major-only|strict|no-interaction|quiet|installed|outdated|self|tree|latest|name-only|path|platform|available|all|abandoned=(?:report|ignore|fail)|format=(?:json|text|summary|plain)|no-check-publish|no-check-all|no-plugins|no-scripts)|-[a-zA-Z]{1,4})$/
+const COMPOSER_OPTION = /^(?:--(?:direct|no-ansi|ansi|locked|no-dev|minor-only|patch-only|major-only|strict|no-interaction|quiet|installed|outdated|self|tree|latest|name-only|path|platform|available|all|abandoned=(?:report|ignore|fail)|format=(?:json|text|summary|plain)|no-check-publish|no-check-all|no-plugins|no-scripts)|-(?:o|D|m|a|i|t|l|N|s|v|vv|vvv))$/
 
 const CURL_FLAG = /^(?:-[sSfLkvigI]+|--silent|--show-error|--fail|--location|--insecure|--head|--include|--compressed|--globoff)$/
-const CURL_VALUE = new Set(['-H', '--header', '-w', '--write-out', '-m', '--max-time', '--connect-timeout', '-A', '--user-agent', '--retry'])
+// each option that takes a value, and what the value may be: a write-out format is %{name} pieces and plain text only (no %output{file}, no @file),
+// a header or agent has no @ (curl reads a file for @), a time or count is a number
+const CURL_VALUE: Record<string, RegExp> = {
+  '-w': /^(?:%\{[a-z_]+\}|[\w .:/\\,-])*$/,
+  '--write-out': /^(?:%\{[a-z_]+\}|[\w .:/\\,-])*$/,
+  '-H': /^[^@\n\r]*$/,
+  '--header': /^[^@\n\r]*$/,
+  '-A': /^[^@\n\r]*$/,
+  '--user-agent': /^[^@\n\r]*$/,
+  '-m': /^\d+(?:\.\d+)?$/,
+  '--max-time': /^\d+(?:\.\d+)?$/,
+  '--connect-timeout': /^\d+(?:\.\d+)?$/,
+  '--retry': /^\d+$/,
+}
 
 const findIsRead = (args: string[]) => !args.some(a => /^-(?:exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(a))
 
@@ -189,7 +210,10 @@ function drushIsRead(args: Word[]): boolean {
 function composerIsRead(args: Word[]): boolean {
   let k = 0
   while (k < args.length && /^(?:--no-ansi|--ansi|-n|--no-interaction|-q|--quiet)$/.test(args[k].v)) k += 1
-  if (args[k]?.v === '-d' || args[k]?.v === '--working-dir') k += 2
+  if (args[k]?.v === '-d' || args[k]?.v === '--working-dir') {
+    if (args[k + 1]?.v !== '/var/www/html') return false
+    k += 2
+  }
   const sub = args[k]?.v
   if (!sub || !COMPOSER_SUBCOMMANDS.has(sub)) return false
   return args.slice(k + 1).every(a => (a.v.startsWith('-') ? COMPOSER_OPTION.test(a.v) : PLAIN.test(a.v)))
@@ -200,9 +224,9 @@ function curlIsRead(args: Word[]): boolean {
   for (let k = 0; k < args.length; k += 1) {
     const a = args[k].v
     if (CURL_FLAG.test(a)) continue
-    if (CURL_VALUE.has(a)) {
+    if (Object.hasOwn(CURL_VALUE, a)) {
       const val = args[k + 1]
-      if (!val || /[\n\r]/.test(val.v)) return false
+      if (!val || !CURL_VALUE[a].test(val.v)) return false
       k += 1
       continue
     }
@@ -226,11 +250,28 @@ function phpIsRead(args: Word[]): boolean {
   return false
 }
 
+// date shows the time; -s, --set and a bare number (which sets it) are not allowed. -d takes a plain value, +FORMAT is the output shape.
+function dateIsRead(args: Word[]): boolean {
+  for (let k = 0; k < args.length; k += 1) {
+    const a = args[k].v
+    if (/^(?:-u|-I|-R|--utc|--universal|--rfc-email|--iso-8601(?:=[a-z]+)?)$/.test(a)) continue
+    if (a === '-d' || a === '--date') {
+      if (!/^[\w :+.-]+$/.test(args[k + 1]?.v ?? '')) return false
+      k += 1
+      continue
+    }
+    if (/^--date=[\w :+.-]+$/.test(a)) continue
+    if (a.startsWith('+')) continue
+    return false
+  }
+  return true
+}
+
 function commandIsRead(words: Word[]): boolean {
   let w = words
   while (w.length > 0 && /^[A-Za-z_]\w*=/.test(w[0].v) && w[0].quote === 'none') {
     const m = /^([A-Za-z_]\w*)=(.*)$/.exec(w[0].v) as RegExpExecArray
-    if (!ENV_OK.has(m[1]) || !PLAIN.test(m[2])) return false
+    if (!Object.hasOwn(ENV_OK, m[1]) || !ENV_OK[m[1]].test(m[2])) return false
     w = w.slice(1)
   }
   if (w.length === 0) return true
@@ -253,7 +294,7 @@ function commandIsRead(words: Word[]): boolean {
     case 'find':
       return findIsRead(args.map(a => a.v))
     case 'date':
-      return args.every(a => !/^-(?:s|-set)/.test(a.v) && !/^[0-9]{8,}/.test(a.v))
+      return dateIsRead(args)
     case 'sort':
       return args.every(a => (a.v.startsWith('-') ? /^-[nrukfdhbsgiMV]+$/.test(a.v) : PLAIN.test(a.v) || a.quote !== 'none') && !/^-o|--output/.test(a.v))
     case 'uniq':
