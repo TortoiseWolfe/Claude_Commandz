@@ -60,7 +60,8 @@ for pair in "${REPOS[@]}"; do
     fi
   fi
   log "$short: runner was down; starting it"
-  setsid nohup ./run.sh >> runner-stdout.log 2>&1 < /dev/null &
+  # 9>&- : the runner must not inherit the lock descriptor, or it holds the lock for as long as it lives and the next run exits at once.
+  setsid nohup ./run.sh >> runner-stdout.log 2>&1 < /dev/null 9>&- &
   sleep 20
   if listener_up "$dir"; then log "$short: runner up"; rm -f "$alert"; else log "$short: runner failed to start"; echo "runner failed to start" > "$alert"; rc=1; fi
 done
