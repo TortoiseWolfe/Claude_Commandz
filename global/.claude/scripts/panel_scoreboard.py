@@ -136,7 +136,9 @@ def cmd_add(a):
     row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "repo": a.repo, "ref": a.ref, "class": a.cls,
            "panel_majority": maj, "pass_votes": p, "revise_votes": r, "members": members,
            "claude_verdict": a.claude_verdict, "agree": maj == a.claude_verdict,
-           "false_pass": maj == "pass" and a.claude_verdict == "revise" and blocking > 0}
+           "claude_blocking": blocking,
+           # Any panel pass Claude revised counts, even with no blocking reasons named: the gate errs toward Claude.
+           "false_pass": maj == "pass" and a.claude_verdict == "revise"}
     if a.note:
         row["note"] = a.note
     append_row(row)

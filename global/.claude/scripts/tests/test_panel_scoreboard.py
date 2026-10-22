@@ -84,11 +84,13 @@ class AddTests(Base):
         self.add({"a": "revise", "b": "revise"}, "revise", raw=True)
         self.assertEqual(self.rows()[0]["panel_majority"], "revise")
 
-    def test_false_pass_needs_blocking_findings(self):
+    def test_any_panel_pass_that_claude_revised_is_a_false_pass(self):
         self.add({"a": "pass", "b": "pass"}, "revise", blocking=2)
-        self.add({"a": "pass", "b": "pass"}, "revise", blocking=0)
-        self.add({"a": "pass", "b": "pass"}, "revise")   # unstated: a revise counts as blocking
-        self.assertEqual([r["false_pass"] for r in self.rows()], [True, False, True])
+        self.add({"a": "pass", "b": "pass"}, "revise", blocking=0)   # no reasons named still counts
+        self.add({"a": "pass", "b": "pass"}, "revise")
+        self.add({"a": "pass", "b": "pass"}, "pass")
+        self.assertEqual([r["false_pass"] for r in self.rows()], [True, True, True, False])
+        self.assertEqual([r["claude_blocking"] for r in self.rows()], [2, 0, 1, 0])
 
     def test_note_and_unreadable_json(self):
         bad = self.dir / "bad.json"
