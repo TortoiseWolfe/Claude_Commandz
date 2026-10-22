@@ -10,6 +10,20 @@ Execute a systematic code review. FIX issues directly rather than documenting th
 - Skip "next steps" unless errors block progress
 - No redundant confirmations
 
+## Step 0: Free panel (shadow until the scoreboard says READY)
+
+Scripts live in `~/.claude/scripts/`. Never print the panel's config or keys.
+
+1. Resolve the class: `echo '{"repos":["<repo name>"]}' | python3 ~/.claude/scripts/class_resolver.py` and read `class`.
+2. `client`: skip the panel entirely and go to "First" below.
+3. `own` or `public`: save the diff to a temp file, then start the panel in the background (Bash `run_in_background`):
+   `python3 ~/.claude/scripts/panel_review.py --class <class> --repo <repo> --diff <diff file> --spec <spec file> --acceptance <acc file> > <panel out file> 2>&1`
+   - spec file = the PR title and body, or the text "review this change"
+   - acceptance file = the text "no bugs, no security issues"
+4. When it finishes, run `python3 ~/.claude/scripts/panel_scoreboard.py should-skip-claude --panel-json <panel out file> --class <class> --ref <PR number or HEAD sha>`.
+   - `yes`: report the panel's verdict and blocking findings as the review, say plainly it was the free panel, and STOP. (Live mode; this only turns on once `panel_scoreboard.py status` says READY.)
+   - `no`: carry on with the normal review below; the panel result is only recorded at the end.
+
 **First**: Identify test runner and package manager from package.json.
 
 ## Phase 1: Security Audit
@@ -132,3 +146,9 @@ End with ONE summary table:
 | Test Coverage | X | Y | Z |
 
 **CRITICAL**: Fix issues directly. Do not defer work to "later" or create issues as a way to avoid fixing things.
+
+## Last step: Score the panel
+
+If the panel ran (own or public) and you did the Claude review above, record the pair:
+`python3 ~/.claude/scripts/panel_scoreboard.py add --repo <repo> --ref <PR number or HEAD sha> --class <class> --panel-json <panel out file> --claude-verdict <pass|revise> --claude-blocking <count of blocking findings left or fixed> [--note "<why they differ>"]`
+`revise` means you found at least one blocking issue. Skip this step for client class or if the panel produced no output.

@@ -1,0 +1,1 @@
+Add last_n(items, n) that returns the last n items of a list, and print_report(path) that prints the file's name through the shell.
