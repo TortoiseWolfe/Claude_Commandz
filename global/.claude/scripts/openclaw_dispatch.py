@@ -249,7 +249,8 @@ COPILOT_WORK_RULE = (
 )
 # agy edits files but cannot run any command (not even git), so it works in the checkout and the hub branches, tests and commits.
 AGY_WORK_RULE = ("You cannot run commands, so you cannot use git: edit the files in this checkout directly, and say in your report the exact commands "
-                 "the hub must run to test and commit. Never write outside your working directory or your lane folder.")
+                 "the hub must run to test and commit. Never write outside your working directory or your lane folder, and open "
+                 "only files inside them: any other read is refused and ends the run.")
 # A report that says the work was not done because the lane was not allowed or able to do it is a failure, whatever the lane called it.
 # Two signs are needed: something stopped it (BLOCKED_RE) and the task was left undone (NOTHING_RE).
 BLOCKED_RE = re.compile(r"permission denied|operation not permitted|not permitted|permission problem|permissions? (?:error|issue)|"

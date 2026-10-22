@@ -1084,8 +1084,9 @@ if [ "$dry" = 1 ]; then
 else
   mkdir -p "$hand"
   [ "$prompt" = "$hprompt" ] || cp "$prompt" "$hprompt"
-  if [ "$engine" = agy ]; then
-    { printf 'You can edit files but cannot run commands. Make the change, then write %s/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit.\n\n' "$hand"
+  # Once only: a restarted lane's prompt already in the hand-off folder keeps its one header.
+  if [ "$engine" = agy ] && ! head -n1 -- "$hprompt" | grep -q '^You can edit files but cannot run commands'; then
+    { printf 'You can edit files but cannot run commands. Make the change, then write %s/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit. Open only files in this checkout and in %s: any other read is refused and ends the run, so leave the live copies a task names under ~/.claude alone.\n\n' "$hand" "$hand"
       cat -- "$hprompt"; } >"$hprompt.agy" && mv "$hprompt.agy" "$hprompt"
   fi
 fi
