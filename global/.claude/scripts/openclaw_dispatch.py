@@ -117,6 +117,7 @@ MONTHLY_QUOTA_RE = re.compile(r"monthly\s+quota", re.I)  # a monthly quota frees
 TRY_AGAIN_RE = re.compile(r"try\s+again\s+at\s+(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?"
                           r"(?:,?\s+(?P<hour>\d{1,2}):(?P<min>\d{2})\s*(?P<ampm>[AaPp])\.?[Mm]\.?)?")
 MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+RESETS_IN_RE = re.compile(r"resets?\s+in\s+(?:(?P<h>\d+)\s*h)?\s*(?:(?P<m>\d+)\s*m)?\s*(?:(?P<s>\d+)\s*s)?\b", re.I)  # agy: "Resets in 76h10m45s"
 TRY_AGAIN_MAX_SECONDS = 62 * 86400  # a date further out than this is a misread, not a limit: the 12 hour fallback applies
 ASK_WAIT = 5 * 60  # how long the dispatch pass has to claim or answer an ask before the script starts it
 PASS_TIMEOUT = 240  # seconds one dispatch pass may run (shorter than ASK_WAIT, so a hung pass cannot start a lane after the fallback did)
@@ -1294,10 +1295,13 @@ def _out_of_usage(skipped):
 
 def try_again_at(tail, now):
     """The time in an engine's "try again at Oct 31st, 2026 2:38 PM" (local time; no year means the next such date, no time means
-    midnight that day), or None when there is none, it does not parse, is already past, or is further out than TRY_AGAIN_MAX_SECONDS."""
+    midnight that day) or agy's relative "Resets in 76h10m45s" (h, m and s each optional: now plus that long), or None when there is
+    none, it does not parse, is already past, or is further out than TRY_AGAIN_MAX_SECONDS."""
     m = TRY_AGAIN_RE.search(tail)
     if not m:
-        return None
+        r = RESETS_IN_RE.search(tail)
+        wait = r and int(r.group("h") or 0) * 3600 + int(r.group("m") or 0) * 60 + int(r.group("s") or 0)
+        return now + wait if wait and wait <= TRY_AGAIN_MAX_SECONDS else None
     if m.group("mon")[:3].lower() not in MONTHS:
         return None
     month, day = MONTHS.index(m.group("mon")[:3].lower()) + 1, int(m.group("day"))

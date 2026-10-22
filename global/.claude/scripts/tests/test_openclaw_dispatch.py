@@ -1280,6 +1280,34 @@ class Sweep(Base):
         dp.sweep(self.ctx, self.host, NOW + 100)
         self.assertEqual(self.state()["codex_blocked_until"], later)
 
+    AGY_LIMIT = ("error: Individual quota reached. Please upgrade your subscription to increase your limits. %s\n"
+                 'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. %s","status":"RESOURCE_EXHAUSTED"}\nexit 3\n')
+
+    def agy_block(self, text, now=None):
+        state = {}
+        dp.block_until(state, "agy_blocked_until", text, now or NOW, dp.AGY_BLOCK_SECONDS)
+        return state["agy_blocked_until"]
+
+    def test_agy_resets_in_blocks_for_the_relative_time(self):
+        # the line agy printed on 22 Oct 2026 4:05 PM: the old code found no date in it and blocked for 5 hours
+        text = self.AGY_LIMIT % (("Resets in 76h10m45s.",) * 2)
+        self.assertEqual(self.agy_block(text), NOW + 76 * 3600 + 10 * 60 + 45)
+
+    def test_agy_resets_in_takes_any_of_hours_minutes_seconds(self):
+        for words, secs in (("Resets in 45m.", 2700), ("Resets in 2h", 7200), ("resets in 30s.", 30), ("Resets in 1h5s", 3605),
+                            ("Resets in 3h 20m", 12000)):
+            self.assertEqual(self.agy_block("Individual quota reached. " + words), NOW + secs, words)
+
+    def test_agy_resets_in_is_capped_like_a_date(self):
+        self.assertEqual(self.agy_block("Resets in 2000h0m0s"), NOW + dp.AGY_BLOCK_SECONDS)
+
+    def test_agy_without_a_reset_keeps_the_five_hour_block(self):
+        for text in ("RESOURCE_EXHAUSTED (code 429): Individual quota reached.", "Resets in soon", "Resets in 0s", ""):
+            self.assertEqual(self.agy_block(text), NOW + dp.AGY_BLOCK_SECONDS, text)
+
+    def test_a_dated_try_again_at_still_wins_over_the_relative_form(self):
+        self.assertEqual(self.agy_block("try again at Feb 3rd, 2027 2:38 PM. Resets in 1h"), self.local_epoch(2027, 2, 3, 14, 38))
+
     def test_codex_falls_back_to_twelve_hours_when_no_date_parses(self):
         for i, text in enumerate(("You've hit your usage limit.", self.CODEX_LIMIT % "sometime soon",
                                   self.CODEX_LIMIT % "Feb 31st, 2027 1:00 PM",      # not a date
