@@ -2086,7 +2086,7 @@ MAIL_RULES = (
     "\n- Gmail is on for this lane, because the task involves email. His standing rule, 19 Oct 2:52 PM: \"I don't have tokens to waste on you sending things to "
     "the wrong lane, if it envolves email then don't waste time and tokens sending it to a lane without email access, standing rule\". "
     "Find the thread yourself (Gmail search_threads, then get_thread) before you say you cannot see it, and read all of it. Do what he asked. "
-    "Leave edited or new mail as a Gmail draft (create_draft) in his voice and name the draft in your report; never send, label or trash anything. "
+    "Leave edited or new mail as a Gmail draft in his voice and name the draft in your report: to anyone but Jonathan, stage it with python3 ~/.claude/scripts/gmail_api.py draft-create (--reply-to MESSAGE_ID keeps the thread), because a hook refuses the connector's create_draft/update_draft for them and the connector rewrites every link; never send, label or trash anything. "
     "Put no email address or link in the chat answer."
 )
 

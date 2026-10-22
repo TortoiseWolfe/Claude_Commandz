@@ -15,7 +15,12 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py auth [--no-browser]       one-time OAuth consent (loopback + PKCE); writes token.json
   gmail_api.py whoami                    the signed-in address (proves the token works)
   gmail_api.py labels                    label names and ids
-  gmail_api.py draft-create --to A [--cc B] --subject S (--html FILE | --text FILE) [--reply-to MESSAGE_ID]
+  gmail_api.py draft-create --to A [--cc B] [--bcc C] --subject S (--html FILE | --text FILE) [--reply-to MESSAGE_ID]
+                             [--inline CID=FILE ...] [--attach FILE ...]
+      --to/--cc/--bcc take one comma-separated string. --reply-to sets threadId, In-Reply-To and References.
+      --inline puts an image where the HTML says <img src="cid:CID">; --attach adds an ordinary attachment.
+      This is the ONLY route for a draft to anyone but Jonathan: the connector rewrites every link, and
+      ~/.claude/hooks/block-outbound.sh refuses connector create_draft/update_draft to anyone else.
   gmail_api.py draft-fix-links DRAFT_ID  unwrap google.com/url redirects in place, thread and headers kept
   gmail_api.py draft-raw DRAFT_ID [--full]   decoded view: ids, headers, hrefs, google.com/url count
   gmail_api.py draft-label DRAFT_ID LABEL    LABEL is a name or an id
@@ -36,6 +41,7 @@ import html
 import html.parser
 import http.server
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -338,14 +344,24 @@ def html_to_text(src):
     return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
 
 
-def build_message(to, subject, html_body=None, text_body=None, cc=None, reply=None):
-    """reply: dict with message_id, references, subject (of the message being answered)."""
+def _guess_type(path):
+    ctype, _ = mimetypes.guess_type(path)
+    maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
+    return maintype, subtype
+
+
+def build_message(to, subject, html_body=None, text_body=None, cc=None, reply=None, bcc=None, inline=None, attach=None):
+    """reply: dict with message_id, references, subject (of the message being answered).
+    inline: {content-id: file path}, shown where the HTML says <img src="cid:content-id">.
+    attach: [file path], ordinary attachments."""
     if html_body is None and text_body is None:
         raise GmailError("need --html or --text")
     msg = EmailMessage()
     msg["To"] = to
     if cc:
         msg["Cc"] = cc
+    if bcc:
+        msg["Bcc"] = bcc
     msg["Subject"] = subject
     if reply:
         msg["In-Reply-To"] = reply["message_id"]
@@ -355,6 +371,21 @@ def build_message(to, subject, html_body=None, text_body=None, cc=None, reply=No
         msg.add_alternative(html_body, subtype="html")
     else:
         msg.set_content(text_body)
+    if inline:
+        if html_body is None:
+            raise GmailError("--inline needs --html")
+        body = msg.get_body(("html",))
+        for cid, path in inline.items():
+            if f"cid:{cid}" not in html_body:
+                raise GmailError(f"the HTML never uses cid:{cid}")
+            maintype, subtype = _guess_type(path)
+            with open(path, "rb") as f:
+                body.add_related(f.read(), maintype, subtype, cid=f"<{cid}>", disposition="inline",
+                                 filename=os.path.basename(path))
+    for path in attach or []:
+        maintype, subtype = _guess_type(path)
+        with open(path, "rb") as f:
+            msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(path))
     return msg
 
 
@@ -368,14 +399,14 @@ def reply_context(message_id):
 
 # ---------------------------------------------------------------- commands
 
-def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=None):
+def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=None, bcc=None, inline=None, attach=None):
     thread, reply = None, None
     if reply_to:
         thread, reply = reply_context(reply_to)
         if not subject:
             s = reply["subject"]
             subject = s if s.lower().startswith("re:") else "Re: " + s
-    msg = build_message(to, subject, html_body, text_body, cc, reply)
+    msg = build_message(to, subject, html_body, text_body, cc, reply, bcc, inline, attach)
     body = {"message": {"raw": b64u_encode(msg.as_bytes())}}
     if thread:
         body["message"]["threadId"] = thread
@@ -483,8 +514,10 @@ def main(argv=None):
     sub.add_parser("whoami")
     sub.add_parser("labels")
     p = sub.add_parser("draft-create")
-    p.add_argument("--to", required=True); p.add_argument("--cc"); p.add_argument("--subject", default="")
+    p.add_argument("--to", required=True); p.add_argument("--cc"); p.add_argument("--bcc"); p.add_argument("--subject", default="")
     p.add_argument("--html"); p.add_argument("--text"); p.add_argument("--reply-to")
+    p.add_argument("--inline", action="append", default=[], metavar="CID=FILE")
+    p.add_argument("--attach", action="append", default=[], metavar="FILE")
     for n in ("draft-fix-links", "draft-delete"):
         sub.add_parser(n).add_argument("draft_id")
     p = sub.add_parser("draft-raw"); p.add_argument("draft_id"); p.add_argument("--full", action="store_true")
@@ -506,8 +539,14 @@ def main(argv=None):
                 raise GmailError("need --html or --text")
             if not a.subject and not a.reply_to:
                 raise GmailError("need --subject (or --reply-to to inherit one)")
+            inline = {}
+            for item in a.inline:
+                cid, sep, path = item.partition("=")
+                if not sep or not cid or not path:
+                    raise GmailError(f"--inline wants CID=FILE, got {item!r}")
+                inline[cid] = path
             d = draft_create(a.to, a.subject, _read_file(a.html) if a.html else None,
-                             _read_file(a.text) if a.text else None, a.cc, a.reply_to)
+                             _read_file(a.text) if a.text else None, a.cc, a.reply_to, a.bcc, inline, a.attach)
             print(f"draftId: {d['id']}\nmessageId: {d['message']['id']}\nthreadId: {d['message'].get('threadId')}")
         elif a.cmd == "draft-fix-links":
             r = draft_fix_links(a.draft_id)

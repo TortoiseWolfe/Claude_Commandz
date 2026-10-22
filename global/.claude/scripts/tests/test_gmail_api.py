@@ -152,6 +152,12 @@ class Unwrap(unittest.TestCase):
 
 
 class Mime(unittest.TestCase):
+    def blob(self, name, data):
+        path = os.path.join(fresh_dir(self), name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
     def parse(self, msg):
         return email.message_from_bytes(msg.as_bytes(), policy=email.policy.default)
 
@@ -171,6 +177,36 @@ class Mime(unittest.TestCase):
         m = self.parse(g.build_message("a@b.co", "Re: S", None, "t", reply={"message_id": "<m2@x>", "references": "<m0@x> <m1@x>"}))
         self.assertEqual(m["In-Reply-To"], "<m2@x>")
         self.assertEqual(m["References"], "<m0@x> <m1@x> <m2@x>")
+
+    def test_bcc_and_comma_separated_recipients(self):
+        m = self.parse(g.build_message("a@b.co, e@f.co", "S", None, "t", cc="c@d.co", bcc="h@i.co"))
+        self.assertEqual((m["To"], m["Cc"], m["Bcc"]), ("a@b.co, e@f.co", "c@d.co", "h@i.co"))
+
+    def test_inline_image_rides_with_the_html_under_its_cid(self):
+        png = self.blob("logo.png", b"\x89PNG fake")
+        m = self.parse(g.build_message("a@b.co", "S", '<p><img src="cid:logo1"></p>', inline={"logo1": png}))
+        html_part = m.get_body(("html",))
+        related = [p for p in m.walk() if p.get_content_type() == "image/png"]
+        self.assertEqual(len(related), 1)
+        self.assertEqual(related[0]["Content-ID"], "<logo1>")
+        self.assertEqual(related[0].get_content_disposition(), "inline")
+        self.assertIn("cid:logo1", html_part.get_content())
+
+    def test_inline_image_the_html_never_uses_is_refused(self):
+        png = self.blob("logo.png", b"x")
+        with self.assertRaisesRegex(g.GmailError, "cid:nope"):
+            g.build_message("a@b.co", "S", "<p>no image</p>", inline={"nope": png})
+
+    def test_inline_needs_html(self):
+        with self.assertRaises(g.GmailError):
+            g.build_message("a@b.co", "S", None, "t", inline={"x": "/dev/null"})
+
+    def test_attachment_is_added_with_its_name_and_type(self):
+        pdf = self.blob("quote.pdf", b"%PDF-1.4")
+        m = self.parse(g.build_message("a@b.co", "S", "<p>h</p>", attach=[pdf]))
+        att = [p for p in m.walk() if p.get_filename()]
+        self.assertEqual([(a.get_filename(), a.get_content_type()) for a in att], [("quote.pdf", "application/pdf")])
+        self.assertEqual(m.get_body(("html",)).get_content().strip(), "<p>h</p>")
 
     def test_needs_a_body(self):
         with self.assertRaises(g.GmailError):
