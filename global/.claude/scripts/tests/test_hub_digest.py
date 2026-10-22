@@ -289,6 +289,26 @@ class Page(unittest.TestCase):
         self.assertLessEqual(len(page.encode()), hd.CAP_DEFAULT)
         self.assertIn("Next session should: Read the reports and merge lane-a.", page)
 
+    def test_jr_dev_section_follows_the_client_lines_and_the_page_stays_small(self):
+        lines = ["Jr Dev: [x] L3 in a week (app #1), [ ] merged", "Clock: not running; next pick app #2, not started",
+                 "Longest review wait: app #3 PR #4, 3.0 days, held by nobody named"]
+        page = self.build(internship=lines)
+        self.assertIn("## Jr Dev", page)
+        self.assertIn("- Clock: not running; next pick app #2, not started", page)
+        self.assertLess(page.index("## Open client lines"), page.index("## Jr Dev"))
+        self.assertLess(page.index("## Jr Dev"), page.index("## Waiting on") if "## Waiting on" in page else len(page))
+        self.assertLessEqual(len(page.encode()), hd.CAP_DEFAULT)
+        self.assertNotIn("## Jr Dev", self.build())
+        self.assertNotIn("## Jr Dev", self.build(internship=[]))
+
+    def test_jr_dev_lines_come_from_the_script_and_a_missing_script_adds_nothing(self):
+        d = Path(fresh_dir(self))
+        (d / "fake.py").write_text("print('Jr Dev: ok')\nprint()\nprint('Clock: x')\n")
+        self.assertEqual(hd.internship_lines(d / "fake.py"), ["Jr Dev: ok", "Clock: x"])
+        self.assertEqual(hd.internship_lines(d / "missing.py"), [])
+        (d / "slow.py").write_text("import time; time.sleep(5)\n")
+        self.assertEqual(hd.internship_lines(d / "slow.py", timeout=1), [])
+
     def test_no_secret_shaped_text_reaches_the_page(self):
         secret = fake("sk-")
         inbox = f"- [ ] 2026-10-14 10:00 | Job: use {secret} for it | https://example.test/reset/abc | r-1\n"
