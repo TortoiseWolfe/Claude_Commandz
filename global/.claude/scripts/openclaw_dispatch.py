@@ -111,7 +111,8 @@ CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own 
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
 AGY_BLOCK_SECONDS = 5 * 3600  # Antigravity's limits refresh on a rolling window, so its block is short
 # What agy prints when its quota is spent. A denied command ("jetski: no output produced") is not a quota block.
-AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|quota|rate[\s_-]*limit|\b429\b", re.I)
+AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|(?:quota|rate[\s_-]*limit)\s+(?:was\s+|has\s+been\s+)?(?:exceeded|reached|exhausted|hit)"
+                          r"|exceeded\s+(?:your|the)\s+(?:\w+\s+)?(?:quota|rate[\s_-]*limit)|\b429\b[^\n]{0,40}too\s+many\s+requests", re.I)
 MONTHLY_QUOTA_RE = re.compile(r"monthly\s+quota", re.I)  # a monthly quota frees on the 1st, not in 12 hours
 TRY_AGAIN_RE = re.compile(r"try\s+again\s+at\s+(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?"
                           r"(?:,?\s+(?P<hour>\d{1,2}):(?P<min>\d{2})\s*(?P<ampm>[AaPp])\.?[Mm]\.?)?")

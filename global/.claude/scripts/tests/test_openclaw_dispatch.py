@@ -1171,6 +1171,10 @@ class Sweep(Base):
         self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 200)[0], "claude")
         self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 101 + dp.AGY_BLOCK_SECONDS)[0], "agy")
 
+    def test_agy_report_that_only_talks_about_quotas_is_not_a_quota_block(self):
+        for text in ("I updated the quota check in the dispatcher", "Fixed the 429 handler in panel_review.py", "rate limits are read from config"):
+            self.assertIsNone(dp.AGY_QUOTA_RE.search(text), text)
+
     def test_agy_denied_command_is_not_a_quota_block_and_goes_to_the_hub_list(self):
         lane = self.agy_lane_with_log("jetski: no output produced\na tool required the 'command' permission that headless mode cannot prompt for, so it was auto-denied")
         dp.sweep(self.ctx, self.host, NOW + 100)
