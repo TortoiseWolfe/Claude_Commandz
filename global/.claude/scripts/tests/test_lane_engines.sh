@@ -189,9 +189,18 @@ checks=$((checks + 1))
 # The header is on the lane's copy of the prompt, ahead of the caller's words; the caller's file is untouched.
 AGY_PROMPT_COPY="$(cat "$AGY_HAND/prompt.md")"
 assert_contains "$AGY_PROMPT_COPY" "You can edit files but cannot run commands. Make the change, then write $AGY_HAND/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit." 'agy prompt copy carries the edit-only header'
+assert_contains "$AGY_PROMPT_COPY" "Open only files in this checkout and in $AGY_HAND: any other read is refused and ends the run" 'agy header keeps reads inside the checkout and the lane folder'
 assert_contains "$AGY_PROMPT_COPY" "$(cat "$PROMPT")" 'agy prompt copy keeps the caller prompt'
 case "$AGY_PROMPT_COPY" in "You can edit files"*) checks=$((checks + 1)) ;; *) fail 'the agy header comes first' ;; esac
 assert_not_contains "$(cat "$PROMPT")" 'You can edit files but cannot run commands' 'the caller prompt file is unchanged'
+# A restart from a prompt that already sits in the hand-off folder, header and all, does not stack a second header.
+AGY_AGAIN_HAND="$HOME_TEST/.claude/state/lanes/$(date +%F)-agy-again"
+mkdir -p "$AGY_AGAIN_HAND"
+printf '%s\n' "$AGY_PROMPT_COPY" >"$AGY_AGAIN_HAND/prompt.md"
+run_lane --engine agy agy-again "$REPO" sonnet "$AGY_AGAIN_HAND/prompt.md"
+assert_exit 0 "$LAST_STATUS" 'agy restart from the hand-off prompt starts'
+[ "$(grep -c '^You can edit files but cannot run commands' "$AGY_AGAIN_HAND/prompt.md")" = 1 ] || fail 'a restarted agy prompt keeps exactly one header'
+checks=$((checks + 1))
 
 # Model mapping: agy's own names pass through, Claude Code aliases and unknown names become the default.
 for pair in gemini-3.8-flash-low:gemini-3.8-flash-low gemini-3.8-flash-medium:gemini-3.8-flash-medium gpt-oss-120b-medium:gpt-oss-120b-medium \
