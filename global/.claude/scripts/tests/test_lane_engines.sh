@@ -71,7 +71,11 @@ cat >"$BIN/copilot" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$COPILOT_CALLS"
 STUB
-chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot"
+cat >"$BIN/agy" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$AGY_CALLS"
+STUB
+chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot" "$BIN/agy"
 
 checks=0
 fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
@@ -95,7 +99,7 @@ run_lane() {
   set +e
   (cd "$TMP" && HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/tmux-calls" TMUX_SENT="$sent" \
     TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" TMUX_PANE_FILE="${TMUX_PANE_FILE:-}" \
-    CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" \
+    CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" AGY_CALLS="$TMP/agy-calls" \
     TEST_CWD="$REPO" RUN_LANE_COMMANDS=1 \
     bash "$SCRIPT" "$@") >"$output" 2>&1
   status=$?
@@ -107,7 +111,7 @@ run_lane() {
 
 # Default engine remains Claude and prompt contents stay in the prompt file.
 HELP_OUTPUT="$(HOME="$HOME_TEST" bash "$SCRIPT" --help)"
-assert_contains "$HELP_OUTPUT" '--engine claude|codex|copilot' 'help documents available engines'
+assert_contains "$HELP_OUTPUT" '--engine claude|codex|copilot|agy' 'help documents available engines'
 assert_contains "$HELP_OUTPUT" '--allow-client' 'help documents the client override'
 
 run_lane default-lane "$REPO" sonnet "$PROMPT"
@@ -166,6 +170,44 @@ run_lane --engine copilot copilot-prefixed-claude-model "$REPO" claude-3-5-sonne
 assert_exit 0 "$LAST_STATUS" 'Copilot accepts a dated Claude model name'
 assert_not_contains "$LAST_COMMAND" '--model ' 'Copilot omits the flag for any claude-prefixed model'
 
+# agy is edit-only: accept-edits and the sandbox, never a permission bypass, the hand-off folder added, and its own model names only.
+run_lane --engine agy agy-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'agy lane starts'
+AGY_HAND="$HOME_TEST/.claude/state/lanes/$(date +%F)-agy-lane"
+assert_contains "$LAST_COMMAND" 'agy -p ' 'agy uses prompt mode'
+assert_contains "$LAST_COMMAND" '--mode accept-edits --sandbox --print-timeout 0 ' 'agy gets accept-edits, the sandbox and no print timeout'
+assert_contains "$LAST_COMMAND" "--add-dir $(printf %q "$AGY_HAND")" 'agy gets write access to the lane folder'
+assert_contains "$LAST_COMMAND" '--model gemini-3.8-flash-high' 'a Claude alias becomes the default agy model'
+assert_contains "$LAST_COMMAND" '$(cat -- ' 'agy reads the prompt file'
+assert_contains "$LAST_COMMAND" 'out.log' 'agy output goes to out.log'
+assert_contains "$(cat "$AGY_HAND/out.log")" 'exit 0' 'agy exit code is recorded in out.log'
+assert_not_contains "$LAST_COMMAND" 'dangerously-skip-permissions' 'agy never skips permissions'
+assert_not_contains "$LAST_COMMAND" '--mode auto' 'agy never runs in auto mode'
+assert_not_contains "$(cat "$TMP/agy-calls")" 'dangerously-skip-permissions' 'the agy binary is never called with a permission bypass'
+[ ! -e "$REPO/injected" ] || fail 'agy prompt contents are not executed by the shell'
+checks=$((checks + 1))
+# The header is on the lane's copy of the prompt, ahead of the caller's words; the caller's file is untouched.
+AGY_PROMPT_COPY="$(cat "$AGY_HAND/prompt.md")"
+assert_contains "$AGY_PROMPT_COPY" "You can edit files but cannot run commands. Make the change, then write $AGY_HAND/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit." 'agy prompt copy carries the edit-only header'
+assert_contains "$AGY_PROMPT_COPY" "$(cat "$PROMPT")" 'agy prompt copy keeps the caller prompt'
+case "$AGY_PROMPT_COPY" in "You can edit files"*) checks=$((checks + 1)) ;; *) fail 'the agy header comes first' ;; esac
+assert_not_contains "$(cat "$PROMPT")" 'You can edit files but cannot run commands' 'the caller prompt file is unchanged'
+
+# Model mapping: agy's own names pass through, Claude Code aliases and unknown names become the default.
+for pair in gemini-3.8-flash-low:gemini-3.8-flash-low gemini-3.8-flash-medium:gemini-3.8-flash-medium gpt-oss-120b-medium:gpt-oss-120b-medium \
+            claude-sonnet-4-6:claude-sonnet-4-6 claude-opus-4-6-thinking:claude-opus-4-6-thinking \
+            opus:gemini-3.8-flash-high sonnet:gemini-3.8-flash-high haiku:gemini-3.8-flash-high fable:gemini-3.8-flash-high \
+            claude-sonnet-5-5:gemini-3.8-flash-high claude-3-5-sonnet-20241022:gemini-3.8-flash-high model-x:gemini-3.8-flash-high; do
+  run_lane --engine agy "agy-map-${pair%%:*}" "$REPO" "${pair%%:*}" "$PROMPT"
+  assert_exit 0 "$LAST_STATUS" "agy accepts model ${pair%%:*}"
+  case "$LAST_COMMAND" in *"--model ${pair#*:} >"*|*"--model ${pair#*:}"[[:space:]]">"*) checks=$((checks + 1)) ;; *) fail "agy model ${pair%%:*} should map to ${pair#*:}: $LAST_COMMAND" ;; esac
+done
+
+run_lane --dry-run --engine agy agy-dry "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'agy dry run works'
+assert_contains "$LAST_OUTPUT" 'agy\ -p\ ' 'agy dry run prints the command'
+assert_not_contains "$LAST_OUTPUT" 'dangerously-skip-permissions' 'agy dry run never skips permissions'
+
 # Sending follow-up text to one-shot lanes must stop before touching their tmux window.
 run_lane --send codex-lane 'echo should-not-be-sent'
 assert_exit 1 "$LAST_STATUS" 'Codex lane refuses --send'
@@ -178,6 +220,12 @@ assert_contains "$LAST_OUTPUT" 'start a new lane with a follow-up prompt' 'Copil
 [ ! -e "$TMP/tmux-sent" ] || fail 'Copilot --send does not type into tmux'
 checks=$((checks + 1))
 
+run_lane --send agy-lane 'echo should-not-be-sent'
+assert_exit 1 "$LAST_STATUS" 'agy lane refuses --send'
+assert_contains "$LAST_OUTPUT" 'start a new lane with a follow-up prompt' 'agy --send refusal gives the next step'
+[ ! -e "$TMP/tmux-sent" ] || fail 'agy --send does not type into tmux'
+checks=$((checks + 1))
+
 # Claude lanes retain the interactive --send, and an emptied input line is not delivery: the words must be in the lane's transcript.
 LANE_SEND_CONFIRM_SECS=1 TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
 assert_exit 1 "$LAST_STATUS" 'Claude send with no transcript entry is not counted as sent'
@@ -188,6 +236,16 @@ assert_contains "$LAST_OUTPUT" 'NOT IN ITS TRANSCRIPT' 'Claude --send says the w
 run_lane --engine codex blocked-client "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'protected repository is refused'
 assert_contains "$LAST_OUTPUT" 'protected client repository' 'refusal explains the client-repository guard'
+
+# The client guard covers agy exactly like Codex and Copilot.
+run_lane --engine agy blocked-client-agy "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'agy: protected repository is refused'
+assert_contains "$LAST_OUTPUT" 'refusing engine agy' 'agy refusal names the engine'
+assert_contains "$LAST_OUTPUT" 'protected client repository' 'agy refusal explains the client-repository guard'
+run_lane --engine agy blocked-listed-agy "$HOME_TEST/repos/listed-only-repo" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'agy: client-repos-only repository is refused'
+run_lane --engine agy --allow-client allowed-client-agy "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'agy: --allow-client bypasses the repository guard'
 
 # client-repos.txt protects repositories absent from the sender list, including children.
 run_lane --engine codex blocked-listed-only "$HOME_TEST/repos/listed-only-repo" sonnet "$PROMPT"
@@ -261,7 +319,7 @@ assert_exit 0 "$LAST_STATUS" '--allow-client bypasses a missing list'
 
 INDEX="$HOME_TEST/.claude/state/lanes/index.tsv"
 # Resume checks use the latest index billing value before checking for a session id.
-for lane_engine in codex copilot; do
+for lane_engine in codex copilot agy; do
   resume_name="resume-$lane_engine-check"
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t-\t-\n' "$(date +%F)" "$resume_name" "$REPO" "$lane_engine" "$PROMPT" "$TMP/no-report" >>"$INDEX"
   run_lane --resume "$resume_name"
