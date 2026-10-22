@@ -93,6 +93,8 @@ assert_exit() {
   checks=$((checks + 1))
 }
 
+# These tests are about the command each engine builds, not about the agy default (tests/test_lane_agy_default.sh covers that), so every
+# run gives --claude-because: $REPO is an own repo, and a Claude start there would otherwise be refused.
 run_lane() {
   local sent="$TMP/tmux-sent" output="$TMP/run.out" status
   rm -f "$sent"
@@ -101,7 +103,7 @@ run_lane() {
     TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" TMUX_PANE_FILE="${TMUX_PANE_FILE:-}" \
     CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" AGY_CALLS="$TMP/agy-calls" \
     TEST_CWD="$REPO" RUN_LANE_COMMANDS=1 \
-    bash "$SCRIPT" "$@") >"$output" 2>&1
+    bash "$SCRIPT" --claude-because "engines test fixture" "$@") >"$output" 2>&1
   status=$?
   set -e
   LAST_STATUS="$status"

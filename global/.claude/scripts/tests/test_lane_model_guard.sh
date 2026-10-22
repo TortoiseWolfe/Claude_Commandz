@@ -21,7 +21,7 @@ cat >"$BIN/sleep" <<'STUB'
 exec /bin/sleep 0.02
 STUB
 # Fake window: names in FAKE_WINDOWS exist; send-keys -l <text> types, C-m submits. A submitted "/model X" saves X as the user default
-# model in settings.json, the way Claude Code does.
+# model in settings.json and prints "Set model to ..." on the pane (never in the transcript), the way Claude Code does.
 cat >"$BIN/tmux" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -37,8 +37,14 @@ st, proj, text, settings = sys.argv[1:5]
 open(os.path.join(st, "pending"), "w").close()
 open(os.path.join(st, "sent.log"), "a").write(text + "\n")
 cur = open(os.path.join(st, "cur")).read().strip()
-with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
-    f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+# /model is a local command: Claude Code never writes it to the transcript, it only prints a confirmation line on the screen.
+if text.startswith("/model "):
+    if not os.path.exists(os.path.join(st, "no-pane-line")):
+        arg = text.split(None, 1)[1]
+        open(os.path.join(st, "pane"), "a").write("Set model to %s 5.5 and saved as your default for new sessions\n" % arg.capitalize())
+else:
+    with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
 if text.startswith("/model ") and os.path.exists(settings) and not os.path.exists(os.path.join(st, "no-save")):
     d = json.load(open(settings))
     d["model"] = text.split(None, 1)[1]
@@ -160,6 +166,25 @@ lane --model plain-sw sonnet
 assert_exit 0 "$LAST_RC" '--model works when /model saves nothing'
 [ "$(cat "$SETTINGS")" = "$ORIG" ] || fail 'settings untouched when /model saves nothing'; ok
 rm -f "$ST/no-save"
+
+# 22 Oct: /model never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line. With that line missing the
+# switch is not confirmed: exit 1, the index row stays, and the user default is still put back.
+orig_settings; ORIG="$(cat "$SETTINGS")"; touch "$ST/no-pane-line"
+before_idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+LANE_SEND_CONFIRM_SECS=1 lane --model plain-sw fable
+assert_exit 1 "$LAST_RC" '--model without a "Set model to" line on the pane is not confirmed'
+assert_contains "$LAST_OUT" 'NOT CONFIRMED' 'the failure says the pane did not confirm'
+assert_not_contains "$LAST_OUT" 'NOT IN ITS TRANSCRIPT' '--model no longer looks for /model in the transcript'
+after_idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+[ "$after_idx" = "$before_idx" ] || fail "an unconfirmed switch leaves the index row, got: $after_idx"; ok
+[ "$(cat "$SETTINGS")" = "$ORIG" ] || fail 'an unconfirmed switch still restores the user default'; ok
+rm -f "$ST/no-pane-line"
+# The pane keeps the old "Set model to" lines: only a new one counts.
+lane --model plain-sw sonnet
+assert_exit 0 "$LAST_RC" 'a switch is confirmed by a new "Set model to" line even when older ones are on the pane'
+assert_contains "$LAST_OUT" 'confirmed on its screen' ''
+lane --model plain-sw sonnet
+assert_exit 0 "$LAST_RC" 'switching to the model it is already on is confirmed again'
 
 # Refusals type nothing and touch nothing.
 : >"$ST/sent.log"; orig_settings; ORIG="$(cat "$SETTINGS")"

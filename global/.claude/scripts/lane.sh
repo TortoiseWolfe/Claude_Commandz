@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex,
 # GitHub Copilot and Google Antigravity (agy) can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -149,7 +149,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -174,11 +174,14 @@ A Claude lane whose prompt names data/sites/ or site-model (3D and photo-match w
 sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
+A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on 31 Oct 2026. Accepted reasons: needs Docker, needs wsl.exe,
+needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
 --model <name> <model> switches a running lane and puts back the user default model that /model would otherwise change.
 USAGE
 }
 
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; recycle_at_opt=; recycle_at_set=0
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -207,6 +210,12 @@ while [ $# -gt 0 ]; do
     --allow-high-tier=*)
       [ -n "${1#*=}" ] || { echo "--allow-high-tier needs a reason in words" >&2; exit 1; }
       allow_high_reason="${1#*=}"; shift ;;
+    --claude-because)
+      [ $# -ge 2 ] && [ -n "${2// /}" ] || { echo "--claude-because needs a reason in words, e.g. --claude-because \"needs Docker\"" >&2; exit 1; }
+      claude_because="$2"; shift 2 ;;
+    --claude-because=*)
+      [ -n "${1#*=}" ] || { echo "--claude-because needs a reason in words" >&2; exit 1; }
+      claude_because="${1#*=}"; shift ;;
     --connectors) connectors_opt=1; no_connectors=0; shift ;;
     --no-connectors) no_connectors=1; connectors_opt=0; shift ;;
     --console) console=1; shift ;;
@@ -278,6 +287,39 @@ fill_ids() {
 
 # Latest index row for a lane name (tab-separated line), or nothing.
 index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)print r}' "$INDEX" || true; }
+
+# Where a lane's index row can go stale: a /clear (typed by the hub or the lane itself) or a --resume starts a new transcript and nothing
+# rewrites column 8 (22 Oct: harmonicegg-mail's row said da6e22ef while the live session was 00e024a9, so --ctx read 22K at 157K and
+# lane_watch never recycled it). follow_session prints the lane's live session id: the newest transcript in its project folder that no
+# index row claims, born no earlier than the row's own transcript and written more recently than it; otherwise the row's id. A change is
+# written back to the lane's last row. A person's own claude session in the same folder would look like a successor; accepted.
+file_birth() { local b; b="$(stat -c %W "$1" 2>/dev/null || echo 0)"; [ "$b" -gt 0 ] || b="$(stat -c %Y "$1" 2>/dev/null || echo 0)"; echo "$b"; }
+follow_session() {  # <name> <dir> <session-id> <start-epoch>
+  local name="$1" dir="$2" id="$3" start="${4:-0}" slug cur curb curm claimed f cid m best="" bestm=0 tmp
+  [[ "$start" =~ ^[0-9]+$ ]] || start=0
+  { [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -s "$INDEX" ]; } || { echo "$id"; return 0; }
+  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
+  cur="$PROJ/$slug/$id.jsonl"
+  if [ -e "$cur" ]; then curb="$(file_birth "$cur")"; curm="$(stat -c %Y "$cur")"
+  else curb=$(( ${start:-0} - 2 )); curm=0; fi
+  claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
+  for f in "$PROJ/$slug"/*.jsonl; do
+    [ -e "$f" ] || continue
+    cid="$(basename "$f" .jsonl)"
+    [ "$cid" != "$id" ] || continue
+    case " $claimed " in *" $cid "*) continue ;; esac
+    [ "$(file_birth "$f")" -ge "$curb" ] || continue
+    m="$(stat -c %Y "$f")"
+    [ "$m" -gt "$curm" ] && [ "$m" -gt "$bestm" ] || continue
+    best="$cid"; bestm="$m"
+  done
+  if [ -z "$best" ]; then echo "$id"; return 0; fi
+  tmp="$(mktemp)"
+  awk -F'\t' -v OFS='\t' -v n="$name" -v id="$best" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[8]=id; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
+    && cat "$tmp" >"$INDEX"
+  rm -f "$tmp"
+  echo "$best"
+}
 
 # Expand only the current user's ~ forms; never eval data from the repository lists.
 # Match the literal ~/ prefix from list data.
@@ -655,6 +697,7 @@ if [ "$mode" = status ]; then
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
         extra="(not in index)"
       else extra=""; fi
+      [ -z "$row" ] || id="$(follow_session "$w" "$dir" "${id:-}" "${st:-0}")"
       wrote="$(report_word "${rep:-}" "${dir:-}" "${id:-}")"; why=""
       case "$wrote" in stale:*) why="${wrote#stale:}"; wrote=stale ;; esac
       outlog=""
@@ -783,6 +826,10 @@ PY
   # "type if no dialog", so this narrows the race to the gap between one look and the keys that follow it (a security review of c0baa36).
   dialog_up() { tmux capture-pane -p -t "$target" 2>/dev/null | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'; }
   if dialog_up; then echo "sent to $name: NOT SENT (a dialog is on its screen; typing would answer it)"; return 1; fi
+  # LANE_SEND_PANE_RE: for a local command (/model) that never reaches the transcript. Delivered means a line matching the regex is on the
+  # pane that was not there before the Enter (22 Oct: "Set model to Sonnet 5.5 and saved as your default for new sessions").
+  pane_hits() { tmux capture-pane -p -S -300 -t "$target" 2>/dev/null | command grep -ciE -- "$LANE_SEND_PANE_RE" || true; }
+  hits_before=0; [ -z "${LANE_SEND_PANE_RE:-}" ] || hits_before="$(pane_hits)"
   tmux send-keys -t "$target" -l -- "$text"
   sleep 0.3
   if dialog_up; then
@@ -790,6 +837,15 @@ PY
     echo "sent to $name: NOT SUBMITTED (a dialog came up while the text was typed; no Enter was sent)"; return 1
   fi
   tmux send-keys -t "$target" C-m
+  if [ -n "${LANE_SEND_PANE_RE:-}" ]; then
+    local i
+    for i in $(seq 1 $(( ${LANE_SEND_CONFIRM_SECS:-15} * 2 ))); do
+      [ "$(pane_hits)" -gt "$hits_before" ] && { echo "sent to $name: confirmed on its screen"; return 0; }
+      sleep 0.5
+    done
+    echo "sent to $name: NOT CONFIRMED (no new line matching \"$LANE_SEND_PANE_RE\" on its screen)"
+    return 1
+  fi
   how=""
   if took 6; then how="submitted"
   elif dialog_up; then echo "sent to $name: NOT SUBMITTED (a dialog came up after the Enter; no second Enter was sent)"; return 1
@@ -825,7 +881,9 @@ if [ "$mode" = model ]; then
     echo "would type '/model $newm' into $name, then restore the user default model (${before})"
     exit 0
   fi
-  rc=0; send_to "$name" "/model $newm" || rc=$?
+  # /model is a local command: it never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line.
+  fam="$(command grep -oiE 'opus|sonnet|haiku|fable' <<<"$newm" | head -1 || true)"  # the pane names the family ("Sonnet 5.5"), not the id
+  rc=0; LANE_SEND_PANE_RE="Set model to .*${fam}" send_to "$name" "/model $newm" || rc=$?
   changed=0; calm=0
   for _ in $(seq 1 "${LANE_MODEL_POLLS:-12}"); do  # /model saves the default a moment after it runs: restore until it has settled
     now="$(python3 -I "$um" get)"
@@ -870,6 +928,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
     id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
   fi
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
+  id="$(follow_session "$1" "$dir" "$id" "${st:-0}")"
   if [ "$mode" = turn ]; then
     f="$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")/$id.jsonl"
     python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_turn_kind.py" "$f" 2>/dev/null || echo "?"
@@ -900,6 +959,7 @@ if [ "$mode" = recycle ]; then
     echo "$name is a headless lane; there is no window to recycle" >&2; exit 1
   fi
   [ -n "${rep:-}" ] || { echo "$name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
+  id="$(follow_session "$name" "$dir" "${id:-}" "${st:-0}")"
   hand="$(dirname "$rep")"; handoff="$hand/handoff.md"
   ctxk="$([ -n "${id:-}" ] && [ "$id" != - ] && ctx_k "$dir" "$id" || echo '?')"
   rk_now="$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")"
@@ -1005,6 +1065,7 @@ if [ "$mode" = resume ]; then
   fi
   [ "$engine" = claude ] || { echo "--engine only applies when starting a lane; lane resume uses Claude Code" >&2; exit 1; }
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "no session id recorded for $name; find it under $PROJ and add it to $INDEX" >&2; exit 1; }
+  id="$(follow_session "$name" "$dir" "$id" "${st:-0}")"  # a /clear since the row was written moved the lane to a newer transcript
   [ -d "$dir" ] || { echo "no such folder: $dir" >&2; exit 1; }
   if [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
     echo "$name is a headless lane (out.log beside its report); there is no interactive session to resume. Read $(dirname "$rep")/out.log" >&2; exit 1
@@ -1040,6 +1101,37 @@ if [ "$mode" = resume ]; then
   exit 0
 fi
 
+# His own-repo code lanes start on agy until Codex returns (his rule, 22 Oct 3:30 PM: "route my own-repo code to agy now"); written down
+# only, 67 own-repo lanes since 18 Oct still ran on Claude. A Claude start in one of his own repos is refused unless --claude-because
+# "<reason>" says why (logged beside the tier overrides). Not his own repo, so never refused: a client repo (the test the codex and copilot
+# guard uses), ~/repos itself, a mail lane, a site-model prompt. When the client lists cannot be read the repo cannot be told apart, so the
+# guard stands aside (the external-engine guard is the one that fails closed). Only a start is checked; resume, recycle, send and the rest are other modes.
+agy_default_ok() {  # <name> <dir> <model> <prompt-file>
+  local name="$1" d="$2" model="$3" pf="${4:-}" home_repos
+  [ "$engine" = claude ] || return 0
+  [ -r "$HOME/repos/hub/client-senders.tsv" ] && [ -f "$HOME/repos/hub/client-senders.tsv" ] \
+    && [ -r "$HOME/repos/hub/client-repos.txt" ] && [ -f "$HOME/repos/hub/client-repos.txt" ] || return 0
+  home_repos="$(canonical_dir "$HOME/repos" 2>/dev/null || true)"
+  [ "$d" != "$home_repos" ] || return 0
+  mail_lane "$name" "$pf" && return 0
+  grep -qE 'data/sites/|site-model' -- "$pf" 2>/dev/null && return 0
+  ( engine=codex; allow_client=0; dir="$d"; guard_external_engine ) >/dev/null 2>&1 || return 0  # a client repo, or one that cannot be checked
+  if [ -n "$claude_because" ]; then
+    if [ "$dry" = 1 ]; then echo "# would log the agy-default override for $name ($model) to $LANE_TIER_LOG"
+    else
+      mkdir -p "$(dirname "$LANE_TIER_LOG")"
+      printf '%s\t%s\t%s\tagy-default\t%s\t%s\n' "$(date -Is)" "$name" "$model" "$(tr '\t\n' '  ' <<<"$claude_because")" "$d" >>"$LANE_TIER_LOG"
+    fi
+    return 0
+  fi
+  {
+    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on 31 Oct 2026 (his rule, 22 Oct 3:30 PM). Use:"
+    echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
+    echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
+  } >&2
+  return 1
+}
+
 [ $# -eq 4 ] || { usage >&2; exit 1; }
 name="$1"; dir="$2"; model="$3"; prompt="$4"
 
@@ -1060,6 +1152,7 @@ fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
 [ "$engine" != claude ] || mail_tier_ok "$model" "$name" "$prompt" || exit 1
 guard_external_engine || exit 1
+agy_default_ok "$name" "$dir" "$model" "$prompt" || exit 1
 
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"
 hprompt="$hand/prompt.md"

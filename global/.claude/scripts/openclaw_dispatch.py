@@ -758,6 +758,12 @@ class LaneHost:
             argv.append("--connectors")  # an email ask: lane.sh would also see "Gmail" in the prompt, but never leave it to a word match
         if engine == "claude" and model in SITE_MODELS and SITE_RE.search(_read_text(prompt_path)):
             argv += ["--effort", "high"]  # site-model work always runs at effort high, whatever lane.sh's default is
+        if engine == "claude":
+            # lane.sh sends his own-repo code lanes to agy unless a reason is given; the router already chose Claude (agy out of usage, or
+            # Docker / wsl.exe work agy cannot do), so say why. lane.sh logs it only when it mattered (an own repo); a client repo ignores it.
+            needs_docker = bool(DOCKER_RE.search(_read_text(prompt_path))) or any((Path(dirpath) / f).exists() for f in COMPOSE_FILES)
+            argv += ["--claude-because", "needs Docker or wsl.exe" if needs_docker
+                     else "agy out of usage or a task only Claude can do (dispatcher routing)"]
         argv += (["--ask", ask] if ask else []) + [name, str(dirpath), model, str(prompt_path)]
         # AFA_LANE_UNATTENDED: nobody is at this lane's window, so its Blast Radius guard must never wait for an answer (see lane.sh)
         r = self._run(argv, 180, cwd=str(dirpath), env=dict(os.environ, AFA_LANE_UNATTENDED="1"))

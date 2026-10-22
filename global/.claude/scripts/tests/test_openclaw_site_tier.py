@@ -226,6 +226,26 @@ class TheHost(unittest.TestCase):
         host.start_lane("oc-x", "/tmp", "claude", "sonnet", self.prompt("Count the issues."))
         self.assertNotIn("--effort", seen["argv"])
 
+    def test_a_claude_start_says_why_it_is_not_on_agy(self):
+        # lane.sh sends his own-repo code lanes to agy unless --claude-because is given (22 Oct); the dispatcher has already routed here
+        host, seen = self.host(self.ok())
+        host.start_lane("oc-x", "/tmp", "claude", "sonnet", self.prompt("Count the issues."))
+        argv = seen["argv"]
+        self.assertIn("agy out of usage", argv[argv.index("--claude-because") + 1])
+        self.assertEqual(argv[-4:], ["oc-x", "/tmp", "sonnet", argv[-1]])
+
+    def test_a_docker_prompt_gives_docker_as_the_reason(self):
+        host, seen = self.host(self.ok())
+        host.start_lane("oc-x", "/tmp", "claude", "sonnet", self.prompt("Run docker compose up and check the logs."))
+        argv = seen["argv"]
+        self.assertEqual(argv[argv.index("--claude-because") + 1], "needs Docker or wsl.exe")
+
+    def test_the_reason_is_not_passed_to_other_engines(self):
+        for engine in ("agy", "codex", "copilot"):
+            host, seen = self.host(self.ok())
+            host.start_lane("oc-x", "/tmp", engine, "gemini-3.8-flash-high", self.prompt("Count the issues."))
+            self.assertNotIn("--claude-because", seen["argv"], engine)
+
     def test_lane_sh_refusing_the_tier_comes_back_as_that_line_not_the_last_stderr_line(self):
         err = types.SimpleNamespace(returncode=1, stdout="", stderr=REFUSAL + "\nsome later line\n")
         host, _ = self.host(err)
