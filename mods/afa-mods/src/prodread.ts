@@ -129,7 +129,7 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
 
 type Piece = { text: string; sep: string }
 
-const ASSIGN = /^([A-Za-z_]\w*)=(?:[\w./:,@%+=~-]*|'[^']*'|"[^"$`\\!]*")$/
+const ASSIGN = /^([A-Za-z_]\w*)=([\w./:,@%+=~-]*|'[\w ./:,@%+=~-]*'|"[\w ./:,@%+=~-]*")$/
 const ASSIGN_BAD = /^(?:PATH|HOME|SHELL|BASH_ENV|ENV|IFS|CDPATH|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|GLOBIGNORE|BASH_XTRACEFD|FPATH|LD_\w*|BASH_FUNC_\w*)$/
 const CD_ABS = /^cd\s+\/[\w./-]*$/
 const TAIL_HEAD = /^(?:tail|head)(?:\s+-n\s*\d+|\s+-\d+)?$/
@@ -137,7 +137,16 @@ const TAIL_HEAD = /^(?:tail|head)(?:\s+-n\s*\d+|\s+-\d+)?$/
 const blank = (p: Piece | undefined) => p !== undefined && p.text.trim() === ''
 const lineEnd = (sep: string) => sep === '' || sep === '\n' || sep === ';'
 
-export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean): boolean {
+// Returns the plain assignments before the call (the only variables the script path may use), or undefined when the line is not the plain shape.
+// A `<<` anywhere refuses it: the splitter drops heredoc bodies it takes for text, and the shell would not see the line the same way.
+export function prodLineShape(command: string, parts: Piece[], index: number, fusedErr: boolean): Map<string, string> | undefined {
+  if (command.includes('<<')) return undefined
+  const vars = new Map<string, string>()
+  const ok = lineShape(parts, index, fusedErr, vars)
+  return ok ? vars : undefined
+}
+
+function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<string, string>): boolean {
   for (let i = 0; i < index; i += 1) {
     const { text, sep } = parts[i]
     const t = text.trim()
@@ -149,6 +158,7 @@ export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean):
     }
     const a = ASSIGN.exec(t)
     if (!(a ? !ASSIGN_BAD.test(a[1]) : CD_ABS.test(t))) return false
+    if (a) vars.set(a[1], a[2].replace(/^(['"])(.*)\1$/, '$2'))
     if (sep === '&') {
       if (!(blank(parts[i + 1]) && parts[i + 1].sep === '&')) return false // a lone & puts it in the background
     } else if (sep !== ';' && sep !== '\n') return false

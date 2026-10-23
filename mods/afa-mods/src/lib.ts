@@ -762,12 +762,13 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
 
 // A production call counts as a read only when its forwarder script is plain and every remote command is a read.
 // The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time.
-function prodReadOnly(raw: string, fusedErr: boolean, shapeOk: boolean, depth: number, scope: Scope, env: ScratchEnv): boolean {
+function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string> | undefined, depth: number, scope: Scope, env: ScratchEnv): boolean {
   // depth 0 only: inside `bash -c` the commands before it are out of sight, and one of them could rewrite the script the hook just read
-  if (depth > 0 || !shapeOk || scope.mounts) return false
+  if (depth > 0 || !shape || scope.mounts) return false
   const call = parseProdCall(raw.trim(), fusedErr)
   if (!call) return false
-  const script = resolveHostPath(call.script, scope)
+  // the script path uses only the assignments the shape check accepted, never the regex over the raw command or the inherited environment
+  const script = resolveHostPath(call.script, { ...scope, vars: shape })
   if (!('path' in script)) return false
   const text = env.prodScripts?.[script.path]
   if (text === undefined) {
@@ -837,7 +838,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
+    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
   }
   return holds
 }

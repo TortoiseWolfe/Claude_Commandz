@@ -857,6 +857,13 @@ container_exec "$cid" "$CMD" "$U"
     ['an assignment that sets PATH', `SP=${SP}; PATH=/tmp/x:$PATH; ${CALL}`],
     ['a relative cd', `SP=${SP}; cd ../x; ${CALL}`],
     // the 2>&1 split: the words after the "1" still reach rexec.sh as arguments
+    // 22 Oct automated review: the script path and the heredoc view must be the ones bash sees
+    ['a heredoc marker inside a quoted assignment', `SP=${SP}; X="a<<EOF"; ${CALL}`],
+    ['a heredoc marker in single quotes', `SP=${SP}; X='<<EOF'; ${CALL}`],
+    ['a second assignment hidden in a quoted value', `SP="${SP}; SP=/tmp/evil"; ${CALL}`],
+    ['a redirect in a quoted value', `SP=${SP}; X="a>b"; ${CALL}`],
+    ['the script word uses a variable the line did not set', `STACK_NAME=x timeout 120 bash $NOPE/rexec.sh --prod 'drush status'`],
+    ['the script word uses an inherited variable', `STACK_NAME=x timeout 120 bash $TMPDIR/rexec.sh --prod 'drush status'`],
     ['2>&1 with extra words after the 1', `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status' 2>&1 extra args | tail -5`],
     ['2>&1 with an extra word and no pipe', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1 root`],
     ['2>&1 followed by a second command', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1; rm -rf /x`],
