@@ -72,7 +72,7 @@ class Acts(Reply):
         self.assertEqual(self.host.reads, 1)
         self.assertEqual(len(self.host.started), 1)
         name, d, engine, model, prompt = self.host.started[0]
-        self.assertEqual((engine, d), ("codex", str(self.root / "own-app")))
+        self.assertEqual((engine, d), ("agy", str(self.root / "own-app")))
         self.assertIn(json.dumps("list the files in docs"), Path(prompt).read_text())
         self.assertEqual(len(self.host.chats), 1)
         self.assertRegex(self.host.chats[0], r"^oc-own-app-\S+ started: list the files in docs\. Say stop to cancel\.")
