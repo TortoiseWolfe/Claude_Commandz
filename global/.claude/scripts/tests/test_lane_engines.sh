@@ -275,7 +275,9 @@ assert_contains "$(cat "$OC_HAND/out.log")" 'opencode: model google/gemini-3-fla
 assert_contains "$(cat "$TMP/opencode-calls")" "google/gemini-3-flash-preview $OC_HAND/opencode.json" 'opencode is called with the free model and the lane-folder config'
 assert_contains "$(cat "$OC_HAND/opencode.json")" '"external_directory":{"*":"deny"' 'opencode may not leave the checkout except for two named folders'
 assert_contains "$(cat "$OC_HAND/opencode.json")" "$OC_HAND/**" 'opencode may write the lane folder'
-assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/**" 'opencode may use worktrees'
+assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/$(basename "$REPO")--*/**" 'opencode may use its own repo worktrees'
+assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/$(basename "$REPO")-wf-*/**" 'opencode may use its own director worktrees'
+assert_not_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/**" 'opencode may not use every repo worktree'
 [ ! -e "$REPO/opencode.json" ] || fail 'opencode writes its config to the lane folder, never into the repo'
 [ ! -e "$REPO/injected" ] || fail 'opencode prompt contents are not executed by the shell'
 assert_contains "$(cat "$OC_HAND/prompt.md")" "$(cat "$PROMPT")" 'opencode prompt copy keeps the caller prompt'
@@ -330,6 +332,10 @@ assert_exit 1 "$LAST_STATUS" 'opencode: the protected CD tree is refused'
 run_lane --engine opencode blocked-home-repos "$HOME_TEST/repos" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'opencode: ~/repos itself is refused'
 assert_contains "$LAST_OUTPUT" 'free APIs train on their input' 'the ~/repos refusal says why'
+run_lane --engine opencode blocked-home-oc "$HOME_TEST" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: the folder above ~/repos is refused'
+run_lane --engine opencode blocked-root-oc / sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: / is refused'
 run_lane --engine opencode --allow-client allowed-client-oc "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'opencode: --allow-client bypasses the repository guard'
 mv "$HOME_TEST/repos/hub/client-repos.txt" "$TMP/client-repos.txt"

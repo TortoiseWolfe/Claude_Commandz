@@ -13,7 +13,9 @@
 # or a log. Both free APIs train on free-tier input (see ~/.config/panel/free-limits.json), so lane.sh refuses client repos and ~/repos.
 # Groq's free tier is not used: its 8000 tokens/minute is smaller than OpenCode's own system prompt (proved 22 Oct: it loops on "Request too large").
 #
-# Permissions: everything allowed except reads outside the checkout; the lane folder and ~/repos/.worktrees are the two outside paths it may use.
+# Permissions: everything allowed except paths outside the checkout; the lane folder and this repo's own worktrees (~/repos/.worktrees/<repo>--*,
+# <repo>-wf-*) are the outside paths it may use, never another repo's worktree. Shell commands are not sandboxed beyond that: the client guard in
+# lane.sh on the checkout is what keeps client code away from the free APIs.
 # The config is written to the lane folder (OPENCODE_CONFIG), never into the repo. A wall-clock limit (OPENCODE_LANE_TIMEOUT seconds, default 7200)
 # stops a run that loops.
 set -u
@@ -38,12 +40,13 @@ load_key() {  # <env var> <file>...
 load_key GOOGLE_GENERATIVE_AI_API_KEY "$HOME/.config/gemini/api-key" || true
 load_key OPENROUTER_API_KEY "$HOME/.config/openrouter/api-key" || true
 
-# One config for the run: allow everything, deny paths outside the checkout except the two this lane is told to use.
+# One config for the run: allow everything, deny paths outside the checkout except the ones this lane is told to use.
+repo_name="$(basename -- "$dir")"
 mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 cat >"$conf" <<JSON
 {"\$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
- "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$HOME/repos/.worktrees/**":"allow"}}}
+ "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
 
