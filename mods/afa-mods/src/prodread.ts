@@ -131,8 +131,8 @@ type Piece = { text: string; sep: string }
 
 // A value is one plain word: no space (the unquoted `$SP` in the call would split on it), no `~` (bash expands it in an assignment, the map would not), no `$`, glob or redirect characters.
 const ASSIGN = /^([A-Za-z_]\w*)=([\w./:,@%+=-]*|'[\w./:,@%+=-]*'|"[\w./:,@%+=-]*")$/
-// Names bash makes readonly (a failed assignment leaves the old value) or recomputes on every read, and every BASH* name.
-const ASSIGN_BAD = /^(?:PATH|HOME|SHELL|ENV|IFS|CDPATH|SHELLOPTS|PS4|PROMPT_COMMAND|GLOBIGNORE|FPATH|LD_\w*|BASH\w*|UID|EUID|PPID|RANDOM|SRANDOM|SECONDS|LINENO|EPOCHSECONDS|EPOCHREALTIME|GROUPS|FUNCNAME|HISTCMD|OPTIND|OLDPWD|PWD|SHLVL|TMPDIR|MAIL\w*|TIMEFORMAT|POSIXLY_CORRECT)$/
+// Only these names may be set before the call: bash gives many other names a meaning of their own (readonly, recomputed, or `$_`), and a value stored here would then differ from what bash holds.
+const ASSIGN_OK = /^(?:SP|L|DIR|SCRIPTS|STACK_NAME)$/
 const CD_ABS = /^cd\s+\/[\w./-]*$/
 const TAIL_HEAD = /^(?:tail|head)(?:\s+-n\s*\d+|\s+-\d+)?$/
 
@@ -159,7 +159,7 @@ function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<s
       return false
     }
     const a = ASSIGN.exec(t)
-    if (!(a ? !ASSIGN_BAD.test(a[1]) : CD_ABS.test(t))) return false
+    if (!(a ? ASSIGN_OK.test(a[1]) : CD_ABS.test(t))) return false
     if (a) vars.set(a[1], a[2].replace(/^(['"])(.*)\1$/, '$2'))
     if (sep === '&') {
       if (!(blank(parts[i + 1]) && parts[i + 1].sep === '&')) return false // a lone & puts it in the background

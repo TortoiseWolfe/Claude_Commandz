@@ -865,6 +865,8 @@ container_exec "$cid" "$CMD" "$U"
     ['a ~ in an unquoted value', `SP=~/x; ${CALL}`],
     ['a readonly variable as the path', `UID=${SP}; ${CALL.replace('$SP', '$UID')}`],
     ['a changing variable as the path', `RANDOM=${SP}; ${CALL.replace('$SP', '$RANDOM')}`],
+    ['the $_ parameter as the path', `_=${SP}; ${CALL.replace('$SP', '$_')}`],
+    ['PIPESTATUS as the path', `PIPESTATUS=${SP}; ${CALL.replace('$SP', '$PIPESTATUS')}`],
     ['a BASH_ name as the path', `BASH_ARGV0=${SP}; ${CALL.replace('$SP', '$BASH_ARGV0')}`],
     ['a redirect in a quoted value', `SP=${SP}; X="a>b"; ${CALL}`],
     ['the script word uses a variable the line did not set', `STACK_NAME=x timeout 120 bash $NOPE/rexec.sh --prod 'drush status'`],
