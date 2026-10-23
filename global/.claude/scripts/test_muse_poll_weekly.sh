@@ -8,6 +8,7 @@ trap 'rm -rf -- "$TMP"' EXIT
 CONFIG=$TMP/weekly.tsv
 INBOX=$TMP/inbox.md
 HOME_TEST=$TMP/home
+export MUSE_POLL_LOCK=$TMP/poll.lock   # never wait on the live poller's /tmp/muse-poll.lock (it made this test fail whenever a real pass was running)
 mkdir -p "$HOME_TEST/.claude/scripts" "$HOME_TEST/.local/bin" "$HOME_TEST/repos" "$HOME_TEST/.claude/state"
 printf '2\t17:00\tWeekly Notes {date}\tnotes\n' >"$CONFIG"
 printf 'keep this line\n' >"$INBOX"
