@@ -83,7 +83,7 @@ export type Hold = { kind: string; hard: boolean; segment: string; container?: M
 // deployEnvKeys: names the repo's dotenv file may hold (default DEPLOY_ENV_KEYS; a test injects its own)
 // deployPins: SHA-256 list, by repo folder, of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string> }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; prodWantedEnv?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string> }
 
 const strip = (s: string) =>
   s
@@ -763,7 +763,8 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
 }
 
 // A production call counts as a read only when its forwarder script is plain and every remote command is a read.
-// The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time.
+// The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time. The repo's dotenv file is
+// asked for through env.prodWantedEnv instead, so the caller reduces exactly that path, and no other, to its key names.
 function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string> | undefined, depth: number, scope: Scope, env: ScratchEnv): boolean {
   // depth 0 only: inside `bash -c` the commands before it are out of sight, and one of them could rewrite the script the hook just read
   if (depth > 0 || !shape || scope.mounts) return false
@@ -773,6 +774,8 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
   const script = resolveHostPath(call.script, { ...scope, vars: shape })
   // backstop: the path bash will open is one plain absolute word
   if (!('path' in script) || !/^\/[\w./-]+$/.test(script.path)) return false
+  // no hidden last part either (a hidden folder such as .worktrees is fine): the forwarder is a script, never a dotfile such as the dotenv file the caller reduces to key names
+  if ((script.path.split('/').pop() ?? '').startsWith('.')) return false
   // no `.` or `..` part, in the word or in any value it expands: the kernel follows a symlink before it folds `..`
   const expanded = call.script.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_m, a?: string, b?: string) => shape.get((a ?? b) as string) ?? '')
   if (hasDotPart(expanded)) return false
@@ -795,7 +798,7 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
   const envPath = `${scope.home}/repos/${deploy.repo}/.env`
   const keys = env.prodScripts?.[envPath]
   if (keys === undefined) {
-    env.prodWanted?.add(envPath)
+    env.prodWantedEnv?.add(envPath)
     return false
   }
   return deployEnvIsPlain(keys, env.deployEnvKeys)

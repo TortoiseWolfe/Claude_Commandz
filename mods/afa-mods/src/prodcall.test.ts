@@ -95,16 +95,30 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
   })
   test('a dotenv file the hook has not read yet is asked for and the command is held meanwhile', () => {
     const wanted = new Set<string>()
+    const wantedEnv = new Set<string>()
     const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY }
-    const holds = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, prodWanted: wanted }).filter(h => h.kind === 'production deploy')
+    const holds = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, prodWanted: wanted, prodWantedEnv: wantedEnv }).filter(h => h.kind === 'production deploy')
     expect(holds.length).toBe(1)
-    expect([...wanted]).toEqual([ENV_PATH])
+    expect([...wanted]).toEqual([])
+    expect([...wantedEnv]).toEqual([ENV_PATH])
   })
   test('an injected key list decides: a key on it passes', () => {
     const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY, [ENV_PATH]: 'EXTRA_KEY' }
     const n = (keys: string[]) => classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, deployEnvKeys: new Set(keys) }).filter(h => h.kind === 'production deploy').length
     expect(n(['EXTRA_KEY'])).toBe(0)
     expect(n(['OTHER'])).toBe(1)
+  })
+  test('a forwarder inside a hidden folder (a worktree under .worktrees) is still a read; only a hidden script name is held', () => {
+    const sp = `${HOME}/repos/.worktrees/Chattanooga-Digital--x/scripts`
+    const cmd = `SP=${sp}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status'`
+    expect(prodHolds(cmd, REXEC, DEPLOY, PINS, { [`${sp}/rexec.sh`]: REXEC })).toBe(0)
+    expect(prodHolds(cmd.replace('rexec.sh', '.rexec.sh'), REXEC, DEPLOY, PINS, { [`${sp}/.rexec.sh`]: REXEC })).toBe(1)
+  })
+  test('a forwarder that is a dotfile (the dotenv file as the script word) is held and never asked for', () => {
+    const wanted = new Set<string>()
+    const holds = classify(`SP=${SP}; STACK_NAME=x bash $SP/.env --prod 'drush status'`, 0, { home: HOME, prodScripts: {}, deployPins: PINS, prodWanted: wanted }).filter(h => h.kind === 'production deploy')
+    expect(holds.length).toBe(1)
+    expect([...wanted]).toEqual([])
   })
   test('a call with CALL and nothing around it needs its variables set', () => {
     expect(prodHolds(CALL)).toBeGreaterThan(0)

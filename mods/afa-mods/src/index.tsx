@@ -225,14 +225,19 @@ export const register: Register = on => {
     const prodScripts: Record<string, string> = {}
     for (let round = 0; round < 4; round += 1) {
       const wanted = new Set<string>()
-      classify(e.command, 0, { ...baseEnv, prodScripts, prodWanted: wanted })
+      const wantedEnv = new Set<string>()
+      classify(e.command, 0, { ...baseEnv, prodScripts, prodWanted: wanted, prodWantedEnv: wantedEnv })
       const fresh = [...wanted].filter(path => !(path in prodScripts))
-      if (fresh.length === 0) break
+      const freshEnv = [...wantedEnv].filter(path => !(path in prodScripts))
+      if (fresh.length === 0 && freshEnv.length === 0) break
       for (const path of fresh) {
         const t = await readText($, path).catch(() => undefined)
-        const fits = t !== undefined && t.length < 400000
-        if (path.endsWith('/.env')) prodScripts[path] = fits ? envKeyLines(t) : '\u0000'
-        else prodScripts[path] = fits && t.length > 0 ? t : ''
+        prodScripts[path] = t !== undefined && t.length > 0 && t.length < 400000 ? t : ''
+      }
+      // only the paths classify asked for as a dotenv file, by name; a forwarder or deploy script is never reduced this way
+      for (const path of freshEnv) {
+        const t = await readText($, path).catch(() => undefined)
+        prodScripts[path] = t !== undefined && t.length < 400000 ? envKeyLines(t) : '\u0000'
       }
     }
     const scratchEnv = { ...baseEnv, prodScripts }
