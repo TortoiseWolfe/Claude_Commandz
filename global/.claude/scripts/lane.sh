@@ -76,13 +76,20 @@
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150, default by kind: see default_recycle_k)
+#   lane.sh --tier <name>               "<model> TAB <reason>": the model in the lane's row and the --allow-high-tier reason written there ("-" = none;
+#                                       "site-model" for a site-model prompt). lane_watch.sh names a live lane on opus or fable with no reason.
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot|agy)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; empty = default for its kind)
+#   date  name  dir  model  billing(console|subscription; codex|copilot|agy)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
+#
+# High tier (his rule, 22 Oct 8 PM, after ten lanes ran on Opus all day and only one was entitled): opus and fable need a stated reason.
+# --allow-high-tier "<reason>" at start, --resume or --model is written to column 13 of the index row and logged to tier-overrides.log; without it
+# a plain opus or fable start is refused (site-model prompts and mail lanes have their own rules above). --recycle puts the lane back on sonnet
+# right after the /clear unless it is a site-model lane or holds a reason; a mail lane is always sonnet.
 #
 # Effort and compaction (Claude lanes only, including --console, --headless and --resume):
 # every Claude lane gets --effort <level> and a --settings JSON with an autoCompactWindow as a backstop (a lane is recycled with
@@ -177,6 +184,8 @@ fable and opus are refused unless --allow-high-tier "<reason>" is given (logged 
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
 his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on 31 Oct 2026. Accepted reasons: needs Docker, needs wsl.exe,
 needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
+opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
+--tier <name> prints the lane's model and that reason.
 --model <name> <model> switches a running lane and puts back the user default model that /model would otherwise change.
 USAGE
 }
@@ -227,6 +236,7 @@ while [ $# -gt 0 ]; do
     --ctx) mode=ctx; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
+    --tier) mode=tier; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
   esac
@@ -275,12 +285,12 @@ fill_ids() {
   local tmp claimed d n dir m b p r id st eff conn rk
   tmp="$(mktemp)"
   claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
-  while IFS="$TAB" read -r d n dir m b p r id st eff conn rk; do
+  while IFS="$TAB" read -r d n dir m b p r id st eff conn rk ent; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(find_session "$dir" "$st" "$claimed")"
       [ -n "$id" ] && claimed="$claimed $id"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:-}" >>"$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" >>"$tmp"
   done <"$INDEX"
   cat "$tmp" >"$INDEX"; rm -f "$tmp"
 }
@@ -319,6 +329,14 @@ follow_session() {  # <name> <dir> <session-id> <start-epoch>
     && cat "$tmp" >"$INDEX"
   rm -f "$tmp"
   echo "$best"
+}
+
+# Set column <col> of the lane's last index row, padding a short row out to 12 fields with "-" (an empty field would collapse in `read`).
+index_set() {  # <name> <col> <value>
+  local tmp; tmp="$(mktemp)"
+  awk -F'\t' -v OFS='\t' -v n="$1" -v c="$2" -v v="$3" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); for (j=k+1;j<c;j++) f[j]="-"; f[c]=v; if (k<c) k=c; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
+    && cat "$tmp" >"$INDEX"
+  rm -f "$tmp"
 }
 
 # Expand only the current user's ~ forms; never eval data from the repository lists.
@@ -480,12 +498,53 @@ mail_tier_ok() {  # <model> <name> <prompt-file> [verb]
     if [ "$dry" = 1 ]; then echo "# would log the mail-tier override for $2 ($1) to $LANE_TIER_LOG"
     else
       mkdir -p "$(dirname "$LANE_TIER_LOG")"
-      printf '%s\t%s\t%s\tmail\t%s\n' "$(date -Is)" "$2" "$1" "$(tr '\t\n' '  ' <<<"$allow_high_reason")" >>"$LANE_TIER_LOG"
+      printf '%s\t%s\t%s\tmail\t%s\n' "$(date -Is)" "$2" "$1" "$(one_line "$allow_high_reason")" >>"$LANE_TIER_LOG"
     fi
     return 0
   fi
   echo "refusing mail model $1 for $2: email work (drafting, answering, absorbing client mail) is execution and runs on sonnet, never fable or opus (his rule, 21 Oct 7:15 PM). Use sonnet, or pass --allow-high-tier \"<reason>\" (logged to $LANE_TIER_LOG)." >&2
   return 1
+}
+
+# Opus and fable cost several times sonnet, and a lane that stays on one all day is what ran up the bill (his rule, 22 Oct: ten lanes on Opus,
+# only tigard-fable entitled; coop-mail on Fable). So a Claude lane may run on opus or fable only with a reason WRITTEN DOWN: the
+# --allow-high-tier "<reason>" given at start, resume or --model goes into index.tsv column 13 (ent, "-" = none). Site-model prompts need none
+# (their own rule above) and mail lanes are settled by mail_tier_ok. A recycle puts a lane without a reason back on sonnet (policy_model),
+# and lane_watch.sh names any live lane on opus or fable with no reason (lane.sh --tier prints "<model> TAB <reason>").
+one_line() { printf '%s' "$1" | tr '\t\n' '  '; }
+is_high_model() { case "${1,,}" in *opus*|*fable*) return 0 ;; *) return 1 ;; esac; }
+site_prompt() { grep -qE 'data/sites/|site-model' -- "${1:-/nonexistent}" 2>/dev/null; }
+high_tier_ok() {  # <model> <name> <prompt-file> [recorded reason]
+  is_high_model "$1" || return 0
+  [ -z "${4:-}" ] || [ "${4:-}" = - ] || return 0
+  site_prompt "${3:-}" && return 0
+  mail_lane "$2" "${3:-}" && return 0
+  if [ -n "$allow_high_reason" ]; then
+    if [ "$dry" = 1 ]; then echo "# would log the high-tier reason for $2 ($1) to $LANE_TIER_LOG"
+    else
+      mkdir -p "$(dirname "$LANE_TIER_LOG")"
+      printf '%s\t%s\t%s\thigh\t%s\n' "$(date -Is)" "$2" "$1" "$(one_line "$allow_high_reason")" >>"$LANE_TIER_LOG"
+    fi
+    return 0
+  fi
+  echo "refusing model $1 for $2: opus and fable need a stated reason (his rule, 22 Oct: ten lanes ran on Opus all day with no entitlement). Use sonnet, or pass --allow-high-tier \"<reason>\"; the reason is written to the lane's index row and logged to $LANE_TIER_LOG." >&2
+  return 1
+}
+# The reason an index row carries for a start: the stated one, or the site-model rule, else "-".
+high_ent() {  # <model> <prompt-file>
+  is_high_model "$1" || { echo -; return 0; }
+  if [ -n "$allow_high_reason" ]; then one_line "$allow_high_reason"
+  elif site_prompt "${2:-}"; then echo "site-model prompt (fable or opus only)"
+  else echo -; fi
+}
+# The model a lane goes back to after a recycle: its own when it is not high, when its prompt is site-model work, or when it holds a reason;
+# sonnet otherwise (a mail lane is always sonnet).
+policy_model() {  # <model> <name> <prompt-file> <recorded reason>
+  is_high_model "$1" || { echo "$1"; return 0; }
+  site_prompt "${3:-}" && { echo "$1"; return 0; }
+  mail_lane "$2" "${3:-}" && { echo sonnet; return 0; }
+  [ -z "${4:-}" ] || [ "${4:-}" = - ] || { echo "$1"; return 0; }
+  echo sonnet
 }
 
 # Default effort for a Claude model: high (sonnet, opus, fable); haiku none (prints nothing).
@@ -691,7 +750,7 @@ if [ "$mode" = status ]; then
       pane_e="$(tmux capture-pane -e -p -t "$SESSION:$w" 2>/dev/null || true)"
       pane="$(strip_ansi <<<"$pane_e")"
       row="$(index_row "$w")"
-      IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"${row:-}"
+      IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"${row:-}"
       if [ -z "$row" ]; then
         rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
@@ -731,7 +790,7 @@ if [ "$mode" = status ]; then
   # Index lanes from the last 3 days with no window and no report.
   if [ -s "$INDEX" ]; then
     cutoff="$(date -d '3 days ago' +%F)"
-    while IFS="$TAB" read -r d n dir m b p rep id st eff conn rk; do
+    while IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent; do
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
@@ -748,7 +807,7 @@ send_to() {  # <name> <text...>
   text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
-    IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+    IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
       return 1
@@ -862,29 +921,19 @@ PY
 }
 if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
 
-# --model <name> <model>: switch a running lane's model. Claude Code's /model also saves the choice as the USER default model, which moved
-# the hub's own default to sonnet on 21 Oct, so read the default first and put it back after (user_model.py prints only the model key).
-if [ "$mode" = model ]; then
-  [ $# -eq 2 ] || { echo "usage: lane.sh [--dry-run] --model <name> <model>" >&2; exit 1; }
-  name="$1"; newm="$2"
-  is_claude_model "$newm" || { echo "--model needs a Claude model name (opus, sonnet, haiku, fable or claude-...), got: $newm" >&2; exit 1; }
-  row="$(index_row "$name")"
-  [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
-  site_tier_ok "$newm" "${p:-}" || exit 1
-  mail_tier_ok "$newm" "$name" "${p:-}" || exit 1
+# switch_model <name> <model>: type /model into a running lane, put back the user default, and move the lane's index row to the new model.
+# Claude Code's /model also saves the choice as the USER default model, which moved the hub's own default to sonnet on 21 Oct, so read the
+# default first and put it back after (user_model.py prints only the model key). Returns 0 only when the pane showed the switch. Used by
+# --model and by --recycle (which puts a lane back on its policy model).
+switch_model() {  # <name> <model>
+  local name="$1" newm="$2" um before now changed=0 calm=0 fam rc=0 _
   um="$(cd "$(dirname "$0")" && pwd -P)/user_model.py"
   python3 -I "$um" check >/dev/null 2>&1 \
-    || { echo "cannot switch $name: the user default model cannot be read back and restored safely, and /model would change it" >&2; exit 1; }
+    || { echo "cannot switch $name: the user default model cannot be read back and restored safely, and /model would change it" >&2; return 1; }
   before="$(python3 -I "$um" get)"
-  if [ "$dry" = 1 ]; then
-    echo "would type '/model $newm' into $name, then restore the user default model (${before})"
-    exit 0
-  fi
   # /model is a local command: it never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line.
   fam="$(command grep -oiE 'opus|sonnet|haiku|fable' <<<"$newm" | head -1 || true)"  # the pane names the family ("Sonnet 5.5"), not the id
-  rc=0; LANE_SEND_PANE_RE="Set model to .*${fam}" send_to "$name" "/model $newm" || rc=$?
-  changed=0; calm=0
+  LANE_SEND_PANE_RE="Set model to .*${fam}" send_to "$name" "/model $newm" || rc=$?
   for _ in $(seq 1 "${LANE_MODEL_POLLS:-12}"); do  # /model saves the default a moment after it runs: restore until it has settled
     now="$(python3 -I "$um" get)"
     if [ "$now" != "$before" ]; then
@@ -896,12 +945,48 @@ if [ "$mode" = model ]; then
     fi
     sleep 0.5
   done
-  [ "$rc" -eq 0 ] || exit "$rc"
-  tmp="$(mktemp)"
-  awk -F'\t' -v OFS='\t' -v n="$name" -v m="$newm" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[4]=m; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
-    && cat "$tmp" >"$INDEX"
-  rm -f "$tmp"
+  [ "$rc" -eq 0 ] || return "$rc"
+  index_set "$name" 4 "$newm"
   echo "model: $name now on $newm; the user default model is still ${before}"
+  return 0
+}
+
+# --model <name> <model>: switch a running lane's model (see switch_model).
+if [ "$mode" = model ]; then
+  [ $# -eq 2 ] || { echo "usage: lane.sh [--dry-run] --model <name> <model>" >&2; exit 1; }
+  name="$1"; newm="$2"
+  is_claude_model "$newm" || { echo "--model needs a Claude model name (opus, sonnet, haiku, fable or claude-...), got: $newm" >&2; exit 1; }
+  row="$(index_row "$name")"
+  [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  site_tier_ok "$newm" "${p:-}" || exit 1
+  mail_tier_ok "$newm" "$name" "${p:-}" || exit 1
+  high_tier_ok "$newm" "$name" "${p:-}" "${ent:-}" || exit 1
+  if [ "$dry" = 1 ]; then
+    um="$(cd "$(dirname "$0")" && pwd -P)/user_model.py"
+    python3 -I "$um" check >/dev/null 2>&1 \
+      || { echo "cannot switch $name: the user default model cannot be read back and restored safely, and /model would change it" >&2; exit 1; }
+    echo "would type '/model $newm' into $name, then restore the user default model ($(python3 -I "$um" get))"
+    exit 0
+  fi
+  rc=0; switch_model "$name" "$newm" || rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
+  if is_high_model "$newm" && [ -n "$allow_high_reason" ] && { [ -z "${ent:-}" ] || [ "${ent:-}" = - ]; }; then
+    index_set "$name" 13 "$(one_line "$allow_high_reason")"
+  fi
+  exit 0
+fi
+
+# --tier <name>: "<model> TAB <reason>" for the lane's last index row; the reason is the one written to the row (column 13), "site-model" for a
+# site-model prompt on opus or fable, else "-". lane_watch.sh names any live lane on opus or fable whose reason is "-".
+if [ "$mode" = tier ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --tier <name>" >&2; exit 1; }
+  row="$(index_row "$1")"
+  [ -n "$row" ] || { printf '?\t-\n'; exit 0; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  reason="${ent:--}"
+  if [ "$reason" = - ] && is_high_model "${m:-}" && site_prompt "${p:-}"; then reason=site-model; fi
+  printf '%s\t%s\n' "${m:-?}" "$reason"
   exit 0
 fi
 
@@ -910,7 +995,7 @@ if [ "$mode" = point ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --recycle-point <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   if [ -z "$row" ]; then default_recycle_k code; exit 0; fi
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
   lane_recycle_k "${rk:-}" "${p:-}" "${dir:-}" "${conn:--}"
   exit 0
 fi
@@ -921,7 +1006,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
   case "${b:-subscription}" in codex|copilot|agy) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
@@ -954,7 +1039,7 @@ if [ "$mode" = recycle ]; then
   name="$1"
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
   if is_headless_billing "${b:-}" || [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
     echo "$name is a headless lane; there is no window to recycle" >&2; exit 1
   fi
@@ -968,6 +1053,7 @@ if [ "$mode" = recycle ]; then
     rk_next=$(( rk_now + 20 )); rk_ceiling=$(( ${LANE_WINDOW_CAP:-200000} * 84 / 100000 - 40 ))
     [ "$rk_next" -le "$rk_ceiling" ] || rk_next=$(( rk_ceiling > rk_now ? rk_ceiling : rk_now ))
   fi
+  target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
   msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff: what is done, what is in flight, the next step, and what to re-arm (timers, background jobs, watchers). Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md."
   msg_reprime="Hub: your context was cleared (recycle, not a restart). Read $p, then $handoff, then carry on from the next step it names and re-arm what it lists. Your hand-off folder is unchanged: $hand."
   if [ "$dry" = 1 ]; then
@@ -976,8 +1062,9 @@ if [ "$mode" = recycle ]; then
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
     echo "  4. send: /clear"
+    echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime"
-    echo "  6. append an index row to $INDEX with the lane's new session id and recycle line ${rk_next}K"
+    echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
   command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
@@ -1039,6 +1126,17 @@ if [ "$mode" = recycle ]; then
   done
   pane_input_empty "$cpane" || rfail "/clear stayed in the input line"
   sleep 2
+  # The lane's model goes back to its policy model before it reads anything (his rule, 22 Oct: lanes sat on opus and fable all day because the
+  # tier was only checked at start). A failed switch is logged and the recycle goes on; lane_watch names the lane for the model instead.
+  if [ "$target_model" != "$m" ]; then
+    if switch_model "$name" "$target_model" >/dev/null 2>&1; then
+      printf '%s\t%s\tmodel-switched\tfrom %s to %s\n' "$(date -Is)" "$name" "$m" "$target_model" >>"$rlog"
+      m="$target_model"
+    else
+      printf '%s\t%s\tmodel-switch-failed\twanted %s, still %s\n' "$(date -Is)" "$name" "$target_model" "$m" >>"$rlog"
+      echo "warning: could not set $name to $target_model after the recycle; it is still on $m" >&2
+    fi
+  fi
   send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
 
   claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"; newid=""
@@ -1046,7 +1144,7 @@ if [ "$mode" = recycle ]; then
     newid="$(find_session "$dir" "$t0" "$claimed")"; [ -n "$newid" ] && break; sleep 1
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" >>"$INDEX"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" >>"$INDEX"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
   exit 0
@@ -1058,7 +1156,7 @@ if [ "$mode" = resume ]; then
   fill_ids
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
   if is_headless_billing "${b:-}"; then
     echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
     exit 1
@@ -1073,12 +1171,16 @@ if [ "$mode" = resume ]; then
   [ "$b" = console ] && console=1
   site_tier_ok "$m" "${p:-}" || exit 1
   mail_tier_ok "$m" "$name" "${p:-}" || exit 1
+  high_tier_ok "$m" "$name" "${p:-}" "${ent:-}" || exit 1
   if [ "$dry" = 0 ]; then
     command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
     if tmux has-session -t "$SESSION" 2>/dev/null \
        && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name"; then
       echo "a window named $name already exists in $SESSION" >&2; exit 1
     fi
+  fi
+  if [ "$dry" = 0 ] && is_high_model "$m" && [ -n "$allow_high_reason" ] && { [ -z "${ent:-}" ] || [ "${ent:-}" = - ]; }; then
+    index_set "$name" 13 "$(one_line "$allow_high_reason")"
   fi
   eff="$(lane_effort "$m" "${eff:-}")"
   # Reuse the recorded connectors choice; a row from before the column was started with them on.
@@ -1151,6 +1253,7 @@ if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
 fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
 [ "$engine" != claude ] || mail_tier_ok "$model" "$name" "$prompt" || exit 1
+[ "$engine" != claude ] || high_tier_ok "$model" "$name" "$prompt" || exit 1
 guard_external_engine || exit 1
 agy_default_ok "$name" "$dir" "$model" "$prompt" || exit 1
 
@@ -1310,8 +1413,9 @@ if [ "$dry" = 0 ]; then
   if [ "$engine" != claude ]; then lane_billing="$engine"
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:-}" >>"$INDEX"
+  lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" >>"$INDEX"
 else
   echo "# would append a row to $INDEX"
 fi

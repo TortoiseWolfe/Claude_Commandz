@@ -20,6 +20,9 @@
 #   - the WSL-to-Windows bridge cannot be healed or still fails its 10 s probe (wsl_bridge_watchdog.py runs from every poll and raises the alert)
 #   - a lane has cost over $LANE_SPEND_LIMIT (default 25) dollars of API-equivalent spend today (lane_spend.py, from the usage ledger),
 #     once per lane per day. 21 Oct: $303 went in one day, $85 on one mail lane redrafting a reply, and nothing said so until night.
+#   - a live lane is on opus or fable and its index row holds no --allow-high-tier reason (lane.sh --tier says "<model> TAB -"; a site-model
+#     prompt counts as a reason). Named once per lane per day with its model and today's spend. 22 Oct: ten lanes ran on Opus all day, only
+#     one was entitled, and the tier was only checked at start. Checked on every poll; a recycle also puts such a lane back on sonnet.
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
@@ -114,6 +117,23 @@ spend_check() {
   done <<<"$out"
   find "$recycle_dir" -maxdepth 1 -name '.spend-alarm-*' -mtime +3 -delete 2>/dev/null
   return 0
+}
+
+# High-tier alarm. high_check <lane> (no subshell: it sets hit and other) names a live lane that is on opus or fable with no logged reason,
+# once per lane per day (.high-alarm-<date> in $recycle_dir lists the lanes already named), with today's spend from the ledger.
+high_check() {
+  local l=$1 model reason f usd
+  IFS=$'\t' read -r model reason <<<"$("$lane_sh" --tier "$l" 2>/dev/null)"
+  case "${model,,}" in *opus*|*fable*) ;; *) return 0 ;; esac
+  [ "${reason:--}" = - ] || return 0
+  f="$recycle_dir/.high-alarm-$(date +%F)"
+  grep -qxF -- "$l" "$f" 2>/dev/null && return 0
+  printf '%s\n' "$l" >> "$f"
+  usd=$(timeout 90 $spend_cmd 2>/dev/null | awk -F'\t' -v n="$l" '$2==n{print $1; exit}')
+  [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || usd=0
+  echo "tier: lane $l is on $model with no logged --allow-high-tier reason, \$$usd API-equivalent today. Set it to sonnet: lane.sh --model $l sonnet (a recycle does this too), or give the reason: lane.sh --allow-high-tier \"<reason>\" --model $l $model. Named once today."
+  find "$recycle_dir" -maxdepth 1 -name '.high-alarm-*' -mtime +3 -delete 2>/dev/null
+  hit=1; other=1
 }
 
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
@@ -267,6 +287,7 @@ while :; do
       if printf '%s\n' "$pane" | dialog_waiting; then
         echo "waiting on a dialog: $l"; hit=1; other=1
       fi
+      high_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then
         recycling[$l]=1; seen_turn[$l]=$done_line   # the hand-off turn is ours, not news

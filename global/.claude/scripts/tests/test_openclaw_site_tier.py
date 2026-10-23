@@ -240,6 +240,29 @@ class TheHost(unittest.TestCase):
         argv = seen["argv"]
         self.assertEqual(argv[argv.index("--claude-because") + 1], "needs Docker or wsl.exe")
 
+    def test_an_opus_or_fable_start_carries_the_high_tier_reason(self):
+        # lane.sh refuses opus and fable without --allow-high-tier and writes the reason to the index (22 Oct)
+        for model in ("opus", "fable"):
+            host, seen = self.host(self.ok())
+            host.start_lane("oc-x", "/tmp", "claude", model, self.prompt("Review the router design for the client."))
+            argv = seen["argv"]
+            self.assertIn("judgment", argv[argv.index("--allow-high-tier") + 1], model)
+            self.assertEqual(argv[-2], model)
+
+    def test_no_high_tier_reason_for_sonnet_site_model_or_mail(self):
+        cases = [("oc-x", "sonnet", "Count the issues."), ("oc-x", "opus", "Fit the Tigard site model."),
+                 ("acme-mail", "opus", "Review the router design."), ("oc-x", "opus", "Draft a reply to Greg's email.")]
+        for name, model, text in cases:
+            host, seen = self.host(self.ok())
+            host.start_lane(name, "/tmp", "claude", model, self.prompt(text))
+            self.assertNotIn("--allow-high-tier", seen["argv"], (name, model, text))
+
+    def test_an_email_ask_gets_no_high_tier_reason(self):
+        host, seen = self.host(self.ok())
+        host.force_connectors_on = True
+        host.start_lane("oc-x", "/tmp", "claude", "fable", self.prompt("Review the router design."))
+        self.assertNotIn("--allow-high-tier", seen["argv"])
+
     def test_the_reason_is_not_passed_to_other_engines(self):
         for engine in ("agy", "codex", "copilot"):
             host, seen = self.host(self.ok())

@@ -511,5 +511,52 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$sp_cmd"; rm -f "$sp_home"/.claude/sta
 out=$(sp_run)
 if [ "$out" = "heartbeat: nothing new in 0 min" ]; then echo "ok   a failing ledger read wakes nobody and stops nothing"; else echo "FAIL spend failure: $out"; failures=$((failures + 1)); fi
 
+# High-tier alarm (22 Oct 8 PM: ten lanes ran on Opus all day, one was entitled): a live lane on opus or fable with no logged reason is
+# named once per lane per day, with its model and today's spend. An entitled lane and a sonnet lane are not.
+hi_home="$TMP/hi-home"; mkdir -p "$hi_home/.claude/state/lanes" "$hi_home/bin"
+hi_lane_sh="$TMP/hi-lane.sh"
+cat > "$hi_lane_sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --tier ] || exit 0
+case "$2" in
+  hi-open) printf 'opus\t-\n' ;;
+  hi-fable) printf 'fable\t-\n' ;;
+  hi-ent) printf 'opus\tdesign review of the router\n' ;;
+  hi-site) printf 'fable\tsite-model\n' ;;
+  hi-sonnet) printf 'sonnet\t-\n' ;;
+esac
+SH
+chmod +x "$hi_lane_sh"
+printf '#!/usr/bin/env bash\nprintf "12.50\\thi-open\\topus\\n\\ntotal\\t12.5\\t0\\n"\n' > "$TMP/hi-spend.sh"; chmod +x "$TMP/hi-spend.sh"
+printf '%s\n' hi-open hi-fable hi-ent hi-site hi-sonnet > "$TMP/hi-live"
+cat > "$TMP/hi-bin-tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in list-windows) cat "$HI_LIVE" ;; esac
+SH
+mkdir -p "$TMP/hi-bin"; cp "$TMP/hi-bin-tmux" "$TMP/hi-bin/tmux"; chmod +x "$TMP/hi-bin/tmux"
+hi_run() { HOME="$hi_home" PATH="$TMP/hi-bin:$PATH" HI_LIVE="$TMP/hi-live" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$hi_lane_sh" LANE_SPEND_CMD="$TMP/hi-spend.sh" \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 20 bash "$SCRIPT" --max-min 0 hi-open hi-fable hi-ent hi-site hi-sonnet 2>&1 || true; }
+out=$(hi_run)
+if printf '%s\n' "$out" | grep -q '^tier: lane hi-open is on opus with no logged --allow-high-tier reason, \$12.50 API-equivalent today' \
+   && printf '%s\n' "$out" | grep -q '^tier: lane hi-fable is on fable with no logged --allow-high-tier reason, \$0 API-equivalent today'; then
+  echo "ok   a live opus or fable lane with no logged reason wakes the hub with its model and today's spend"
+else echo "FAIL high-tier wake: $out"; failures=$((failures + 1)); fi
+if ! printf '%s\n' "$out" | grep -q 'hi-ent\|hi-site\|hi-sonnet'; then echo "ok   a lane with a reason, a site-model lane and a sonnet lane are not named"
+else echo "FAIL high-tier named the wrong lane: $out"; failures=$((failures + 1)); fi
+out=$(hi_run)
+if ! printf '%s\n' "$out" | grep -q '^tier:'; then echo "ok   a lane already named today is not named again"
+else echo "FAIL high-tier named twice: $out"; failures=$((failures + 1)); fi
+echo hi-late >> "$TMP/hi-live"
+cat > "$hi_lane_sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --tier ] || exit 0
+case "$2" in hi-open) printf 'opus\t-\n' ;; hi-late) printf 'opus\t-\n' ;; esac
+SH
+out=$(HOME="$hi_home" PATH="$TMP/hi-bin:$PATH" HI_LIVE="$TMP/hi-live" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$hi_lane_sh" LANE_SPEND_CMD="$TMP/hi-spend.sh" \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 20 bash "$SCRIPT" --max-min 0 hi-open hi-late 2>&1 || true)
+if [ "$(printf '%s\n' "$out" | grep -c '^tier:')" = 1 ] && printf '%s\n' "$out" | grep -q '^tier: lane hi-late '; then
+  echo "ok   a lane that moves to opus later in the day is named, the earlier one is not repeated"
+else echo "FAIL high-tier later lane: $out"; failures=$((failures + 1)); fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

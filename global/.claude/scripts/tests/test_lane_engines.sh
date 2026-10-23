@@ -366,7 +366,7 @@ assert_contains "$STATUS_OUTPUT" 'engine/billing:copilot' 'status displays the C
 # Lean Claude lanes: effort high on every model, connectors/plugins/Artifact off, workspace CLAUDE.md swapped for the slim rules.
 PROMPT_MAIL="$TMP/prompt-mail.md"
 printf 'Check the Gmail drafts for replies.\n' >"$PROMPT_MAIL"
-run_lane lean-opus "$REPO" opus "$PROMPT"
+run_lane --allow-high-tier "engines test fixture" lean-opus "$REPO" opus "$PROMPT"
 assert_contains "$LAST_COMMAND" '--effort high' 'opus defaults to effort high'
 assert_not_contains "$LAST_COMMAND" 'xhigh' 'no lane defaults to xhigh'
 assert_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'connectors are off by default'
@@ -380,7 +380,7 @@ assert_not_contains "$LAST_COMMAND" 'append-system-prompt-file' 'no rule file, n
 assert_contains "$LAST_OUTPUT" 'connectors off' 'start line reports connectors off'
 run_lane lean-haiku "$REPO" haiku "$PROMPT"
 assert_not_contains "$LAST_COMMAND" '--effort' 'haiku takes no effort'
-run_lane --effort max lean-max "$REPO" opus "$PROMPT"
+run_lane --allow-high-tier "engines test fixture" --effort max lean-max "$REPO" opus "$PROMPT"
 assert_contains "$LAST_COMMAND" '--effort max' '--effort still overrides'
 
 printf '# Lane rules\n' >"$HOME_TEST/repos/hub/lane-rules.md"
@@ -403,6 +403,11 @@ conn_of() { awk -F'\t' -v n="$1" '$2==n{c=$11} END{print c}' "$INDEX"; }
 [ "$(conn_of lean-opus)" = off ] || fail 'index records connectors off'
 [ "$(conn_of lean-mail)" = on ] || fail 'index records connectors on'
 checks=$((checks + 2))
+ent_of() { awk -F'\t' -v n="$1" '$2==n{c=$13} END{print c}' "$INDEX"; }
+[ "$(ent_of lean-opus)" = 'engines test fixture' ] || fail "an opus start writes its --allow-high-tier reason to column 13, got: $(ent_of lean-opus)"
+[ "$(ent_of lean-mail)" = - ] || fail "a sonnet start writes - to column 13, got: $(ent_of lean-mail)"
+[ "$(awk -F'\t' '$2=="lean-opus"{c=$12} END{print c}' "$INDEX")" = 100 ] || fail 'column 12 (recycle line) stays a number before the reason'
+checks=$((checks + 3))
 
 # --resume reuses the recorded choice; a row from before the column counts as on.
 for pair in res-off:off res-on:on; do
@@ -444,6 +449,7 @@ run_lane rk-ops "$REPO" sonnet "$OPS_PROMPT"
 SITE_PROMPT="$TMP/site-prompt.md"; echo 'Fit the photos for data/sites/carbarns and write the SketchUp geometry' >"$SITE_PROMPT"
 run_lane --allow-low-tier rk-site "$REPO" opus "$SITE_PROMPT"
 [ "$(rk_of rk-site)" = 100 ] || fail "a site-model lane defaults to 100K, got: $(rk_of rk-site)"; checks=$((checks + 1))
+[ "$(awk -F'\t' '$2=="rk-site"{c=$13} END{print c}' "$INDEX")" = 'site-model prompt (fable or opus only)' ] || fail 'a site-model start records why it may be on opus or fable'; checks=$((checks + 1))
 for bad in 30 151 abc ''; do
   run_lane --recycle-at "$bad" rk-bad "$REPO" sonnet "$PROMPT"
   assert_exit 1 "$LAST_STATUS" "--recycle-at '$bad' is refused"
