@@ -484,13 +484,14 @@ assert_contains "$STATUS_CONN" 'old-row' 'status lists the ten-column row'
 # A dispatcher lane (name oc-*, or AFA_LANE_UNATTENDED=1) tells its Claude process nobody is at the window; a hub lane does not.
 run_lane oc-own-1016-0000 "$REPO" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'dispatcher-named lane starts'
-assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'oc- lane gets the unattended flag'
+assert_contains "$LAST_COMMAND" 'AFA_LANE=1 AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'oc- lane gets the lane mark and the unattended flag'
 assert_contains "$LAST_COMMAND" "$(date +%F)-oc-own-1016-0000" 'oc- lane is told its own folder'
 assert_contains "$LAST_COMMAND" 'claude --model sonnet' 'oc- lane still runs Claude'
 AFA_LANE_UNATTENDED=1 run_lane env-flagged-lane "$REPO" sonnet "$PROMPT"
 assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'the env flag alone also marks a lane unattended'
 run_lane hub-lane "$REPO" sonnet "$PROMPT"
 assert_not_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED' 'a hub lane is not marked unattended'
+assert_contains "$LAST_COMMAND" 'AFA_LANE=1 ' 'every Claude lane is marked a lane, so the guard denies fixable holds instead of asking'
 # An unattended lane may make one roadmap post, and its settings carry a narrow rule for exactly that; a hub lane's do not.
 # bash printf %q escapes the characters of the JSON, so the settings are compared after the escapes are dropped.
 plain() { printf '%s' "$1" | tr -d '\\'; }

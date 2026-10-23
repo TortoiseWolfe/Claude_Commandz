@@ -255,7 +255,7 @@ describe('what the question and a refusal say about it', () => {
     const text = await touches(probe, h, '/home/t')
     expect(text).toContain('image or service ada-stair-generator-site-tools')
     expect(text).toContain('no --cpus or compose cpus limit and no timeout')
-    expect(text).toContain('fix: add --cpus N (and a timeout in front), or run it through ~/.claude/scripts/docker-heavy.sh -- docker run ...')
+    expect(text).toContain('fix: add --cpus N (and a timeout in front), as "timeout <secs> docker run --cpus <n> --memory <m> ...", or run it through "~/.claude/scripts/docker-heavy.sh -- docker ..."')
   })
   test('a compose run names its service, not a flag value', async () => {
     const [h] = held('docker compose run -e A=b -v x:/y --rm web npm test')
