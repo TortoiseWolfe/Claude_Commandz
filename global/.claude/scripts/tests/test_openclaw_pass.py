@@ -1055,12 +1055,12 @@ class StartForAnAsk(PassBase):
         dp.save_state(self.ctx.state_path, state)
 
     def test_engine_copilot_while_copilot_is_blocked_starts_claude_and_says_so(self):
-        self.block(copilot_blocked_until=NOW + 14 * 86400, agy_blocked_until=NOW + 14 * 86400)
+        self.block(copilot_blocked_until=NOW + 14 * 86400, opencode_blocked_until=NOW + 14 * 86400)
         ok, msg = self.go(engine="copilot")
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
-        self.assertIn("Copilot and agy are out of usage", msg)
-        self.assertIn("Copilot and agy are out of usage", self.host.notes[-1])
+        self.assertIn("Copilot and OpenCode are out of usage", msg)
+        self.assertIn("Copilot and OpenCode are out of usage", self.host.notes[-1])
         self.assertIn("on Claude Sonnet", self.host.notes[-1])
 
     def test_engine_codex_while_both_are_blocked_starts_claude_and_codex_alone_goes_to_copilot(self):
@@ -1295,14 +1295,14 @@ class TheWaitingRoom(PassBase):
     def test_a_waiting_room_entry_asking_for_blocked_copilot_starts_claude(self):
         state = self.state()
         state["copilot_blocked_until"] = NOW + 14 * 86400
-        state["agy_blocked_until"] = NOW + 14 * 86400
+        state["opencode_blocked_until"] = NOW + 14 * 86400
         dp.save_state(self.ctx.state_path, state)
         self.entry("fd-a", engine="copilot")
         self.asked("start fd-a now")
         ok, msg = dp.approve_entry(self.ctx, self.host, ASK, "fd-a", NOW + 5)
         self.assertTrue(ok, msg)
         self.assertEqual(self.host.started[-1][2], "claude")
-        self.assertIn("Copilot and agy are out of usage", self.host.notes[-1])
+        self.assertIn("Copilot and OpenCode are out of usage", self.host.notes[-1])
 
     def test_his_words_must_name_the_entry(self):
         self.entry("fd-a")

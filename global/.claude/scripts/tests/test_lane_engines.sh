@@ -75,7 +75,21 @@ cat >"$BIN/agy" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$AGY_CALLS"
 STUB
-chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot" "$BIN/agy"
+# opencode stub: logs "<model> <config>" per call; OPENCODE_QUOTA_MODELS (space separated) makes those models print a free-tier limit error and exit 1,
+# OPENCODE_LOOP_MODELS makes them print the limit error and then hang, as the real thing did on Groq's 8000 tokens/minute.
+cat >"$BIN/opencode" <<'STUB'
+#!/usr/bin/env bash
+model=""; while [ $# -gt 0 ]; do [ "$1" = --model ] && { model="$2"; shift; }; shift; done
+printf '%s %s\n' "$model" "${OPENCODE_CONFIG:-}" >>"$OPENCODE_CALLS"
+for m in ${OPENCODE_QUOTA_MODELS:-}; do
+  [ "$m" = "$model" ] && { printf '\033[91m\033[1mError: \033[0mRequest too large for model `x` on tokens per minute (TPM): Limit 8000\n'; exit 1; }
+done
+for m in ${OPENCODE_LOOP_MODELS:-}; do
+  [ "$m" = "$model" ] && { printf 'Error: 429 RESOURCE_EXHAUSTED\n'; exec /bin/sleep 30; }
+done
+printf 'tests ran: this text says rate limit and quota but is not an Error line\n'
+STUB
+chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot" "$BIN/agy" "$BIN/opencode"
 
 checks=0
 fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
@@ -102,6 +116,7 @@ run_lane() {
   (cd "$TMP" && HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/tmux-calls" TMUX_SENT="$sent" \
     TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" TMUX_PANE_FILE="${TMUX_PANE_FILE:-}" \
     CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" AGY_CALLS="$TMP/agy-calls" \
+    OPENCODE_CALLS="$TMP/opencode-calls" OPENCODE_QUOTA_MODELS="${OPENCODE_QUOTA_MODELS:-}" OPENCODE_LOOP_MODELS="${OPENCODE_LOOP_MODELS:-}" OPENCODE_LANE_POLL=1 \
     TEST_CWD="$REPO" RUN_LANE_COMMANDS=1 \
     bash "$SCRIPT" --claude-because "engines test fixture" "$@") >"$output" 2>&1
   status=$?
@@ -241,6 +256,93 @@ checks=$((checks + 1))
 LANE_SEND_CONFIRM_SECS=1 TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'continue this work'
 assert_exit 1 "$LAST_STATUS" 'Claude send with no transcript entry is not counted as sent'
 assert_contains "$LAST_OUTPUT" 'NOT IN ITS TRANSCRIPT' 'Claude --send says the words are not in the transcript'
+
+# opencode: headless, runs opencode_lane.sh with the checkout, the lane folder, a free-API model and the prompt file; no key or prompt in the command.
+: >"$TMP/opencode-calls"
+run_lane --engine opencode oc-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'opencode lane starts'
+OC_HAND="$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-lane"
+assert_contains "$LAST_COMMAND" 'opencode_lane.sh' 'opencode runs through the wrapper'
+assert_contains "$LAST_COMMAND" "$(printf %q "$OC_HAND")" 'opencode gets the lane folder'
+assert_contains "$LAST_COMMAND" 'google/gemini-3-flash-preview' 'a Claude alias becomes the free Gemini model'
+assert_contains "$LAST_COMMAND" "$(printf %q "$OC_HAND/prompt.md")" 'the opencode prompt is a file the wrapper reads at run time'
+assert_not_contains "$LAST_COMMAND" 'touch injected' 'the opencode prompt is not interpolated into the shell command'
+assert_not_contains "$LAST_COMMAND" 'api-key' 'no key file is named in the opencode command'
+assert_not_contains "$LAST_COMMAND" 'API_KEY' 'no key variable is named in the opencode command'
+assert_contains "$LAST_COMMAND" 'out.log' 'opencode output goes to out.log'
+assert_contains "$(cat "$OC_HAND/out.log")" 'exit 0' 'opencode exit code is recorded in out.log'
+assert_contains "$(cat "$OC_HAND/out.log")" 'opencode: model google/gemini-3-flash-preview' 'the wrapper says which model ran'
+assert_contains "$(cat "$TMP/opencode-calls")" "google/gemini-3-flash-preview $OC_HAND/opencode.json" 'opencode is called with the free model and the lane-folder config'
+assert_contains "$(cat "$OC_HAND/opencode.json")" '"external_directory":{"*":"deny"' 'opencode may not leave the checkout except for two named folders'
+assert_contains "$(cat "$OC_HAND/opencode.json")" "$OC_HAND/**" 'opencode may write the lane folder'
+assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/**" 'opencode may use worktrees'
+[ ! -e "$REPO/opencode.json" ] || fail 'opencode writes its config to the lane folder, never into the repo'
+[ ! -e "$REPO/injected" ] || fail 'opencode prompt contents are not executed by the shell'
+assert_contains "$(cat "$OC_HAND/prompt.md")" "$(cat "$PROMPT")" 'opencode prompt copy keeps the caller prompt'
+case "$(head -n1 "$OC_HAND/prompt.md")" in 'You can edit files'*) fail 'opencode prompt copy has no edit-only header' ;; *) checks=$((checks + 1)) ;; esac
+assert_contains "$(cat "$OC_HAND/out.log")" 'tests ran' 'the lane output is kept even when it talks about rate limits'
+assert_not_contains "$(cat "$OC_HAND/out.log")" 'free quota exhausted' 'a lane whose output only mentions quota is not out of quota'
+case "$(grep -P '\toc-lane\t' "$HOME_TEST/.claude/state/lanes/index.tsv")" in *$'\topencode\t'*) checks=$((checks + 1)) ;; *) fail 'the index row says billing opencode' ;; esac
+
+# Model mapping: provider/model names on a provider whose key the wrapper loads pass through, anything else is the free default.
+for pair in google/gemini-3.8-flash=google/gemini-3.8-flash openrouter/nvidia/nemotron-3-ultra-550b-a55b:free=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free groq/openai/gpt-oss-120b=google/gemini-3-flash-preview opus=google/gemini-3-flash-preview; do
+  run_lane --dry-run --engine opencode "oc-map" "$REPO" "${pair%%=*}" "$PROMPT"
+  assert_exit 0 "$LAST_STATUS" "opencode accepts model ${pair%%=*}"
+  case "$LAST_OUTPUT" in *"$(printf %q "${pair#*=}")"*) checks=$((checks + 1)) ;; *) fail "opencode model ${pair%%=*} should map to ${pair#*=}: $LAST_OUTPUT" ;; esac
+done
+# Groq's free tier (8000 tokens/minute) is smaller than OpenCode's own prompt, so it is never passed through.
+run_lane --dry-run --engine opencode oc-free "$REPO" groq/openai/gpt-oss-120b "$PROMPT"
+assert_not_contains "$(grep 'send-keys' <<<"$LAST_OUTPUT")" 'groq' 'opencode never runs on Groq'
+
+# Fallback: the first provider reports its free limit, the second takes the same prompt; both out leaves the line the dispatcher reads.
+: >"$TMP/opencode-calls"
+OPENCODE_QUOTA_MODELS="google/gemini-3-flash-preview" run_lane --engine opencode oc-fallback "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'opencode fallback lane starts'
+OC_FB="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-fallback/out.log")"
+assert_contains "$OC_FB" 'google/gemini-3-flash-preview is out of free quota or rate limit; trying the next provider' 'the first provider out of quota is named'
+assert_contains "$OC_FB" 'opencode: model openrouter/nvidia/nemotron-3-ultra-550b-a55b:free' 'the second provider takes over'
+assert_contains "$OC_FB" 'tests ran' 'the second provider ran the prompt'
+assert_not_contains "$OC_FB" 'free quota exhausted' 'one provider left means not exhausted'
+assert_contains "$OC_FB" 'exit 0' 'the fallback run ends with exit 0'
+[ "$(grep -c '' "$TMP/opencode-calls")" = 2 ] || fail 'the fallback calls opencode twice'
+: >"$TMP/opencode-calls"
+OPENCODE_QUOTA_MODELS="google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" run_lane --engine opencode oc-exhausted "$REPO" sonnet "$PROMPT"
+OC_EX="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-exhausted/out.log")"
+assert_contains "$OC_EX" 'opencode: free quota exhausted on every provider' 'both providers out ends with the line the dispatcher reads'
+assert_not_contains "$OC_EX" 'exit 0' 'an exhausted opencode lane does not exit 0'
+assert_contains "$OC_EX" 'exit 75' 'an exhausted opencode lane exits 75'
+# A provider that loops on its limit error (OpenCode retries forever) is stopped while it runs, not left to the time limit.
+: >"$TMP/opencode-calls"
+OPENCODE_LOOP_MODELS="google/gemini-3-flash-preview" run_lane --engine opencode oc-loop "$REPO" sonnet "$PROMPT"
+OC_LP="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-loop/out.log")"
+assert_contains "$OC_LP" 'google/gemini-3-flash-preview is out of free quota or rate limit' 'a looping provider is caught while it runs'
+assert_contains "$OC_LP" 'opencode: model openrouter/' 'a looping provider falls through to the next'
+
+# The client guard covers opencode like the other engines, and ~/repos itself is refused too (the free APIs train on input).
+run_lane --engine opencode blocked-client-oc "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: protected repository is refused'
+assert_contains "$LAST_OUTPUT" 'refusing engine opencode' 'opencode refusal names the engine'
+assert_contains "$LAST_OUTPUT" 'protected client repository' 'opencode refusal explains the client-repository guard'
+run_lane --engine opencode blocked-listed-oc "$HOME_TEST/repos/listed-only-repo" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: client-repos-only repository is refused'
+run_lane --engine opencode blocked-cd-oc "$HOME_TEST/repos/CD/nested" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: the protected CD tree is refused'
+run_lane --engine opencode blocked-home-repos "$HOME_TEST/repos" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: ~/repos itself is refused'
+assert_contains "$LAST_OUTPUT" 'free APIs train on their input' 'the ~/repos refusal says why'
+run_lane --engine opencode --allow-client allowed-client-oc "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'opencode: --allow-client bypasses the repository guard'
+mv "$HOME_TEST/repos/hub/client-repos.txt" "$TMP/client-repos.txt"
+run_lane --engine opencode missing-repos-list-oc "$REPO" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: a missing client list fails closed'
+mv "$TMP/client-repos.txt" "$HOME_TEST/repos/hub/client-repos.txt"
+run_lane --dry-run --engine bogus oc-bad "$REPO" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'an unknown engine is refused'
+assert_contains "$LAST_OUTPUT" 'agy, or opencode' 'the unknown-engine message lists opencode'
+run_lane --engine opencode --console oc-console "$REPO" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'opencode: --console is refused'
+run_lane --send oc-lane 'echo should-not-be-sent'
+assert_exit 1 "$LAST_STATUS" 'opencode lane refuses --send'
 
 # The second TSV field expands ~/ and protects client repositories; comments, blanks,
 # and the header row are not repository paths.

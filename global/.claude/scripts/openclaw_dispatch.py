@@ -109,6 +109,7 @@ EVENT_MAX = 1500  # how much of a hub post the front desk's next turn is shown (
 REPLY_FRAME = "Jonathan says (from his OpenClaw chat): "
 CODEX_BLOCK_SECONDS = 12 * 3600  # after an engine reports its usage limit, own repos use the next fallback for this long
 COPILOT_BLOCK_SECONDS = CODEX_BLOCK_SECONDS
+OPENCODE_BLOCK_SECONDS = 6 * 3600  # free Gemini and OpenRouter quotas are per day and per minute; opencode_lane.sh has already tried both providers
 AGY_BLOCK_SECONDS = 5 * 3600  # Antigravity's limits refresh on a rolling window, so its block is short
 # What agy prints when its quota is spent. A denied command ("jetski: no output produced") is not a quota block.
 AGY_QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|(?:quota|rate[\s_-]*limit)\s+(?:was\s+|has\s+been\s+)?(?:exceeded|reached|exhausted|hit)"
@@ -1261,8 +1262,8 @@ def prompt_site_tier(prompt_path, engine, model, name="", mail=False):
 
 def choose_engine(path, client, task, workspace=False, mail=False):
     """-> (engine, model, why). Site-model work: Claude Opus (effort high). Client or foreign: Claude, Opus only for client judgment
-    (invoice, quote, contract), never for email. Own: Codex, or Claude Sonnet when the work needs Docker or wsl.exe. Email is always
-    Claude (Gmail is a Claude connector) and always Sonnet."""
+    (invoice, quote, contract), never for email. Own: agy first (resolve_engine walks on to Codex, Copilot, OpenCode and then Claude Sonnet as each
+    is out of usage), or Claude Sonnet at once when the work needs Docker or wsl.exe. Email is always Claude (Gmail is a Claude connector) and always Sonnet."""
     if SITE_RE.search(task or ""):
         return "claude", SITE_MODEL, "site-model work: Claude Opus, effort high"
     if client:
@@ -1277,15 +1278,17 @@ def choose_engine(path, client, task, workspace=False, mail=False):
         return "claude", "sonnet", "email: Claude with Gmail on"
     if DOCKER_RE.search(task) or any((Path(path) / f).exists() for f in COMPOSE_FILES):
         return "claude", "sonnet", "own repo, needs Docker or wsl.exe"
-    return "codex", "sonnet", "own repo"  # the model name only has to be a Claude one: lane.sh then passes no -m to Codex
+    return "agy", "sonnet", "own repo"  # the model name only has to be a Claude one: lane.sh then maps it to each engine's own default
 
 
-ENGINE_CHAIN = (("codex", "Codex"), ("copilot", "Copilot"), ("agy", "agy"))  # free code engines in fallback order; Claude is the last resort
+# Free code engines in the order his own-repo code lanes try them (his rule, 22 Oct 10:15 PM); Claude Sonnet is the last resort.
+ENGINE_CHAIN = (("agy", "agy"), ("codex", "Codex"), ("copilot", "Copilot"), ("opencode", "OpenCode"))
 
 
 def resolve_engine(state, engine, now):
     """The one place a usage block is honored, for every way a lane starts (the script's start, the pass's start, the waiting room).
-    Codex blocked goes to Copilot, then agy, then Claude; Copilot blocked goes to agy, then Claude; agy blocked goes to Claude.
+    The order is agy, Codex, Copilot, OpenCode, then Claude: an engine that is blocked goes to the next one after it that is not, and the
+    last one blocked goes to Claude. A lane asked for on a later engine (Codex, say) never goes back up the chain.
     -> (engine, why | None, note)."""
     names = [e for e, _ in ENGINE_CHAIN]
     if engine not in names:
@@ -1739,13 +1742,16 @@ def _sweep(ctx, host, now=None):
                 tail = " ".join(_log_exit(Path(lane["report"]).parent)[1])
                 if lane["engine"] == "codex" and re.search(r"usage limit|monthly\s+quota", tail, re.I):
                     block_until(state, "codex_blocked_until", tail, now, CODEX_BLOCK_SECONDS)
-                    lane["note"] = " Codex says it is out of usage. Until it's back I'll start your own repos on Copilot."
+                    lane["note"] = " Codex says it is out of usage. Until it's back I'll start your own repos on the next engine with usage left (Copilot, OpenCode, then Claude Sonnet)."
                 elif lane["engine"] == "copilot" and re.search(r"(?:usage|quota)\s+limit|monthly\s+quota", tail, re.I):
                     block_until(state, "copilot_blocked_until", tail, now, COPILOT_BLOCK_SECONDS)
-                    lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on agy, or Claude Sonnet."
+                    lane["note"] = " Copilot says it is out of usage. Until it's back I'll start your own repos on OpenCode, or Claude Sonnet."
                 elif lane["engine"] == "agy" and AGY_QUOTA_RE.search(tail):
                     block_until(state, "agy_blocked_until", tail, now, AGY_BLOCK_SECONDS)
-                    lane["note"] = " agy says it is out of usage. Until it's back I'll start your own repos on Claude Sonnet."
+                    lane["note"] = " agy says it is out of usage. Until it's back I'll start your own repos on the next engine with usage left (Codex, Copilot, OpenCode, then Claude Sonnet)."
+                elif lane["engine"] == "opencode" and AGY_QUOTA_RE.search(tail):  # opencode_lane.sh ends with "free quota exhausted" after both providers failed
+                    block_until(state, "opencode_blocked_until", tail, now, OPENCODE_BLOCK_SECONDS)
+                    lane["note"] = " OpenCode says its free Gemini and OpenRouter quotas are used up. Until they're back I'll start your own repos on Claude Sonnet."
         if lane.get("status") not in ("reported", "dead") or lane.get("delivered"):
             continue
         answered_in_chat = False
@@ -2280,7 +2286,7 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
     report = hand / "report.md"
     prompt = hand / "prompt.md"
     hand.mkdir(parents=True, exist_ok=True)
-    work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else AGY_WORK_RULE if engine == "agy" else WORK_RULE
+    work_rule = COPILOT_WORK_RULE.format(hand=hand) if engine == "copilot" else AGY_WORK_RULE if engine == "agy" else WORK_RULE  # opencode may use worktrees under ~/repos/.worktrees (its permission file allows them)
     extra = (WORKSPACE_RULES if name == WORKSPACE else "") + (MAIL_RULES if mail else "")
     prompt.write_text(TEMPLATE.format(repo=name, dir=path, task=json.dumps(task, ensure_ascii=False), report=report, work_rule=work_rule, extra_rules=extra))
     try:
@@ -2497,7 +2503,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
         else:
             line, chat = do_start(ctx, host, repo, text, now, ask_id, context)
         return line.replace(" | start ", " | reply %s: follow-up | " % name, 1), chat
-    if lane.get("engine") in ("codex", "copilot", "agy"):
+    if lane.get("engine") in ("codex", "copilot", "agy", "opencode"):
         with ctx.locked():
             state = load_state(ctx.state_path)
             lane = state["lanes"].get(name)
@@ -2586,7 +2592,7 @@ def restart_lane(ctx, host, old, text, now, ask_id=None, context=None):
     if not rows:
         return "%s | reply %s | couldn't restart: lane.sh has no record of it" % (stamp, old), ""
     row = rows[-1]
-    engine = row["billing"] if row["billing"] in ("codex", "copilot", "agy") else "claude"
+    engine = row["billing"] if row["billing"] in ("codex", "copilot", "agy", "opencode") else "claude"
     model = row["model"] if row["model"] in MODELS else "sonnet"
     problem, hit = vet_start(ctx, row["dir"], engine, model)
     if problem:
@@ -2817,7 +2823,7 @@ def do_lanes(ctx, host, now):
         except ValueError:
             started = 0
         report = lane.get("report") or (f[6] if f else "")
-        engine = lane.get("engine") or (f[4] if f and f[4] in ("codex", "copilot", "agy") else "claude")
+        engine = lane.get("engine") or (f[4] if f and f[4] in ("codex", "copilot", "agy", "opencode") else "claude")
         if _nonempty(report):
             body = _report_text(report)
             st = "failed" if lane.get("failed") or report_failure(body) else "report written"
@@ -3320,7 +3326,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
         hit, parent = listed_repo(ctx, real)
         repo = (hit or parent or (os.path.basename(real),))[0]
         if lane_name not in state["lanes"]:
-            state["lanes"][lane_name] = {"repo": repo, "engine": row[4] if row[4] in ("codex", "copilot", "agy") else "claude", "model": row[3],
+            state["lanes"][lane_name] = {"repo": repo, "engine": row[4] if row[4] in ("codex", "copilot", "agy", "opencode") else "claude", "model": row[3],
                                          "started": now, "status": "started", "report": row[6], "task_key": ask.get("task_key"), "ask": ask_id}
             if is_test():
                 state["lanes"][lane_name]["test"] = True
@@ -3342,7 +3348,7 @@ def claim(ctx, ask_id, lane_name, now=None, host=None):
     return True, "claimed %s for %s" % (lane_name, ask_id)
 
 
-ENGINES = ("claude", "codex", "copilot", "agy")
+ENGINES = ("claude", "codex", "copilot", "agy", "opencode")
 MODELS = ("sonnet", "opus", "haiku", "fable")  # fable: a restart of a Fable lane must not fall back to Sonnet
 
 
@@ -4282,10 +4288,10 @@ Repos you may start a lane in (name | folder | owner | client?). The workspace f
 {table}
 
 Engine rules (from hub/lane-rules.md): {engine_rule}
-- A client repo, or anything a client repo is involved in: Claude (sonnet; opus only for client judgment such as an invoice, quote or contract). Never --engine codex/copilot there.
+- A client repo, or anything a client repo is involved in: Claude (sonnet; opus only for client judgment such as an invoice, quote or contract). Never --engine codex/copilot/agy/opencode there.
 - Anything that names a site model, the site-model skill, data/sites/ or SketchUp geometry (3D fitting, photo matching): Claude, model opus (or fable), never sonnet, haiku, codex or copilot; `start` moves it up and lane.sh refuses anything lower.
 - Work that spans repos (scan, count, compare, list across repos, anything on his GitHub as a whole): folder {root} (the workspace), Claude sonnet, and add the WORKSPACE RULES below to the prompt.
-- Code in one of his own repos (one of the "own" rows): --engine copilot, folder = that repo, copilot work rule below. If it needs Docker or wsl.exe: Claude sonnet in that repo instead.
+- Code in one of his own repos (one of the "own" rows): --engine agy, folder = that repo, agy work rule below (`start` moves it to Codex, Copilot, then OpenCode, then Claude Sonnet as each is out of usage). If it needs Docker or wsl.exe: Claude sonnet in that repo instead.
 - Anything that involves email (reading, proofreading, editing, drafting or replying to mail, a named person's email or thread, also when the ask is a follow-up of one) starts a lane with Gmail on, in the folder of the repo it concerns, on Claude Sonnet (email is execution, never opus or fable: his rule, 21 Oct 7:15 PM, "why are you burning Fable on emails!"), never a lane without email access. His standing rule, 19 Oct 2:52 PM: "I don't have tokens to waste on you sending things to the wrong lane, if it envolves email then don't waste time and tokens sending it to a lane without email access, standing rule". `start` turns Gmail on for such a task; add this MAIL RULE to {{extra_rules}}: {mail_rules}
 - If the answer is a short fact you can state without looking at any repo (what a command is, what this receptionist can do), do not start a lane: run python3 {me} say {ask} "<your answer, plain words>".
 - The waiting room holds lanes the hub has already planned (name | waits for | approved or not | what it is). If his words name one of them ("queue frontdesk-5 ...", "go ahead with frontdesk-5"), it is NOT a repo job: run python3 {me} approve {ask} <name>. That approves it if it is not yet and answers the chat itself (queued behind its earlier lane, or started now). Then stop; never start a lane for it.
@@ -4297,7 +4303,7 @@ To start a lane:
    running-lane cap, and starts the lane under this ask. It refuses a second lane for the same ask. If it refuses or fails, say so in one line and stop.
    `start` also appends what the task line refers to: his latest messages and the receptionist's whole message verbatim, and the report and
    files of earlier lanes in that repo (copied into the lane's folder). Do not copy any of that into the prompt yourself; keep the task as quoted.{followup}
-Usage: python3 {me} start <ask> [--engine claude|codex|copilot|agy] <lane> <folder> <model> <prompt-file>
+Usage: python3 {me} start <ask> [--engine claude|codex|copilot|agy|opencode] <lane> <folder> <model> <prompt-file>
 
 PROMPT TEMPLATE (fill the four braces, keep the rest):
 <<<TEMPLATE
@@ -4307,10 +4313,13 @@ TEMPLATE>>>
 WORKSPACE RULES (add as {{extra_rules}} for a workspace lane, else empty):
 {workspace_rules}
 
+AGY WORK RULE (use as {{work_rule}} for an agy lane):
+{agy_rule}
+
 COPILOT WORK RULE (use as {{work_rule}} for a copilot lane):
 {copilot_rule}
 
-CLAUDE WORK RULE (use as {{work_rule}} for a Claude lane):
+CLAUDE WORK RULE (use as {{work_rule}} for a Claude, codex or opencode lane):
 {work_rule}
 """
 
@@ -4398,7 +4407,7 @@ def pass_prompt(ctx, ask_id, ask, now):
         engine_rule=_engine_rule(), me=Path(__file__).resolve(), hand_root=ctx.lanes_dir, lane=lane, hand=hand,
         room_block=("Waiting room right now:\n" + room + "\n") if room else "(The waiting room is empty right now.)\n",
         template=template,
-        workspace_rules=WORKSPACE_RULES.strip(), mail_rules=MAIL_RULES.strip(), copilot_rule=COPILOT_WORK_RULE.replace("{hand}", str(hand)), work_rule=WORK_RULE,
+        workspace_rules=WORKSPACE_RULES.strip(), mail_rules=MAIL_RULES.strip(), agy_rule=AGY_WORK_RULE, copilot_rule=COPILOT_WORK_RULE.replace("{hand}", str(hand)), work_rule=WORK_RULE,
         followup=("\n   This ask follows up lane %s, which has finished: start the lane in its repo (%s)." % (ask["followup_of"], ask["repo"])
                   if ask.get("followup_of") else ""))
 
