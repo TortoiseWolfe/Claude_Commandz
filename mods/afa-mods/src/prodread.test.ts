@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { forwarderIsPlain, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { DEPLOY_ENV_KEYS, DEPLOY_PINS, deployEnvIsPlain, deployIsPinned, deployScript, envKeyLines, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -177,4 +177,128 @@ describe('remote commands that write, or that the reader cannot classify, are no
       expect(remoteIsRead(remote)).toBe(false)
     })
   }
+})
+
+
+describe('review of #94 (23 Oct)', () => {
+  test('sha256Hex matches the standard vectors, multibyte text and a multi-block text', () => {
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    expect(sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe('248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1')
+    expect(sha256Hex('é—x')).toBe('9e59193bcce943091dcbf7abccabcf6de4b1ae97a7c62653453ebd9414630883')
+    expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+    expect(sha256Hex('\ud800')).toBeUndefined()
+  })
+  test('the only pinned repo is Chattanooga-Digital (Eduity has no source guard) and a changed copy is not pinned', () => {
+    expect(Object.keys(DEPLOY_PINS)).toEqual(['Chattanooga-Digital'])
+    expect(Object.values(DEPLOY_PINS).flat().length).toBe(1)
+    expect(deployIsPinned('Chattanooga-Digital', '#!/bin/bash\necho hi\n')).toBe(false)
+    expect(deployIsPinned('Chattanooga-Digital', '')).toBe(false)
+    expect(deployIsPinned('Eduity', '#!/bin/bash\necho hi\n')).toBe(false)
+  })
+  test('a pin counts only in its own repo folder, and a name like toString is no folder', () => {
+    const pins = { 'Chattanooga-Digital': [sha256Hex('x') as string] }
+    expect(deployIsPinned('Chattanooga-Digital', 'x', pins)).toBe(true)
+    expect(deployIsPinned('evil', 'x', pins)).toBe(false)
+    expect(deployIsPinned('toString', 'x', pins)).toBe(false)
+    expect(deployIsPinned('__proto__', 'x', pins)).toBe(false)
+  })
+  test('the deploy script path comes from the forwarder cd and the home', () => {
+    expect(deployScript(REXEC, '/home/u')).toEqual({ repo: 'Chattanooga-Digital', path: '/home/u/repos/Chattanooga-Digital/scripts/portainer-deploy.sh' })
+    expect(deployScript(REXEC.replace(' || exit 1', ''), '/home/u')).toBeUndefined()
+    expect(deployScript(REXEC, 'relative')).toBeUndefined()
+    expect(deployScript(REXEC, '/home/../u')).toBeUndefined()
+  })
+  test('a second cd line, or an indented one, is no plain forwarder and gives no deploy path', () => {
+    const second = REXEC.replace('source scripts', 'cd ~/repos/evil || exit 1\nsource scripts')
+    const indented = REXEC.replace('cd ~/repos', '  cd ~/repos')
+    expect(forwarderIsPlain(second)).toBe(false)
+    expect(deployScript(second, '/home/u')).toBeUndefined()
+    expect(forwarderIsPlain(indented)).toBe(false)
+    expect(forwarderIsPlain(REXEC.replace('cd ~/repos', '\tcd ~/repos'))).toBe(false)
+  })
+  test('dot parts', () => {
+    expect(hasDotPart('/a/b/../c')).toBe(true)
+    expect(hasDotPart('/a/./c')).toBe(true)
+    expect(hasDotPart('/a/b.c/.d/..e')).toBe(false)
+  })
+  for (const [what, first] of [
+    ['env -S', "#!/usr/bin/env -S sh -c 'anything'"],
+    ['sh', '#!/bin/sh'],
+    ['a different env', '#!/usr/bin/env python3'],
+    ['bash with a flag', '#!/bin/bash -p'],
+  ] as const) {
+    test(`a forwarder whose first line is a ${what} shebang is not plain`, () => {
+      expect(forwarderIsPlain(REXEC.replace('#!/usr/bin/env bash', first))).toBe(false)
+    })
+  }
+  test('the two bash shebangs are plain, and a #! line past line 1 is not', () => {
+    expect(forwarderIsPlain(REXEC.replace('#!/usr/bin/env bash', '#!/bin/bash'))).toBe(true)
+    expect(forwarderIsPlain(REXEC.replace('# usage', '#!/bin/sh\n# usage'))).toBe(false)
+  })
+  for (const [what, text] of [
+    ['a carriage return', REXEC.replace('T="$1"', 'T="$1"\r')],
+    ['a no-break space', REXEC.replace('# usage', '#\u00a0usage')],
+    ['a form feed', REXEC.replace('cd ~', 'cd\f~')],
+  ] as const) {
+    test(`a forwarder with ${what} is not plain`, () => {
+      expect(forwarderIsPlain(text)).toBe(false)
+    })
+  }
+  test('a cd that does not stop on failure, or comes after the source, is not plain', () => {
+    expect(forwarderIsPlain(REXEC.replace(' || exit 1\nsource', '\nsource'))).toBe(false)
+    const lines = REXEC.split('\n')
+    const cd = lines.findIndex(l => l.startsWith('cd '))
+    const src = lines.findIndex(l => l.startsWith('source '))
+    ;[lines[cd], lines[src]] = [lines[src], lines[cd]]
+    expect(forwarderIsPlain(lines.join('\n'))).toBe(false)
+  })
+  test('hostname is not a read', () => {
+    expect(remoteIsRead('hostname evil')).toBe(false)
+    expect(remoteIsRead('hostname')).toBe(false)
+    expect(remoteIsRead('uname -a')).toBe(true)
+  })
+  test('the command line must be printable ASCII', () => {
+    const part = (text: string) => [{ text, sep: '' }]
+    expect(prodLineShape("bash x --prod 'a'", part("bash x --prod 'a'"), 0, false)).toBeDefined()
+    expect(prodLineShape("bash x --prod 'a'\r", part("bash x --prod 'a'\r"), 0, false)).toBeUndefined()
+  })
+})
+
+// 23 Oct, second senior review of #94: the pinned script loads the repo's dotenv file and exports every key the caller has not set
+describe('the dotenv file the pinned script loads', () => {
+  const REAL = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_URL\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD\nPORTAINER_GIT_TOKEN_FILE'
+  test('envKeyLines keeps only the names: values, comments and blank lines are gone', () => {
+    const out = envKeyLines('# comment\n\nDB_PASSWORD=hunter2\nPORTAINER_PROD_URL="https://x.example"\nA=b=c\n')
+    expect(out).toBe('DB_PASSWORD\nPORTAINER_PROD_URL\nA')
+    expect(out).not.toContain('hunter2')
+    expect(out).not.toContain('example')
+  })
+  test('a line with no = is its own key, as load_env reads it', () => {
+    expect(envKeyLines('PYTHONPATH\n')).toBe('PYTHONPATH')
+  })
+  test('the ordinary keys pass, an empty file passes', () => {
+    expect(deployEnvIsPlain(REAL)).toBe(true)
+    expect(deployEnvIsPlain('')).toBe(true)
+  })
+  for (const key of [
+    'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONUSERBASE', 'PYTHONWARNINGS',
+    'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+    'BASH_ENV', 'ENV', 'BASH_FUNC_x%%', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'PROMPT_COMMAND', 'CDPATH', 'GLOBIGNORE',
+    'PERL5LIB', 'PERL5OPT', 'NODE_OPTIONS', 'RUBYOPT', 'RUBYLIB',
+    'PORTAINER_URL_OVERRIDE', 'PORTAINER_USER_OVERRIDE', 'PORTAINER_PASSWORD_OVERRIDE', 'PORTAINER_ENDPOINT_ID_OVERRIDE',
+    'PATH', 'IFS', 'HOME', 'TMPDIR', 'SHELL', 'PORTAINER_DEPLOY_SKIP_ENV', 'STACK_NAME', 'COMPOSE_FILE', 'CURL_HOME', 'SSL_CERT_FILE', 'HTTPS_PROXY', 'http_proxy',
+  ]) {
+    test(`a ${key} key is held`, () => {
+      expect(deployEnvIsPlain(`${REAL}\n${key}`)).toBe(false)
+    })
+  }
+  test('a key that is not a plain name is held, though load_env would skip it', () => {
+    for (const bad of [' PYTHONPATH', 'PYTHONPATH ', 'PYTHONPATH\r', 'PYTHON\u00a0PATH', 'PYTHÖNPATH', '', '=x', '\u0000']) {
+      expect(deployEnvIsPlain(`${REAL}\n${bad}\nDB_NAME`.replace('\n\n', '\n=x\n'))).toBe(false)
+    }
+  })
+  test('the allowlist holds no key that changes how a program starts', () => {
+    for (const k of DEPLOY_ENV_KEYS) expect(k).not.toMatch(/^(?:LD_|PYTHON|PERL|RUBY|NODE|BASH|ENV$|PATH$|IFS$|HOME$|SHELL|TMPDIR|CDPATH|GLOBIGNORE|PS4|PROMPT)|_OVERRIDE$|PROXY/i)
+  })
 })

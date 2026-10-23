@@ -45,6 +45,19 @@ reads the forwarder script itself (small files only; every line must be on an al
 the command: before the call only plain assignments (never PATH, HOME, BASH_ENV and the like) or `cd /abs/path` joined by `;`, newline or `&&`,
 then the call, then optionally `2>&1`, then optionally one pipe to `tail` or `head` with a number. Anything else, a write, an unreadable or
 missing script, a second command, `&`, `tee` or `bash -c`, is held as before (hub: dialog; unattended lane: deny).
+Further rules (senior review of #94): a `.` or `..` part anywhere in the script path (a symlink is followed before `..` folds); a forwarder whose first
+line is a shebang other than `#!/usr/bin/env bash` or `#!/bin/bash`; any character in the command or the forwarder other than printable ASCII, tab
+or newline (bash keeps CR and no-break space that JavaScript trims); and a `portainer-deploy.sh` whose SHA-256 is not in `DEPLOY_PINS`
+(`prodread.ts`). The pin list changes only by a reviewed PR, and must change whenever a repo's `scripts/portainer-deploy.sh` does.
+The pin is per repo folder (only Chattanooga-Digital counts; Eduity's script has no source guard and defines neither `find_service_container` nor `container_exec`), the forwarder must have exactly one `cd` line and no indented line, and the
+deploy path comes from that same line. The pinned script exports every key of the repo's dotenv file, so the hook reads that file's key NAMES only (values are dropped as it reads; nothing is shown
+or logged) and holds unless every key is on `DEPLOY_ENV_KEYS` (an allowlist: no `PYTHON*`, `LD_*`, `BASH_ENV`, `PATH`, `*_OVERRIDE` and the like). Values of
+allowed keys are not checked. `python3 mods/afa-mods/scripts/check-pins.py` checks the pins and the key list against the real files on this machine (the
+plugin tests have no real filesystem); run it after a deploy script or the dotenv file changes, and expect it to fail loudly when proofs have gone back to held.
+`hostname NAME` is not a read. Known limits: a `curl` GET can still change state on some endpoints, the file can change between the hook's read and
+the run, and with `sh` in front the forwarder's `source` line fails.
+`#!/usr/bin/env bash`, the forwarder and the deploy script find `timeout`, `bash`, `python3` and `curl` through PATH, so a lane-writable folder early in
+PATH (for example `~/.local/bin`) defeats the check.
 The question and every refusal (the lane refusals, the non-interactive denial, and the guard-failure
 denial too) say in words what the command does, why it was held, and **what it would touch**: each
 path with `(dir, N bytes, ...)`, `(file, N bytes)` or `(not found)`; the branch and remote host of a
