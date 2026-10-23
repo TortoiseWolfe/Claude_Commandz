@@ -273,6 +273,7 @@ export const RULE_SAMPLES: Record<string, string[]> = {
   'docker run without limits': ['docker run --rm ada-stair-generator-site-tools', 'docker compose run --rm app make test', 'docker-compose -f ci.yml run web npm test'],
   'git push --force': ['git push --force origin main', 'git push -f', 'git push origin +feat/x'],
   'production deploy': ['vercel --prod', 'npm run deploy --production', 'redeploy prod now', 'mystery-tool --prod'],
+  'pinned dotenv file': ['cat ~/repos/Chattanooga-Digital/.env', 'cd /home/t/repos/Chattanooga-Digital && sed -n 1p .env'],
   'tmux shared lanes': [
     'tmux kill-server',
     'tmux kill-session -t lanes',
@@ -310,6 +311,9 @@ export async function touches($: Probe, hold: Hold, home: string): Promise<strin
         break
       case 'production deploy':
         lines = await deployLines($, hold.segment)
+        break
+      case 'pinned dotenv file':
+        lines = ["the dotenv file of a pinned production repo (file: production credentials and the routing values the hook pinned); it is not opened, listed or counted"]
         break
       case 'tmux shared lanes':
         lines = [

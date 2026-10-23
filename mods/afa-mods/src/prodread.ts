@@ -492,18 +492,66 @@ export const DEPLOY_ENV_KEYS: ReadonlySet<string> = new Set([
   'NEXTCLOUD_PROD_URL', 'NEXTCLOUD_PROD_USER', 'NEXTCLOUD_PROD_PASS', 'NEXTCLOUD_PROD_APP_PASSWORD',
 ])
 
-// The key part of each line load_env would look at (blank lines and lines starting with `#` are skipped as it skips them), values dropped.
+// The keys that say WHERE the pinned script sends the production login: a URL, a host, an endpoint, a token file's path. Their values are not secret, so
+// the hook pins a SHA-256 of each (DEPLOY_ENV_PINS); a lane that can write the dotenv file cannot repoint them. Every other key keeps to its name: a
+// secret's value is never read into anything the hook keeps, shows or logs.
+export const DEPLOY_ROUTING_KEYS: ReadonlySet<string> = new Set([
+  'PORTAINER_URL', 'PORTAINER_PROD_URL', 'PORTAINER_ENDPOINT_ID', 'PORTAINER_PROD_ENDPOINT_ID', 'PORTAINER_GIT_TOKEN_FILE',
+  'GREG_NEXTCLOUD_STAGING_URL', 'NEXTCLOUD_PROD_URL', 'DB_HOST',
+])
+
+// SHA-256 of the raw text after the first `=` (quotes, a trailing CR and all), by repo folder, then key. Every occurrence of a routing key in the file
+// must match one. `scripts/check-pins.py` checks this table against the real file; a rotated URL fails it loudly and a reviewed PR updates the table.
+export type DeployEnvPins = Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>
+export const DEPLOY_ENV_PINS: DeployEnvPins = {
+  'Chattanooga-Digital': {
+    PORTAINER_URL: ['8059df537f62fc59535ae6d1207085547cd11427f8bbcdf81873010cebd15d20'],
+    PORTAINER_PROD_URL: ['1104fb34ac887d5b20525fb3bb42faa7fc6eaa3351c48dc8fbb39fbd189e73de'],
+    PORTAINER_ENDPOINT_ID: ['6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b'],
+    PORTAINER_PROD_ENDPOINT_ID: ['6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b'],
+    PORTAINER_GIT_TOKEN_FILE: ['e36a64775627c30b9e33c25a712ff93890b1923dfc433baae5985f60f04b44e3'],
+    GREG_NEXTCLOUD_STAGING_URL: ['300613b82384f61d2591b748d057473a1812388bb2d5d867de419a7f56ae83fa'],
+    NEXTCLOUD_PROD_URL: ['4949b57a00730bccb71ae229bcb78555c92c27a83105c012560bdea7ce4e021f'],
+    DB_HOST: ['e08f4c9c36148019458d78d4baa84cbfa4beeb6e36be36c96f74c8655723b1ba'],
+  },
+}
+
+// The key part of each line load_env would look at (blank lines and lines starting with `#` are skipped as it skips them). A routing key (and only
+// that) keeps a hash of its value as `KEY=<64 hex>`; every other line is its key part alone, its value dropped as it is read.
 export const envKeyLines = (text: string): string =>
   text
     .split('\n')
     .filter(l => l !== '' && !l.startsWith('#'))
     .map(l => {
       const at = l.indexOf('=')
-      return at < 0 ? l : l.slice(0, at)
+      if (at < 0) return l
+      const key = l.slice(0, at)
+      return DEPLOY_ROUTING_KEYS.has(key) ? `${key}=${sha256Hex(l.slice(at + 1)) ?? '?'}` : key
     })
     .join('\n')
 
 // Strict on purpose: a key part that is not exactly an allowed name (spaces, a CR, a non-ASCII character, nothing before the `=`) is held, though
-// load_env would skip it, so the hook never has to agree with bash about what counts as a name.
-export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
-  keyLines.split('\n').every(k => k === '' || allowed.has(k))
+// load_env would skip it, so the hook never has to agree with bash about what counts as a name. A routing key passes only with a value hash that is
+// pinned for this repo; a routing key with no `=` (load_env would read the whole line as its value) never does.
+export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS, pinned: Readonly<Record<string, readonly string[]>> = {}): boolean =>
+  keyLines.split('\n').every(line => {
+    if (line === '') return true
+    const at = line.indexOf('=')
+    if (at < 0) return allowed.has(line) && !DEPLOY_ROUTING_KEYS.has(line)
+    const key = line.slice(0, at)
+    const hash = line.slice(at + 1)
+    return allowed.has(key) && DEPLOY_ROUTING_KEYS.has(key) && /^[0-9a-f]{64}$/.test(hash) && (pinned[key] ?? []).includes(hash)
+  })
+
+// Does this text name a pinned repo's dotenv file (`.env`, `.env.production`; the `.example`, `.sample` and `.template` copies hold no secrets)?
+// The repo folder's name and a dotenv word have to meet in one command line, in the words as written, with quotes and backslashes closed up
+// (`.e"n"v`) and the command's own variables and tracked `cd` folder filled in. Text, not a parser: a name built by a glob or a loop is not seen
+// (README, known limits).
+const DOTENV_WORD = /(?:^|[^\w.-])\.env(?!\.(?:example|sample|template)\b)(?![\w-])/
+export function namesPinnedDotenv(text: string, repos: readonly string[], cwd?: string, vars?: ReadonlyMap<string, string | null>): boolean {
+  const flat = text
+    .replace(/["'\\]/g, '')
+    .replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_m, a?: string, b?: string) => vars?.get((a ?? b) as string) ?? '$')
+  if (!DOTENV_WORD.test(flat)) return false
+  return repos.some(repo => flat.includes(repo) || (cwd !== undefined && cwd.includes(repo)))
+}

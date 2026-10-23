@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEPLOY_ENV_KEYS, DEPLOY_PINS, deployEnvIsPlain, deployIsPinned, deployScript, envKeyLines, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
+import { DEPLOY_ENV_KEYS, DEPLOY_ENV_PINS, DEPLOY_PINS, DEPLOY_ROUTING_KEYS, deployEnvIsPlain, deployIsPinned, deployScript, envKeyLines, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -267,19 +267,63 @@ describe('review of #94 (23 Oct)', () => {
 
 // 23 Oct, second senior review of #94: the pinned script loads the repo's dotenv file and exports every key the caller has not set
 describe('the dotenv file the pinned script loads', () => {
-  const REAL = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_URL\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD\nPORTAINER_GIT_TOKEN_FILE'
+  const REAL = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD'
+  const H = (v: string) => sha256Hex(v) as string
   test('envKeyLines keeps only the names: values, comments and blank lines are gone', () => {
-    const out = envKeyLines('# comment\n\nDB_PASSWORD=hunter2\nPORTAINER_PROD_URL="https://x.example"\nA=b=c\n')
-    expect(out).toBe('DB_PASSWORD\nPORTAINER_PROD_URL\nA')
+    const out = envKeyLines('# comment\n\nDB_PASSWORD=hunter2\nPORTAINER_PROD_PASSWORD="s3cret value"\nA=b=c\n')
+    expect(out).toBe('DB_PASSWORD\nPORTAINER_PROD_PASSWORD\nA')
     expect(out).not.toContain('hunter2')
-    expect(out).not.toContain('example')
+    expect(out).not.toContain('s3cret')
+  })
+  test('a routing key keeps a SHA-256 of its raw value (text after the first =, quotes and CR included) and the value is gone', () => {
+    const out = envKeyLines('PORTAINER_PROD_URL="https://p.example"\nDB_HOST=db=1\nPORTAINER_ENDPOINT_ID=1\r\nDB_PASSWORD=x')
+    expect(out).toBe(`PORTAINER_PROD_URL=${H('"https://p.example"')}\nDB_HOST=${H('db=1')}\nPORTAINER_ENDPOINT_ID=${H('1\r')}\nDB_PASSWORD`)
+    expect(out).not.toContain('p.example')
   })
   test('a line with no = is its own key, as load_env reads it', () => {
     expect(envKeyLines('PYTHONPATH\n')).toBe('PYTHONPATH')
+    expect(envKeyLines('PORTAINER_PROD_URL\n')).toBe('PORTAINER_PROD_URL')
   })
   test('the ordinary keys pass, an empty file passes', () => {
     expect(deployEnvIsPlain(REAL)).toBe(true)
     expect(deployEnvIsPlain('')).toBe(true)
+  })
+  describe('routing keys are pinned by the hash of their value', () => {
+    const URL_HASH = H('https://p.example')
+    const PINNED = { PORTAINER_PROD_URL: [URL_HASH], DB_HOST: [H('db'), H('db2')] }
+    const line = (k: string, v: string) => envKeyLines(`${k}=${v}`)
+    test('a pinned value passes, any of the pinned values passes', () => {
+      expect(deployEnvIsPlain(`${REAL}\n${line('PORTAINER_PROD_URL', 'https://p.example')}`, DEPLOY_ENV_KEYS, PINNED)).toBe(true)
+      expect(deployEnvIsPlain(line('DB_HOST', 'db2'), DEPLOY_ENV_KEYS, PINNED)).toBe(true)
+    })
+    test('a different value is held: repointing the URL, a trailing space, a changed scheme', () => {
+      for (const v of ['https://evil.example', 'https://p.example ', 'http://p.example', '"https://p.example"', 'https://p.example\r']) {
+        expect(deployEnvIsPlain(line('PORTAINER_PROD_URL', v), DEPLOY_ENV_KEYS, PINNED)).toBe(false)
+      }
+    })
+    test('every occurrence must be pinned: the second line is the one that wins in bash', () => {
+      const two = `${line('PORTAINER_PROD_URL', 'https://p.example')}\n${line('PORTAINER_PROD_URL', 'https://evil.example')}`
+      expect(deployEnvIsPlain(two, DEPLOY_ENV_KEYS, PINNED)).toBe(false)
+    })
+    test('a routing key with no pin for this repo is held, and so is one with no value (load_env would read the line as its value)', () => {
+      expect(deployEnvIsPlain(line('PORTAINER_PROD_URL', 'https://p.example'))).toBe(false)
+      expect(deployEnvIsPlain(line('NEXTCLOUD_PROD_URL', 'https://n.example'), DEPLOY_ENV_KEYS, PINNED)).toBe(false)
+      expect(deployEnvIsPlain('PORTAINER_PROD_URL', DEPLOY_ENV_KEYS, PINNED)).toBe(false)
+    })
+    test('a hash written by hand is held unless it is exactly 64 hex digits and pinned; a non-routing key never carries one', () => {
+      for (const bad of [`PORTAINER_PROD_URL=${URL_HASH.toUpperCase()}`, `PORTAINER_PROD_URL=${URL_HASH}00`, 'PORTAINER_PROD_URL=?', 'PORTAINER_PROD_URL=']) {
+        expect(deployEnvIsPlain(bad, DEPLOY_ENV_KEYS, PINNED)).toBe(false)
+      }
+      expect(deployEnvIsPlain(`DB_PASSWORD=${URL_HASH}`, DEPLOY_ENV_KEYS, { DB_PASSWORD: [URL_HASH] })).toBe(false)
+    })
+    test('the pin table covers exactly the routing keys the real script reads, for the one pinned repo', () => {
+      expect(Object.keys(DEPLOY_ENV_PINS)).toEqual(Object.keys(DEPLOY_PINS))
+      for (const k of Object.keys(DEPLOY_ENV_PINS['Chattanooga-Digital'])) expect(DEPLOY_ROUTING_KEYS.has(k)).toBe(true)
+      for (const hashes of Object.values(DEPLOY_ENV_PINS['Chattanooga-Digital'])) for (const h of hashes) expect(h).toMatch(/^[0-9a-f]{64}$/)
+    })
+    test('every routing key is an allowed key (the allowlist is what lets it be read at all)', () => {
+      for (const k of DEPLOY_ROUTING_KEYS) expect(DEPLOY_ENV_KEYS.has(k)).toBe(true)
+    })
   })
   for (const key of [
     'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONUSERBASE', 'PYTHONWARNINGS',

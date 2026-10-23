@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { type DeployPins, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { DEPLOY_PINS, type DeployEnvPins, DEPLOY_ENV_PINS, type DeployPins, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, namesPinnedDotenv, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -73,6 +73,7 @@ export const HELD_KINDS = [
   'docker run without limits',
   'git push --force',
   'production deploy',
+  'pinned dotenv file',
   'tmux shared lanes',
 ] as const
 export type HeldKind = (typeof HELD_KINDS)[number]
@@ -82,8 +83,10 @@ export type Hold = { kind: string; hard: boolean; segment: string; container?: M
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
 // deployEnvKeys: names the repo's dotenv file may hold (default DEPLOY_ENV_KEYS; a test injects its own)
 // deployPins: SHA-256 list, by repo folder, of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
+// deployEnvPins: SHA-256 of the values of the routing keys in a repo's dotenv file, by repo folder then key (default DEPLOY_ENV_PINS; a test injects its own)
+// prodReal: where a script the caller read really lives (realpath), by the path as written; a dotfile there is held
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; prodWantedEnv?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string> }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; prodWantedEnv?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string>; deployEnvPins?: DeployEnvPins; prodReal?: Record<string, string> }
 
 const strip = (s: string) =>
   s
@@ -762,6 +765,9 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
   return [...holds, ...classifyWithEnv(folded, depth, env, newScope(folded, env)).filter(h => !seen.has(`${h.kind}\0${h.segment}`))]
 }
 
+// The last part of a path, trailing and doubled slashes folded away, starts with a dot. A path that ends in `/` names a folder, so it is held too.
+export const isHiddenFile = (path: string): boolean => path.endsWith('/') || (path.split('/').filter(Boolean).pop() ?? '').startsWith('.')
+
 // A production call counts as a read only when its forwarder script is plain and every remote command is a read.
 // The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time. The repo's dotenv file is
 // asked for through env.prodWantedEnv instead, so the caller reduces exactly that path, and no other, to its key names.
@@ -774,8 +780,9 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
   const script = resolveHostPath(call.script, { ...scope, vars: shape })
   // backstop: the path bash will open is one plain absolute word
   if (!('path' in script) || !/^\/[\w./-]+$/.test(script.path)) return false
-  // no hidden last part either (a hidden folder such as .worktrees is fine): the forwarder is a script, never a dotfile such as the dotenv file the caller reduces to key names
-  if ((script.path.split('/').pop() ?? '').startsWith('.')) return false
+  // no hidden last part either (a hidden folder such as .worktrees is fine): the forwarder is a script, never a dotfile such as the dotenv file the
+  // caller reduces to key names. Judged on the path folded (a trailing slash, a doubled one) and, once the caller has resolved it, on where it really leads.
+  if (isHiddenFile(script.path) || isHiddenFile(env.prodReal?.[script.path] ?? script.path)) return false
   // no `.` or `..` part, in the word or in any value it expands: the kernel follows a symlink before it folds `..`
   const expanded = call.script.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_m, a?: string, b?: string) => shape.get((a ?? b) as string) ?? '')
   if (hasDotPart(expanded)) return false
@@ -801,7 +808,7 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
     env.prodWantedEnv?.add(envPath)
     return false
   }
-  return deployEnvIsPlain(keys, env.deployEnvKeys)
+  return deployEnvIsPlain(keys, env.deployEnvKeys, (env.deployEnvPins ?? DEPLOY_ENV_PINS)[deploy.repo])
 }
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
@@ -864,6 +871,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
+    if (namesPinnedDotenv(seg, Object.keys(env.deployPins ?? DEPLOY_PINS), scope.cwd, scope.vars)) add('pinned dotenv file', true)
     if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
   }
   return holds
@@ -1127,6 +1135,11 @@ export function explain(hold: Hold): { what: string; why: string } {
       }
     case 'production deploy':
       return { what: 'ships to the live production site', why: 'production changes wait for the agreed window' }
+    case 'pinned dotenv file':
+      return {
+        what: "reads or changes the dotenv file of a repo whose production login the hook trusts (it holds the production credentials, and the values the hook pinned)",
+        why: 'a lane that can read it can leak the credentials, and one that can write it can repoint the production login',
+      }
     case 'tmux shared lanes':
       return hold.segment.includes('kill-server')
         ? {
