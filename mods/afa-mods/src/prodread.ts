@@ -460,19 +460,50 @@ export function sha256Hex(text: string): string | undefined {
   return h.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('')
 }
 
-// SHA-256 of the scripts/portainer-deploy.sh versions a production proof may source, by the repo folder they live in. Only these two folders count:
+// SHA-256 of the scripts/portainer-deploy.sh versions a production proof may source, by the repo folder they live in. Only a folder listed here counts:
 // a lane can make a folder of its own under ~/repos with a copy of a pinned script beside files we have not read. A different copy, or a pinned copy in
 // another folder, keeps the command held. The list changes only by a reviewed PR; when a repo's script changes, so does this.
+// Eduity is not listed: its script has no BASH_SOURCE guard (sourcing it runs its action dispatch), takes REPO_ROOT from $0 (the forwarder's scratch
+// folder) and defines neither find_service_container nor container_exec. It gets a pin after it has a source guard and the helpers.
 export type DeployPins = Record<string, readonly string[]>
 export const DEPLOY_PINS: DeployPins = {
   'Chattanooga-Digital': ['3224c8b19ee7e7f9e0edf30b16c789a7a45eaf71422ef20843127f5077e8f527'], // main (aed358a)
-  Eduity: [
-    '4be5b540117efed91c7de2870c8a200e068e7c64b21ff6dbbb2db146fd107c4f', // origin/main (6206534a)
-    '76320bc668065b41ab2d7d4e8df958c3ae9c21039fbef8147e34311cd5f2b6c1', // before #162 (c3226459)
-  ],
 }
 
 export const deployIsPinned = (repo: string, text: string, pins: DeployPins = DEPLOY_PINS): boolean => {
   const h = sha256Hex(text)
   return h !== undefined && Object.prototype.hasOwnProperty.call(pins, repo) && pins[repo].includes(h)
 }
+
+// ---- the dotenv file the pinned script loads ----
+// portainer-deploy.sh's load_env exports every KEY=value line of the repo's dotenv file that the caller has not set, so a key such as PYTHONPATH,
+// LD_PRELOAD, BASH_ENV or PORTAINER_URL_OVERRIDE would reach the python3 and curl it runs while it holds the production login. The hook reads the key
+// NAMES only (envKeyLines keeps what is before the first `=` and drops the values at once; nothing else of the file is held or shown) and allows a read
+// only when every key is one of these. An allowlist: a new key keeps proofs held until a reviewed PR adds it. Values are not checked, so a changed
+// value of an allowed key (a Portainer address) is outside this check.
+export const DEPLOY_ENV_KEYS: ReadonlySet<string> = new Set([
+  'PROJECT_NAME', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_ROOT_PASSWORD', 'DB_HOST', 'DB_PORT', 'DB_DRIVER',
+  'DRUPAL_ADMIN_USER', 'DRUPAL_ADMIN_PASS', 'DRUPAL_CMS_TAG', 'MARIADB_TAG', 'NGINX_TAG', 'NGINX_VHOST_PRESET', 'DRUPAL_PORT',
+  'GITHUB_BACKUP_TOKEN', 'GITHUB_REPO', 'GREG_PASSWORD', 'SMTP_PASSWORD',
+  'PORTAINER_URL', 'PORTAINER_USER', 'PORTAINER_PASSWORD', 'PORTAINER_ENDPOINT_ID',
+  'PORTAINER_PROD_URL', 'PORTAINER_PROD_USER', 'PORTAINER_PROD_PASSWORD', 'PORTAINER_PROD_ENDPOINT_ID', 'PORTAINER_GIT_TOKEN_FILE',
+  'UPTIMEROBOT_API_KEY', 'DRUPAL_GITLAB_TOKEN', 'DRUPAL_ORG_USER', 'DRUPAL_ORG_PASS',
+  'GREG_NEXTCLOUD_STAGING_URL', 'GREG_NEXTCLOUD_STAGING_USER', 'GREG_NEXTCLOUD_STAGING_PASS',
+  'NEXTCLOUD_PROD_URL', 'NEXTCLOUD_PROD_USER', 'NEXTCLOUD_PROD_PASS', 'NEXTCLOUD_PROD_APP_PASSWORD',
+])
+
+// The key part of each line load_env would look at (blank lines and lines starting with `#` are skipped as it skips them), values dropped.
+export const envKeyLines = (text: string): string =>
+  text
+    .split('\n')
+    .filter(l => l !== '' && !l.startsWith('#'))
+    .map(l => {
+      const at = l.indexOf('=')
+      return at < 0 ? l : l.slice(0, at)
+    })
+    .join('\n')
+
+// Strict on purpose: a key part that is not exactly an allowed name (spaces, a CR, a non-ASCII character, nothing before the `=`) is held, though
+// load_env would skip it, so the hook never has to agree with bash about what counts as a name.
+export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
+  keyLines.split('\n').every(k => k === '' || allowed.has(k))

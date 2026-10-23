@@ -21,6 +21,7 @@ import {
   weather,
 } from './lib'
 import type { Hold } from './lib'
+import { envKeyLines } from './prodread'
 import { touches } from './touches'
 import type { Probe } from './touches'
 
@@ -217,17 +218,21 @@ export const register: Register = on => {
       }
     }
     const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
-    // classify asks for the files a production call needs (the forwarder, then the deploy script it sources); read what it asks for, up to
-    // three rounds, then classify with their text. A file over 400000 characters is not read, so it is held.
+    // classify asks for the files a production call needs (the forwarder, the deploy script it sources, then the repo's dotenv file); read what it asks
+    // for, up to four rounds, then classify with their text. A file over 400000 characters is not read, so it is held; the forwarder is further bounded
+    // by forwarderIsPlain's 40-line limit, the deploy script only by its SHA-256 pin. The dotenv file is reduced to its key names the moment it is read
+    // (envKeyLines): the values are never stored, shown or logged; a read error or an oversize file is stored as a mark that holds.
     const prodScripts: Record<string, string> = {}
-    for (let round = 0; round < 3; round += 1) {
+    for (let round = 0; round < 4; round += 1) {
       const wanted = new Set<string>()
       classify(e.command, 0, { ...baseEnv, prodScripts, prodWanted: wanted })
       const fresh = [...wanted].filter(path => !(path in prodScripts))
       if (fresh.length === 0) break
       for (const path of fresh) {
-        const t = await readText($, path).catch(() => '')
-        prodScripts[path] = t.length > 0 && t.length < 400000 ? t : ''
+        const t = await readText($, path).catch(() => undefined)
+        const fits = t !== undefined && t.length < 400000
+        if (path.endsWith('/.env')) prodScripts[path] = fits ? envKeyLines(t) : '\u0000'
+        else prodScripts[path] = fits && t.length > 0 ? t : ''
       }
     }
     const scratchEnv = { ...baseEnv, prodScripts }

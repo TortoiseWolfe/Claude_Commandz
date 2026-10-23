@@ -10,8 +10,10 @@ const DEPLOY_PATH = `${HOME}/repos/Chattanooga-Digital/scripts/portainer-deploy.
 const PINS: DeployPins = { 'Chattanooga-Digital': [sha256Hex(DEPLOY) as string] }
 
 // a missing file is read as '' by the hook, the same here
+const ENV_PATH = `${HOME}/repos/Chattanooga-Digital/.env`
+const KEYS = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_URL\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD'
 const prodHolds = (command: string, script: string | null = REXEC, deploy: string | null = DEPLOY, pins: DeployPins | null = PINS, more: Record<string, string> = {}) =>
-  classify(command, 0, { home: HOME, prodScripts: { [`${SP}/rexec.sh`]: script ?? '', [DEPLOY_PATH]: deploy ?? '', ...more }, deployPins: pins ?? undefined }).filter(h => h.kind === 'production deploy').length
+  classify(command, 0, { home: HOME, prodScripts: { [`${SP}/rexec.sh`]: script ?? '', [DEPLOY_PATH]: deploy ?? '', [ENV_PATH]: KEYS, ...more }, deployPins: pins ?? undefined }).filter(h => h.kind === 'production deploy').length
 
 describe('read-only production proofs (classifier, deploy pin injected)', () => {
   for (const remote of ['drush status', 'composer audit', 'drush sqlq "SELECT COUNT(*) FROM users"', 'curl -s https://example.org/']) {
@@ -77,6 +79,32 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
   test('deploy script pin: a pin of one repo does not count in another listed repo', () => {
     const eduity = REXEC.replace('Chattanooga-Digital', 'Eduity')
     expect(prodHolds(prod('drush status'), eduity, DEPLOY, PINS, { [`${HOME}/repos/Eduity/scripts/portainer-deploy.sh`]: DEPLOY })).toBe(1)
+  })
+  // 23 Oct, second senior review: the pinned script exports every key of the repo's dotenv file, so a key that changes how python3 or curl start is a hold
+  for (const key of ['PYTHONPATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'BASH_ENV', 'ENV', 'PERL5OPT', 'NODE_OPTIONS', 'RUBYOPT', 'PORTAINER_URL_OVERRIDE', 'PORTAINER_PASSWORD_OVERRIDE', 'PATH', 'IFS']) {
+    test(`dotenv key ${key} is held`, () => {
+      expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: `${KEYS}\n${key}` })).toBe(1)
+    })
+  }
+  test('a dotenv file that holds only the ordinary keys passes, and so does a missing one', () => {
+    expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: KEYS })).toBe(0)
+    expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: '' })).toBe(0)
+  })
+  test('an unreadable or oversize dotenv file (stored as a mark) is held', () => {
+    expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: '\u0000' })).toBe(1)
+  })
+  test('a dotenv file the hook has not read yet is asked for and the command is held meanwhile', () => {
+    const wanted = new Set<string>()
+    const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY }
+    const holds = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, prodWanted: wanted }).filter(h => h.kind === 'production deploy')
+    expect(holds.length).toBe(1)
+    expect([...wanted]).toEqual([ENV_PATH])
+  })
+  test('an injected key list decides: a key on it passes', () => {
+    const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY, [ENV_PATH]: 'EXTRA_KEY' }
+    const n = (keys: string[]) => classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, deployEnvKeys: new Set(keys) }).filter(h => h.kind === 'production deploy').length
+    expect(n(['EXTRA_KEY'])).toBe(0)
+    expect(n(['OTHER'])).toBe(1)
   })
   test('a call with CALL and nothing around it needs its variables set', () => {
     expect(prodHolds(CALL)).toBeGreaterThan(0)

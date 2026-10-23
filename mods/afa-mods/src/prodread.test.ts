@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEPLOY_PINS, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
+import { DEPLOY_ENV_KEYS, DEPLOY_PINS, deployEnvIsPlain, deployIsPinned, deployScript, envKeyLines, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -189,11 +189,12 @@ describe('review of #94 (23 Oct)', () => {
     expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
     expect(sha256Hex('\ud800')).toBeUndefined()
   })
-  test('the pins are the two repos reviewed (three versions) and a changed copy is not pinned', () => {
-    expect(Object.keys(DEPLOY_PINS).sort()).toEqual(['Chattanooga-Digital', 'Eduity'])
-    expect(Object.values(DEPLOY_PINS).flat().length).toBe(3)
+  test('the only pinned repo is Chattanooga-Digital (Eduity has no source guard) and a changed copy is not pinned', () => {
+    expect(Object.keys(DEPLOY_PINS)).toEqual(['Chattanooga-Digital'])
+    expect(Object.values(DEPLOY_PINS).flat().length).toBe(1)
+    expect(deployIsPinned('Chattanooga-Digital', '#!/bin/bash\necho hi\n')).toBe(false)
+    expect(deployIsPinned('Chattanooga-Digital', '')).toBe(false)
     expect(deployIsPinned('Eduity', '#!/bin/bash\necho hi\n')).toBe(false)
-    expect(deployIsPinned('Eduity', '')).toBe(false)
   })
   test('a pin counts only in its own repo folder, and a name like toString is no folder', () => {
     const pins = { 'Chattanooga-Digital': [sha256Hex('x') as string] }
@@ -261,5 +262,43 @@ describe('review of #94 (23 Oct)', () => {
     const part = (text: string) => [{ text, sep: '' }]
     expect(prodLineShape("bash x --prod 'a'", part("bash x --prod 'a'"), 0, false)).toBeDefined()
     expect(prodLineShape("bash x --prod 'a'\r", part("bash x --prod 'a'\r"), 0, false)).toBeUndefined()
+  })
+})
+
+// 23 Oct, second senior review of #94: the pinned script loads the repo's dotenv file and exports every key the caller has not set
+describe('the dotenv file the pinned script loads', () => {
+  const REAL = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_URL\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD\nPORTAINER_GIT_TOKEN_FILE'
+  test('envKeyLines keeps only the names: values, comments and blank lines are gone', () => {
+    const out = envKeyLines('# comment\n\nDB_PASSWORD=hunter2\nPORTAINER_PROD_URL="https://x.example"\nA=b=c\n')
+    expect(out).toBe('DB_PASSWORD\nPORTAINER_PROD_URL\nA')
+    expect(out).not.toContain('hunter2')
+    expect(out).not.toContain('example')
+  })
+  test('a line with no = is its own key, as load_env reads it', () => {
+    expect(envKeyLines('PYTHONPATH\n')).toBe('PYTHONPATH')
+  })
+  test('the ordinary keys pass, an empty file passes', () => {
+    expect(deployEnvIsPlain(REAL)).toBe(true)
+    expect(deployEnvIsPlain('')).toBe(true)
+  })
+  for (const key of [
+    'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONUSERBASE', 'PYTHONWARNINGS',
+    'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+    'BASH_ENV', 'ENV', 'BASH_FUNC_x%%', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'PROMPT_COMMAND', 'CDPATH', 'GLOBIGNORE',
+    'PERL5LIB', 'PERL5OPT', 'NODE_OPTIONS', 'RUBYOPT', 'RUBYLIB',
+    'PORTAINER_URL_OVERRIDE', 'PORTAINER_USER_OVERRIDE', 'PORTAINER_PASSWORD_OVERRIDE', 'PORTAINER_ENDPOINT_ID_OVERRIDE',
+    'PATH', 'IFS', 'HOME', 'TMPDIR', 'SHELL', 'PORTAINER_DEPLOY_SKIP_ENV', 'STACK_NAME', 'COMPOSE_FILE', 'CURL_HOME', 'SSL_CERT_FILE', 'HTTPS_PROXY', 'http_proxy',
+  ]) {
+    test(`a ${key} key is held`, () => {
+      expect(deployEnvIsPlain(`${REAL}\n${key}`)).toBe(false)
+    })
+  }
+  test('a key that is not a plain name is held, though load_env would skip it', () => {
+    for (const bad of [' PYTHONPATH', 'PYTHONPATH ', 'PYTHONPATH\r', 'PYTHON\u00a0PATH', 'PYTHÖNPATH', '', '=x', '\u0000']) {
+      expect(deployEnvIsPlain(`${REAL}\n${bad}\nDB_NAME`.replace('\n\n', '\n=x\n'))).toBe(false)
+    }
+  })
+  test('the allowlist holds no key that changes how a program starts', () => {
+    for (const k of DEPLOY_ENV_KEYS) expect(k).not.toMatch(/^(?:LD_|PYTHON|PERL|RUBY|NODE|BASH|ENV$|PATH$|IFS$|HOME$|SHELL|TMPDIR|CDPATH|GLOBIGNORE|PS4|PROMPT)|_OVERRIDE$|PROXY/i)
   })
 })

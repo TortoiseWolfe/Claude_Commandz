@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { type DeployPins, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { type DeployPins, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -80,9 +80,10 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
+// deployEnvKeys: names the repo's dotenv file may hold (default DEPLOY_ENV_KEYS; a test injects its own)
 // deployPins: SHA-256 list, by repo folder, of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; deployPins?: DeployPins }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string> }
 
 const strip = (s: string) =>
   s
@@ -789,7 +790,15 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
     env.prodWanted?.add(deploy.path)
     return false
   }
-  return deployIsPinned(deploy.repo, deployText, env.deployPins)
+  if (!deployIsPinned(deploy.repo, deployText, env.deployPins)) return false
+  // the dotenv file it loads: key names only (index.tsx keeps nothing else of the file), every one on the allowlist
+  const envPath = `${scope.home}/repos/${deploy.repo}/.env`
+  const keys = env.prodScripts?.[envPath]
+  if (keys === undefined) {
+    env.prodWanted?.add(envPath)
+    return false
+  }
+  return deployEnvIsPlain(keys, env.deployEnvKeys)
 }
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
