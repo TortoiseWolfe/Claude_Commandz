@@ -88,8 +88,8 @@
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
 #   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
-# The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
-# and not claimed by another row; if it is not there yet at start, the next --status fills it in.
+# The session id is the one the lane's own SessionStart hook recorded (lane_session_hook.sh, ~/.claude/state/lanes/sessions/<name>), never
+# a guess from file age; if it is not there yet at start, the next --status fills it in.
 #
 # High tier (his rule, 22 Oct 8 PM, after ten lanes ran on Opus all day and only one was entitled): opus and fable need a stated reason.
 # --allow-high-tier "<reason>" at start, --resume or --model is written to column 13 of the index row and logged to tier-overrides.log; without it
@@ -147,6 +147,7 @@ LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 PROJ="$HOME/.claude/projects"
+SESS_DIR="$HOME/.claude/state/lanes/sessions"   # lane_session_hook.sh writes one file per lane here: the proof of a lane's live session
 TAB=$'\t'
 
 # Every Claude lane gets AFA_LANE=1, which tells the afa-mods Blast Radius guard this is a lane and not the hub: a hold it can
@@ -160,6 +161,7 @@ lane_env_prefix() {
   if [ "${AFA_LANE_UNATTENDED:-}" = 1 ] || [[ "$1" == oc-* ]]; then
     printf 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=%q ' "$2"
   fi
+  printf 'AFA_LANE_NAME=%q ' "$1"   # lane_session_hook.sh records the lane's session against this name
 }
 
 usage() {
@@ -275,30 +277,46 @@ fi
 # Run a tmux command, or just print it under --dry-run.
 t() { if [ "$dry" = 1 ]; then printf 'tmux'; printf ' %q' "$@"; echo; else tmux "$@"; fi; }
 
-# Earliest transcript for <dir> created at/after <start-epoch> whose id is not in <claimed> (space-separated).
-find_session() {
-  local dir="$1" start="$2" claimed="$3" slug f b id
-  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
+# A lane's session is never guessed from file age: a folder like ~/repos also holds the hub's sessions and a person's own, and the newest
+# unclaimed transcript there is not the lane's (23 Oct: mac-mini-prep was handed the hub director's session). The proof is the lane's own
+# process: lane_session_hook.sh (a SessionStart hook in every lane's settings) records the session id against AFA_LANE_NAME, and the pane it
+# ran in. proven_session prints that id when it was recorded at/after <start-epoch>, its pane (when tmux can say) is a window of that
+# name, and no OTHER lane's row claims it.
+proven_session() {  # <name> <start-epoch>
+  local name="$1" start="${2:-0}" f id ts pane win
+  [[ "$start" =~ ^[0-9]+$ ]] || start=0
+  f="$SESS_DIR/$name"; [ -s "$f" ] || return 0
+  IFS="$TAB" read -r id ts pane < <(tail -n 1 "$f")
+  [[ "$ts" =~ ^[0-9]+$ ]] && [ "$ts" -ge $((start - 2)) ] || return 0
+  if [[ "${pane:-}" == %* ]]; then
+    win="$(tmux display -p -t "$pane" '#{window_name}' 2>/dev/null || true)"
+    [ -z "$win" ] || [ "$win" = "$name" ] || return 0
+  fi
+  if [ -s "$INDEX" ] && awk -F'\t' -v n="$name" -v i="$id" '$2!=n && $8==i{f=1} END{exit !f}' "$INDEX"; then return 0; fi
+  echo "$id"
+}
+
+# For a lane whose process predates the hook (it has no record): the transcript, born at/after <start-epoch>, that holds the message
+# lane.sh itself typed into that window. The re-prime names the lane's own hand-off folder, so no other session contains it.
+session_with_text() {  # <dir> <start-epoch> <text>
+  local slug f b
+  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")"
   [ -d "$PROJ/$slug" ] || return 0
   while IFS= read -r f; do
     b="$(stat -c %W "$f")"; [ "$b" -gt 0 ] || b="$(stat -c %Y "$f")"
-    [ "$b" -ge $((start - 2)) ] || continue
-    id="$(basename "$f" .jsonl)"
-    case " $claimed " in *" $id "*) continue ;; esac
-    echo "$id"; return 0
-  done < <(ls -tr "$PROJ/$slug"/*.jsonl 2>/dev/null)
+    [ "$b" -ge $(( $2 - 2 )) ] || continue
+    if grep -qF -- "$3" "$f" 2>/dev/null; then basename "$f" .jsonl; return 0; fi
+  done < <(ls -t "$PROJ/$slug"/*.jsonl 2>/dev/null)
 }
 
 # Fill blank session ids in the index (column 8) where a transcript can be found.
 fill_ids() {
   [ -s "$INDEX" ] || return 0
-  local tmp claimed d n dir m b p r id st eff conn rk
+  local tmp d n dir m b p r id st eff conn rk ent
   tmp="$(mktemp)"
-  claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
   while IFS="$TAB" read -r d n dir m b p r id st eff conn rk ent; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
-      id="$(find_session "$dir" "$st" "$claimed")"
-      [ -n "$id" ] && claimed="$claimed $id"
+      id="$(proven_session "$n" "$st")"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" >>"$tmp"
   done <"$INDEX"
@@ -310,30 +328,16 @@ index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)prin
 
 # Where a lane's index row can go stale: a /clear (typed by the hub or the lane itself) or a --resume starts a new transcript and nothing
 # rewrites column 8 (22 Oct: harmonicegg-mail's row said da6e22ef while the live session was 00e024a9, so --ctx read 22K at 157K and
-# lane_watch never recycled it). follow_session prints the lane's live session id: the newest transcript in its project folder that no
-# index row claims, born no earlier than the row's own transcript and written more recently than it; otherwise the row's id. A change is
-# written back to the lane's last row. A person's own claude session in the same folder would look like a successor; accepted.
-file_birth() { local b; b="$(stat -c %W "$1" 2>/dev/null || echo 0)"; [ "$b" -gt 0 ] || b="$(stat -c %Y "$1" 2>/dev/null || echo 0)"; echo "$b"; }
+# lane_watch never recycled it). follow_session prints the lane's live session id: the one proven_session reports from the lane's own
+# SessionStart hook, if its transcript exists; otherwise the row's id. A change is written back to the lane's last row. Never inferred
+# from file age (23 Oct: that handed a lane in ~/repos the hub's own session). A lane started before the hook existed has no record and
+# keeps its row's id until it is next recycled (lane.sh --recycle finds the new session by the message it typed).
 follow_session() {  # <name> <dir> <session-id> <start-epoch>
-  local name="$1" dir="$2" id="$3" start="${4:-0}" slug cur curb curm claimed f cid m best="" bestm=0 tmp
-  [[ "$start" =~ ^[0-9]+$ ]] || start=0
+  local name="$1" dir="$2" id="$3" start="${4:-0}" slug best tmp
   { [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -s "$INDEX" ]; } || { echo "$id"; return 0; }
   slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
-  cur="$PROJ/$slug/$id.jsonl"
-  if [ -e "$cur" ]; then curb="$(file_birth "$cur")"; curm="$(stat -c %Y "$cur")"
-  else curb=$(( ${start:-0} - 2 )); curm=0; fi
-  claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"
-  for f in "$PROJ/$slug"/*.jsonl; do
-    [ -e "$f" ] || continue
-    cid="$(basename "$f" .jsonl)"
-    [ "$cid" != "$id" ] || continue
-    case " $claimed " in *" $cid "*) continue ;; esac
-    [ "$(file_birth "$f")" -ge "$curb" ] || continue
-    m="$(stat -c %Y "$f")"
-    [ "$m" -gt "$curm" ] && [ "$m" -gt "$bestm" ] || continue
-    best="$cid"; bestm="$m"
-  done
-  if [ -z "$best" ]; then echo "$id"; return 0; fi
+  best="$(proven_session "$name" "$start")"
+  if [ -z "$best" ] || [ "$best" = "$id" ] || [ ! -e "$PROJ/$slug/$best.jsonl" ]; then echo "$id"; return 0; fi
   tmp="$(mktemp)"
   awk -F'\t' -v OFS='\t' -v n="$name" -v id="$best" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[8]=id; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
     && cat "$tmp" >"$INDEX"
@@ -642,6 +646,7 @@ claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recy
   json='{"autoCompactWindow":'"$(window_for "${4:-100}")"
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
+  json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}]}'
   json+=',"enabledPlugins":{'
   for p in $LANE_PLUGINS_OFF; do json+="\"$p\":false,"; done
   json="${json%,}}"
@@ -1037,7 +1042,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   case "${b:-subscription}" in codex|copilot|agy|opencode) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
-    id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
+    id="$(proven_session "$1" "$st")"
   fi
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
   id="$(follow_session "$1" "$dir" "$id" "${st:-0}")"
@@ -1166,9 +1171,11 @@ if [ "$mode" = recycle ]; then
   fi
   send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
 
-  claimed="$(cut -f8 "$INDEX" | tr '\n' ' ')"; newid=""
+  newid=""
   for _ in $(seq 1 20); do
-    newid="$(find_session "$dir" "$t0" "$claimed")"; [ -n "$newid" ] && break; sleep 1
+    newid="$(proven_session "$name" "$t0")"
+    [ -n "$newid" ] || newid="$(session_with_text "$dir" "$t0" "$msg_reprime")"   # a lane whose process predates the hook
+    [ -n "$newid" ] && break; sleep 1
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" >>"$INDEX"
@@ -1438,7 +1445,7 @@ if [ "$dry" = 0 ]; then
   mkdir -p "$(dirname "$INDEX")"
   sid=""
   for _ in $(seq 1 10); do
-    sid="$(find_session "$dir" "$start_epoch" "$( [ -s "$INDEX" ] && cut -f8 "$INDEX" | tr '\n' ' ' || true)")"
+    sid="$(proven_session "$name" "$start_epoch")"
     [ -n "$sid" ] && break; sleep 1
   done
   if [ "$engine" != claude ]; then lane_billing="$engine"
