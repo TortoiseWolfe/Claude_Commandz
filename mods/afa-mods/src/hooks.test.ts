@@ -689,3 +689,222 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     expect(seen.asked).toContain('docker run without limits')
   })
 })
+
+// A lane (lane.sh sets AFA_LANE=1) is not left on a "Run it?" dialog for a hold whose fix can be named; the hub (no AFA_LANE) still gets the dialog.
+describe('blast radius, lane denies what it can name the fix for', () => {
+  const SP = '/tmp/claude-1000/-home-t-repos-harmonic-egg/0a1b2c3d/scratchpad'
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}) => {
+    setup(on, vars)
+    const seen = { asked: '', log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+
+  // 22 Oct 7:18 AM, harmonicegg-mail: a python heredoc with parens sat between the cd and the rm, and hid the cd from the guard.
+  const PY = `cd ${SP} && rm -rf em && mkdir em && python3 - <<'EOF'\nimport os\nD=os.path.expanduser("~/x")\nprint(os.getcwd())\nEOF\ndate`
+  for (const [who, vars] of [['hub', {}], ['lane', { AFA_LANE: '1' }]] as const) {
+    test(`a python heredoc between a cd and an rm no longer hides the cd: the rm runs as the scratch folder it is (${who})`, async ($, on) => {
+      const { seen, r } = await go($, on, PY, vars)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeUndefined()
+      expect(seen.log).toContain('allowed (own scratch) | rm -rf')
+    })
+  }
+  test('a cd inside a real subshell still hides the folder', async ($, on) => {
+    const { seen } = await go($, on, `cd ${SP} && (cd /x) && rm -rf em`)
+    expect(seen.asked).toContain('rm -rf')
+  })
+  const RELATIVE = 'cd /home/t/work; rm -rf build'
+  test('relative rm: the lane is denied with the full-path fix and not asked', async ($, on) => {
+    const { seen, r } = await go($, on, RELATIVE, { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toContain('use the full absolute path')
+    expect(r.deny).toContain('rm -rf /a/b/c')
+    expect(r.deny).toContain('Then run it again')
+    expect(seen.log).toContain('denied (fix named) | rm -rf')
+  })
+  test('relative rm: the hub still gets the dialog', async ($, on) => {
+    const { seen, r } = await go($, on, RELATIVE)
+    expect(seen.asked).toContain('Blast Radius stopped a command')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('rm with a full path that is held anyway is not a fixable hold: the lane still gets the dialog', async ($, on) => {
+    const { seen } = await go($, on, 'rm -rf /home/t/precious', { AFA_LANE: '1' })
+    expect(seen.asked).toContain('Blast Radius stopped a command')
+  })
+  const DOCKER = [
+    'docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest -color',
+    "docker run --rm -v /home/t/repos/he:/app -w /app node:22 node --test test/*.test.js",
+  ]
+  for (const command of DOCKER) {
+    test(`docker run without limits: the lane is denied naming both fixes (${command.slice(0, 40)})`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE: '1' })
+      expect(seen.asked).toBe('')
+      expect(r.deny).toContain('timeout <secs> docker run --cpus <n> --memory <m> ...')
+      expect(r.deny).toContain('~/.claude/scripts/docker-heavy.sh -- docker ...')
+      expect(r.deny).toContain('Then run it again')
+    })
+    test(`docker run without limits: the hub still gets the dialog (${command.slice(0, 40)})`, async ($, on) => {
+      const { seen, r } = await go($, on, command)
+      expect(seen.asked).toContain('docker run without limits')
+      expect(r.deny).toContain('refused at the prompt')
+    })
+  }
+  test('a fixable hold next to one that is not: the lane is told the fix and that the other will ask Jonathan', async ($, on) => {
+    const { seen, r } = await go($, on, 'docker run img; docker system prune -f', { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toContain('docker run without limits')
+    expect(r.deny).toContain('also holds docker system prune')
+  })
+  test('a hold with no named fix keeps the dialog in a lane', async ($, on) => {
+    const { seen } = await go($, on, 'docker system prune -f', { AFA_LANE: '1' })
+    expect(seen.asked).toContain('docker system prune')
+  })
+  test('the lane fix applies when the run is fixed: a capped run goes through', async ($, on) => {
+    const { seen, r } = await go($, on, 'timeout 600 docker run --cpus 4 --memory 4g img', { AFA_LANE: '1' })
+    expect(seen.asked).toBe('')
+    expect(r.deny).toBeUndefined()
+  })
+})
+
+// 22 Oct 3:15 PM, coop-site: read-only proofs through rexec.sh --prod were held as a "production deploy". The guard reads the
+// forwarder script and each remote command itself; anything it cannot show is a read stays held (hub: dialog, lane: dialog, unattended: deny).
+describe('blast radius, read-only production proofs', () => {
+  const SP = '/tmp/claude-1000/-home-t-repos-chattanooga-digital/0a1b2c3d/scratchpad'
+  const REXEC = `#!/usr/bin/env bash
+# usage: rexec.sh --prod|--staging '<shell cmd>' [exec user, default 82 = www-data]
+T="$1"; CMD="$2"; U="\${3-82}"
+cd ~/repos/Chattanooga-Digital || exit 1
+source scripts/portainer-deploy.sh "$T"
+auth >/dev/null 2>&1 || { echo "auth failed"; exit 1; }
+cid="$(find_service_container "\${STACK_NAME}_php")"
+[ -n "$cid" ] || { echo "no php container for $STACK_NAME"; exit 1; }
+echo "[rexec] stack=$STACK_NAME portainer=$PORTAINER_URL" >&2
+container_exec "$cid" "$CMD" "$U"
+`
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, script: string | null = REXEC) => {
+    delete FILES[`${SP}/rexec.sh`]
+    if (script !== null) FILES[`${SP}/rexec.sh`] = script
+    setup(on, vars)
+    const seen = { asked: '', log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+  const prod = (remote: string, q = "'") => `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod ${q}${remote}${q} 2>&1 | tail -5`
+  const MODES = [
+    ['hub', {}],
+    ['lane', { AFA_LANE: '1' }],
+  ] as const
+
+  for (const remote of ['drush status', 'composer audit', 'drush sqlq "SELECT COUNT(*) FROM users"', 'curl -s https://example.org/']) {
+    for (const [who, vars] of MODES) {
+      test(`a read passes without a dialog or a deny: ${remote.slice(0, 30)} (${who})`, async ($, on) => {
+        const { seen, r } = await go($, on, prod(remote), vars)
+        expect(seen.asked).toBe('')
+        expect(r.deny).toBeUndefined()
+      })
+    }
+  }
+
+  const WRITES: [string, string, string?][] = [
+    ['drush updb -y', prod('drush updb -y')],
+    ['drush cim -y', prod('drush cim -y')],
+    ['drush sqlq UPDATE', prod('drush sqlq "UPDATE users SET name=1"')],
+    ['rm -rf', prod('rm -rf /var/www/html/sites')],
+    ['docker service update', prod('docker service update --force x')],
+    ['a redirect to a file', prod('drush status > /tmp/x')],
+    ['a variable in a double-quoted remote', prod('drush $CMD', '"')],
+  ]
+  // 22 Oct security review of 9015962: the script is read before the command runs, so nothing in the same command may touch or race it.
+  const CALL = "STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status'"
+  const BYPASSES: [string, string][] = [
+    ['an earlier segment rewrites the script', `SP=${SP}; echo evil >> $SP/rexec.sh && ${CALL} 2>&1 | tail -5`],
+    ['an earlier segment rewrites the script, joined by ;', `SP=${SP}; printf x > $SP/rexec.sh; ${CALL}`],
+    ['an earlier segment is a command substitution', `SP=${SP}; X=$(echo evil >> $SP/rexec.sh); ${CALL}`],
+    ['an earlier segment is a backtick', `SP=${SP}; X=\`echo evil >> $SP/rexec.sh\`; ${CALL}`],
+    ['a background segment races the read', `SP=${SP}; ( sleep 1; echo evil >> $SP/rexec.sh ) & ${CALL}`],
+    ['a lone & sends an earlier assignment to the background', `SP=${SP} & ${CALL}`],
+    ['the call is in the background', `SP=${SP}; ${CALL} &`],
+    ['a pipe into tee rewrites the script', `SP=${SP}; echo evil | tee $SP/rexec.sh | ${CALL}`],
+    ['the output is piped into tee on the script', `SP=${SP}; ${CALL} 2>&1 | tee $SP/rexec.sh`],
+    ['the output is piped into tail with a file flag', `SP=${SP}; ${CALL} 2>&1 | tail -f $SP/rexec.sh`],
+    ['a second command follows the call', `SP=${SP}; ${CALL}; echo evil >> $SP/rexec.sh`],
+    ['an || list', `SP=${SP}; true || ${CALL}`],
+    ['the call is wrapped in bash -c after a rewrite', `SP=${SP}; echo evil >> $SP/rexec.sh; bash -c "${CALL}"`],
+    ['an assignment that moves HOME', `SP=${SP}; HOME=/tmp/x; ${CALL}`],
+    ['an assignment that sets PATH', `SP=${SP}; PATH=/tmp/x:$PATH; ${CALL}`],
+    ['a relative cd', `SP=${SP}; cd ../x; ${CALL}`],
+    // the 2>&1 split: the words after the "1" still reach rexec.sh as arguments
+    ['2>&1 with extra words after the 1', `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status' 2>&1 extra args | tail -5`],
+    ['2>&1 with an extra word and no pipe', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1 root`],
+    ['2>&1 followed by a second command', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1; rm -rf /x`],
+  ]
+  for (const [what, command] of BYPASSES) {
+    for (const [who, vars] of MODES) {
+      test(`bypass held: ${what} (${who} asks)`, async ($, on) => {
+        const { seen, r } = await go($, on, command, vars)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`bypass held: ${what} (unattended lane is denied)`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` })
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
+  // the plain shapes still pass: assignments and a cd before, 2>&1, one tail or head after
+  for (const command of [
+    `SP=${SP}; ${CALL}`,
+    `cd /tmp && SP=${SP} && ${CALL} 2>&1 | head -n 20`,
+    `SP=${SP}\nSTACK_NAME=y\n${CALL} 2>&1 | tail -n 5`,
+  ]) {
+    test(`a plain shape still passes: ${command.slice(-50).replace(/\n/g, ' ')}`, async ($, on) => {
+      const { seen, r } = await go($, on, command.replace(/\\n/g, '\n'))
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeUndefined()
+    })
+  }
+  const FORWARDERS: [string, string, string | null][] = [
+    ['a forwarder with a second container_exec', prod('drush status'), `${REXEC}container_exec "$cid" "rm -rf /x" "$U"\n`],
+    ['a forwarder that sources another file', prod('drush status'), REXEC.replace('auth >', 'source /tmp/x.sh\nauth >')],
+    ['a forwarder that dot-sources another file', prod('drush status'), REXEC.replace('auth >', '. /tmp/x.sh\nauth >')],
+    ['a forwarder script that is not found', prod('drush status'), null],
+  ]
+  for (const [what, command, script] of [...WRITES.map(([w, c]) => [w, c, REXEC] as const), ...FORWARDERS]) {
+    for (const [who, vars] of MODES) {
+      test(`still held: ${what} (${who} asks)`, async ($, on) => {
+        const { seen, r } = await go($, on, command, vars, script)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`still held: ${what} (unattended lane is denied)`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` }, script)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
+})

@@ -10,6 +10,7 @@ import {
   explain,
   hasExitLine,
   hostRmSegment,
+  laneFix,
   namedVolumesOf,
   ownScratchTargets,
   recentLanes,
@@ -215,7 +216,16 @@ export const register: Register = on => {
         if (verdict === 'capped') composeLimited.push(c.key)
       }
     }
-    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
+    const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
+    // pass 1 only collects the forwarder scripts a production call names; read them (small files only), then classify with their text
+    const wanted = new Set<string>()
+    classify(e.command, 0, { ...baseEnv, prodWanted: wanted })
+    const prodScripts: Record<string, string> = {}
+    for (const path of wanted) {
+      const t = await readText($, path).catch(() => '')
+      if (t.length > 0 && t.length < 4000) prodScripts[path] = t
+    }
+    const scratchEnv = { ...baseEnv, prodScripts }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
@@ -273,6 +283,23 @@ export const register: Register = on => {
       }
       await noteScratch()
       return next(e)
+    }
+
+    // A lane someone may be watching (lane.sh sets AFA_LANE=1; the hub does not) is not left on a dialog for a hold whose fix is known:
+    // the refusal says the fix, and the lane runs the corrected command. Every other hold keeps the dialog.
+    if ((await $.env.get('AFA_LANE')) === '1') {
+      const fixable = holds.filter(h => laneFix(h))
+      if (fixable.length > 0) {
+        const refusals: string[] = []
+        for (const h of fixable) {
+          await note($, home, 'denied (fix named)', h)
+          const { what, why } = explain(h)
+          refusals.push(`${h.kind} "${h.segment.slice(0, 200)}" ${what}. Held because ${why}. ${laneFix(h)}`)
+        }
+        const rest = holds.filter(h => !laneFix(h))
+        const more = rest.length > 0 ? ` It also holds ${[...new Set(rest.map(h => h.kind))].join(', ')}, which will ask Jonathan once this is fixed.` : ''
+        return { deny: `Blast Radius held this command and did not ask, because a lane can fix it. ${refusals.join(' ')}${more}` }
+      }
     }
 
     const isInteractive = (await $.session.surfaces()).length > 0
