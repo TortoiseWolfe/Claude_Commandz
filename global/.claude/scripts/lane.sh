@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex,
-# GitHub Copilot and Google Antigravity (agy) can be selected with --engine.
+# GitHub Copilot, Google Antigravity (agy) and OpenCode (opencode, on free Gemini / OpenRouter keys) can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -38,6 +38,11 @@
 # header telling the lane to write report.md with the commands the hub must run. Same client guard as above.
 # The model is passed through when it is one of agy's own (gemini-*, gpt-oss-*, claude-*-4-6*); any other
 # name (a Claude Code alias) becomes gemini-3.8-flash-high (see agy_model).
+# --engine opencode runs opencode_lane.sh (beside this script): OpenCode, headless, edit files AND run commands, on a free API key read from
+# ~/.config/gemini and ~/.config/openrouter at run time (never in the command line). Model: google/gemini-3-flash-preview, with
+# openrouter/nvidia/nemotron-3-ultra-550b-a55b:free as the fallback when the first is out of quota; any other model name (a Claude alias) becomes the
+# first. Both free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
+# like Codex/Copilot: git, tests and the report are the lane's own. Order for his own-repo code lanes: agy, codex, copilot, opencode, then Claude Sonnet.
 #
 # 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/ or site-model (3D fitting, photo
 # matching, site models) starts or resumes only on fable or opus, each at effort high.
@@ -81,7 +86,7 @@
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot|agy)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)
+#   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the earliest transcript under ~/.claude/projects/<dir-slug>/ created after the start
 # and not claimed by another row; if it is not there yet at start, the next --status fills it in.
@@ -156,7 +161,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot|agy] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -166,10 +171,10 @@ Usage:
   lane.sh --recycle-point <name>
   (start and --resume also take --recycle-at <K>)
 
-Claude is the default engine. Codex, Copilot and agy run headless and write to out.log.
+Claude is the default engine. Codex, Copilot, agy and opencode run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
-Codex and Copilot refuse repositories listed in client-senders.tsv or client-repos.txt,
-and folders under ~/repos/CD. client-repos.txt has one path per line. Blank lines
+Codex, Copilot, agy and opencode refuse repositories listed in client-senders.tsv or client-repos.txt,
+and folders under ~/repos/CD (opencode also refuses ~/repos itself: its free APIs train on input). client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
 --ask <oc-id> claims an OpenClaw ask for this lane (its result then reaches Jonathan's OpenClaw chat).
@@ -182,7 +187,7 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
-his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on 31 Oct 2026. Accepted reasons: needs Docker, needs wsl.exe,
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on 31 Oct 2026; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
 needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
@@ -190,13 +195,14 @@ opus and fable need --allow-high-tier "<reason>" (written to the lane's index ro
 USAGE
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --engine)
-      [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, or agy" >&2; exit 1; }
+      [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, agy, or opencode" >&2; exit 1; }
       engine="$2"; shift 2 ;;
     --engine=*) engine="${1#*=}"; shift ;;
     --effort)
@@ -243,8 +249,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$engine" in
-  claude|codex|copilot|agy) ;;
-  *) echo "unknown engine: $engine (choose claude, codex, copilot, or agy)" >&2; exit 1 ;;
+  claude|codex|copilot|agy|opencode) ;;
+  *) echo "unknown engine: $engine (choose claude, codex, copilot, agy, or opencode)" >&2; exit 1 ;;
 esac
 
 case "$effort_opt" in
@@ -398,6 +404,10 @@ guard_external_engine() {
   local sender_rows sender_paths repo_paths in_worktree common_dir checkout_path checkout_root
   [ "$engine" = claude ] && return 0
   [ "$allow_client" = 1 ] && return 0
+  if [ "$engine" = opencode ] && [ "$(canonical_dir "$dir" 2>/dev/null || true)" = "$(canonical_dir "$HOME/repos" 2>/dev/null || echo /nonexistent)" ]; then
+    echo "refusing engine $engine: ~/repos holds client repositories and opencode's free APIs train on their input; work in one sub-repo, or pass --allow-client to continue" >&2
+    return 1
+  fi
   if [ ! -f "$client_file" ] || [ ! -r "$client_file" ]; then
     echo "refusing engine $engine: cannot check client repositories because client-senders.tsv is missing or unreadable, or is not a regular file; pass --allow-client to continue" >&2
     return 1
@@ -458,6 +468,14 @@ agy_model() {
   case "$1" in
     gemini-*|gpt-oss-*|claude-*-4-6*) printf '%s' "$1" ;;
     *) printf 'gemini-3.8-flash-high' ;;
+  esac
+}
+
+# OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads; anything else (a Claude alias) is the free default.
+opencode_model() {
+  case "$1" in
+    google/*|openrouter/*) printf '%s' "$1" ;;
+    *) printf 'google/gemini-3-flash-preview' ;;
   esac
 }
 
@@ -674,7 +692,7 @@ else:
 }
 
 is_headless_billing() {
-  case "$1" in codex|copilot|agy) return 0 ;; *) return 1 ;; esac
+  case "$1" in codex|copilot|agy|opencode) return 0 ;; *) return 1 ;; esac
 }
 
 # Colour-coded pane text (tmux capture-pane -e) in, plain text out.
@@ -779,8 +797,8 @@ if [ "$mode" = status ]; then
       fi
       printf '%-18s report:%-3s %-7s %s%s\n' "$w" "$wrote" "$state" "$last" "$sug"
       ctx="?"
-      case "${b:-subscription}" in codex|copilot|agy) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
-      case "${b:-subscription}" in codex|copilot|agy) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
+      case "${b:-subscription}" in codex|copilot|agy|opencode) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
+      case "${b:-subscription}" in codex|copilot|agy|opencode) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
       printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
@@ -1007,7 +1025,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
-  case "${b:-subscription}" in codex|copilot|agy) echo "?"; exit 0 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy|opencode) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(find_session "$dir" "$st" "$(cut -f8 "$INDEX" | tr '\n' ' ')")"
@@ -1229,6 +1247,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
   {
     echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on 31 Oct 2026 (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
+    echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
     echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
   } >&2
   return 1
@@ -1248,7 +1267,7 @@ if [ "$engine" != claude ] && [ "$console" = 1 ]; then
   exit 1
 fi
 if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
-  echo "--headless applies only to Claude with --console; Codex, Copilot and agy are already headless" >&2
+  echo "--headless applies only to Claude with --console; Codex, Copilot, agy and opencode are already headless" >&2
   exit 1
 fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
@@ -1328,6 +1347,9 @@ if [ "$engine" != claude ]; then
     cmd+=" -c sandbox_workspace_write.network_access=true"
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
+  elif [ "$engine" = opencode ]; then
+    cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/opencode_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(opencode_model "$model")") $(printf %q "$hprompt")"
+    cmd+=" >$out_cmd 2>&1"
   elif [ "$engine" = agy ]; then
     cmd="cd $(printf %q "$dir") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --add-dir $(printf %q "$hand") --model $(printf %q "$(agy_model "$model")")"
     cmd+=" >$out_cmd 2>&1"

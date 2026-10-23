@@ -147,6 +147,12 @@ class Base(unittest.TestCase):
     def state(self):
         return dp.load_state(self.ctx.state_path)
 
+    def agy_out(self):
+        """agy is first in the chain: a test about a later engine takes agy out of the way first."""
+        s = self.state()
+        s["agy_blocked_until"] = NOW + 100 * 86400
+        dp.save_state(self.ctx.state_path, s)
+
     def start(self, repo="own-app", task="do the thing", now=NOW):
         kind, line = self.act("start %s: %s" % (repo, task), now)
         self.assertEqual(kind, "dispatch", line)
@@ -699,8 +705,21 @@ class Engines(Base):
         s = self.host.started[-1]
         return s[2], s[3]
 
-    def test_own_repos_get_codex(self):
-        self.assertEqual(self.engine("own-app"), ("codex", "sonnet"))
+    def test_own_repos_get_agy_first(self):
+        self.assertEqual(self.engine("own-app"), ("agy", "sonnet"))
+
+    def test_own_repos_walk_agy_codex_copilot_opencode_then_claude(self):
+        for i, (blocked, want) in enumerate((((), "agy"), (("agy",), "codex"), (("agy", "codex"), "copilot"),
+                                             (("agy", "codex", "copilot"), "opencode"), (("agy", "codex", "copilot", "opencode"), "claude"))):
+            s = self.state()
+            for e in ("agy", "codex", "copilot", "opencode"):
+                s[e + "_blocked_until"] = NOW + 100 * 86400 if e in blocked else 0
+            dp.save_state(self.ctx.state_path, s)
+            self.start("own-app", "task for %s" % want, NOW + i * 60)
+            self.assertEqual(self.host.started[-1][2], want)
+            s = self.state()  # close it: the running-lanes cap would hold the next start
+            s["lanes"][self.host.started[-1][0]]["status"] = "closed"
+            dp.save_state(self.ctx.state_path, s)
 
     def test_a_client_repo_gets_claude_sonnet_and_opus_for_judgment_but_never_for_email(self):
         self.assertEqual(self.engine("client-app"), ("claude", "sonnet"))
@@ -812,7 +831,7 @@ class Budget(Base):
         self.host.proj = 99.0
         self.start("own-app")
         self.assertEqual(self.host.proj_asked, 0)
-        self.assertEqual(self.host.started[-1][2], "codex")
+        self.assertEqual(self.host.started[-1][2], "agy")
 
 
 class Replies(Base):
@@ -956,7 +975,7 @@ class Replies(Base):
     def test_a_reply_to_a_running_headless_lane_is_held_then_followed_up_when_it_closes(self):
         self.start("own-app", "list the files", NOW)
         lane = self.lane_names()[0]
-        self.assertIn(self.state()["lanes"][lane]["engine"], ("codex", "copilot"))
+        self.assertIn(self.state()["lanes"][lane]["engine"], ("agy", "codex", "copilot", "opencode"))
         self.act("reply %s: and count them" % lane, NOW + 30)
         self.assertEqual(self.host.sent, [])  # lane.sh --send refuses a headless lane: nothing is tried
         self.assertIn("still working", self.host.chats[-1])
@@ -1086,6 +1105,7 @@ class Sweep(Base):
         self.assertTrue(self.state()["lanes"][lane]["delivered"])
 
     def test_codex_out_of_usage_sends_own_repos_to_copilot_until_the_block_lapses(self):
+        self.agy_out()
         self.start("own-app")
         lane = self.lane_names()[0]
         out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
@@ -1096,7 +1116,7 @@ class Sweep(Base):
         self.start("own-app", "again", NOW + 200)
         self.assertEqual(self.host.started[-1][2], "copilot")
         self.assertIn("on Copilot", self.host.chats[-1])
-        self.assertIn("Codex is out of usage", self.host.chats[-1])
+        self.assertIn("agy and Codex are out of usage", self.host.chats[-1])
         self.start("own-app", "later", NOW + 100 + dp.CODEX_BLOCK_SECONDS + 10)
         self.assertEqual(self.host.started[-1][2], "codex")
 
@@ -1104,6 +1124,7 @@ class Sweep(Base):
         state = self.state()
         state["codex_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
         state["agy_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
+        state["opencode_blocked_until"] = NOW + 2 * dp.CODEX_BLOCK_SECONDS
         dp.save_state(self.ctx.state_path, state)
 
         for i, limit in enumerate(("usage limit", "quota limit")):
@@ -1124,7 +1145,7 @@ class Sweep(Base):
             self.start("own-app", "Claude fallback %d" % i, started + 200)
             self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
             self.assertIn("on Claude Sonnet", self.host.chats[-1])
-            self.assertIn("Codex, Copilot and agy are out of usage", self.host.chats[-1])
+            self.assertIn("agy, Codex, Copilot and OpenCode are out of usage", self.host.chats[-1])
 
         self.start("own-app", "Copilot is available again", started + 101 + dp.COPILOT_BLOCK_SECONDS)
         self.assertEqual(self.host.started[-1][2], "copilot")
@@ -1135,18 +1156,18 @@ class Sweep(Base):
         dp.save_state(self.ctx.state_path, state)
 
     def test_copilot_chosen_directly_while_blocked_starts_claude_and_says_so(self):
-        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS, agy_blocked_until=NOW + dp.AGY_BLOCK_SECONDS)
+        self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS, opencode_blocked_until=NOW + dp.OPENCODE_BLOCK_SECONDS)
         with unittest.mock.patch.object(dp, "choose_engine", return_value=("copilot", "sonnet", "own repo")):
             self.start("own-app")
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
         self.assertIn("on Claude Sonnet", self.host.chats[-1])
-        self.assertIn("Copilot and agy are out of usage", self.host.chats[-1])
+        self.assertIn("Copilot and OpenCode are out of usage", self.host.chats[-1])
 
-    def test_copilot_blocked_falls_to_agy_before_claude(self):
+    def test_copilot_blocked_falls_to_opencode_before_claude(self):
         self.block(copilot_blocked_until=NOW + dp.COPILOT_BLOCK_SECONDS)
         with unittest.mock.patch.object(dp, "choose_engine", return_value=("copilot", "sonnet", "own repo")):
             self.start("own-app")
-        self.assertEqual(self.host.started[-1][2], "agy")
+        self.assertEqual(self.host.started[-1][2], "opencode")
         self.assertIn("Copilot is out of usage", self.host.chats[-1])
 
     def agy_lane_with_log(self, text, started=NOW):
@@ -1168,6 +1189,8 @@ class Sweep(Base):
             (line, chat), = dp.sweep(self.ctx, self.host, started + 100)
             self.assertIn("agy says it is out of usage", chat)
             self.assertEqual(self.state()["agy_blocked_until"], started + 100 + dp.AGY_BLOCK_SECONDS)
+        self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 200)[0], "codex")
+        self.block(codex_blocked_until=started + 10**6, copilot_blocked_until=started + 10**6, opencode_blocked_until=started + 10**6)
         self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 200)[0], "claude")
         self.assertEqual(dp.resolve_engine(self.state(), "agy", started + 101 + dp.AGY_BLOCK_SECONDS)[0], "agy")
 
@@ -1191,25 +1214,69 @@ class Sweep(Base):
         self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
         self.assertEqual(self.state()["lanes"][lane]["engine"], "agy")
 
+    def opencode_lane_with_log(self, text, started=NOW):
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("opencode", "sonnet", "own repo")):
+            self.start("own-app", "task at %d" % started, started)
+        self.assertEqual(self.host.started[-1][2], "opencode")
+        lane = self.host.started[-1][0]
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\nexit 75\n")
+        return lane
+
+    def test_opencode_free_quota_exhausted_blocks_it_for_six_hours_then_claude_starts(self):
+        self.assertEqual(dp.OPENCODE_BLOCK_SECONDS, 6 * 3600)
+        self.opencode_lane_with_log("opencode: model google/gemini-3-flash-preview\nopencode: free quota exhausted on every provider (google/x openrouter/y)")
+        (line, chat), = dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertIn("OpenCode says its free Gemini and OpenRouter quotas are used up", chat)
+        self.assertEqual(self.state()["opencode_blocked_until"], NOW + 100 + dp.OPENCODE_BLOCK_SECONDS)
+        self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 200)[:2], ("claude", "own repo, OpenCode is out of usage"))
+        self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 101 + dp.OPENCODE_BLOCK_SECONDS)[0], "opencode")
+
+    def test_an_opencode_failure_that_is_not_about_quota_does_not_block_it(self):
+        self.opencode_lane_with_log("opencode: model google/gemini-3-flash-preview\nError: the test suite failed")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state().get("opencode_blocked_until", 0), 0)
+
+    def test_an_opencode_report_is_delivered_like_any_other_and_keeps_its_engine(self):
+        with unittest.mock.patch.object(dp, "choose_engine", return_value=("opencode", "sonnet", "own repo")):
+            self.start("own-app")
+        lane = self.host.started[-1][0]
+        self.write_report(lane)
+        dp.sweep(self.ctx, self.host, NOW + 100)
+        self.assertEqual(self.state()["lanes"][lane]["status"], "closed")
+        self.assertEqual(self.state()["lanes"][lane]["engine"], "opencode")
+
+    def test_opencode_is_a_known_engine_and_the_pass_prompt_names_the_whole_order(self):
+        self.assertIn("opencode", dp.ENGINES)
+        self.assertEqual([e for e, _ in dp.ENGINE_CHAIN], ["agy", "codex", "copilot", "opencode"])
+        self.assertIn("--engine agy", dp.PASS_PROMPT)
+        self.assertIn("OpenCode", dp.PASS_PROMPT)
+        self.assertIn("opencode", dp.PASS_PROMPT)
+
     def test_one_choice_honors_every_block(self):
         now = NOW
-        out = {"codex_blocked_until": now + 100, "copilot_blocked_until": now + 100}
-        self.assertEqual(dp.resolve_engine({}, "codex", now)[0], "codex")
-        self.assertEqual(dp.resolve_engine({}, "copilot", now)[0], "copilot")
-        self.assertEqual(dp.resolve_engine({"codex_blocked_until": now + 1}, "codex", now)[0], "copilot")
-        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "copilot", now)[0], "agy")
-        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now + 1}, "codex", now)[0], "codex")
-        self.assertEqual(dp.resolve_engine(out, "codex", now)[0], "agy")
-        self.assertEqual(dp.resolve_engine(out, "copilot", now)[0], "agy")
-        self.assertEqual(dp.resolve_engine(out, "codex", now)[1:], ("own repo, Codex and Copilot are out of usage", " (Codex and Copilot are out of usage)"))
-        every = dict(out, agy_blocked_until=now + 100)
-        self.assertEqual(dp.resolve_engine(every, "codex", now)[0], "claude")
-        self.assertEqual(dp.resolve_engine(every, "copilot", now)[0], "claude")
-        self.assertEqual(dp.resolve_engine({"agy_blocked_until": now + 1}, "agy", now)[:2], ("claude", "own repo, agy is out of usage"))
-        self.assertEqual(dp.resolve_engine({"agy_blocked_until": now + 1}, "codex", now)[0], "codex")
-        self.assertEqual(dp.resolve_engine({"codex_blocked_until": now + 1, "agy_blocked_until": now + 1}, "codex", now)[0], "copilot")
-        self.assertEqual(dp.resolve_engine(out, "claude", now)[0], "claude")
-        self.assertEqual(dp.resolve_engine({"copilot_blocked_until": now}, "copilot", now)[0], "copilot")  # lapsed
+        r = lambda state, engine: dp.resolve_engine(state, engine, now)
+        late = now + 100
+        none = {}
+        for e in ("agy", "codex", "copilot", "opencode"):
+            self.assertEqual(r(none, e)[0], e)
+        # the chain is agy, Codex, Copilot, OpenCode, then Claude; a blocked engine goes to the next one that is not
+        self.assertEqual(r({"agy_blocked_until": late}, "agy")[0], "codex")
+        self.assertEqual(r({"agy_blocked_until": late, "codex_blocked_until": late}, "agy")[0], "copilot")
+        self.assertEqual(r({"agy_blocked_until": late, "codex_blocked_until": late, "copilot_blocked_until": late}, "agy")[0], "opencode")
+        every = {e + "_blocked_until": late for e in ("agy", "codex", "copilot", "opencode")}
+        self.assertEqual(r(every, "agy")[0], "claude")
+        self.assertEqual(r(every, "agy")[1:], ("own repo, agy, Codex, Copilot and OpenCode are out of usage", " (agy, Codex, Copilot and OpenCode are out of usage)"))
+        self.assertEqual(r({"opencode_blocked_until": late}, "opencode")[:2], ("claude", "own repo, OpenCode is out of usage"))
+        # a lane asked for on a later engine never goes back up the chain
+        self.assertEqual(r({"copilot_blocked_until": late}, "codex")[0], "codex")
+        self.assertEqual(r({"agy_blocked_until": late}, "codex")[0], "codex")
+        self.assertEqual(r({"codex_blocked_until": late}, "copilot")[0], "copilot")
+        self.assertEqual(r({"copilot_blocked_until": late}, "copilot")[0], "opencode")
+        self.assertEqual(r({"copilot_blocked_until": late, "opencode_blocked_until": late}, "copilot")[0], "claude")
+        self.assertEqual(r(every, "claude")[0], "claude")
+        self.assertEqual(r({"copilot_blocked_until": now}, "copilot")[0], "copilot")  # lapsed
 
     def out_of_usage(self, text, started):
         self.start("own-app", "task at %d" % started, started)
@@ -1225,6 +1292,7 @@ class Sweep(Base):
         return (d.replace(day=28, hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=4)).replace(day=1).timestamp()
 
     def test_a_monthly_quota_message_blocks_until_the_first_of_next_month_local(self):
+        self.agy_out()
         self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS)
         (line, chat), = self.out_of_usage("Error: You have exceeded your monthly quota", NOW)
         self.assertIn("Copilot says it is out of usage", chat)
@@ -1249,12 +1317,14 @@ class Sweep(Base):
         return time.mktime(ymdhm + (0, 0, 0, -1))
 
     def test_codex_usage_limit_blocks_until_the_date_in_try_again_at(self):
+        self.agy_out()
         (line, chat), = self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027 2:38 PM", NOW)
         self.assertIn("Codex says it is out of usage", chat)
         self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 14, 38))
 
     def test_codex_try_again_at_without_a_year_takes_this_years_date(self):
         # NOW is 15 Jan 2027
+        self.agy_out()
         self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd 9:05 AM", NOW)
         self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 9, 5))
 
@@ -1265,11 +1335,13 @@ class Sweep(Base):
         self.assertEqual(state["codex_blocked_until"], self.local_epoch(2027, 1, 2, 9, 5))
 
     def test_codex_try_again_at_a_date_with_no_time_blocks_from_midnight_that_day(self):
+        self.agy_out()
         self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027", NOW)
         self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 0, 0))
 
     def test_codex_block_never_shortens_an_existing_later_one(self):
         later = self.local_epoch(2027, 3, 1, 0, 0)
+        self.agy_out()
         self.start("own-app", "ran on codex")  # the lane started on Codex; the later block was set by another lane's report meanwhile
         lane = self.host.started[-1][0]
         self.assertEqual(self.host.started[-1][2], "codex")
@@ -1309,6 +1381,7 @@ class Sweep(Base):
         self.assertEqual(self.agy_block("try again at Feb 3rd, 2027 2:38 PM. Resets in 1h"), self.local_epoch(2027, 2, 3, 14, 38))
 
     def test_codex_falls_back_to_twelve_hours_when_no_date_parses(self):
+        self.agy_out()
         for i, text in enumerate(("You've hit your usage limit.", self.CODEX_LIMIT % "sometime soon",
                                   self.CODEX_LIMIT % "Feb 31st, 2027 1:00 PM",      # not a date
                                   self.CODEX_LIMIT % "Jan 1st, 2027 1:00 PM",       # already past
@@ -1358,18 +1431,24 @@ class Sweep(Base):
         dp.save_state(self.ctx.state_path, state)
 
         self.start("own-app")
-        self.assertEqual(self.host.started[-1][2], "agy")
-        self.assertIn("Codex and Copilot are out of usage", self.host.chats[-1])
+        self.assertEqual(self.host.started[-1][2], "agy")  # agy comes first and has usage
 
         state["agy_blocked_until"] = NOW + dp.AGY_BLOCK_SECONDS
         dp.save_state(self.ctx.state_path, state)
         self.start("own-app", "second")
+        self.assertEqual(self.host.started[-1][2], "opencode")
+        self.assertIn("agy, Codex and Copilot are out of usage", self.host.chats[-1])
+
+        state["opencode_blocked_until"] = NOW + dp.OPENCODE_BLOCK_SECONDS
+        dp.save_state(self.ctx.state_path, state)
+        self.start("own-app", "third")
 
         self.assertEqual(self.host.started[-1][2:4], ("claude", "sonnet"))
         self.assertIn("on Claude Sonnet", self.host.chats[-1])
-        self.assertIn("Codex, Copilot and agy are out of usage", self.host.chats[-1])
+        self.assertIn("agy, Codex, Copilot and OpenCode are out of usage", self.host.chats[-1])
 
     def test_an_ordinary_codex_failure_does_not_block_codex(self):
+        self.agy_out()
         self.start("own-app")
         lane = self.lane_names()[0]
         out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
@@ -1888,6 +1967,7 @@ class WorkRules(Base):
         return Path(self.host.started[-1][4]).read_text()
 
     def test_a_copilot_prompt_says_clone_and_push_from_the_lane_folder_and_never_a_worktree(self):
+        self.agy_out()
         self.start("own-app")
         self.assertEqual(self.host.started[-1][2], "codex")
         state = self.state()
@@ -1904,6 +1984,7 @@ class WorkRules(Base):
         self.assertNotIn("git worktree add", text)
 
     def test_other_engines_keep_the_worktree_rule(self):
+        self.agy_out()
         self.start("own-app")
         self.assertEqual(self.host.started[-1][2], "codex")
         self.assertIn(".worktrees", self.prompt())
@@ -2175,6 +2256,7 @@ class FollowUp17Oct(Base):
         super().setUp()
         s = self.state()
         s["codex_blocked_until"] = NOW + 14 * 86400  # Codex is out until 31 Oct: the dispatcher picks Copilot for an own repo
+        s["agy_blocked_until"] = NOW + 14 * 86400  # agy resets in about 76 hours, and is first in the chain
         dp.save_state(self.ctx.state_path, s)
         self.history = []
 
