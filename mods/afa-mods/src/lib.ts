@@ -769,7 +769,8 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
   if (!call) return false
   // the script path uses only the assignments the shape check accepted, never the regex over the raw command or the inherited environment
   const script = resolveHostPath(call.script, { ...scope, vars: shape })
-  if (!('path' in script)) return false
+  // backstop: the path bash will open is one plain absolute word
+  if (!('path' in script) || !/^\/[\w./-]+$/.test(script.path)) return false
   const text = env.prodScripts?.[script.path]
   if (text === undefined) {
     env.prodWanted?.add(script.path)
