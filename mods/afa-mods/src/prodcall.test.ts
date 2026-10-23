@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { BYPASSES, CALL, DEPLOY, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
 import { classify } from './lib'
-import { type DeployPins, sha256Hex } from './prodread'
+import { type DeployEnvPins, type DeployPins, DEPLOY_ROUTING_KEYS, envKeyLines, sha256Hex } from './prodread'
 
 // The classifier with the deploy-script pin injected. hooks.test.ts cannot do this (the plugin keeps its own copy of the real pin list), so the
 // passes and the refusals that depend on the pin are proved here; hooks.test.ts proves the dialog and the deny per mode.
@@ -11,9 +11,17 @@ const PINS: DeployPins = { 'Chattanooga-Digital': [sha256Hex(DEPLOY) as string] 
 
 // a missing file is read as '' by the hook, the same here
 const ENV_PATH = `${HOME}/repos/Chattanooga-Digital/.env`
-const KEYS = 'PROJECT_NAME\nDB_PASSWORD\nPORTAINER_PROD_URL\nPORTAINER_PROD_USER\nPORTAINER_PROD_PASSWORD'
+// a stand-in dotenv file: the routing values are made up, the pins are their hashes; the hook reduces the file with envKeyLines the same way
+const ROUTING_VALUES: Record<string, string> = {
+  PORTAINER_URL: 'https://p-staging.example', PORTAINER_PROD_URL: 'https://p.example', PORTAINER_ENDPOINT_ID: '2', PORTAINER_PROD_ENDPOINT_ID: '1',
+  PORTAINER_GIT_TOKEN_FILE: '/home/t/.config/token', GREG_NEXTCLOUD_STAGING_URL: 'https://nc-staging.example', NEXTCLOUD_PROD_URL: 'https://nc.example', DB_HOST: 'db',
+}
+const FAKE_ENV = (over: Record<string, string> = {}) =>
+  ['PROJECT_NAME=cd', 'DB_PASSWORD=hunter2', 'PORTAINER_PROD_USER=u', 'PORTAINER_PROD_PASSWORD=pw', ...Object.entries({ ...ROUTING_VALUES, ...over }).map(([k, v]) => `${k}=${v}`)].join('\n')
+const ENV_PINS: DeployEnvPins = { 'Chattanooga-Digital': Object.fromEntries(Object.entries(ROUTING_VALUES).map(([k, v]) => [k, [sha256Hex(v) as string]])) }
+const KEYS = envKeyLines(FAKE_ENV())
 const prodHolds = (command: string, script: string | null = REXEC, deploy: string | null = DEPLOY, pins: DeployPins | null = PINS, more: Record<string, string> = {}) =>
-  classify(command, 0, { home: HOME, prodScripts: { [`${SP}/rexec.sh`]: script ?? '', [DEPLOY_PATH]: deploy ?? '', [ENV_PATH]: KEYS, ...more }, deployPins: pins ?? undefined }).filter(h => h.kind === 'production deploy').length
+  classify(command, 0, { home: HOME, prodScripts: { [`${SP}/rexec.sh`]: script ?? '', [DEPLOY_PATH]: deploy ?? '', [ENV_PATH]: KEYS, ...more }, deployPins: pins ?? undefined, deployEnvPins: ENV_PINS }).filter(h => h.kind === 'production deploy').length
 
 describe('read-only production proofs (classifier, deploy pin injected)', () => {
   for (const remote of ['drush status', 'composer audit', 'drush sqlq "SELECT COUNT(*) FROM users"', 'curl -s https://example.org/']) {
@@ -97,14 +105,14 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
     const wanted = new Set<string>()
     const wantedEnv = new Set<string>()
     const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY }
-    const holds = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, prodWanted: wanted, prodWantedEnv: wantedEnv }).filter(h => h.kind === 'production deploy')
+    const holds = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, deployEnvPins: ENV_PINS, prodWanted: wanted, prodWantedEnv: wantedEnv }).filter(h => h.kind === 'production deploy')
     expect(holds.length).toBe(1)
     expect([...wanted]).toEqual([])
     expect([...wantedEnv]).toEqual([ENV_PATH])
   })
   test('an injected key list decides: a key on it passes', () => {
     const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY, [ENV_PATH]: 'EXTRA_KEY' }
-    const n = (keys: string[]) => classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, deployEnvKeys: new Set(keys) }).filter(h => h.kind === 'production deploy').length
+    const n = (keys: string[]) => classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS, deployEnvPins: ENV_PINS, deployEnvKeys: new Set(keys) }).filter(h => h.kind === 'production deploy').length
     expect(n(['EXTRA_KEY'])).toBe(0)
     expect(n(['OTHER'])).toBe(1)
   })
@@ -119,6 +127,24 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
     const holds = classify(`SP=${SP}; STACK_NAME=x bash $SP/.env --prod 'drush status'`, 0, { home: HOME, prodScripts: {}, deployPins: PINS, prodWanted: wanted }).filter(h => h.kind === 'production deploy')
     expect(holds.length).toBe(1)
     expect([...wanted]).toEqual([])
+  })
+  // the hub's decision on #94: the routing values are pinned, so a lane that can write the dotenv file cannot repoint the production login
+  test('the stand-in dotenv file with every routing value as pinned passes; the key list is the reduced file', () => {
+    expect(Object.keys(ROUTING_VALUES).sort()).toEqual([...DEPLOY_ROUTING_KEYS].sort())
+    expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: envKeyLines(FAKE_ENV()) })).toBe(0)
+  })
+  for (const key of Object.keys(ROUTING_VALUES)) {
+    test(`a changed ${key} value is held`, () => {
+      expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: envKeyLines(FAKE_ENV({ [key]: 'https://evil.example' })) })).toBe(1)
+    })
+  }
+  test('a routing key given twice, the second one repointed, is held', () => {
+    expect(prodHolds(prod('drush status'), REXEC, DEPLOY, PINS, { [ENV_PATH]: envKeyLines(`${FAKE_ENV()}\nPORTAINER_PROD_URL=https://evil.example`) })).toBe(1)
+  })
+  test('the real pin table does not bless the stand-in values: with no injected env pins the same file is held', () => {
+    const prodScripts = { [`${SP}/rexec.sh`]: REXEC, [DEPLOY_PATH]: DEPLOY, [ENV_PATH]: KEYS }
+    const n = classify(prod('drush status'), 0, { home: HOME, prodScripts, deployPins: PINS }).filter(h => h.kind === 'production deploy').length
+    expect(n).toBe(1)
   })
   test('a call with CALL and nothing around it needs its variables set', () => {
     expect(prodHolds(CALL)).toBeGreaterThan(0)
