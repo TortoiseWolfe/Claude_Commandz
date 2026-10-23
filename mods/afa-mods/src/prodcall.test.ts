@@ -2,15 +2,15 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { BYPASSES, CALL, DEPLOY, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
 import { classify } from './lib'
-import { sha256Hex } from './prodread'
+import { type DeployPins, sha256Hex } from './prodread'
 
 // The classifier with the deploy-script pin injected. hooks.test.ts cannot do this (the plugin keeps its own copy of the real pin list), so the
 // passes and the refusals that depend on the pin are proved here; hooks.test.ts proves the dialog and the deny per mode.
 const DEPLOY_PATH = `${HOME}/repos/Chattanooga-Digital/scripts/portainer-deploy.sh`
-const PINS = new Set([sha256Hex(DEPLOY) as string])
+const PINS: DeployPins = { 'Chattanooga-Digital': [sha256Hex(DEPLOY) as string] }
 
 // a missing file is read as '' by the hook, the same here
-const prodHolds = (command: string, script: string | null = REXEC, deploy: string | null = DEPLOY, pins: Set<string> | null = PINS, more: Record<string, string> = {}) =>
+const prodHolds = (command: string, script: string | null = REXEC, deploy: string | null = DEPLOY, pins: DeployPins | null = PINS, more: Record<string, string> = {}) =>
   classify(command, 0, { home: HOME, prodScripts: { [`${SP}/rexec.sh`]: script ?? '', [DEPLOY_PATH]: deploy ?? '', ...more }, deployPins: pins ?? undefined }).filter(h => h.kind === 'production deploy').length
 
 describe('read-only production proofs (classifier, deploy pin injected)', () => {
@@ -69,10 +69,14 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
     const evil = REXEC.replace('Chattanooga-Digital', 'evil')
     expect(prodHolds(prod('drush status'), evil, DEPLOY, PINS, { [`${HOME}/repos/evil/scripts/portainer-deploy.sh`]: `${DEPLOY}echo evil\n` })).toBe(1)
   })
-  test('deploy script pin: a lane-made folder is read as it is when its copy is the pinned one', () => {
-    // pinned content is what is reviewed; where it sits does not matter, the command in it is the same
+  test('deploy script pin: a folder not on the list is held even with the pinned copy', () => {
+    // the pin belongs to a reviewed repo folder; a lane-made folder may hold other files the script reads
     const other = REXEC.replace('Chattanooga-Digital', 'other')
-    expect(prodHolds(prod('drush status'), other, DEPLOY, PINS, { [`${HOME}/repos/other/scripts/portainer-deploy.sh`]: DEPLOY })).toBe(0)
+    expect(prodHolds(prod('drush status'), other, DEPLOY, PINS, { [`${HOME}/repos/other/scripts/portainer-deploy.sh`]: DEPLOY })).toBe(1)
+  })
+  test('deploy script pin: a pin of one repo does not count in another listed repo', () => {
+    const eduity = REXEC.replace('Chattanooga-Digital', 'Eduity')
+    expect(prodHolds(prod('drush status'), eduity, DEPLOY, PINS, { [`${HOME}/repos/Eduity/scripts/portainer-deploy.sh`]: DEPLOY })).toBe(1)
   })
   test('a call with CALL and nothing around it needs its variables set', () => {
     expect(prodHolds(CALL)).toBeGreaterThan(0)

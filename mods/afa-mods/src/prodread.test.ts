@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEPLOY_PINS, deployIsPinned, deployScriptPath, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
+import { DEPLOY_PINS, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -190,15 +190,31 @@ describe('review of #94 (23 Oct)', () => {
     expect(sha256Hex('\ud800')).toBeUndefined()
   })
   test('the pins are the two repos reviewed (three versions) and a changed copy is not pinned', () => {
-    expect(DEPLOY_PINS.size).toBe(3)
-    expect(deployIsPinned('#!/bin/bash\necho hi\n')).toBe(false)
-    expect(deployIsPinned('')).toBe(false)
+    expect(Object.keys(DEPLOY_PINS).sort()).toEqual(['Chattanooga-Digital', 'Eduity'])
+    expect(Object.values(DEPLOY_PINS).flat().length).toBe(3)
+    expect(deployIsPinned('Eduity', '#!/bin/bash\necho hi\n')).toBe(false)
+    expect(deployIsPinned('Eduity', '')).toBe(false)
+  })
+  test('a pin counts only in its own repo folder, and a name like toString is no folder', () => {
+    const pins = { 'Chattanooga-Digital': [sha256Hex('x') as string] }
+    expect(deployIsPinned('Chattanooga-Digital', 'x', pins)).toBe(true)
+    expect(deployIsPinned('evil', 'x', pins)).toBe(false)
+    expect(deployIsPinned('toString', 'x', pins)).toBe(false)
+    expect(deployIsPinned('__proto__', 'x', pins)).toBe(false)
   })
   test('the deploy script path comes from the forwarder cd and the home', () => {
-    expect(deployScriptPath(REXEC, '/home/u')).toBe('/home/u/repos/Chattanooga-Digital/scripts/portainer-deploy.sh')
-    expect(deployScriptPath(REXEC.replace(' || exit 1', ''), '/home/u')).toBeUndefined()
-    expect(deployScriptPath(REXEC, 'relative')).toBeUndefined()
-    expect(deployScriptPath(REXEC, '/home/../u')).toBeUndefined()
+    expect(deployScript(REXEC, '/home/u')).toEqual({ repo: 'Chattanooga-Digital', path: '/home/u/repos/Chattanooga-Digital/scripts/portainer-deploy.sh' })
+    expect(deployScript(REXEC.replace(' || exit 1', ''), '/home/u')).toBeUndefined()
+    expect(deployScript(REXEC, 'relative')).toBeUndefined()
+    expect(deployScript(REXEC, '/home/../u')).toBeUndefined()
+  })
+  test('a second cd line, or an indented one, is no plain forwarder and gives no deploy path', () => {
+    const second = REXEC.replace('source scripts', 'cd ~/repos/evil || exit 1\nsource scripts')
+    const indented = REXEC.replace('cd ~/repos', '  cd ~/repos')
+    expect(forwarderIsPlain(second)).toBe(false)
+    expect(deployScript(second, '/home/u')).toBeUndefined()
+    expect(forwarderIsPlain(indented)).toBe(false)
+    expect(forwarderIsPlain(REXEC.replace('cd ~/repos', '\tcd ~/repos'))).toBe(false)
   })
   test('dot parts', () => {
     expect(hasDotPart('/a/b/../c')).toBe(true)

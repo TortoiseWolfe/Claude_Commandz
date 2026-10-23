@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { deployIsPinned, deployScriptPath, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { type DeployPins, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -80,9 +80,9 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
-// deployPins: SHA-256 list of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
+// deployPins: SHA-256 list, by repo folder, of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; deployPins?: Set<string> }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; deployPins?: DeployPins }
 
 const strip = (s: string) =>
   s
@@ -782,14 +782,14 @@ function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string>
   }
   if (!forwarderIsPlain(text) || !remoteIsRead(call.remote)) return false
   // the one file the forwarder sources must be a version we have reviewed
-  const deploy = deployScriptPath(text, scope.home)
+  const deploy = deployScript(text, scope.home)
   if (deploy === undefined) return false
-  const deployText = env.prodScripts?.[deploy]
+  const deployText = env.prodScripts?.[deploy.path]
   if (deployText === undefined) {
-    env.prodWanted?.add(deploy)
+    env.prodWanted?.add(deploy.path)
     return false
   }
-  return deployIsPinned(deployText, env.deployPins)
+  return deployIsPinned(deploy.repo, deployText, env.deployPins)
 }
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {

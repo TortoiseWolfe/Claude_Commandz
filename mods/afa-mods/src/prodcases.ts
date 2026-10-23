@@ -86,5 +86,8 @@ export const FORWARDERS: [string, string, string | null][] = [
   ['a forwarder with a carriage return', prod('drush status'), REXEC.replace('T="$1"', 'T="$1"\r')],
   ['a forwarder with a no-break space', prod('drush status'), REXEC.replace('# usage', '#\u00a0usage')],
   ['a forwarder whose cd can fail and go on', prod('drush status'), REXEC.replace(' || exit 1\nsource', '\nsource')],
+  ['a forwarder with a second cd after the first', prod('drush status'), REXEC.replace('source scripts', 'cd ~/repos/evil || exit 1\nsource scripts')],
+  ['a forwarder with an indented cd', prod('drush status'), REXEC.replace('cd ~/repos', '  cd ~/repos')],
+  ['a forwarder with a tab-indented cd', prod('drush status'), REXEC.replace('cd ~/repos', '\tcd ~/repos')],
   ['a forwarder script that is not found', prod('drush status'), null],
 ]

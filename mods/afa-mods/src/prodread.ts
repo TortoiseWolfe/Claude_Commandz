@@ -206,18 +206,24 @@ const FORWARDER_LINES: RegExp[] = [
 
 const SHEBANGS = new Set(['#!/usr/bin/env bash', '#!/bin/bash'])
 
+// the lines both the plain check and the deploy-script lookup read, so they cannot disagree about which line is the cd
+const forwarderLines = (text: string): string[] => text.split('\n').map(l => l.trim()).filter(Boolean)
+
 export function forwarderIsPlain(text: string): boolean {
   if (!PLAIN_ASCII.test(text)) return false
   // a `#!` line is the interpreter when the script is run without `bash` in front, so line 1 may name only bash; later `#!` lines are not comments we trust
   const first = text.split('\n')[0]
   if (first.startsWith('#!') && !SHEBANGS.has(first)) return false
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  // no indented line: the real forwarders have none, and one would be read differently by a line match and by a person
+  if (text.split('\n').some(l => /^\s/.test(l))) return false
+  const lines = forwarderLines(text)
   if (lines.length === 0 || lines.length > 40) return false
   // the repo's own portainer-deploy.sh line is the only file it may source; any other `source` or `.` runs code we did not read
   if (lines.some(l => /^(?:source|\.)\s/.test(l) && l !== 'source scripts/portainer-deploy.sh "$T"')) return false
   if (lines.filter(l => l.startsWith('source ')).length > 1) return false
   if (!lines.every(l => (l.startsWith('#!') ? l === first : FORWARDER_LINES.some(r => r.test(l))))) return false
   // the cd that picks the repo must come before the source line, and stop the script when it fails
+  if (lines.filter(l => l.startsWith('cd ')).length !== 1) return false
   const cdAt = lines.findIndex(l => l.startsWith('cd '))
   const srcAt = lines.findIndex(l => l.startsWith('source '))
   if (srcAt >= 0 && !(cdAt >= 0 && cdAt < srcAt)) return false
@@ -393,11 +399,12 @@ export function remoteIsRead(remote: string): boolean {
 
 // ---- the one file the forwarder sources: pinned by SHA-256 ----
 
-// The repo folder the forwarder cd's into (`cd ~/repos/NAME || exit 1`) and the deploy script it then sources.
-export function deployScriptPath(forwarder: string, home: string): string | undefined {
+// The repo folder the forwarder cd's into (`cd ~/repos/NAME || exit 1`, the only cd line) and the deploy script it then sources.
+export function deployScript(forwarder: string, home: string): { repo: string; path: string } | undefined {
   if (!home.startsWith('/') || hasDotPart(home)) return undefined
-  const m = /^cd (?:~|\$HOME)\/repos\/([\w-]+) \|\| exit 1$/m.exec(forwarder)
-  return m ? `${home}/repos/${m[1]}/scripts/portainer-deploy.sh` : undefined
+  const cds = forwarderLines(forwarder).filter(l => l.startsWith('cd '))
+  const m = cds.length === 1 ? /^cd (?:~|\$HOME)\/repos\/([\w-]+) \|\| exit 1$/.exec(cds[0]) : null
+  return m ? { repo: m[1], path: `${home}/repos/${m[1]}/scripts/portainer-deploy.sh` } : undefined
 }
 
 // SHA-256 (hex) of the UTF-8 bytes of a text; undefined for text that is not valid Unicode.
@@ -453,15 +460,19 @@ export function sha256Hex(text: string): string | undefined {
   return h.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('')
 }
 
-// SHA-256 of the scripts/portainer-deploy.sh versions a production proof may source. A different copy (a lane can make a folder of its own
-// under ~/repos, or edit a repo's) keeps the command held. The list changes only by a reviewed PR; when a repo's script changes, so does this.
-export const DEPLOY_PINS = new Set<string>([
-  '3224c8b19ee7e7f9e0edf30b16c789a7a45eaf71422ef20843127f5077e8f527', // Chattanooga-Digital main (aed358a)
-  '4be5b540117efed91c7de2870c8a200e068e7c64b21ff6dbbb2db146fd107c4f', // Eduity origin/main (6206534a)
-  '76320bc668065b41ab2d7d4e8df958c3ae9c21039fbef8147e34311cd5f2b6c1', // Eduity before #162 (c3226459)
-])
+// SHA-256 of the scripts/portainer-deploy.sh versions a production proof may source, by the repo folder they live in. Only these two folders count:
+// a lane can make a folder of its own under ~/repos with a copy of a pinned script beside files we have not read. A different copy, or a pinned copy in
+// another folder, keeps the command held. The list changes only by a reviewed PR; when a repo's script changes, so does this.
+export type DeployPins = Record<string, readonly string[]>
+export const DEPLOY_PINS: DeployPins = {
+  'Chattanooga-Digital': ['3224c8b19ee7e7f9e0edf30b16c789a7a45eaf71422ef20843127f5077e8f527'], // main (aed358a)
+  Eduity: [
+    '4be5b540117efed91c7de2870c8a200e068e7c64b21ff6dbbb2db146fd107c4f', // origin/main (6206534a)
+    '76320bc668065b41ab2d7d4e8df958c3ae9c21039fbef8147e34311cd5f2b6c1', // before #162 (c3226459)
+  ],
+}
 
-export const deployIsPinned = (text: string, pins: Set<string> = DEPLOY_PINS): boolean => {
+export const deployIsPinned = (repo: string, text: string, pins: DeployPins = DEPLOY_PINS): boolean => {
   const h = sha256Hex(text)
-  return h !== undefined && pins.has(h)
+  return h !== undefined && Object.prototype.hasOwnProperty.call(pins, repo) && pins[repo].includes(h)
 }
