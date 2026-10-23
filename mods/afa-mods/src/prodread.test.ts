@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { forwarderIsPlain, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { DEPLOY_PINS, deployIsPinned, deployScriptPath, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead, sha256Hex } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -177,4 +177,73 @@ describe('remote commands that write, or that the reader cannot classify, are no
       expect(remoteIsRead(remote)).toBe(false)
     })
   }
+})
+
+
+describe('review of #94 (23 Oct)', () => {
+  test('sha256Hex matches the standard vectors, multibyte text and a multi-block text', () => {
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    expect(sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe('248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1')
+    expect(sha256Hex('é—x')).toBe('9e59193bcce943091dcbf7abccabcf6de4b1ae97a7c62653453ebd9414630883')
+    expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+    expect(sha256Hex('\ud800')).toBeUndefined()
+  })
+  test('the pins are the two repos reviewed (three versions) and a changed copy is not pinned', () => {
+    expect(DEPLOY_PINS.size).toBe(3)
+    expect(deployIsPinned('#!/bin/bash\necho hi\n')).toBe(false)
+    expect(deployIsPinned('')).toBe(false)
+  })
+  test('the deploy script path comes from the forwarder cd and the home', () => {
+    expect(deployScriptPath(REXEC, '/home/u')).toBe('/home/u/repos/Chattanooga-Digital/scripts/portainer-deploy.sh')
+    expect(deployScriptPath(REXEC.replace(' || exit 1', ''), '/home/u')).toBeUndefined()
+    expect(deployScriptPath(REXEC, 'relative')).toBeUndefined()
+    expect(deployScriptPath(REXEC, '/home/../u')).toBeUndefined()
+  })
+  test('dot parts', () => {
+    expect(hasDotPart('/a/b/../c')).toBe(true)
+    expect(hasDotPart('/a/./c')).toBe(true)
+    expect(hasDotPart('/a/b.c/.d/..e')).toBe(false)
+  })
+  for (const [what, first] of [
+    ['env -S', "#!/usr/bin/env -S sh -c 'anything'"],
+    ['sh', '#!/bin/sh'],
+    ['a different env', '#!/usr/bin/env python3'],
+    ['bash with a flag', '#!/bin/bash -p'],
+  ] as const) {
+    test(`a forwarder whose first line is a ${what} shebang is not plain`, () => {
+      expect(forwarderIsPlain(REXEC.replace('#!/usr/bin/env bash', first))).toBe(false)
+    })
+  }
+  test('the two bash shebangs are plain, and a #! line past line 1 is not', () => {
+    expect(forwarderIsPlain(REXEC.replace('#!/usr/bin/env bash', '#!/bin/bash'))).toBe(true)
+    expect(forwarderIsPlain(REXEC.replace('# usage', '#!/bin/sh\n# usage'))).toBe(false)
+  })
+  for (const [what, text] of [
+    ['a carriage return', REXEC.replace('T="$1"', 'T="$1"\r')],
+    ['a no-break space', REXEC.replace('# usage', '#\u00a0usage')],
+    ['a form feed', REXEC.replace('cd ~', 'cd\f~')],
+  ] as const) {
+    test(`a forwarder with ${what} is not plain`, () => {
+      expect(forwarderIsPlain(text)).toBe(false)
+    })
+  }
+  test('a cd that does not stop on failure, or comes after the source, is not plain', () => {
+    expect(forwarderIsPlain(REXEC.replace(' || exit 1\nsource', '\nsource'))).toBe(false)
+    const lines = REXEC.split('\n')
+    const cd = lines.findIndex(l => l.startsWith('cd '))
+    const src = lines.findIndex(l => l.startsWith('source '))
+    ;[lines[cd], lines[src]] = [lines[src], lines[cd]]
+    expect(forwarderIsPlain(lines.join('\n'))).toBe(false)
+  })
+  test('hostname is not a read', () => {
+    expect(remoteIsRead('hostname evil')).toBe(false)
+    expect(remoteIsRead('hostname')).toBe(false)
+    expect(remoteIsRead('uname -a')).toBe(true)
+  })
+  test('the command line must be printable ASCII', () => {
+    const part = (text: string) => [{ text, sep: '' }]
+    expect(prodLineShape("bash x --prod 'a'", part("bash x --prod 'a'"), 0, false)).toBeDefined()
+    expect(prodLineShape("bash x --prod 'a'\r", part("bash x --prod 'a'\r"), 0, false)).toBeUndefined()
+  })
 })

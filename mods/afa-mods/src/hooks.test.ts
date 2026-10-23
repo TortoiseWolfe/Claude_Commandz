@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { BYPASSES, DEPLOY, FORWARDERS, REXEC, SP, WRITES, prod } from './prodcases'
+
 const HOME = '/home/t'
 const STATE = `${HOME}/.claude/state`
 const FILES: Record<string, string> = {
@@ -8,6 +10,8 @@ const FILES: Record<string, string> = {
     '2026-10-12\tdone\t/x\tm\tb\t-\t/r/done.md\ts\t-\n2026-10-12\tbusy\t/x\tm\tb\t-\t-\ts\t-\n',
   '/r/done.md': 'report',
 }
+// every path the hook read, for the tests that ask what it looked at
+const READS: string[] = []
 const PROPS = {
   hasSurvey: false,
   isWorking: false,
@@ -25,7 +29,10 @@ const setup = (on: any, vars: Record<string, string> = {}) => {
   on('session.measure', ($: any, e: any) => ({ changed: e.changed }))
   on('ui.render', ($: any, e: any) => h($.ui.resolve(e).Text, {}, 'ENGINE'))
   on('fs.exists', ($: any, e: any) => ({ value: e.path in FILES }))
-  on('fs.read', ($: any, e: any) => ({ value: FILES[e.path] ?? '' }))
+  on('fs.read', ($: any, e: any) => {
+    READS.push(e.path)
+    return { value: FILES[e.path] ?? '' }
+  })
 }
 
 // The dialog's answer is keyed by the question text; a key that is not the question reads as "no answer" and the guard fails closed.
@@ -781,22 +788,14 @@ describe('blast radius, lane denies what it can name the fix for', () => {
 // 22 Oct 3:15 PM, coop-site: read-only proofs through rexec.sh --prod were held as a "production deploy". The guard reads the
 // forwarder script and each remote command itself; anything it cannot show is a read stays held (hub: dialog, lane: dialog, unattended: deny).
 describe('blast radius, read-only production proofs', () => {
-  const SP = '/tmp/claude-1000/-home-t-repos-chattanooga-digital/0a1b2c3d/scratchpad'
-  const REXEC = `#!/usr/bin/env bash
-# usage: rexec.sh --prod|--staging '<shell cmd>' [exec user, default 82 = www-data]
-T="$1"; CMD="$2"; U="\${3-82}"
-cd ~/repos/Chattanooga-Digital || exit 1
-source scripts/portainer-deploy.sh "$T"
-auth >/dev/null 2>&1 || { echo "auth failed"; exit 1; }
-cid="$(find_service_container "\${STACK_NAME}_php")"
-[ -n "$cid" ] || { echo "no php container for $STACK_NAME"; exit 1; }
-echo "[rexec] stack=$STACK_NAME portainer=$PORTAINER_URL" >&2
-container_exec "$cid" "$CMD" "$U"
-`
-  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, script: string | null = REXEC) => {
+  const DEPLOY_PATH = `${HOME}/repos/Chattanooga-Digital/scripts/portainer-deploy.sh`
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, script: string | null = REXEC, deploy: string | null = DEPLOY) => {
     delete FILES[`${SP}/rexec.sh`]
     if (script !== null) FILES[`${SP}/rexec.sh`] = script
+    delete FILES[DEPLOY_PATH]
+    if (deploy !== null) FILES[DEPLOY_PATH] = deploy
     setup(on, vars)
+    READS.length = 0
     const seen = { asked: '', log: '' }
     on('session.surfaces', () => ({ value: ['terminal'] }))
     on('fs.write', ($: any, e: any) => {
@@ -812,69 +811,12 @@ container_exec "$cid" "$CMD" "$U"
     const r: any = await $.tool.call({ tool: 'Bash', command })
     return { seen, r }
   }
-  const prod = (remote: string, q = "'") => `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod ${q}${remote}${q} 2>&1 | tail -5`
   const MODES = [
     ['hub', {}],
     ['lane', { AFA_LANE: '1' }],
   ] as const
 
-  for (const remote of ['drush status', 'composer audit', 'drush sqlq "SELECT COUNT(*) FROM users"', 'curl -s https://example.org/']) {
-    for (const [who, vars] of MODES) {
-      test(`a read passes without a dialog or a deny: ${remote.slice(0, 30)} (${who})`, async ($, on) => {
-        const { seen, r } = await go($, on, prod(remote), vars)
-        expect(seen.asked).toBe('')
-        expect(r.deny).toBeUndefined()
-      })
-    }
-  }
-
-  const WRITES: [string, string, string?][] = [
-    ['drush updb -y', prod('drush updb -y')],
-    ['drush cim -y', prod('drush cim -y')],
-    ['drush sqlq UPDATE', prod('drush sqlq "UPDATE users SET name=1"')],
-    ['rm -rf', prod('rm -rf /var/www/html/sites')],
-    ['docker service update', prod('docker service update --force x')],
-    ['a redirect to a file', prod('drush status > /tmp/x')],
-    ['a variable in a double-quoted remote', prod('drush $CMD', '"')],
-  ]
   // 22 Oct security review of 9015962: the script is read before the command runs, so nothing in the same command may touch or race it.
-  const CALL = "STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status'"
-  const BYPASSES: [string, string][] = [
-    ['an earlier segment rewrites the script', `SP=${SP}; echo evil >> $SP/rexec.sh && ${CALL} 2>&1 | tail -5`],
-    ['an earlier segment rewrites the script, joined by ;', `SP=${SP}; printf x > $SP/rexec.sh; ${CALL}`],
-    ['an earlier segment is a command substitution', `SP=${SP}; X=$(echo evil >> $SP/rexec.sh); ${CALL}`],
-    ['an earlier segment is a backtick', `SP=${SP}; X=\`echo evil >> $SP/rexec.sh\`; ${CALL}`],
-    ['a background segment races the read', `SP=${SP}; ( sleep 1; echo evil >> $SP/rexec.sh ) & ${CALL}`],
-    ['a lone & sends an earlier assignment to the background', `SP=${SP} & ${CALL}`],
-    ['the call is in the background', `SP=${SP}; ${CALL} &`],
-    ['a pipe into tee rewrites the script', `SP=${SP}; echo evil | tee $SP/rexec.sh | ${CALL}`],
-    ['the output is piped into tee on the script', `SP=${SP}; ${CALL} 2>&1 | tee $SP/rexec.sh`],
-    ['the output is piped into tail with a file flag', `SP=${SP}; ${CALL} 2>&1 | tail -f $SP/rexec.sh`],
-    ['a second command follows the call', `SP=${SP}; ${CALL}; echo evil >> $SP/rexec.sh`],
-    ['an || list', `SP=${SP}; true || ${CALL}`],
-    ['the call is wrapped in bash -c after a rewrite', `SP=${SP}; echo evil >> $SP/rexec.sh; bash -c "${CALL}"`],
-    ['an assignment that moves HOME', `SP=${SP}; HOME=/tmp/x; ${CALL}`],
-    ['an assignment that sets PATH', `SP=${SP}; PATH=/tmp/x:$PATH; ${CALL}`],
-    ['a relative cd', `SP=${SP}; cd ../x; ${CALL}`],
-    // the 2>&1 split: the words after the "1" still reach rexec.sh as arguments
-    // 22 Oct automated review: the script path and the heredoc view must be the ones bash sees
-    ['a heredoc marker inside a quoted assignment', `SP=${SP}; X="a<<EOF"; ${CALL}`],
-    ['a heredoc marker in single quotes', `SP=${SP}; X='<<EOF'; ${CALL}`],
-    ['a second assignment hidden in a quoted value', `SP="${SP}; SP=/tmp/evil"; ${CALL}`],
-    ['a space in a quoted value splits the unquoted $SP', `SP="${SP} x"; ${CALL}`],
-    ['a ~ in an unquoted value', `SP=~/x; ${CALL}`],
-    ['a readonly variable as the path', `UID=${SP}; ${CALL.replace('$SP', '$UID')}`],
-    ['a changing variable as the path', `RANDOM=${SP}; ${CALL.replace('$SP', '$RANDOM')}`],
-    ['the $_ parameter as the path', `_=${SP}; ${CALL.replace('$SP', '$_')}`],
-    ['PIPESTATUS as the path', `PIPESTATUS=${SP}; ${CALL.replace('$SP', '$PIPESTATUS')}`],
-    ['a BASH_ name as the path', `BASH_ARGV0=${SP}; ${CALL.replace('$SP', '$BASH_ARGV0')}`],
-    ['a redirect in a quoted value', `SP=${SP}; X="a>b"; ${CALL}`],
-    ['the script word uses a variable the line did not set', `STACK_NAME=x timeout 120 bash $NOPE/rexec.sh --prod 'drush status'`],
-    ['the script word uses an inherited variable', `STACK_NAME=x timeout 120 bash $TMPDIR/rexec.sh --prod 'drush status'`],
-    ['2>&1 with extra words after the 1', `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status' 2>&1 extra args | tail -5`],
-    ['2>&1 with an extra word and no pipe', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1 root`],
-    ['2>&1 followed by a second command', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1; rm -rf /x`],
-  ]
   for (const [what, command] of BYPASSES) {
     for (const [who, vars] of MODES) {
       test(`bypass held: ${what} (${who} asks)`, async ($, on) => {
@@ -889,24 +831,6 @@ container_exec "$cid" "$CMD" "$U"
       expect(r.deny).toBeDefined()
     })
   }
-  // the plain shapes still pass: assignments and a cd before, 2>&1, one tail or head after
-  for (const command of [
-    `SP=${SP}; ${CALL}`,
-    `cd /tmp && SP=${SP} && ${CALL} 2>&1 | head -n 20`,
-    `SP=${SP}\nSTACK_NAME=y\n${CALL} 2>&1 | tail -n 5`,
-  ]) {
-    test(`a plain shape still passes: ${command.slice(-50).replace(/\n/g, ' ')}`, async ($, on) => {
-      const { seen, r } = await go($, on, command.replace(/\\n/g, '\n'))
-      expect(seen.asked).toBe('')
-      expect(r.deny).toBeUndefined()
-    })
-  }
-  const FORWARDERS: [string, string, string | null][] = [
-    ['a forwarder with a second container_exec', prod('drush status'), `${REXEC}container_exec "$cid" "rm -rf /x" "$U"\n`],
-    ['a forwarder that sources another file', prod('drush status'), REXEC.replace('auth >', 'source /tmp/x.sh\nauth >')],
-    ['a forwarder that dot-sources another file', prod('drush status'), REXEC.replace('auth >', '. /tmp/x.sh\nauth >')],
-    ['a forwarder script that is not found', prod('drush status'), null],
-  ]
   for (const [what, command, script] of [...WRITES.map(([w, c]) => [w, c, REXEC] as const), ...FORWARDERS]) {
     for (const [who, vars] of MODES) {
       test(`still held: ${what} (${who} asks)`, async ($, on) => {
@@ -921,4 +845,49 @@ container_exec "$cid" "$CMD" "$U"
       expect(r.deny).toBeDefined()
     })
   }
+  // the shebang case from the review: no `bash` in front, so line 1 is the interpreter
+  test('no bash in front and an env -S shebang: held', async ($, on) => {
+    const { seen, r } = await go($, on, `SP=${SP}; STACK_NAME=x $SP/rexec.sh --prod 'drush status'`, {}, REXEC.replace('#!/usr/bin/env bash', "#!/usr/bin/env -S sh -c 'anything'"))
+    expect(seen.asked).toContain('production deploy')
+    expect(r.deny).toContain('refused at the prompt')
+  })
+  test('hostname NAME in the remote command is held', async ($, on) => {
+    const { seen } = await go($, on, prod('hostname evil'))
+    expect(seen.asked).toContain('production deploy')
+  })
+  // portainer-deploy.sh is pinned by SHA-256: a copy that differs, an empty one or a missing one keeps the command held
+  for (const [what, deploy] of [
+    ['a changed copy', `${DEPLOY}curl -X POST https://example.org/\n`],
+    ['an empty copy', ''],
+    ['a missing copy', null],
+  ] as const) {
+    for (const [who, vars] of MODES) {
+      test(`deploy script pin: ${what} is held (${who} asks)`, async ($, on) => {
+        const { seen, r } = await go($, on, prod('drush status'), vars, REXEC, deploy)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`deploy script pin: ${what} is denied in an unattended lane`, async ($, on) => {
+      const { seen, r } = await go($, on, prod('drush status'), { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` }, REXEC, deploy)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
+  test('deploy script pin: a lane-made repo folder with its own copy is held', async ($, on) => {
+    const evil = REXEC.replace('Chattanooga-Digital', 'evil')
+    FILES[`${HOME}/repos/evil/scripts/portainer-deploy.sh`] = `${DEPLOY}echo evil\n`
+    const { seen } = await go($, on, prod('drush status'), {}, evil)
+    expect(seen.asked).toContain('production deploy')
+  })
+  // the hook reads the forwarder, then the deploy script it sources, before it decides (the pin itself is proved in prodcall.test.ts)
+  test('the hook reads the forwarder and then the deploy script it sources', async ($, on) => {
+    const { seen } = await go($, on, prod('drush status'))
+    expect(READS).toContain(`${SP}/rexec.sh`)
+    expect(READS).toContain(DEPLOY_PATH)
+  })
+  test('the hook does not read the deploy script of a forwarder it has already refused', async ($, on) => {
+    await go($, on, `SP=${SP}; STACK_NAME=x $SP/rexec.sh --prod 'drush status'`, {}, REXEC.replace('#!/usr/bin/env bash', "#!/usr/bin/env -S sh -c 'anything'"))
+    expect(READS).not.toContain(DEPLOY_PATH)
+  })
 })

@@ -45,6 +45,12 @@ reads the forwarder script itself (small files only; every line must be on an al
 the command: before the call only plain assignments (never PATH, HOME, BASH_ENV and the like) or `cd /abs/path` joined by `;`, newline or `&&`,
 then the call, then optionally `2>&1`, then optionally one pipe to `tail` or `head` with a number. Anything else, a write, an unreadable or
 missing script, a second command, `&`, `tee` or `bash -c`, is held as before (hub: dialog; unattended lane: deny).
+Further rules (senior review of #94): a `.` or `..` part anywhere in the script path (a symlink is followed before `..` folds); a forwarder whose first
+line is a shebang other than `#!/usr/bin/env bash` or `#!/bin/bash`; any character in the command or the forwarder other than printable ASCII, tab
+or newline (bash keeps CR and no-break space that JavaScript trims); and a `portainer-deploy.sh` whose SHA-256 is not in `DEPLOY_PINS`
+(`prodread.ts`). The pin list changes only by a reviewed PR, and must change whenever a repo's `scripts/portainer-deploy.sh` does.
+`hostname NAME` is not a read. Known limits: a `curl` GET can still change state on some endpoints, the file can change between the hook's read and
+the run, and with `sh` in front the forwarder's `source` line fails.
 The question and every refusal (the lane refusals, the non-interactive denial, and the guard-failure
 denial too) say in words what the command does, why it was held, and **what it would touch**: each
 path with `(dir, N bytes, ...)`, `(file, N bytes)` or `(not found)`; the branch and remote host of a

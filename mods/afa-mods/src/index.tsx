@@ -217,13 +217,18 @@ export const register: Register = on => {
       }
     }
     const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
-    // pass 1 only collects the forwarder scripts a production call names; read them (small files only), then classify with their text
-    const wanted = new Set<string>()
-    classify(e.command, 0, { ...baseEnv, prodWanted: wanted })
+    // classify asks for the files a production call needs (the forwarder, then the deploy script it sources); read what it asks for, up to
+    // three rounds, then classify with their text. A file over 400000 characters is not read, so it is held.
     const prodScripts: Record<string, string> = {}
-    for (const path of wanted) {
-      const t = await readText($, path).catch(() => '')
-      if (t.length > 0 && t.length < 4000) prodScripts[path] = t
+    for (let round = 0; round < 3; round += 1) {
+      const wanted = new Set<string>()
+      classify(e.command, 0, { ...baseEnv, prodScripts, prodWanted: wanted })
+      const fresh = [...wanted].filter(path => !(path in prodScripts))
+      if (fresh.length === 0) break
+      for (const path of fresh) {
+        const t = await readText($, path).catch(() => '')
+        prodScripts[path] = t.length > 0 && t.length < 400000 ? t : ''
+      }
     }
     const scratchEnv = { ...baseEnv, prodScripts }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
