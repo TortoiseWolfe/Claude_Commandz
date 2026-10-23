@@ -21,7 +21,7 @@ cat >"$BIN/sleep" <<'STUB'
 exec /bin/sleep 0.02
 STUB
 # Fake window: names in FAKE_WINDOWS exist; send-keys -l <text> types, C-m submits. A submitted "/model X" saves X as the user default
-# model in settings.json, the way Claude Code does.
+# model in settings.json and prints "Set model to ..." on the pane (never in the transcript), the way Claude Code does.
 cat >"$BIN/tmux" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
@@ -37,8 +37,14 @@ st, proj, text, settings = sys.argv[1:5]
 open(os.path.join(st, "pending"), "w").close()
 open(os.path.join(st, "sent.log"), "a").write(text + "\n")
 cur = open(os.path.join(st, "cur")).read().strip()
-with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
-    f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+# /model is a local command: Claude Code never writes it to the transcript, it only prints a confirmation line on the screen.
+if text.startswith("/model "):
+    if not os.path.exists(os.path.join(st, "no-pane-line")):
+        arg = text.split(None, 1)[1]
+        open(os.path.join(st, "pane"), "a").write("Set model to %s 5.5 and saved as your default for new sessions\n" % arg.capitalize())
+else:
+    with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
 if text.startswith("/model ") and os.path.exists(settings) and not os.path.exists(os.path.join(st, "no-save")):
     d = json.load(open(settings))
     d["model"] = text.split(None, 1)[1]
@@ -86,10 +92,22 @@ lane --dry-run client-work "$REPO" opus "$P_DRAFT"
 assert_exit 1 "$LAST_RC" 'a prompt about drafting a reply to an email on opus is refused'
 lane --dry-run client-work "$REPO" sonnet "$P_DRAFT"
 assert_exit 0 "$LAST_RC" 'the same prompt on sonnet starts'
+# 22 Oct: opus and fable need a stated reason whatever the prompt; the mail tier is not involved for a code prompt.
 lane --dry-run client-work "$REPO" opus "$P_CODE"
-assert_exit 0 "$LAST_RC" 'a code prompt on opus is untouched'
+assert_exit 1 "$LAST_RC" 'a code prompt on opus is refused without a reason'
+assert_contains "$LAST_OUT" 'opus and fable need a stated reason' 'the refusal says what is missing'
+assert_not_contains "$LAST_OUT" 'refusing mail model' 'a code prompt is not treated as mail'
+lane --dry-run client-work "$REPO" fable "$P_CODE"
+assert_exit 1 "$LAST_RC" 'a code prompt on fable is refused without a reason'
+lane --dry-run --allow-high-tier "needs the strongest tier for the design" client-work "$REPO" opus "$P_CODE"
+assert_exit 0 "$LAST_RC" 'a code prompt on opus starts with a reason'
+assert_contains "$LAST_OUT" 'would log the high-tier reason' 'a dry run says it would log the reason'
+assert_not_contains "$LAST_OUT" 'mail-tier override' 'and it is not a mail override'
 lane --dry-run client-work "$REPO" opus "$P_EMAILFEATURE"
-assert_exit 0 "$LAST_RC" 'a code prompt that only mentions an email field is untouched'
+assert_exit 1 "$LAST_RC" 'a code prompt that only mentions an email field is refused as high tier, not as mail'
+assert_not_contains "$LAST_OUT" 'refusing mail model' 'an email field in a feature is not mail'
+lane --dry-run client-work "$REPO" sonnet "$P_CODE"
+assert_exit 0 "$LAST_RC" 'a code prompt on sonnet starts'
 lane --dry-run acme-site-mail "$REPO" opus "$P_SITE"
 assert_exit 0 "$LAST_RC" 'a site-model prompt keeps its own rule (opus allowed)'
 lane --dry-run --engine codex acme-mail "$REPO" sonnet "$P_CODE"
@@ -123,7 +141,15 @@ assert_exit 0 "$LAST_RC" '--allow-high-tier lets it resume'
 lane --dry-run --resume res-ok
 assert_exit 0 "$LAST_RC" 'a sonnet lane resumes'
 lane --dry-run --resume res-opus-plain
-assert_exit 0 "$LAST_RC" 'a non-mail opus lane resumes'
+assert_exit 1 "$LAST_RC" 'an opus lane with no recorded reason does not resume without one'
+lane --dry-run --allow-high-tier "design review" --resume res-opus-plain
+assert_exit 0 "$LAST_RC" 'a non-mail opus lane resumes with a reason'
+printf '%s\t%s\t%s\t%s\tsubscription\t%s\t%s\told-sess\t-\thigh\toff\t-\t%s\n' "$(date +%F)" res-opus-ent "$REPO" opus "$P_CODE" "$TMP/res-opus-ent-report.md" "design review" >>"$INDEX"
+lane --dry-run --resume res-opus-ent
+assert_exit 0 "$LAST_RC" 'an opus lane whose row holds a reason resumes without being told again'
+row res-site-opus opus "$P_SITE"
+lane --dry-run --resume res-site-opus
+assert_exit 0 "$LAST_RC" 'a site-model opus lane resumes with no reason'
 
 # ---- --model: the lane switches, the user default does not ----------------------------------------------------------------------------
 row mail-sw sonnet "$P_ABSORB"
@@ -135,6 +161,10 @@ orig_settings; ORIG="$(cat "$SETTINGS")"
 : >"$ST/sent.log"
 
 lane --model plain-sw opus
+assert_exit 1 "$LAST_RC" '--model to opus without a reason is refused'
+assert_contains "$LAST_OUT" 'opus and fable need a stated reason' 'the refusal says what is missing'
+[ ! -s "$ST/sent.log" ] || fail 'a refused switch typed nothing'; ok
+lane --allow-high-tier "model guard test" --model plain-sw opus
 assert_exit 0 "$LAST_RC" '--model switches a running lane'
 assert_contains "$(cat "$ST/sent.log")" '/model opus' '--model typed /model into the window'
 [ "$(cat "$SETTINGS")" = "$ORIG" ] || fail "--model left the settings file as it found it, got: $(cat "$SETTINGS")"; ok
@@ -145,7 +175,16 @@ idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
 other="$(awk -F'\t' '$2=="nowrite-sw"{m=$4} END{print m}' "$INDEX")"
 [ "$other" = sonnet ] || fail "another lane's row is untouched, got: $other"; ok
 cols="$(awk -F'\t' '$2=="plain-sw"{print NF}' "$INDEX" | tail -1)"
-[ "$cols" = 11 ] || fail "the rewritten row keeps its 11 columns, got: $cols"; ok
+[ "$cols" = 13 ] || fail "the rewritten row has the reason in column 13 (column 12 padded), got $cols columns"; ok
+tier="$(awk -F'\t' '$2=="plain-sw"{r=$12 "|" $13} END{print r}' "$INDEX")"
+[ "$tier" = "-|model guard test" ] || fail "the reason is written to the row, got: $tier"; ok
+assert_contains "$(cat "$TLOG")" 'model guard test' 'the high-tier reason is logged'
+lane --tier plain-sw
+assert_contains "$LAST_OUT" "opus	model guard test" '--tier prints the model and the reason'
+lane --tier nobody-sw
+assert_contains "$LAST_OUT" "?	-" '--tier of an unknown lane prints ? and -'
+lane --tier site-sw
+assert_contains "$LAST_OUT" "opus	site-model" '--tier names a site-model lane by its prompt'
 
 # A user with no model key: the key /model adds is removed again.
 printf '{\n  "theme": "dark"\n}\n' >"$SETTINGS"; ORIG="$(cat "$SETTINGS")"
@@ -160,6 +199,25 @@ lane --model plain-sw sonnet
 assert_exit 0 "$LAST_RC" '--model works when /model saves nothing'
 [ "$(cat "$SETTINGS")" = "$ORIG" ] || fail 'settings untouched when /model saves nothing'; ok
 rm -f "$ST/no-save"
+
+# 22 Oct: /model never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line. With that line missing the
+# switch is not confirmed: exit 1, the index row stays, and the user default is still put back.
+orig_settings; ORIG="$(cat "$SETTINGS")"; touch "$ST/no-pane-line"
+before_idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+LANE_SEND_CONFIRM_SECS=1 lane --allow-high-tier "model guard test" --model plain-sw fable
+assert_exit 1 "$LAST_RC" '--model without a "Set model to" line on the pane is not confirmed'
+assert_contains "$LAST_OUT" 'NOT CONFIRMED' 'the failure says the pane did not confirm'
+assert_not_contains "$LAST_OUT" 'NOT IN ITS TRANSCRIPT' '--model no longer looks for /model in the transcript'
+after_idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+[ "$after_idx" = "$before_idx" ] || fail "an unconfirmed switch leaves the index row, got: $after_idx"; ok
+[ "$(cat "$SETTINGS")" = "$ORIG" ] || fail 'an unconfirmed switch still restores the user default'; ok
+rm -f "$ST/no-pane-line"
+# The pane keeps the old "Set model to" lines: only a new one counts.
+lane --model plain-sw sonnet
+assert_exit 0 "$LAST_RC" 'a switch is confirmed by a new "Set model to" line even when older ones are on the pane'
+assert_contains "$LAST_OUT" 'confirmed on its screen' ''
+lane --model plain-sw sonnet
+assert_exit 0 "$LAST_RC" 'switching to the model it is already on is confirmed again'
 
 # Refusals type nothing and touch nothing.
 : >"$ST/sent.log"; orig_settings; ORIG="$(cat "$SETTINGS")"
@@ -197,7 +255,7 @@ assert_exit 1 "$LAST_RC" '--model refuses when the user default cannot be restor
 # A dead window: the send fails, the default is still intact, the index row does not move.
 orig_settings; ORIG="$(cat "$SETTINGS")"
 row ghost sonnet "$P_CODE"
-lane --model ghost opus
+lane --allow-high-tier "model guard test" --model ghost opus
 assert_exit 1 "$LAST_RC" 'a lane with no window cannot be switched'
 [ "$(cat "$SETTINGS")" = "$ORIG" ] || fail 'a failed switch leaves settings alone'; ok
 g="$(awk -F'\t' '$2=="ghost"{m=$4} END{print m}' "$INDEX")"
@@ -205,7 +263,7 @@ g="$(awk -F'\t' '$2=="ghost"{m=$4} END{print m}' "$INDEX")"
 
 # --dry-run types nothing.
 : >"$ST/sent.log"
-lane --dry-run --model plain-sw opus
+lane --dry-run --allow-high-tier "model guard test" --model plain-sw opus
 assert_exit 0 "$LAST_RC" '--model --dry-run exits 0'
 assert_contains "$LAST_OUT" "would type '/model opus'" 'the dry run says what it would type'
 [ ! -s "$ST/sent.log" ] || fail 'the dry run typed nothing'; ok

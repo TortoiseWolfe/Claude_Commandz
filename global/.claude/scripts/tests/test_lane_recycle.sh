@@ -22,7 +22,7 @@ cat >"$BIN/tmux" <<'STUB'
 # fake lane window "rl-lane": send-keys -l <text> types, C-m submits
 case "$1" in
   has-session) exit 0 ;;
-  list-windows) printf "%s\n" rl-lane rk-lane rk-fast ;;
+  list-windows) printf "%s\n" rl-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
   capture-pane) cat "$FAKE_ST/pane" ;;
   send-keys)
     if [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
@@ -37,6 +37,11 @@ if text == "/clear":
     n = int(open(os.path.join(st, "n")).read()) + 1 if os.path.exists(os.path.join(st, "n")) else 1
     open(os.path.join(st, "n"), "w").write(str(n))
     open(os.path.join(st, "cur"), "w").write("new-sess-%d" % n)
+    sys.exit(0)
+# /model is a local command: it only prints a confirmation line on the screen, never in the transcript (22 Oct).
+if text.startswith("/model "):
+    if not os.path.exists(os.path.join(st, "no-pane-line")):
+        open(os.path.join(st, "pane"), "a").write("Set model to %s 5.5 and saved as your default for new sessions\n" % text.split(None, 1)[1].capitalize())
     sys.exit(0)
 with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
@@ -221,5 +226,84 @@ assert_contains "$LAST_OUT" 'already being recycled' 'the refusal names the lock
 rmdir "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock"
 lane --recycle nobody
 assert_exit 1 "$LAST_RC" 'an unknown lane is refused'
+
+# Model policy at a recycle (his rule, 22 Oct 8 PM: ten lanes ran on Opus all day, only one was entitled; the tier was checked at start only).
+# Right after the /clear and before the re-prime the lane goes back to sonnet, unless it is a site-model lane or its row holds a reason.
+# A mail lane is always sonnet.
+USERSET="$HOME_T/.claude/settings.json"
+printf '{\n  "theme": "dark"\n}\n' >"$USERSET"
+SITE_P="$HAND/site-prompt.md"; echo 'Fit the photos in data/sites/example-01' >"$SITE_P"
+pol_row() {  # pol_row <name> <model> <prompt> <reason or ->
+  printf '%s\t%s\t%s\t%s\tsubscription\t%s\t%s\told-sess\t-\thigh\toff\t-\t%s\n' "$(date +%F)" "$1" "$REPO" "$2" "$3" "$HAND/report.md" "$4" >>"$INDEX"
+}
+pol_model() { tail -1 "$INDEX" | cut -f4; }
+pol_ent() { tail -1 "$INDEX" | cut -f13; }
+pol_row pol-opus opus "$HAND/prompt.md" -
+pol_row pol-ent opus "$HAND/prompt.md" "design review of the router"
+pol_row pol-acme-mail fable "$HAND/prompt.md" "claim-check pass"
+pol_row pol-site opus "$SITE_P" -
+pol_row pol-sonnet sonnet "$HAND/prompt.md" -
+lane --tier pol-opus; [ "$LAST_OUT" = "$(printf 'opus\t-')" ] || fail "--tier of an unentitled opus lane prints opus and -, got: $LAST_OUT"; ok
+lane --tier pol-ent; [ "$LAST_OUT" = "$(printf 'opus\tdesign review of the router')" ] || fail "--tier prints the reason, got: $LAST_OUT"; ok
+lane --tier pol-site; [ "$LAST_OUT" = "$(printf 'opus\tsite-model')" ] || fail "--tier of a site-model lane prints site-model, got: $LAST_OUT"; ok
+lane --tier pol-sonnet; [ "$LAST_OUT" = "$(printf 'sonnet\t-')" ] || fail "--tier of a sonnet lane, got: $LAST_OUT"; ok
+
+reset_fake
+lane --dry-run --recycle pol-opus
+assert_exit 0 "$LAST_RC" 'dry run of an unentitled opus lane'
+assert_contains "$LAST_OUT" '4b. set the model to the policy model (sonnet)' 'the dry run shows the model step'
+assert_contains "$LAST_OUT" 'model sonnet and recycle line' 'the dry run says the new row carries sonnet'
+lane --dry-run --recycle pol-ent
+assert_contains "$LAST_OUT" 'policy model (opus)' 'the dry run of an entitled lane keeps opus'
+lane --dry-run --recycle pol-acme-mail
+assert_contains "$LAST_OUT" 'policy model (sonnet)' 'the dry run of a mail lane says sonnet'
+[ ! -e "$ST/sent.log" ] || fail 'the model dry runs typed into the window'; ok
+
+reset_fake
+FAKE_WRITE_HANDOFF=1 lane --recycle pol-opus
+assert_exit 0 "$LAST_RC" 'an unentitled opus lane is recycled'
+mapfile -t sent <"$ST/sent.log"
+[ "${#sent[@]}" = 4 ] || fail "hand-off request, /clear, /model, re-prime expected, got ${#sent[@]}: ${sent[*]}"; ok
+[ "${sent[1]}" = /clear ] && [ "${sent[2]}" = "/model sonnet" ] || fail "/model sonnet is typed right after /clear, got: ${sent[1]} / ${sent[2]}"; ok
+case "${sent[3]}" in *"Read $HAND/prompt.md"*) ok ;; *) fail "the re-prime comes after the model switch: ${sent[3]}" ;; esac
+[ "$(pol_model)" = sonnet ] || fail "the new index row has the policy model, got: $(pol_model)"; ok
+[ "$(tail -1 "$INDEX" | cut -f2)" = pol-opus ] || fail "the new row is the lane's own"; ok
+grep -q $'\tmodel-switched\tfrom opus to sonnet' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no model-switched row'; ok
+[ "$(cat "$USERSET")" = "$(printf '{\n  "theme": "dark"\n}\n')" ] || fail 'the recycle left the user default model alone'; ok
+lane --tier pol-opus; [ "$LAST_OUT" = "$(printf 'sonnet\t-')" ] || fail "--tier follows the recycle, got: $LAST_OUT"; ok
+
+reset_fake
+FAKE_WRITE_HANDOFF=1 lane --recycle pol-ent
+assert_exit 0 "$LAST_RC" 'an entitled opus lane is recycled'
+assert_not_contains "$(cat "$ST/sent.log")" '/model' 'an entitled lane keeps its model: no /model typed'
+[ "$(pol_model)" = opus ] && [ "$(pol_ent)" = "design review of the router" ] || fail "the new row keeps opus and the reason, got: $(tail -1 "$INDEX")"; ok
+
+reset_fake
+FAKE_WRITE_HANDOFF=1 lane --recycle pol-acme-mail
+assert_exit 0 "$LAST_RC" 'a mail lane on fable is recycled'
+assert_contains "$(cat "$ST/sent.log")" '/model sonnet' 'a mail lane goes back to sonnet even with a reason'
+[ "$(pol_model)" = sonnet ] || fail "the mail lane's new row has sonnet, got: $(pol_model)"; ok
+
+reset_fake
+FAKE_WRITE_HANDOFF=1 lane --recycle pol-site
+assert_exit 0 "$LAST_RC" 'a site-model lane is recycled'
+assert_not_contains "$(cat "$ST/sent.log")" '/model' 'a site-model lane keeps opus: no /model typed'
+[ "$(pol_model)" = opus ] || fail "the site-model lane's new row keeps opus, got: $(pol_model)"; ok
+
+reset_fake
+FAKE_WRITE_HANDOFF=1 lane --recycle pol-sonnet
+assert_exit 0 "$LAST_RC" 'a sonnet lane is recycled'
+assert_not_contains "$(cat "$ST/sent.log")" '/model' 'a sonnet lane is not touched'
+
+# A switch the pane does not confirm is logged (as model-switch-failed, not FAILED: that word wakes lane_watch) and the recycle goes on.
+pol_row pol-opus opus "$HAND/prompt.md" -
+reset_fake; touch "$ST/no-pane-line"
+LANE_SEND_CONFIRM_SECS=1 FAKE_WRITE_HANDOFF=1 lane --recycle pol-opus
+assert_exit 0 "$LAST_RC" 'a model switch that is not confirmed does not fail the recycle'
+assert_contains "$LAST_OUT" 'could not set pol-opus to sonnet' 'the recycle says the switch failed'
+[ "$(pol_model)" = opus ] || fail "the new row keeps the model the lane is really on, got: $(pol_model)"; ok
+grep -q $'\tmodel-switch-failed\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no model-switch-failed row'; ok
+if grep -q $'\tFAILED\t' "$HOME_T/.claude/state/lanes/recycle.log"; then fail 'a model-switch failure must not be logged as FAILED'; fi; ok
+rm -f "$ST/no-pane-line"
 
 printf 'ok - %s checks passed\n' "$checks"
