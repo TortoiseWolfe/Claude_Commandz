@@ -1590,7 +1590,9 @@ def _chat_chunks(text, limit):
         text = rest
     if text:
         chunks.append(text)
-    return chunks
+    # A lone seam space (sentence end, one space, then a token too long for a part) strips to
+    # nothing; sending it would be a part holding only its marker, and would skew "part N of M".
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 def _chat_parts(text):
@@ -1607,11 +1609,8 @@ def _chat_parts(text):
             parts.append(content + " " + marker)
         return parts
 
-    if len(rough) > MAX_CHAT_PARTS:
-        count = MAX_CHAT_PARTS
-        marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
-        chunks = _chat_chunks(text, CHAT_MAX - marker_size - 1)[:count]
-        return marked(chunks, count) + [_chat_overflow_notice(ref)]
+    # The rough count can overshoot (blank chunks are dropped), so the loop settles the real
+    # count and only a text that still needs more than MAX_CHAT_PARTS gets the overflow notice.
     count = len(rough)
     while True:
         marker_size = max(len(" (part %d of %d)" % (i, count)) for i in range(1, count + 1))
