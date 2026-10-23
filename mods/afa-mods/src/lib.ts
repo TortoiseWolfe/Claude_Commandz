@@ -1,4 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
+import { forwarderIsPlain, parseProdCall, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -80,7 +81,7 @@ export type Hold = { kind: string; hard: boolean; segment: string; container?: M
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[] }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string> }
 
 const strip = (s: string) =>
   s
@@ -759,9 +760,29 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
   return [...holds, ...classifyWithEnv(folded, depth, env, newScope(folded, env)).filter(h => !seen.has(`${h.kind}\0${h.segment}`))]
 }
 
+// A production call counts as a read only when its forwarder script is plain and every remote command is a read.
+// The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time.
+function prodReadOnly(raw: string, fusedErr: boolean, scope: Scope, env: ScratchEnv): boolean {
+  if (scope.mounts) return false
+  const call = parseProdCall(raw.trim(), fusedErr)
+  if (!call) return false
+  const script = resolveHostPath(call.script, scope)
+  if (!('path' in script)) return false
+  const text = env.prodScripts?.[script.path]
+  if (text === undefined) {
+    env.prodWanted?.add(script.path)
+    return false
+  }
+  return forwarderIsPlain(text) && remoteIsRead(call.remote)
+}
+
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
   const holds: Hold[] = []
-  for (const raw of segmentsOf(command)) {
+  const parts = segmentsWithSeps(command)
+  for (const [index, part] of parts.entries()) {
+    const raw = part.text
+    // `2>&1` is cut at its "&": the piece ends in `2>` and the next one starts with `1`
+    const fusedErr = part.sep === '&' && /(?:^|\s)2>\s*$/.test(raw) && /^1(?:\s|$)/.test(parts[index + 1]?.text ?? '')
     const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
     trackCd(seg, command, scope)
@@ -815,7 +836,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    if (isProdDeploy(seg)) add('production deploy', true)
+    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, scope, env)) add('production deploy', true)
   }
   return holds
 }

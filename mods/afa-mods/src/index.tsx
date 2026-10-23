@@ -216,7 +216,16 @@ export const register: Register = on => {
         if (verdict === 'capped') composeLimited.push(c.key)
       }
     }
-    const scratchEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
+    const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
+    // pass 1 only collects the forwarder scripts a production call names; read them (small files only), then classify with their text
+    const wanted = new Set<string>()
+    classify(e.command, 0, { ...baseEnv, prodWanted: wanted })
+    const prodScripts: Record<string, string> = {}
+    for (const path of wanted) {
+      const t = await readText($, path).catch(() => '')
+      if (t.length > 0 && t.length < 4000) prodScripts[path] = t
+    }
+    const scratchEnv = { ...baseEnv, prodScripts }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)
     const holds = classify(e.command, 0, scratchEnv)
     const noteScratch = async () => {
