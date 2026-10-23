@@ -88,7 +88,10 @@ lane --ctx nobody
 printf '%s\tnew-lane\t%s\tsonnet\tsubscription\t%s\t%s\t-\t%s\thigh\toff\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$(($(date +%s) - 5))" >>"$INDEX"
 usage_rec 88000 >"$PROJ/fresh-sess.jsonl"
 lane --ctx new-lane
-[ "$LAST_OUT" = 88 ] || fail "--ctx finds a fresh lane transcript when the index id is blank, got: $LAST_OUT"; ok
+[ "$LAST_OUT" = '?' ] || fail "--ctx does not guess a blank id from the newest transcript, got: $LAST_OUT"; ok
+mkdir -p "$HOME_T/.claude/state/lanes/sessions"; printf 'fresh-sess\t%s\t-\n' "$(date +%s)" >"$HOME_T/.claude/state/lanes/sessions/new-lane"
+lane --ctx new-lane
+[ "$LAST_OUT" = 88 ] || fail "--ctx finds a fresh lane's transcript by the session its hook recorded, got: $LAST_OUT"; ok
 rm -f "$PROJ/fresh-sess.jsonl"; sed -i '/\tnew-lane\t/d' "$INDEX"
 add_row cx-lane codex -
 lane --ctx cx-lane
@@ -119,7 +122,9 @@ assert_contains "$LAST_OUT" "Read $HAND/prompt.md, then $HAND/handoff.md" 'the r
 [ ! -e "$HAND/handoff.md" ] || fail '--dry-run wrote handoff.md'; ok
 
 # A real recycle: hand-off request, handoff.md, /clear, re-prime, in that order; the index row follows the new session.
+# 23 Oct: a session in the lane's folder that is not the lane's (the hub's own) was born meanwhile; the row must not take it.
 reset_fake; rows_before="$(wc -l <"$INDEX")"
+usage_rec 250000 >"$PROJ/hub-decoy.jsonl"
 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
 assert_exit 0 "$LAST_RC" '--recycle exits 0'
 assert_contains "$LAST_OUT" 'recycled rl-lane' 'the recycle says what it did'
@@ -133,6 +138,7 @@ case "${sent[2]}" in *"Read $HAND/prompt.md, then $HAND/handoff.md"*) ok ;; *) f
 last="$(tail -1 "$INDEX")"
 IFS=$'\t' read -r _d iname _dir _m _b iprompt irep isid _st _eff _conn <<<"$last"
 [ "$iname" = rl-lane ] && [ "$isid" = new-sess-1 ] || fail "index row names the new session: $last"; ok
+rm -f "$PROJ/hub-decoy.jsonl"
 [ "$iprompt" = "$HAND/prompt.md" ] && [ "$irep" = "$HAND/report.md" ] || fail "index row keeps prompt and report: $last"; ok
 lane --ctx rl-lane
 [ "$LAST_OUT" != 130 ] || fail '--ctx still reads the old transcript after the recycle'; ok
