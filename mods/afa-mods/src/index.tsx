@@ -21,6 +21,7 @@ import {
   weather,
 } from './lib'
 import type { Hold } from './lib'
+import { envKeyLines } from './prodread'
 import { touches } from './touches'
 import type { Probe } from './touches'
 
@@ -217,13 +218,27 @@ export const register: Register = on => {
       }
     }
     const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
-    // pass 1 only collects the forwarder scripts a production call names; read them (small files only), then classify with their text
-    const wanted = new Set<string>()
-    classify(e.command, 0, { ...baseEnv, prodWanted: wanted })
+    // classify asks for the files a production call needs (the forwarder, the deploy script it sources, then the repo's dotenv file); read what it asks
+    // for, up to four rounds, then classify with their text. A file over 400000 characters is not read, so it is held; the forwarder is further bounded
+    // by forwarderIsPlain's 40-line limit, the deploy script only by its SHA-256 pin. The dotenv file is reduced to its key names the moment it is read
+    // (envKeyLines): the values are never stored, shown or logged; a read error or an oversize file is stored as a mark that holds.
     const prodScripts: Record<string, string> = {}
-    for (const path of wanted) {
-      const t = await readText($, path).catch(() => '')
-      if (t.length > 0 && t.length < 4000) prodScripts[path] = t
+    for (let round = 0; round < 4; round += 1) {
+      const wanted = new Set<string>()
+      const wantedEnv = new Set<string>()
+      classify(e.command, 0, { ...baseEnv, prodScripts, prodWanted: wanted, prodWantedEnv: wantedEnv })
+      const fresh = [...wanted].filter(path => !(path in prodScripts))
+      const freshEnv = [...wantedEnv].filter(path => !(path in prodScripts))
+      if (fresh.length === 0 && freshEnv.length === 0) break
+      for (const path of fresh) {
+        const t = await readText($, path).catch(() => undefined)
+        prodScripts[path] = t !== undefined && t.length > 0 && t.length < 400000 ? t : ''
+      }
+      // only the paths classify asked for as a dotenv file, by name; a forwarder or deploy script is never reduced this way
+      for (const path of freshEnv) {
+        const t = await readText($, path).catch(() => undefined)
+        prodScripts[path] = t !== undefined && t.length < 400000 ? envKeyLines(t) : '\u0000'
+      }
     }
     const scratchEnv = { ...baseEnv, prodScripts }
     const ownScratch = ownScratchTargets(e.command, scratchEnv)

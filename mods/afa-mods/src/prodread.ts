@@ -129,15 +129,32 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
 
 type Piece = { text: string; sep: string }
 
-const ASSIGN = /^([A-Za-z_]\w*)=(?:[\w./:,@%+=~-]*|'[^']*'|"[^"$`\\!]*")$/
-const ASSIGN_BAD = /^(?:PATH|HOME|SHELL|BASH_ENV|ENV|IFS|CDPATH|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|GLOBIGNORE|BASH_XTRACEFD|FPATH|LD_\w*|BASH_FUNC_\w*)$/
+// A value is one plain word: no space (the unquoted `$SP` in the call would split on it), no `~` (bash expands it in an assignment, the map would not), no `$`, glob or redirect characters.
+const ASSIGN = /^([A-Za-z_]\w*)=([\w./:,@%+=-]*|'[\w./:,@%+=-]*'|"[\w./:,@%+=-]*")$/
+// Only these names may be set before the call: bash gives many other names a meaning of their own (readonly, recomputed, or `$_`), and a value stored here would then differ from what bash holds.
+const ASSIGN_OK = /^(?:SP|L|DIR|SCRIPTS|STACK_NAME)$/
 const CD_ABS = /^cd\s+\/[\w./-]*$/
+
+// bash keeps CR, NBSP and other odd characters inside a word where JS .trim() drops them, so the hook and the shell would read different lines.
+// Anything but printable ASCII, tab and newline refuses the exception.
+export const PLAIN_ASCII = /^[\x20-\x7e\t\n]*$/
+// a `.` or `..` part is followed by the kernel through a symlink before it is folded, which a text tidy-up cannot know
+export const hasDotPart = (path: string) => path.split('/').some(part => part === '.' || part === '..')
 const TAIL_HEAD = /^(?:tail|head)(?:\s+-n\s*\d+|\s+-\d+)?$/
 
 const blank = (p: Piece | undefined) => p !== undefined && p.text.trim() === ''
 const lineEnd = (sep: string) => sep === '' || sep === '\n' || sep === ';'
 
-export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean): boolean {
+// Returns the plain assignments before the call (the only variables the script path may use), or undefined when the line is not the plain shape.
+// A `<<` anywhere refuses it: the splitter drops heredoc bodies it takes for text, and the shell would not see the line the same way.
+export function prodLineShape(command: string, parts: Piece[], index: number, fusedErr: boolean): Map<string, string> | undefined {
+  if (command.includes('<<') || !PLAIN_ASCII.test(command)) return undefined
+  const vars = new Map<string, string>()
+  const ok = lineShape(parts, index, fusedErr, vars)
+  return ok ? vars : undefined
+}
+
+function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<string, string>): boolean {
   for (let i = 0; i < index; i += 1) {
     const { text, sep } = parts[i]
     const t = text.trim()
@@ -148,7 +165,8 @@ export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean):
       return false
     }
     const a = ASSIGN.exec(t)
-    if (!(a ? !ASSIGN_BAD.test(a[1]) : CD_ABS.test(t))) return false
+    if (!(a ? ASSIGN_OK.test(a[1]) : CD_ABS.test(t) && !hasDotPart(t.slice(2).trim()))) return false
+    if (a) vars.set(a[1], a[2].replace(/^(['"])(.*)\1$/, '$2'))
     if (sep === '&') {
       if (!(blank(parts[i + 1]) && parts[i + 1].sep === '&')) return false // a lone & puts it in the background
     } else if (sep !== ';' && sep !== '\n') return false
@@ -173,11 +191,11 @@ export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean):
 // ---- the forwarder script: every line must be one of these, so it only passes its second argument on ----
 
 const FORWARDER_LINES: RegExp[] = [
-  /^#.*$/,
+  /^#(?!!).*$/,
   /^set -[euo]+(?: pipefail)?$/,
   /^T="\$1"; CMD="\$2"; U="\$\{3-82\}"$/,
   /^T="\$1"; CMD="\$2"; U="\$\{3:-82\}"$/,
-  /^cd (?:~|\$HOME)\/repos\/[\w-]+(?: \|\| exit 1)?$/,
+  /^cd (?:~|\$HOME)\/repos\/[\w-]+ \|\| exit 1$/,
   /^source scripts\/portainer-deploy\.sh "\$T"$/,
   /^auth >\/dev\/null 2>&1 \|\| \{ echo "auth failed"; exit 1; \}$/,
   /^cid="\$\(find_service_container "\$\{STACK_NAME\}_php"\)"$/,
@@ -186,13 +204,29 @@ const FORWARDER_LINES: RegExp[] = [
   /^container_exec "\$cid" "\$CMD" "\$U"$/,
 ]
 
+const SHEBANGS = new Set(['#!/usr/bin/env bash', '#!/bin/bash'])
+
+// the lines both the plain check and the deploy-script lookup read, so they cannot disagree about which line is the cd
+const forwarderLines = (text: string): string[] => text.split('\n').map(l => l.trim()).filter(Boolean)
+
 export function forwarderIsPlain(text: string): boolean {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  if (!PLAIN_ASCII.test(text)) return false
+  // a `#!` line is the interpreter when the script is run without `bash` in front, so line 1 may name only bash; later `#!` lines are not comments we trust
+  const first = text.split('\n')[0]
+  if (first.startsWith('#!') && !SHEBANGS.has(first)) return false
+  // no indented line: the real forwarders have none, and one would be read differently by a line match and by a person
+  if (text.split('\n').some(l => /^\s/.test(l))) return false
+  const lines = forwarderLines(text)
   if (lines.length === 0 || lines.length > 40) return false
   // the repo's own portainer-deploy.sh line is the only file it may source; any other `source` or `.` runs code we did not read
   if (lines.some(l => /^(?:source|\.)\s/.test(l) && l !== 'source scripts/portainer-deploy.sh "$T"')) return false
   if (lines.filter(l => l.startsWith('source ')).length > 1) return false
-  if (!lines.every(l => FORWARDER_LINES.some(r => r.test(l)))) return false
+  if (!lines.every(l => (l.startsWith('#!') ? l === first : FORWARDER_LINES.some(r => r.test(l))))) return false
+  // the cd that picks the repo must come before the source line, and stop the script when it fails
+  if (lines.filter(l => l.startsWith('cd ')).length !== 1) return false
+  const cdAt = lines.findIndex(l => l.startsWith('cd '))
+  const srcAt = lines.findIndex(l => l.startsWith('source '))
+  if (srcAt >= 0 && !(cdAt >= 0 && cdAt < srcAt)) return false
   // exactly one thing runs in the container, and it is the second argument
   return lines.filter(l => l.startsWith('container_exec ')).length === 1
 }
@@ -210,7 +244,7 @@ const ENV_OK: Record<string, RegExp> = {
 }
 const PLAIN = /^[\w./:,@%+=-]*$/
 
-const PLAIN_READERS = new Set(['echo', 'printf', 'true', 'pwd', 'ls', 'cat', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'cut', 'wc', 'tr', 'stat', 'du', 'df', 'test', '[', 'uname', 'whoami', 'id', 'hostname', 'basename', 'dirname', 'readlink', 'realpath'])
+const PLAIN_READERS = new Set(['echo', 'printf', 'true', 'pwd', 'ls', 'cat', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'cut', 'wc', 'tr', 'stat', 'du', 'df', 'test', '[', 'uname', 'whoami', 'id', 'basename', 'dirname', 'readlink', 'realpath'])
 
 const DRUSH_SUBCOMMANDS = new Set(['status', 'st', 'core:status', 'core-status', 'state:get', 'sget', 'watchdog:show', 'ws', 'wd-show', 'pm:list', 'pml', 'pm-list', 'pm:security', 'config:get', 'cget', 'config:status', 'cst', 'core:requirements', 'requirements', 'sqlq', 'sql:query', 'sql-query', 'version'])
 const DRUSH_GLOBAL = /^(?:--no-ansi|--ansi|-v|-vv|-vvv|--verbose|--quiet|-q|--uri=[\w.:/-]+)$/
@@ -361,3 +395,115 @@ export function remoteIsRead(remote: string): boolean {
   if (!t || t.commands.length === 0) return false
   return t.commands.every(commandIsRead)
 }
+
+
+// ---- the one file the forwarder sources: pinned by SHA-256 ----
+
+// The repo folder the forwarder cd's into (`cd ~/repos/NAME || exit 1`, the only cd line) and the deploy script it then sources.
+export function deployScript(forwarder: string, home: string): { repo: string; path: string } | undefined {
+  if (!home.startsWith('/') || hasDotPart(home)) return undefined
+  const cds = forwarderLines(forwarder).filter(l => l.startsWith('cd '))
+  const m = cds.length === 1 ? /^cd (?:~|\$HOME)\/repos\/([\w-]+) \|\| exit 1$/.exec(cds[0]) : null
+  return m ? { repo: m[1], path: `${home}/repos/${m[1]}/scripts/portainer-deploy.sh` } : undefined
+}
+
+// SHA-256 (hex) of the UTF-8 bytes of a text; undefined for text that is not valid Unicode.
+export function sha256Hex(text: string): string | undefined {
+  let bytes: number[]
+  try {
+    bytes = Array.from(unescape(encodeURIComponent(text)), c => c.charCodeAt(0))
+  } catch {
+    return undefined
+  }
+  const K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]
+  const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+  const bitLen = bytes.length * 8
+  bytes.push(0x80)
+  while (bytes.length % 64 !== 56) bytes.push(0)
+  for (let i = 7; i >= 0; i -= 1) bytes.push(i >= 4 ? 0 : (bitLen >>> (i * 8)) & 0xff)
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n))
+  const w = new Array<number>(64)
+  for (let off = 0; off < bytes.length; off += 64) {
+    for (let i = 0; i < 16; i += 1) w[i] = ((bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3]) | 0
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0
+    }
+    let [a, b, c, d, e, f, g, hh] = h
+    for (let i = 0; i < 64; i += 1) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0
+      hh = g
+      g = f
+      f = e
+      e = (d + t1) | 0
+      d = c
+      c = b
+      b = a
+      a = (t1 + t2) | 0
+    }
+    h[0] = (h[0] + a) | 0
+    h[1] = (h[1] + b) | 0
+    h[2] = (h[2] + c) | 0
+    h[3] = (h[3] + d) | 0
+    h[4] = (h[4] + e) | 0
+    h[5] = (h[5] + f) | 0
+    h[6] = (h[6] + g) | 0
+    h[7] = (h[7] + hh) | 0
+  }
+  return h.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('')
+}
+
+// SHA-256 of the scripts/portainer-deploy.sh versions a production proof may source, by the repo folder they live in. Only a folder listed here counts:
+// a lane can make a folder of its own under ~/repos with a copy of a pinned script beside files we have not read. A different copy, or a pinned copy in
+// another folder, keeps the command held. The list changes only by a reviewed PR; when a repo's script changes, so does this.
+// Eduity is not listed: its script has no BASH_SOURCE guard (sourcing it runs its action dispatch), takes REPO_ROOT from $0 (the forwarder's scratch
+// folder) and defines neither find_service_container nor container_exec. It gets a pin after it has a source guard and the helpers.
+export type DeployPins = Record<string, readonly string[]>
+export const DEPLOY_PINS: DeployPins = {
+  'Chattanooga-Digital': ['3224c8b19ee7e7f9e0edf30b16c789a7a45eaf71422ef20843127f5077e8f527'], // main (aed358a)
+}
+
+export const deployIsPinned = (repo: string, text: string, pins: DeployPins = DEPLOY_PINS): boolean => {
+  const h = sha256Hex(text)
+  return h !== undefined && Object.prototype.hasOwnProperty.call(pins, repo) && pins[repo].includes(h)
+}
+
+// ---- the dotenv file the pinned script loads ----
+// portainer-deploy.sh's load_env exports every KEY=value line of the repo's dotenv file that the caller has not set, so a key such as PYTHONPATH,
+// LD_PRELOAD, BASH_ENV or PORTAINER_URL_OVERRIDE would reach the python3 and curl it runs while it holds the production login. The hook reads the key
+// NAMES only (envKeyLines keeps what is before the first `=` and drops the values at once; nothing else of the file is held or shown) and allows a read
+// only when every key is one of these. An allowlist: a new key keeps proofs held until a reviewed PR adds it. Values are not checked, so a changed
+// value of an allowed key (a Portainer address) is outside this check.
+export const DEPLOY_ENV_KEYS: ReadonlySet<string> = new Set([
+  'PROJECT_NAME', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_ROOT_PASSWORD', 'DB_HOST', 'DB_PORT', 'DB_DRIVER',
+  'DRUPAL_ADMIN_USER', 'DRUPAL_ADMIN_PASS', 'DRUPAL_CMS_TAG', 'MARIADB_TAG', 'NGINX_TAG', 'NGINX_VHOST_PRESET', 'DRUPAL_PORT',
+  'GITHUB_BACKUP_TOKEN', 'GITHUB_REPO', 'GREG_PASSWORD', 'SMTP_PASSWORD',
+  'PORTAINER_URL', 'PORTAINER_USER', 'PORTAINER_PASSWORD', 'PORTAINER_ENDPOINT_ID',
+  'PORTAINER_PROD_URL', 'PORTAINER_PROD_USER', 'PORTAINER_PROD_PASSWORD', 'PORTAINER_PROD_ENDPOINT_ID', 'PORTAINER_GIT_TOKEN_FILE',
+  'UPTIMEROBOT_API_KEY', 'DRUPAL_GITLAB_TOKEN', 'DRUPAL_ORG_USER', 'DRUPAL_ORG_PASS',
+  'GREG_NEXTCLOUD_STAGING_URL', 'GREG_NEXTCLOUD_STAGING_USER', 'GREG_NEXTCLOUD_STAGING_PASS',
+  'NEXTCLOUD_PROD_URL', 'NEXTCLOUD_PROD_USER', 'NEXTCLOUD_PROD_PASS', 'NEXTCLOUD_PROD_APP_PASSWORD',
+])
+
+// The key part of each line load_env would look at (blank lines and lines starting with `#` are skipped as it skips them), values dropped.
+export const envKeyLines = (text: string): string =>
+  text
+    .split('\n')
+    .filter(l => l !== '' && !l.startsWith('#'))
+    .map(l => {
+      const at = l.indexOf('=')
+      return at < 0 ? l : l.slice(0, at)
+    })
+    .join('\n')
+
+// Strict on purpose: a key part that is not exactly an allowed name (spaces, a CR, a non-ASCII character, nothing before the `=`) is held, though
+// load_env would skip it, so the hook never has to agree with bash about what counts as a name.
+export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
+  keyLines.split('\n').every(k => k === '' || allowed.has(k))

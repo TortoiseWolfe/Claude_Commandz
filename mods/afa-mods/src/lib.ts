@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { forwarderIsPlain, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
+import { type DeployPins, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -80,8 +80,10 @@ export type HeldKind = (typeof HELD_KINDS)[number]
 export type Hold = { kind: string; hard: boolean; segment: string; container?: Mapped[] }
 // volumeDevices: named Docker volumes that are really a host folder (local driver, device=/path), read by the caller with docker volume inspect
 // uninspectedVolumes: named volumes docker could not be asked about; they are held as unresolved, never resolved as text
+// deployEnvKeys: names the repo's dotenv file may hold (default DEPLOY_ENV_KEYS; a test injects its own)
+// deployPins: SHA-256 list, by repo folder, of the deploy scripts a production proof may source (default DEPLOY_PINS; a test injects its own)
 // composeLimited: keys (composeKey) of the compose services whose file gives them a cpus limit, read by the caller
-export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string> }
+export type ScratchEnv = { home?: string; tmpdir?: string; volumeDevices?: Record<string, string>; uninspectedVolumes?: string[]; composeLimited?: string[]; prodScripts?: Record<string, string>; prodWanted?: Set<string>; prodWantedEnv?: Set<string>; deployPins?: DeployPins; deployEnvKeys?: ReadonlySet<string> }
 
 const strip = (s: string) =>
   s
@@ -761,20 +763,45 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
 }
 
 // A production call counts as a read only when its forwarder script is plain and every remote command is a read.
-// The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time.
-function prodReadOnly(raw: string, fusedErr: boolean, shapeOk: boolean, depth: number, scope: Scope, env: ScratchEnv): boolean {
+// The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time. The repo's dotenv file is
+// asked for through env.prodWantedEnv instead, so the caller reduces exactly that path, and no other, to its key names.
+function prodReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string> | undefined, depth: number, scope: Scope, env: ScratchEnv): boolean {
   // depth 0 only: inside `bash -c` the commands before it are out of sight, and one of them could rewrite the script the hook just read
-  if (depth > 0 || !shapeOk || scope.mounts) return false
+  if (depth > 0 || !shape || scope.mounts) return false
   const call = parseProdCall(raw.trim(), fusedErr)
   if (!call) return false
-  const script = resolveHostPath(call.script, scope)
-  if (!('path' in script)) return false
+  // the script path uses only the assignments the shape check accepted, never the regex over the raw command or the inherited environment
+  const script = resolveHostPath(call.script, { ...scope, vars: shape })
+  // backstop: the path bash will open is one plain absolute word
+  if (!('path' in script) || !/^\/[\w./-]+$/.test(script.path)) return false
+  // no hidden last part either (a hidden folder such as .worktrees is fine): the forwarder is a script, never a dotfile such as the dotenv file the caller reduces to key names
+  if ((script.path.split('/').pop() ?? '').startsWith('.')) return false
+  // no `.` or `..` part, in the word or in any value it expands: the kernel follows a symlink before it folds `..`
+  const expanded = call.script.replace(/\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g, (_m, a?: string, b?: string) => shape.get((a ?? b) as string) ?? '')
+  if (hasDotPart(expanded)) return false
   const text = env.prodScripts?.[script.path]
   if (text === undefined) {
     env.prodWanted?.add(script.path)
     return false
   }
-  return forwarderIsPlain(text) && remoteIsRead(call.remote)
+  if (!forwarderIsPlain(text) || !remoteIsRead(call.remote)) return false
+  // the one file the forwarder sources must be a version we have reviewed
+  const deploy = deployScript(text, scope.home)
+  if (deploy === undefined) return false
+  const deployText = env.prodScripts?.[deploy.path]
+  if (deployText === undefined) {
+    env.prodWanted?.add(deploy.path)
+    return false
+  }
+  if (!deployIsPinned(deploy.repo, deployText, env.deployPins)) return false
+  // the dotenv file it loads: key names only (index.tsx keeps nothing else of the file), every one on the allowlist
+  const envPath = `${scope.home}/repos/${deploy.repo}/.env`
+  const keys = env.prodScripts?.[envPath]
+  if (keys === undefined) {
+    env.prodWantedEnv?.add(envPath)
+    return false
+  }
+  return deployEnvIsPlain(keys, env.deployEnvKeys)
 }
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
@@ -837,7 +864,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
+    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
   }
   return holds
 }
