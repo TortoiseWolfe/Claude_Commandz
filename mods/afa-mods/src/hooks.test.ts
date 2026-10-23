@@ -777,3 +777,82 @@ describe('blast radius, lane denies what it can name the fix for', () => {
     expect(r.deny).toBeUndefined()
   })
 })
+
+// 22 Oct 3:15 PM, coop-site: read-only proofs through rexec.sh --prod were held as a "production deploy". The guard reads the
+// forwarder script and each remote command itself; anything it cannot show is a read stays held (hub: dialog, lane: dialog, unattended: deny).
+describe('blast radius, read-only production proofs', () => {
+  const SP = '/tmp/claude-1000/-home-t-repos-chattanooga-digital/0a1b2c3d/scratchpad'
+  const REXEC = `#!/usr/bin/env bash
+# usage: rexec.sh --prod|--staging '<shell cmd>' [exec user, default 82 = www-data]
+T="$1"; CMD="$2"; U="\${3-82}"
+cd ~/repos/Chattanooga-Digital || exit 1
+source scripts/portainer-deploy.sh "$T"
+auth >/dev/null 2>&1 || { echo "auth failed"; exit 1; }
+cid="$(find_service_container "\${STACK_NAME}_php")"
+[ -n "$cid" ] || { echo "no php container for $STACK_NAME"; exit 1; }
+echo "[rexec] stack=$STACK_NAME portainer=$PORTAINER_URL" >&2
+container_exec "$cid" "$CMD" "$U"
+`
+  const go = async ($: any, on: any, command: string, vars: Record<string, string> = {}, script: string | null = REXEC) => {
+    delete FILES[`${SP}/rexec.sh`]
+    if (script !== null) FILES[`${SP}/rexec.sh`] = script
+    setup(on, vars)
+    const seen = { asked: '', log: '' }
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+    return { seen, r }
+  }
+  const prod = (remote: string, q = "'") => `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod ${q}${remote}${q} 2>&1 | tail -5`
+  const MODES = [
+    ['hub', {}],
+    ['lane', { AFA_LANE: '1' }],
+  ] as const
+
+  for (const remote of ['drush status', 'composer audit', 'drush sqlq "SELECT COUNT(*) FROM users"', 'curl -s https://example.org/']) {
+    for (const [who, vars] of MODES) {
+      test(`a read passes without a dialog or a deny: ${remote.slice(0, 30)} (${who})`, async ($, on) => {
+        const { seen, r } = await go($, on, prod(remote), vars)
+        expect(seen.asked).toBe('')
+        expect(r.deny).toBeUndefined()
+      })
+    }
+  }
+
+  const WRITES: [string, string, string?][] = [
+    ['drush updb -y', prod('drush updb -y')],
+    ['drush cim -y', prod('drush cim -y')],
+    ['drush sqlq UPDATE', prod('drush sqlq "UPDATE users SET name=1"')],
+    ['rm -rf', prod('rm -rf /var/www/html/sites')],
+    ['docker service update', prod('docker service update --force x')],
+    ['a redirect to a file', prod('drush status > /tmp/x')],
+    ['a variable in a double-quoted remote', prod('drush $CMD', '"')],
+  ]
+  const FORWARDERS: [string, string, string | null][] = [
+    ['a forwarder with a second container_exec', prod('drush status'), `${REXEC}container_exec "$cid" "rm -rf /x" "$U"\n`],
+    ['a forwarder script that is not found', prod('drush status'), null],
+  ]
+  for (const [what, command, script] of [...WRITES.map(([w, c]) => [w, c, REXEC] as const), ...FORWARDERS]) {
+    for (const [who, vars] of MODES) {
+      test(`still held: ${what} (${who} asks)`, async ($, on) => {
+        const { seen, r } = await go($, on, command, vars, script)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`still held: ${what} (unattended lane is denied)`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` }, script)
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
+})
