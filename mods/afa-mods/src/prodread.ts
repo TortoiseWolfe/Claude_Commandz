@@ -122,6 +122,54 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
   return { script: script.v, remote: remote.v, user: user?.v }
 }
 
+// ---- the whole command line around the call ----
+// The hook reads the forwarder before the command runs, so nothing else in the command may touch that file or run beside it:
+// only plain assignments or `cd /abs/path` before the call (joined by ; newline or &&), then the call, then optionally 2>&1,
+// then optionally ONE pipe into tail/head with a number. Anything else is held.
+
+type Piece = { text: string; sep: string }
+
+const ASSIGN = /^([A-Za-z_]\w*)=(?:[\w./:,@%+=~-]*|'[^']*'|"[^"$`\\!]*")$/
+const ASSIGN_BAD = /^(?:PATH|HOME|SHELL|BASH_ENV|ENV|IFS|CDPATH|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|GLOBIGNORE|BASH_XTRACEFD|FPATH|LD_\w*|BASH_FUNC_\w*)$/
+const CD_ABS = /^cd\s+\/[\w./-]*$/
+const TAIL_HEAD = /^(?:tail|head)(?:\s+-n\s*\d+|\s+-\d+)?$/
+
+const blank = (p: Piece | undefined) => p !== undefined && p.text.trim() === ''
+const lineEnd = (sep: string) => sep === '' || sep === '\n' || sep === ';'
+
+export function prodLineShape(parts: Piece[], index: number, fusedErr: boolean): boolean {
+  for (let i = 0; i < index; i += 1) {
+    const { text, sep } = parts[i]
+    const t = text.trim()
+    if (t === '') {
+      // a blank line, or the second "&" of "&&" (checked where the first one is)
+      if (sep === ';' || sep === '\n') continue
+      if (sep === '&' && i > 0 && parts[i - 1].sep === '&' && !blank(parts[i - 1])) continue
+      return false
+    }
+    const a = ASSIGN.exec(t)
+    if (!(a ? !ASSIGN_BAD.test(a[1]) : CD_ABS.test(t))) return false
+    if (sep === '&') {
+      if (!(blank(parts[i + 1]) && parts[i + 1].sep === '&')) return false // a lone & puts it in the background
+    } else if (sep !== ';' && sep !== '\n') return false
+  }
+  let last = index
+  if (fusedErr) {
+    if (parts[index + 1]?.text.trim() !== '1') return false // `2>&1` and nothing else: other words would reach the script
+    last = index + 1
+  }
+  let sep = parts[last].sep
+  let k = last + 1
+  if (sep === '|') {
+    const next = parts[k]
+    if (!next || !TAIL_HEAD.test(next.text.trim())) return false
+    sep = next.sep
+    k += 1
+  }
+  if (!lineEnd(sep)) return false
+  return parts.slice(k).every(p => blank(p) && (p.sep === '' || p.sep === '\n'))
+}
+
 // ---- the forwarder script: every line must be one of these, so it only passes its second argument on ----
 
 const FORWARDER_LINES: RegExp[] = [
@@ -141,6 +189,9 @@ const FORWARDER_LINES: RegExp[] = [
 export function forwarderIsPlain(text: string): boolean {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
   if (lines.length === 0 || lines.length > 40) return false
+  // the repo's own portainer-deploy.sh line is the only file it may source; any other `source` or `.` runs code we did not read
+  if (lines.some(l => /^(?:source|\.)\s/.test(l) && l !== 'source scripts/portainer-deploy.sh "$T"')) return false
+  if (lines.filter(l => l.startsWith('source ')).length > 1) return false
   if (!lines.every(l => FORWARDER_LINES.some(r => r.test(l)))) return false
   // exactly one thing runs in the container, and it is the second argument
   return lines.filter(l => l.startsWith('container_exec ')).length === 1

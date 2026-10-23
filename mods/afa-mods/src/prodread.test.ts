@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { forwarderIsPlain, parseProdCall, remoteIsRead } from './prodread'
+import { forwarderIsPlain, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 // The forwarder as the coop-site lane wrote it (seven scratchpads held this same text).
 const REXEC = `#!/usr/bin/env bash
@@ -27,6 +27,11 @@ describe('prod forwarder script', () => {
   ] as const) {
     test(`a script with ${what} is not plain`, () => {
       expect(forwarderIsPlain(`${REXEC}${extra}\n`)).toBe(false)
+    })
+  }
+  for (const extra of ['source /tmp/x.sh', '. /tmp/x.sh', 'source scripts/other.sh', 'source scripts/portainer-deploy.sh "$T"']) {
+    test(`a script that also sources another file is not plain: ${extra}`, () => {
+      expect(forwarderIsPlain(REXEC.replace('auth >', `${extra}\nauth >`))).toBe(false)
     })
   }
   test('an empty or missing script is not plain', () => {

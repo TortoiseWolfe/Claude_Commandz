@@ -39,6 +39,12 @@ relative `rm -rf` (the refusal says to write the full absolute path, `cd /a/b &&
 without limits (it names both fixes, `timeout <secs> docker run --cpus <n> --memory <m> ...` or `~/.claude/scripts/docker-heavy.sh -- docker ...`).
 The lane corrects the command and runs it again; the log shows `denied (fix named)`. Every other hold keeps the dialog, and the hub always does.
 The text of a python, node or `cat` heredoc is not shell, so its parentheses no longer hide a `cd` from the check above.
+A read-only production proof is not held as a deploy (`rexec.sh --prod 'drush status'`, `composer audit`, a `SELECT`, a `curl` GET). The hook
+reads the forwarder script itself (small files only; every line must be on an allowlist, exactly one `container_exec`, and the repo's own
+`source scripts/portainer-deploy.sh` is the only file it may source) and each remote command (`prodread.ts`), and only at the top level of
+the command: before the call only plain assignments (never PATH, HOME, BASH_ENV and the like) or `cd /abs/path` joined by `;`, newline or `&&`,
+then the call, then optionally `2>&1`, then optionally one pipe to `tail` or `head` with a number. Anything else, a write, an unreadable or
+missing script, a second command, `&`, `tee` or `bash -c`, is held as before (hub: dialog; unattended lane: deny).
 The question and every refusal (the lane refusals, the non-interactive denial, and the guard-failure
 denial too) say in words what the command does, why it was held, and **what it would touch**: each
 path with `(dir, N bytes, ...)`, `(file, N bytes)` or `(not found)`; the branch and remote host of a

@@ -837,8 +837,60 @@ container_exec "$cid" "$CMD" "$U"
     ['a redirect to a file', prod('drush status > /tmp/x')],
     ['a variable in a double-quoted remote', prod('drush $CMD', '"')],
   ]
+  // 22 Oct security review of 9015962: the script is read before the command runs, so nothing in the same command may touch or race it.
+  const CALL = "STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status'"
+  const BYPASSES: [string, string][] = [
+    ['an earlier segment rewrites the script', `SP=${SP}; echo evil >> $SP/rexec.sh && ${CALL} 2>&1 | tail -5`],
+    ['an earlier segment rewrites the script, joined by ;', `SP=${SP}; printf x > $SP/rexec.sh; ${CALL}`],
+    ['an earlier segment is a command substitution', `SP=${SP}; X=$(echo evil >> $SP/rexec.sh); ${CALL}`],
+    ['an earlier segment is a backtick', `SP=${SP}; X=\`echo evil >> $SP/rexec.sh\`; ${CALL}`],
+    ['a background segment races the read', `SP=${SP}; ( sleep 1; echo evil >> $SP/rexec.sh ) & ${CALL}`],
+    ['a lone & sends an earlier assignment to the background', `SP=${SP} & ${CALL}`],
+    ['the call is in the background', `SP=${SP}; ${CALL} &`],
+    ['a pipe into tee rewrites the script', `SP=${SP}; echo evil | tee $SP/rexec.sh | ${CALL}`],
+    ['the output is piped into tee on the script', `SP=${SP}; ${CALL} 2>&1 | tee $SP/rexec.sh`],
+    ['the output is piped into tail with a file flag', `SP=${SP}; ${CALL} 2>&1 | tail -f $SP/rexec.sh`],
+    ['a second command follows the call', `SP=${SP}; ${CALL}; echo evil >> $SP/rexec.sh`],
+    ['an || list', `SP=${SP}; true || ${CALL}`],
+    ['the call is wrapped in bash -c after a rewrite', `SP=${SP}; echo evil >> $SP/rexec.sh; bash -c "${CALL}"`],
+    ['an assignment that moves HOME', `SP=${SP}; HOME=/tmp/x; ${CALL}`],
+    ['an assignment that sets PATH', `SP=${SP}; PATH=/tmp/x:$PATH; ${CALL}`],
+    ['a relative cd', `SP=${SP}; cd ../x; ${CALL}`],
+    // the 2>&1 split: the words after the "1" still reach rexec.sh as arguments
+    ['2>&1 with extra words after the 1', `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod 'drush status' 2>&1 extra args | tail -5`],
+    ['2>&1 with an extra word and no pipe', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1 root`],
+    ['2>&1 followed by a second command', `SP=${SP}; STACK_NAME=x bash $SP/rexec.sh --prod 'drush status' 2>&1; rm -rf /x`],
+  ]
+  for (const [what, command] of BYPASSES) {
+    for (const [who, vars] of MODES) {
+      test(`bypass held: ${what} (${who} asks)`, async ($, on) => {
+        const { seen, r } = await go($, on, command, vars)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`bypass held: ${what} (unattended lane is denied)`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` })
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
+  // the plain shapes still pass: assignments and a cd before, 2>&1, one tail or head after
+  for (const command of [
+    `SP=${SP}; ${CALL}`,
+    `cd /tmp && SP=${SP} && ${CALL} 2>&1 | head -n 20`,
+    `SP=${SP}\nSTACK_NAME=y\n${CALL} 2>&1 | tail -n 5`,
+  ]) {
+    test(`a plain shape still passes: ${command.slice(-50).replace(/\n/g, ' ')}`, async ($, on) => {
+      const { seen, r } = await go($, on, command.replace(/\\n/g, '\n'))
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeUndefined()
+    })
+  }
   const FORWARDERS: [string, string, string | null][] = [
     ['a forwarder with a second container_exec', prod('drush status'), `${REXEC}container_exec "$cid" "rm -rf /x" "$U"\n`],
+    ['a forwarder that sources another file', prod('drush status'), REXEC.replace('auth >', 'source /tmp/x.sh\nauth >')],
+    ['a forwarder that dot-sources another file', prod('drush status'), REXEC.replace('auth >', '. /tmp/x.sh\nauth >')],
     ['a forwarder script that is not found', prod('drush status'), null],
   ]
   for (const [what, command, script] of [...WRITES.map(([w, c]) => [w, c, REXEC] as const), ...FORWARDERS]) {

@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { forwarderIsPlain, parseProdCall, remoteIsRead } from './prodread'
+import { forwarderIsPlain, parseProdCall, prodLineShape, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -762,8 +762,9 @@ export function classify(command: string, depth = 0, env: ScratchEnv = {}): Hold
 
 // A production call counts as a read only when its forwarder script is plain and every remote command is a read.
 // The script text comes from env.prodScripts; a path not read yet is asked for through env.prodWanted and held this time.
-function prodReadOnly(raw: string, fusedErr: boolean, scope: Scope, env: ScratchEnv): boolean {
-  if (scope.mounts) return false
+function prodReadOnly(raw: string, fusedErr: boolean, shapeOk: boolean, depth: number, scope: Scope, env: ScratchEnv): boolean {
+  // depth 0 only: inside `bash -c` the commands before it are out of sight, and one of them could rewrite the script the hook just read
+  if (depth > 0 || !shapeOk || scope.mounts) return false
   const call = parseProdCall(raw.trim(), fusedErr)
   if (!call) return false
   const script = resolveHostPath(call.script, scope)
@@ -782,7 +783,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
   for (const [index, part] of parts.entries()) {
     const raw = part.text
     // `2>&1` is cut at its "&": the piece ends in `2>` and the next one starts with `1`
-    const fusedErr = part.sep === '&' && /(?:^|\s)2>\s*$/.test(raw) && /^1(?:\s|$)/.test(parts[index + 1]?.text ?? '')
+    const fusedErr = part.sep === '&' && /(?:^|\s)2>\s*$/.test(raw) && /^1\s*$/.test(parts[index + 1]?.text ?? '')
     const seg = strip(raw).replace(/^\\/, '')
     if (seg === '') continue
     trackCd(seg, command, scope)
@@ -836,7 +837,7 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, scope, env)) add('production deploy', true)
+    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(parts, index, fusedErr), depth, scope, env)) add('production deploy', true)
   }
   return holds
 }
