@@ -18,7 +18,7 @@ MOCK
 echo mock >"$H/.claude/scripts/muse_poll.check.prompt"; echo mock >"$H/.claude/scripts/muse_poll.handle.prompt"
 chmod +x "$H/.local/bin/claude" "$H/.claude/scripts/muse_poll_client_check.sh"
 
-run() { : >"$CALLS"; HOME=$H "$@" "$SCRIPT" >/dev/null 2>&1 || true; }
+run() { : >"$CALLS"; HOME=$H MUSE_POLL_LOCK=$TMP/poll.lock "$@" "$SCRIPT" >/dev/null 2>&1 || true; }
 count() { grep -c "^$1" "$CALLS" || true; }
 ok() { [[ "$2" == "$3" ]] && printf 'PASS: %s\n' "$1" || { printf 'FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2; exit 1; }; }
 fresh() {   # ACTIVE a minute old (hot phase); LAST $1 old; CLIENT_LAST $2 old (or absent)

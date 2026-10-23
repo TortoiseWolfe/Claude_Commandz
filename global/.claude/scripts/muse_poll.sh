@@ -88,7 +88,7 @@ if [[ "${1:-}" == --weekly-dry-run ]]; then
 fi
 
 H=$(date +%-H)
-exec 9>/tmp/muse-poll.lock
+exec 9>"${MUSE_POLL_LOCK:-/tmp/muse-poll.lock}"   # a test passes its own, so it never waits on the live poller
 flock -n 9 || exit 0
 
 STATE=$HOME/.claude/state
