@@ -172,10 +172,22 @@ class ReceptionistQueue(Base):
         parts = dp._chat_parts(text)
         self.assertTrue(parts)
         self.assertTrue(all(len(part) <= dp.CHAT_MAX for part in parts))
+        if len(parts) > dp.MAX_CHAT_PARTS:
+            # Past the part limit the last part is the overflow notice, not text: only the
+            # numbered parts are checked, and the text itself is cut off by design.
+            self.assertEqual(len(parts), dp.MAX_CHAT_PARTS + 1)
+            for i, part in enumerate(parts[:-1], 1):
+                self.assertTrue(part.endswith(" (part %d of %d)" % (i, dp.MAX_CHAT_PARTS)))
+                self.assertTrue(re.sub(r" \(part \d+ of \d+\)$", "", part).strip(),
+                                "a chat part held only its marker")
+            return
         if len(parts) > 1:
             for i, part in enumerate(parts, 1):
                 self.assertTrue(part.endswith(" (part %d of %d)" % (i, len(parts))))
         payloads = [re.sub(r" \(part \d+ of \d+\)$", "", part) for part in parts]
+        if len(parts) > 1:
+            self.assertTrue(all(payload.strip() for payload in payloads),
+                            "a chat part held only its marker")
         visible = "".join(c for payload in payloads for c in payload if not c.isspace())
         source = "".join(c for c in text if not c.isspace())
         self.assertEqual(visible, source)
@@ -217,6 +229,8 @@ class ReceptionistQueue(Base):
                     piece = "\n"
                 elif sample < 0.17:
                     piece = ". "
+                elif sample < 0.175:
+                    piece = "end. " + "x" * rng.randint(dp.CHAT_MAX - 30, 3 * dp.CHAT_MAX)
                 else:
                     word = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz")
                                    for _ in range(rng.randint(1, 15)))
@@ -225,6 +239,15 @@ class ReceptionistQueue(Base):
                 length += len(piece)
             text = "".join(pieces)
             self.assert_chat_parts_keep_words(text)
+
+    def test_chat_parts_never_send_a_part_holding_only_its_marker(self):
+        text = "word " * 300 + "end. " + "x" * 2000
+        self.assert_chat_parts_keep_words(text)
+        parts = dp._chat_parts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(re.sub(r" \(part \d+ of \d+\)$", "", p).strip() for p in parts))
+        for tail in (2000, 3 * dp.CHAT_MAX):
+            self.assert_chat_parts_keep_words("word " * 300 + "end. " + "x" * tail)
 
     def test_chat_parts_fit_when_whitespace_precedes_a_hard_cut(self):
         for text in ("intro\n\n" + "x" * 3000, "intro" + " " * 5 + "x" * 3000):
