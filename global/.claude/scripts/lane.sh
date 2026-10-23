@@ -408,9 +408,14 @@ guard_external_engine() {
   local sender_rows sender_paths repo_paths in_worktree common_dir checkout_path checkout_root
   [ "$engine" = claude ] && return 0
   [ "$allow_client" = 1 ] && return 0
-  if [ "$engine" = opencode ] && [ "$(canonical_dir "$dir" 2>/dev/null || true)" = "$(canonical_dir "$HOME/repos" 2>/dev/null || echo /nonexistent)" ]; then
-    echo "refusing engine $engine: ~/repos holds client repositories and opencode's free APIs train on their input; work in one sub-repo, or pass --allow-client to continue" >&2
-    return 1
+  if [ "$engine" = opencode ]; then  # ~/repos itself, or any folder above it ($HOME, /), would put the client repos inside the lane's checkout
+    local oc_dir oc_repos
+    oc_dir="$(canonical_dir "$dir" 2>/dev/null || true)"
+    oc_repos="$(canonical_dir "$HOME/repos" 2>/dev/null || echo /nonexistent)"
+    if [ -z "$oc_dir" ] || path_within "$oc_repos" "$oc_dir"; then
+      echo "refusing engine $engine: $dir is ~/repos or a folder above it, which holds client repositories, and opencode's free APIs train on their input; work in one sub-repo, or pass --allow-client to continue" >&2
+      return 1
+    fi
   fi
   if [ ! -f "$client_file" ] || [ ! -r "$client_file" ]; then
     echo "refusing engine $engine: cannot check client repositories because client-senders.tsv is missing or unreadable, or is not a regular file; pass --allow-client to continue" >&2
