@@ -230,6 +230,7 @@ class FakeGmail:
     def __init__(self):
         self.drafts, self.labels, self.log = {}, {"Label_31": "agent-notes"}, []
         self.n = 0
+        self.messages = {}  # id -> {"labelIds", "threadId", "headers": {name: value}}
 
     def add(self, raw_bytes, thread="T1"):
         self.n += 1
@@ -264,6 +265,18 @@ class FakeGmail:
                     ids += [x for x in data.get("addLabelIds", []) if x not in ids]
                     d["message"]["labelIds"] = [x for x in ids if x not in data.get("removeLabelIds", [])]
             return 200, b"{}"
+        if method == "GET" and path == "/messages":
+            ids = list(self.messages)
+            start, size = int(q.get("pageToken", 0)), 2  # tiny pages so the tests walk nextPageToken
+            out = {"messages": [{"id": i, "threadId": self.messages[i]["threadId"]} for i in ids[start:start + size]]}
+            if start + size < len(ids):
+                out["nextPageToken"] = str(start + size)
+            return 200, json.dumps(out).encode()
+        m = re.fullmatch(r"/messages/(\w+)", path)
+        if method == "GET" and m and m[1] in self.messages:
+            msg = self.messages[m[1]]
+            return 200, json.dumps({"id": m[1], "threadId": msg["threadId"], "labelIds": msg["labelIds"], "snippet": "SECRET BODY TEXT",
+                                    "payload": {"headers": [{"name": k, "value": v} for k, v in msg["headers"].items()]}}).encode()
         return 404, json.dumps({"error": {"message": f"no {method} {path}"}}).encode()
 
     def _store(self, did, data):
@@ -343,6 +356,66 @@ class Commands(Creds):
         g.draft_label(did, "agent-notes")
         g.draft_delete(did)
         self.assertFalse([c for c in self.fake.log if "send" in c[1].lower()])
+
+    def add_message(self, mid, frm, subject="Hi", date="Mon, 19 Oct 2026 14:08:23 -0400", labels=("INBOX", "UNREAD"), thread=None):
+        self.fake.messages[mid] = {"labelIds": list(labels), "threadId": thread or mid,
+                                   "headers": {"From": frm, "Subject": subject, "Date": date}}
+
+    def test_messages_list_prints_ids_exactly_as_gmail_returns_them(self):
+        self.add_message("1a15559aee5b0b47", "Greg L <greg@example.test>", "Re: plan", labels=("INBOX", "Label_32"), thread="1a15559aee5b0b00")
+        self.add_message("1a15559aee5b0b48", '"x <a@evil.test> | y" <B@Evil.Test>', "Two\n  lines")
+        self.add_message("1a15559aee5b0b49", "bare@example.test", labels=("SENT",))
+        lines = g.messages_list("from:(greg@example.test)")  # 3 messages over two pages
+        self.assertEqual(lines[0], "MSG 1a15559aee5b0b47 | greg@example.test | Greg L <greg@example.test> | Re: plan | "
+                                   "Mon, 19 Oct 2026 14:08:23 -0400 | INBOX,Label_32 | 1a15559aee5b0b00")
+        self.assertEqual([l.split(" | ")[0] for l in lines], ["MSG 1a15559aee5b0b47", "MSG 1a15559aee5b0b48", "MSG 1a15559aee5b0b49"])
+        self.assertEqual(lines[1].split(" | ")[1], "b@evil.test")  # the real address, not the one in the display name
+        self.assertIn(" | Two lines | ", lines[1])  # folded header collapsed to one line
+        self.assertEqual(lines[2].split(" | ")[5], "SENT")  # labels are reported truthfully for the shell to filter
+
+    def test_messages_list_is_read_only_and_never_reads_a_body(self):
+        self.add_message("1a15559aee5b0b47", "a@example.test")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(g.main(["messages-list", "from:a@example.test"]), 0)
+        self.assertNotIn("SECRET BODY TEXT", out.getvalue())
+        self.assertEqual({m for m, _ in self.fake.log}, {"GET"})
+        self.assertFalse([c for c in self.fake.log if "send" in c[1].lower()])
+
+    def test_messages_list_limit_and_empty(self):
+        for i in range(5):
+            self.add_message(f"1a15559aee5b0b4{i}", "a@example.test")
+        self.assertEqual(len(g.messages_list("q", limit=3)), 3)
+        self.fake.messages.clear()
+        self.assertEqual(g.messages_list("q"), [])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(g.main(["messages-list", "q"]), 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_messages_list_waits_out_the_per_minute_quota_but_not_other_errors(self):
+        self.add_message("1a15559aee5b0b47", "a@example.test")
+        calls = {"n": 0}
+
+        def flaky(method, url, headers=None, body=None, timeout=60):
+            if "/messages/" in url:
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    return 403, json.dumps({"error": {"message": "Quota exceeded for quota metric 'Total Query Cost'"}}).encode()
+            return self.fake(method, url, headers, body, timeout)
+
+        with mock.patch.object(g, "http_request", flaky), mock.patch.object(g.time, "sleep") as slept:
+            self.assertEqual(len(g.messages_list("q")), 1)
+        self.assertEqual((calls["n"], slept.call_count), (3, 2))
+        with mock.patch.object(g, "http_request", lambda *a, **k: (403, json.dumps({"error": {"message": "Insufficient permission"}}).encode())), \
+                mock.patch.object(g.time, "sleep") as slept:
+            with self.assertRaises(g.GmailError):
+                g.messages_list("q")
+        slept.assert_not_called()
+
+    def test_messages_list_api_error_is_a_clean_failure(self):
+        with mock.patch.object(g, "http_request", lambda *a, **k: (401, json.dumps({"error": {"message": "bad token"}}).encode())):
+            self.assertEqual(g.main(["messages-list", "q"]), 1)
 
     def test_cli_draft_raw_prints_ids_hrefs_and_count_but_no_token(self):
         did = self.fake.add(self.raw_with_redirects())
