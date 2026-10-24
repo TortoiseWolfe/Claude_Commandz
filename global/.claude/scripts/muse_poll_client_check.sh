@@ -11,7 +11,7 @@
 # A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Senders of no-reply@ or noreply@ are skipped UNLESS they match a
-# client pattern: matching no-reply senders are marked "Client alert" so the handler queues them, except
+# client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
 # kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script and its prompt
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
@@ -42,6 +42,9 @@ pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
 # kind "payment" senders (Gusto) mail from no-reply addresses but have their own handler step (mark the invoice
 # paid), so they are never tagged "Client alert"
 paypats=$(awk -F'\t' 'NR>1 && $3=="payment" && $4!="" {print tolower($4)}' "$TSV")
+# A pattern with @ is one address and must match exactly; a bare domain matches that domain and its subdomains.
+sender_is() { local a=$1 p=${2//[[:space:]]/}; [[ -n "$p" ]] || return 1
+  if [[ "$p" == *@* ]]; then [[ "$a" == "$p" ]]; else [[ "$a" == *"@$p" || "$a" == *".$p" ]]; fi; }
 # A real Gmail message ID is 16 hex characters; a 13-digit internalDate once slipped through as an ID and hid a
 # client reply, so a MSG line that fails the ID check is logged, never silently ignored.
 printf '%s\n' "$out" | grep '^MSG ' | grep -vE '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r bad; do
@@ -60,14 +63,19 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   [[ -n "${labels//[[:space:]]/}" ]] || continue
   [[ "$labels" == *DRAFT* || "$labels" == *SENT* ]] && continue
   from=$(printf '%s' "${line#MSG * | }" | cut -d'|' -f1 | tr 'A-Z' 'a-z')
-  ok=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { ok=1; break; }; done <<<"$pats"
+  # Match on the address only, never the display name (anyone can put a client's domain there): the part in
+  # the last <...>, or the whole field when there are no brackets.
+  addr=$from; [[ "$from" == *"<"*">"* ]] && { addr=${from##*<}; addr=${addr%%>*}; }
+  addr=${addr//[[:space:]]/}
+  ok=""; while IFS= read -r p; do sender_is "$addr" "$p" && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
-  alert=""
-  if [[ "$from" == *no-reply@* || "$from" == *noreply@* ]]; then
-    pay=""; while IFS= read -r p; do [[ -n "$p" && "$from" == *"$p"* ]] && { pay=1; break; }; done <<<"$paypats"
-    [[ -n "$pay" ]] || alert=" | Client alert"
+  # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.
+  tag=""
+  if [[ "$addr" == no-reply@* || "$addr" == noreply@* ]]; then
+    pay=""; while IFS= read -r p; do sender_is "$addr" "$p" && { pay=1; break; }; done <<<"$paypats"
+    [[ -n "$pay" ]] || tag=" ALERT"
   fi
   grep -qxF "$id" "$SEEN" && continue
   grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
-  printf 'NEW %s%s\n' "$(printf '%s' "${line#MSG }" | cut -d'|' -f1-4)" "$alert"
+  printf 'NEW %s%s |%s\n' "$id" "$tag" "$(printf '%s' "${line#MSG }" | cut -d'|' -f2-4)"
 done
