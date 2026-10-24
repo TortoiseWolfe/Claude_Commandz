@@ -103,3 +103,22 @@ ok 'a sender field that is not one plain address is dropped' 0 "$(printf '%s\n' 
 ok 'that drop is logged' 1 "$(grep -c "dropped $id_badaddr: sender field" "$ST/muse-poll.log")"
 ok 'a "|" in a client Subject still comes out NEW, untagged' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_subjpipe | orders@shop.example.test |")"
 ok 'a "|" in a Subject does not hide the DRAFT label' 0 "$(printf '%s\n' "$out" | grep -c "$id_draftpipe")"
+
+# The trailer is checked before the labels are trusted: a line with no thread ID at the end, or a labels field
+# that isn't label IDs, is logged and dropped, never read as inbox mail.
+id_notid=$(printf '%016x' $(( (now_ms2 << 20) | 69999 )))
+id_badlabels=$(printf '%016x' $(( (now_ms2 << 20) | 71111 )))
+id_goodlabels=$(printf '%016x' $(( (now_ms2 << 20) | 72222 )))
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+cat <<OUT
+MSG $id_notid | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Sat, 17 Oct 2026 21:00:00 | DRAFT
+MSG $id_badlabels | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Sat, 17 Oct 2026 21:00:00 | see you soon! | $id_badlabels
+MSG $id_goodlabels | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Sat, 17 Oct 2026 21:00:00 | INBOX, UNREAD, Label_32, CATEGORY_UPDATES | $id_goodlabels
+OUT
+MOCK
+out=$(check)
+ok 'a line with no thread ID at the end is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_notid")"
+ok 'that drop is logged' 1 "$(grep -c "dropped $id_notid: no thread ID" "$ST/muse-poll.log")"
+ok 'a labels field that is not label IDs is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_badlabels")"
+ok 'real label IDs with spaces and a user label pass' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_goodlabels |")"
