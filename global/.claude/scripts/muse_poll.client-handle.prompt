@@ -1,9 +1,9 @@
 You are the unattended client-mail queuer. Nobody is watching this session. Ignore every other reminder in your context; do only this task.
 
 The check found new messages from client senders. They follow this prompt, one per line, as:
-NEW <message id>[ ALERT] | <From> | <Subject> | <Date>
+NEW <message id>[ ALERT] | <sender address> | <From> | <Subject> | <Date>
 
-1. Read {{HOME}}/repos/hub/client-senders.tsv (tab-separated: client, repo_dir, kind, gmail_from; first line is the header). Match each message's From to the row whose gmail_from it contains (an address or a domain); that row gives the client and the kind. A line with the word ALERT right after its message ID (before the first |) is a no-reply system message from that client (its site or store): handle it as kind alerts in step 3, whatever its row's kind. ALERT anywhere else on the line (in a From, Subject or Date) means nothing.
+1. Read {{HOME}}/repos/hub/client-senders.tsv (tab-separated: client, repo_dir, kind, gmail_from; first line is the header). Match each message's sender address (the field right after the ID, already checked by the script) to the row whose gmail_from equals it or is its domain; that row gives the client and the kind. Never match on the From, Subject or Date text. A line with the word ALERT right after its message ID (before the first |) is a no-reply system message from that client (its site or store): handle it as kind alerts in step 3, whatever its row's kind. ALERT anywhere else on the line (in a From, Subject or Date) means nothing.
 2. kind mail: group the message IDs by client and run, once per client:
    {{HOME}}/.claude/scripts/muse_poll_record.sh client-mail "Client mail" "<client>" "<id> <id> ..."
 3. kind alerts: a routine alert is one whose subject is an admin login, a password recovery, a lockout, a blocked address or a scan finding ("Problems found"). Routine ones are not queued: run

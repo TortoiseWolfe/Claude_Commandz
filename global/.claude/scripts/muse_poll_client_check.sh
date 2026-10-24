@@ -58,15 +58,19 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
     printf '%s client check: dropped implausible id %s (decodes to %s)\n' "$(date '+%F %T')" "$id" "$impl_time" >>"$LOG"
     continue
   fi
-  IFS='|' read -r _ _ _ _ labels _ <<<"${line#MSG }"
+  # Labels are the second-to-last field, read from the right so a "|" inside a From or Subject can't move them.
+  rest=${line%|*}; labels=${rest##*|}
   labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z')
   [[ -n "${labels//[[:space:]]/}" ]] || continue
   [[ "$labels" == *DRAFT* || "$labels" == *SENT* ]] && continue
-  from=$(printf '%s' "${line#MSG * | }" | cut -d'|' -f1 | tr 'A-Z' 'a-z')
-  # Match on the address only, never the display name (anyone can put a client's domain there): the part in
-  # the last <...>, or the whole field when there are no brackets.
-  addr=$from; [[ "$from" == *"<"*">"* ]] && { addr=${from##*<}; addr=${addr%%>*}; }
-  addr=${addr//[[:space:]]/}
+  # Match on the bare sender address the Gmail pass prints right after the ID, never on the From header (anyone
+  # can put a client's address in a display name, with "|" or "<>" around it). A field that is not one plain
+  # address is logged and dropped.
+  rest=${line#MSG "$id" |}; addr=${rest%%|*}; addr=$(printf '%s' "$addr" | tr 'A-Z' 'a-z'); addr=${addr//[[:space:]]/}
+  if ! [[ "$addr" =~ ^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$ ]]; then
+    printf '%s client check: dropped %s: sender field is not one plain address\n' "$(date '+%F %T')" "$id" >>"$LOG"
+    continue
+  fi
   ok=""; while IFS= read -r p; do sender_is "$addr" "$p" && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
   # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.
@@ -77,5 +81,7 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   fi
   grep -qxF "$id" "$SEEN" && continue
   grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
-  printf 'NEW %s%s |%s\n' "$id" "$tag" "$(printf '%s' "${line#MSG }" | cut -d'|' -f2-4)"
+  # From, Subject and Date pass through as printed (between the address and the labels), for the reader only.
+  mid=${rest#*|}; mid=${mid%|*}; mid=${mid%|*}
+  printf 'NEW %s%s | %s |%s\n' "$id" "$tag" "$addr" "$mid"
 done

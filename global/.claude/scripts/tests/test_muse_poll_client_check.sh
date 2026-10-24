@@ -19,10 +19,10 @@ id_past=$(printf '%016x' $(( ((now_ms - 5184000000) << 20) | 12345 )))
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
 cat <<OUT
-MSG 1792119952000 | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
-MSG $id_now | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
-MSG $id_future | Pat <brewer@example.test> | Future mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_future
-MSG $id_past | Pat <brewer@example.test> | Old mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_past
+MSG 1792119952000 | brewer@example.test | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
+MSG $id_now | brewer@example.test | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
+MSG $id_future | brewer@example.test | Pat <brewer@example.test> | Future mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_future
+MSG $id_past | brewer@example.test | Pat <brewer@example.test> | Old mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_past
 OUT
 MOCK
 chmod +x "$TMP/claude"
@@ -63,21 +63,43 @@ printf 'client\trepo_dir\tkind\tgmail_from\nPayroll\t/x\tpayment\tno-reply@pay.e
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
 cat <<OUT
-MSG $id_pay | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_pay
-MSG $id_news | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_news
-MSG $id_random_noreply | Bot <no-reply@random.test> | Spam | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_random_noreply
-MSG $id_spoof | noreply@news.example.test shop.example.test <noreply@evil.test> | Urgent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_spoof
-MSG $id_subj | Pat <orders@shop.example.test> | Order ALERT | Client alert | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_subj
-MSG $id_sub | Store <no-reply@mail.shop.example.test> | Site notice | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_sub
-MSG $id_lookalike | Shop <no-reply@notshop.example.test> | Hi | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_lookalike
+MSG $id_pay | no-reply@pay.example.test | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_pay
+MSG $id_news | noreply@news.example.test | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_news
+MSG $id_random_noreply | no-reply@random.test | Bot <no-reply@random.test> | Spam | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_random_noreply
+MSG $id_spoof | noreply@evil.test | noreply@news.example.test shop.example.test <noreply@evil.test> | Urgent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_spoof
+MSG $id_subj | orders@shop.example.test | Pat <orders@shop.example.test> | Order ALERT | Client alert | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_subj
+MSG $id_sub | no-reply@mail.shop.example.test | Store <no-reply@mail.shop.example.test> | Site notice | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_sub
+MSG $id_lookalike | no-reply@notshop.example.test | Shop <no-reply@notshop.example.test> | Hi | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_lookalike
 OUT
 MOCK
 out=$(check)
 ok 'a no-reply payment sender comes out NEW, untagged' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_pay |")"
 ok 'a no-reply client sender comes out NEW with ALERT after its ID' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_news ALERT |")"
 ok 'unrelated no-reply sender is still skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_random_noreply")"
-ok 'a client domain in the display name only is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_spoof")"
+ok 'a client address in the display name only is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_spoof")"
 ok 'ALERT in a Subject does not tag the line' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_subj |")"
 ok 'a no-reply sender on a client subdomain is tagged' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_sub ALERT |")"
 ok 'a lookalike domain ending in the client name is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_lookalike")"
 ok 'exactly two lines carry the tag' 2 "$(printf '%s\n' "$out" | grep -cE '^NEW [0-9a-f]{15,16} ALERT \|')"
+
+# Field two is the only thing matched. A display name carrying "|" and a client address can't shift it; a sender
+# field that isn't one plain address is logged and dropped; a "|" in a Subject leaves the labels readable.
+id_pipe=$(printf '%016x' $(( (now_ms2 << 20) | 65555 )))
+id_badaddr=$(printf '%016x' $(( (now_ms2 << 20) | 66666 )))
+id_subjpipe=$(printf '%016x' $(( (now_ms2 << 20) | 67777 )))
+id_draftpipe=$(printf '%016x' $(( (now_ms2 << 20) | 68888 )))
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+cat <<OUT
+MSG $id_pipe | noreply@evil.test | "x <noreply@news.example.test> | y" <noreply@evil.test> | Hi | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_pipe
+MSG $id_badaddr | Pat <orders@shop.example.test | Pat <orders@shop.example.test> | Hi | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_badaddr
+MSG $id_subjpipe | orders@shop.example.test | Pat <orders@shop.example.test> | Order 12 | shipped | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_subjpipe
+MSG $id_draftpipe | orders@shop.example.test | Pat <orders@shop.example.test> | Re: a | b | Sat, 17 Oct 2026 21:00:00 | DRAFT | $id_draftpipe
+OUT
+MOCK
+out=$(check)
+ok 'a "|" and client address in a display name do not pass' 0 "$(printf '%s\n' "$out" | grep -c "$id_pipe")"
+ok 'a sender field that is not one plain address is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_badaddr")"
+ok 'that drop is logged' 1 "$(grep -c "dropped $id_badaddr: sender field" "$ST/muse-poll.log")"
+ok 'a "|" in a client Subject still comes out NEW, untagged' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_subjpipe | orders@shop.example.test |")"
+ok 'a "|" in a Subject does not hide the DRAFT label' 0 "$(printf '%s\n' "$out" | grep -c "$id_draftpipe")"
