@@ -47,20 +47,26 @@ if rec client-seen "1792119952000" 2>/dev/null; then ok 'client-seen refuses a 1
 ok 'client-seen refuses a 13-digit timestamp' 0 "$(grep -c 1792119952000 "$ST/client-mail-seen.txt" 2>/dev/null || true)"
 rec client-seen "1a14c8be4df08299" && ok 'client-seen takes a 16-hex ID' 1 "$(grep -c 1a14c8be4df08299 "$ST/client-mail-seen.txt")"
 
-# A kind=payment sender (Gusto) mails from a no-reply address and must still come out NEW, because its handler
-# marks the invoice paid; a no-reply sender of any other kind is still skipped.
-# Generate fresh IDs for this test case too
+# A no-reply sender at a client domain must come out NEW and be marked "Client alert", except a kind=payment
+# sender (Gusto), which comes out NEW unmarked because its own handler step marks the invoice paid;
+# a no-reply sender at an unrelated domain is still skipped.
+# Generate fresh IDs for this test case
 now_ms2=$(( $(date +%s) * 1000 ))
 id_pay=$(printf '%016x' $(( (now_ms2 << 20) | 23456 )))
 id_news=$(printf '%016x' $(( (now_ms2 << 20) | 34567 )))
+id_random_noreply=$(printf '%016x' $(( (now_ms2 << 20) | 56789 )))
 printf 'client\trepo_dir\tkind\tgmail_from\nPayroll\t/x\tpayment\tno-reply@pay.example.test\nNews\t/x\tmail\tnoreply@news.example.test\n' >"$TMP/senders.tsv"
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
 cat <<OUT
 MSG $id_pay | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_pay
 MSG $id_news | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_news
+MSG $id_random_noreply | Bot <no-reply@random.test> | Spam | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_random_noreply
 OUT
 MOCK
 out=$(check)
 ok 'a no-reply payment sender comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_pay |")"
-ok 'a no-reply sender of another kind is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_news")"
+ok 'a no-reply news sender comes out NEW (now allowed)' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_news |")"
+ok 'the no-reply news sender is marked Client alert' 1 "$(printf '%s\n' "$out" | grep "^NEW $id_news |" | grep -F -c "| Client alert")"
+ok 'the no-reply payment sender is not marked Client alert' 0 "$(printf '%s\n' "$out" | grep "^NEW $id_pay |" | grep -F -c "| Client alert")"
+ok 'unrelated no-reply sender is still skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_random_noreply")"
