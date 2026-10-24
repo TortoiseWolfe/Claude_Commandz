@@ -103,7 +103,7 @@ async function main() {
     await page.goto(TARGET, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
 
     const start = Date.now();
-    let delegateOpened = false, accessTries = 0, stepUpSwitched = false, signedIn = false, submitted = false, otpDone = false, googleTried = false, chooserDone = false;
+    let methodChosen = false, levelupLogged = false, delegateOpened = false, accessTries = 0, stepUpSwitched = false, signedIn = false, submitted = false, otpDone = false, googleTried = false, chooserDone = false;
     while (Date.now() - start < DEADLINE_MS) {
       await page.waitForTimeout(1500);
       const url = page.url();
@@ -124,6 +124,22 @@ async function main() {
       }
 
       if (host.startsWith('sso.')) {
+        // Once per run, what the step-up page first says (words only, 6-digit runs masked), so we can see
+        // whether GoDaddy texts the phone before offering the choice.
+        if (!levelupLogged && /levelup/.test(url)) {
+          levelupLogged = true; log('levelup page says: ' + text.replace(/\b\d{6}\b/g, '[6d]'));
+        }
+        // "Select a method": choose the authenticator named Claude fleet. Never the phone row and never
+        // "Recover your account" (that removes the verification methods).
+        if (/select a method/i.test(text)) {
+          if (methodChosen) { code = needHuman('the method choice did not move on', text); break; }
+          const fleet = page.getByText('Claude fleet', { exact: false }).first();
+          if (!await fleet.isVisible().catch(() => false)) { code = needHuman('no Claude fleet method offered', text); break; }
+          await fleet.click();
+          await page.getByRole('button', { name: /^continue$/i }).first().click();
+          methodChosen = true; log('chose the Claude fleet authenticator');
+          continue;
+        }
         // Step-up ("Verify it's you"): the authenticator if the page offers it, never an SMS we cannot read.
         if (/verify it.?s you|levelup/i.test(text + ' ' + url) && /text message|sent to \*|sms/i.test(text)) {
           const other = page.getByText(/another way|different (way|method)|other (way|method)|authenticator|can.?t (use|access)/i).first();
