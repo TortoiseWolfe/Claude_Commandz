@@ -182,7 +182,30 @@ def ticked_since(inbox_text, since):
     return out
 
 
-def lanes_closed(lanes_dir, since):
+def open_lane_names():
+    override = os.environ.get("SESSION_PRIME_OPEN_LANES")
+    if override is not None:
+        return {n for n in override.split(",") if n}
+    script = HOME / ".claude/scripts/lane.sh"
+    if not script.exists():
+        return None
+    try:
+        r = subprocess.run([str(script), "--status"], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        out = set()
+        for line in r.stdout.splitlines():
+            m = re.match(r"^([A-Za-z0-9._-]+)\s+report:", line)
+            if m:
+                out.add(m.group(1))
+        return out
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def lanes_reported(lanes_dir, since, open_names=None):
+    if open_names is None:
+        open_names = open_lane_names()
     out = []
     for p in Path(lanes_dir).glob("*/report.md"):
         try:
@@ -191,9 +214,13 @@ def lanes_closed(lanes_dir, since):
             continue
         if mt >= since:
             name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", p.parent.name)
-            out.append((mt, name, report_first_line(p, 150)))
+            if open_names is None:
+                state = "unknown"
+            else:
+                state = "open" if name in open_names else "closed"
+            out.append((mt, name, report_first_line(p, 150), state))
     out.sort(key=lambda x: x[0])
-    return [(n, f) for _, n, f in out]
+    return [(n, f, s) for _, n, f, s in out]
 
 
 def window_changes(items, since, skip=None):
@@ -232,8 +259,8 @@ def comment_facts(f):
         out += ["**Opened:** " + ", ".join(opened), ""]
     if f.get("lanes"):
         n = len(f["lanes"])
-        out.append(f"**Lanes closed ({n}, first line of each report):**")
-        out += [f"- {name}: {first or 'report written'}" for name, first in f["lanes"][:MAX_LANES]]
+        out.append(f"**Lanes reported ({n}, first line of each report; a lane stays open until Jonathan closes it):**")
+        out += [f"- {name} ({state}): {first or 'report written'}" for name, first, state in f["lanes"][:MAX_LANES]]
         if n > MAX_LANES:
             out.append(f"- and {n - MAX_LANES} more")
         out.append("")
@@ -324,7 +351,7 @@ def gather(args, now):
     f = dict(repo=repo, branch=branch, commits=commits, unpushed=unpushed, issues_opened=io, issues_closed=[(n, t, m) for n, t, m in ic],
              prs_opened=po, prs_closed=pc, lanes=[], inbox=[], tidy=[])
     if private_hub:
-        f["lanes"] = lanes_closed(args.lanes_dir, since)
+        f["lanes"] = lanes_reported(args.lanes_dir, since)
         f["inbox"] = ticked_since(inbox_text(args, since), since)
         f["tidy"] = tidy_summary(sh(["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=40, check=False))
     return dict(repo=repo, num=num, machine=machine, body=iss["body"], updated_at=iss["updatedAt"], last_comment=last,
