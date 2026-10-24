@@ -27,6 +27,7 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py draft-unlabel DRAFT_ID LABEL
   gmail_api.py draft-delete DRAFT_ID
   gmail_api.py drafts-list [QUERY]
+  gmail_api.py messages-list QUERY [--limit N]   (read-only: MSG id | address | From | Subject | Date | labels | threadId)
 
 Credentials (mode 600, never printed): ~/.config/afa/gmail/client.json (OAuth Desktop client),
 ~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). AFA_GMAIL_ACCOUNT, if set, is the consent screen's login hint.
@@ -36,6 +37,7 @@ import argparse
 import base64
 import email
 import email.policy
+import email.utils
 import hashlib
 import html
 import html.parser
@@ -502,6 +504,46 @@ def drafts_list(query="", limit=25):
     return out
 
 
+def _one_line(text):
+    return " ".join((text or "").split())
+
+
+def _api_retry(method, path, params=None, tries=4):
+    """api() with a pause-and-retry on Gmail's per-minute quota (HTTP 429, or 403 'Quota exceeded'); anything else raises."""
+    for n in range(tries):
+        try:
+            return api(method, path, params)
+        except GmailError as e:
+            busy = " 429 " in str(e) or "Quota exceeded" in str(e) or "rateLimitExceeded" in str(e)
+            if not busy or n == tries - 1:
+                raise
+            time.sleep(2 ** n * 5)
+
+
+def messages_list(query, limit=100):
+    """Read-only. One 'MSG id | address | From | Subject | Date | labels | threadId' line per message matching the Gmail
+    query, straight from the API (messages.list, then messages.get in metadata format: no body, no snippet), so a
+    caller never has a model copy an ID."""
+    ids, token = [], None
+    while len(ids) < limit:
+        params = {"q": query, "maxResults": min(500, limit - len(ids))}
+        if token:
+            params["pageToken"] = token
+        page = _api_retry("GET", "/messages", params)
+        ids += [m["id"] for m in page.get("messages", [])]
+        token = page.get("nextPageToken")
+        if not token:
+            break
+    lines = []
+    for mid in ids[:limit]:
+        m = _api_retry("GET", f"/messages/{mid}", {"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]})
+        h = {x["name"].lower(): _one_line(x["value"]) for x in m.get("payload", {}).get("headers", [])}
+        addr = email.utils.parseaddr(h.get("from", ""))[1].lower()
+        lines.append(" | ".join(["MSG " + m["id"], addr, h.get("from", ""), h.get("subject", ""), h.get("date", ""),
+                                 ",".join(m.get("labelIds", [])), m.get("threadId", "")]))
+    return lines
+
+
 def _read_file(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -524,6 +566,7 @@ def main(argv=None):
     for n in ("draft-label", "draft-unlabel"):
         p = sub.add_parser(n); p.add_argument("draft_id"); p.add_argument("label")
     p = sub.add_parser("drafts-list"); p.add_argument("query", nargs="?", default=""); p.add_argument("--limit", type=int, default=25)
+    p = sub.add_parser("messages-list"); p.add_argument("query"); p.add_argument("--limit", type=int, default=100)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "auth":
@@ -563,6 +606,9 @@ def main(argv=None):
         elif a.cmd == "drafts-list":
             for did, tid, to, subj in drafts_list(a.query, a.limit):
                 print(f"{did}\t{tid}\t{to}\t{subj}")
+        elif a.cmd == "messages-list":
+            for line in messages_list(a.query, a.limit):
+                print(line)
     except GmailError as e:
         print(f"gmail_api: {e}", file=sys.stderr)
         return 1

@@ -2,8 +2,8 @@
 # Client-mail check, shared by the notes poller (muse_poll.sh) and /prep.
 #   muse_poll_client_check.sh
 # Reads the client senders from the private hub file (hub/client-senders.tsv: client, repo_dir, kind,
-# gmail_from), has a metadata-only Haiku pass list every message from those senders in the last two days
-# (search_threads, never a body), then drops the IDs already absorbed. Prints one line per new message:
+# gmail_from), lists every message from those senders in the last two days with gmail_api.py messages-list
+# (the Gmail API, metadata only, never a body; no model pass, so IDs can't be garbled), then drops the IDs already absorbed. Prints one line per new message:
 #   NEW <message id> | <From> | <Subject> | <Date>
 # Only mail a client actually sent counts: the check prints each message's labels, and anything labelled
 # DRAFT or SENT (our own drafts and replies, which ride along inside a matched thread) is dropped, as is any
@@ -12,8 +12,8 @@
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Senders of no-reply@ or noreply@ are skipped UNLESS they match a
 # client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
-# kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script and its prompt
-# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_CLAUDE (a stub for the Haiku pass),
+# kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script
+# hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_GMAIL (an executable that stands in for gmail_api.py: called as `<it> messages-list <query>`),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
 set -u
 S=$HOME/.claude/scripts
@@ -21,7 +21,6 @@ TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
 SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
 INBOX=${MUSE_CLIENT_INBOX:-${HUB_INBOX:-${MUSE_INBOX:-$HOME/.claude/state/hub-inbox.md}}}
 LOG=$HOME/.claude/state/muse-poll.log
-CLAUDE=${MUSE_CLIENT_CLAUDE:-$HOME/.local/bin/claude}
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}
 # Client mail is NX-01's job only; the second tower exits quietly so the same mail is not absorbed twice.
 [[ "$(cat "$HOME/.config/afa/machine" 2>/dev/null)" == NX-01 ]] || exit 0
@@ -29,12 +28,15 @@ WINDOW=${MUSE_CLIENT_WINDOW:-2d}
 froms=$(awk -F'\t' 'NR>1 && $4!="" {print $4}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
 [[ -n "$froms" ]] || exit 0
 query="from:($froms) newer_than:$WINDOW -from:me"
-prompt=$(cat "$S/muse_poll.client-check.prompt")
-prompt=${prompt//\{\{QUERY\}\}/$query}
-out=$(env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN timeout 300 "$CLAUDE" -p "$prompt" --model haiku --max-turns 12 \
-  --permission-mode default \
-  --disallowedTools "Bash,Edit,Write,Agent,WebFetch,WebSearch,Read" \
-  --allowedTools "mcp__claude_ai_Gmail__search_threads" 2>>"$LOG")
+# The message list comes straight from the Gmail API (gmail_api.py messages-list, metadata only, never a body):
+# no model copies the IDs. If the call fails, say so on stderr (muse_poll.sh logs it) and stop, so a dead token
+# can't pass for "nothing new".
+if [[ -n "${MUSE_CLIENT_GMAIL:-}" ]]; then lister=("$MUSE_CLIENT_GMAIL" messages-list); else lister=(python3 "$S/gmail_api.py" messages-list); fi
+errf=$(mktemp); trap 'rm -f -- "$errf"' EXIT
+if ! out=$("${lister[@]}" "$query" 2>"$errf"); then
+  printf '%s client check: messages-list failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >&2
+  exit 1
+fi
 touch "$SEEN"
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
