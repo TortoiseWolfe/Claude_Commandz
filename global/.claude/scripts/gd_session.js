@@ -27,9 +27,11 @@ const TARGET = 'https://account.godaddy.com/products';
 const WHO = /logged in as:?\s*Gail Lynn/i;
 const DEADLINE_MS = 150000;
 
+// Page words are logged only after digit runs of 4+ and email addresses are masked.
+function scrub(t) { return String(t).replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '[email]').replace(/\d{4,}/g, '[digits]'); }
 function log(m) { console.log('gd_session: ' + m); }
 function needHuman(why, page) {
-  console.error('gd_session: NEEDS A HUMAN: ' + why + (page ? ' | page says: ' + page : ''));
+  console.error('gd_session: NEEDS A HUMAN: ' + why + (page ? ' | page says: ' + scrub(page) : ''));
   return 3;
 }
 
@@ -128,7 +130,7 @@ async function main() {
         // Once per run, what the step-up page first says (words only, 6-digit runs masked), so we can see
         // whether GoDaddy texts the phone before offering the choice.
         if (!levelupLogged && /levelup/.test(url)) {
-          levelupLogged = true; log('levelup page says: ' + text.replace(/\b\d{6}\b/g, '[6d]'));
+          levelupLogged = true; log('levelup page says: ' + scrub(text));
         }
         // "Select a method": choose the authenticator named Claude fleet. Never the phone row and never
         // "Recover your account" (that removes the verification methods).
@@ -147,7 +149,7 @@ async function main() {
           if (!stepUpSwitched && await other.isVisible().catch(() => false)) {
             stepUpSwitched = true; await other.click().catch(() => {}); log('asked for another way to verify'); continue;
           }
-          console.error('gd_session: SMS step-up | page says: ' + text);
+          console.error('gd_session: SMS step-up | page says: ' + scrub(text));
           code = 5; break;
         }
         // 2-step prompt first: it can show on the same host as the password form.
