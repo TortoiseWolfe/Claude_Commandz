@@ -6,13 +6,16 @@
 // Exit 0  the page reads "logged in as: Gail Lynn"
 // Exit 1  bad arguments or Playwright not found
 // Exit 3  needs a human; stderr carries the page's own words
+// Exit 5  the Delegate Access step-up offers only an SMS code ("SMS step-up"): the hub decides
 // Exit 4  another Chromium holds the profile (agent_browser.sh busy), nothing was touched
 //
 // Headed on purpose: Akamai answers headless loads with "Access Denied". Chrome fills the saved
 // password itself and this script never reads it; the 2-step code comes from otp_code.py. It logs
 // page changes (origin and path, no query) and never a field value. It never signs out and never
-// opens Delegate Access (account.godaddy.com/access): that ended the login on 22 Oct, so Gail's
-// account is reached from the account menu instead.
+// signs in through GoDaddy's "Sign in with Google" when Chrome has no saved password, then reaches
+// Gail's account by GoDaddy's own route (help article 12373): account.godaddy.com/access, then
+// "Access Now" on the row that names Gail Lynn. A step-up is answered with the authenticator
+// (otp_code.py godaddy) only when the page offers it; an SMS-only step-up exits 5.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -79,28 +82,57 @@ async function main() {
   });
   let code = 3;
   try {
-    const page = ctx.pages()[0] || await ctx.newPage();
+    let page = ctx.pages()[0] || await ctx.newPage();
     let last = '';
-    page.on('framenavigated', (f) => {
-      if (f !== page.mainFrame()) return;
+    const watch = (p) => p.on('framenavigated', (f) => {
+      if (f !== p.mainFrame()) return;
       const u = new URL(f.url());
       const here = u.origin + u.pathname;
       if (here !== last) { last = here; log('page: ' + here); }
     });
+    watch(page);
+    // Access Now may open the delegate's account in a new window: follow the newest page.
+    ctx.on('page', (p) => { watch(p); page = p; });
+    const reached = async () => {
+      for (const p of ctx.pages()) {
+        const t = await p.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+        if (WHO.test(t) || (/exit access/i.test(t) && /Gail Lynn/.test(t))) return true;
+      }
+      return false;
+    };
     await page.goto(TARGET, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
 
     const start = Date.now();
-    let triedAccountMenu = false, signedIn = false, submitted = false, otpDone = false;
+    let delegateOpened = false, accessTries = 0, stepUpSwitched = false, signedIn = false, submitted = false, otpDone = false, googleTried = false, chooserDone = false;
     while (Date.now() - start < DEADLINE_MS) {
       await page.waitForTimeout(1500);
       const url = page.url();
       const host = new URL(url).hostname;
       const text = await words(page);
 
-      if (WHO.test(await page.locator('body').innerText({ timeout: 3000 }).catch(() => ''))) { code = 0; break; }
+      if (await reached()) { code = 0; break; }
       if (/access denied/i.test(text)) { code = needHuman('Akamai blocked the load', text); break; }
 
+      if (host === 'accounts.google.com') {
+        // Account chooser: pick the tile by its email attribute (an address is not a secret; no password is typed).
+        const tile = page.locator('[data-identifier]').first();
+        if (!chooserDone && await tile.isVisible().catch(() => false)) {
+          chooserDone = true; await tile.click(); log('picked the Google account'); continue;
+        }
+        if (/password|verify it|2-step|captcha/i.test(text)) { code = needHuman('Google asks for more than the account tile', text); break; }
+        continue;
+      }
+
       if (host.startsWith('sso.')) {
+        // Step-up ("Verify it's you"): the authenticator if the page offers it, never an SMS we cannot read.
+        if (/verify it.?s you|levelup/i.test(text + ' ' + url) && /text message|sent to \*|sms/i.test(text)) {
+          const other = page.getByText(/another way|different (way|method)|other (way|method)|authenticator|can.?t (use|access)/i).first();
+          if (!stepUpSwitched && await other.isVisible().catch(() => false)) {
+            stepUpSwitched = true; await other.click().catch(() => {}); log('asked for another way to verify'); continue;
+          }
+          console.error('gd_session: SMS step-up | page says: ' + text);
+          code = 5; break;
+        }
         // 2-step prompt first: it can show on the same host as the password form.
         const otp = page.locator('input[autocomplete="one-time-code"], input[name*="code" i], input[inputmode="numeric"]').first();
         if (await otp.isVisible().catch(() => false)) {
@@ -125,7 +157,14 @@ async function main() {
             await page.waitForTimeout(1500);
             filled = await pass.evaluate((el) => el.value.length > 0).catch(() => false);
           }
-          if (!filled) { code = needHuman('Chrome has no saved GoDaddy password to fill', text); break; }
+          if (!filled) {
+            // No saved password: GoDaddy's own Google button, answered by the profile's Google session.
+            const g = page.locator('[data-eid*="google" i], button[aria-label*="Google" i], a[aria-label*="Google" i], button:has-text("Google")').first();
+            if (!googleTried && await g.isVisible().catch(() => false)) {
+              googleTried = true; await g.click(); log('chose Sign in with Google'); continue;
+            }
+            code = needHuman('Chrome has no saved GoDaddy password to fill and the Google button is not available', text); break;
+          }
           const keep = page.getByLabel(/keep me signed in/i).first();
           if (await keep.count()) await keep.check().catch(() => {});
           await page.locator('button[type="submit"]').first().click();
@@ -144,21 +183,35 @@ async function main() {
 
       if (host.endsWith('godaddy.com')) {
         signedIn = true;
-        // Signed in as someone else (Jonathan): reach Gail's account from the account menu.
-        if (!triedAccountMenu) {
-          triedAccountMenu = true;
-          const menu = page.locator('[data-eid*="account" i], [aria-label*="account" i], [aria-label*="profile" i], button:has-text("Account")').first();
-          if (await menu.isVisible().catch(() => false)) {
-            await menu.click().catch(() => {});
-            await page.waitForTimeout(1000);
-            const gail = page.getByText(/Gail Lynn/).first();
-            if (await gail.isVisible().catch(() => false)) {
-              await gail.click().catch(() => {});
-              log('chose Gail Lynn from the account menu');
-              continue;
+        // Signed in as Jonathan: reach Gail's account by GoDaddy's own route (help 12373).
+        if (!/^\/access/.test(new URL(url).pathname)) {
+          if (!delegateOpened) {
+            delegateOpened = true;
+            await page.goto('https://account.godaddy.com/access', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+          }
+          continue;
+        }
+        // Tag the smallest block that names Gail Lynn and holds exactly one Access Now, then click it.
+        const tagged = await page.evaluate(() => {
+          const btns = [...document.querySelectorAll('button, a, [role=button]')].filter((b) => /^\s*access now\s*$/i.test(b.textContent));
+          for (const b of btns) {
+            let n = b.parentElement;
+            while (n && n !== document.body) {
+              const inN = btns.filter((x) => n.contains(x)).length;
+              if (inN > 1) break;
+              if (/Gail Lynn/.test(n.textContent)) { b.setAttribute('data-gd-access', 'gail'); return true; }
+              n = n.parentElement;
             }
           }
+          return false;
+        }).catch(() => false);
+        if (tagged) {
+          log('Access Now on the Gail Lynn row');
+          await page.locator('[data-gd-access="gail"]').first().click().catch(() => {});
+          await page.waitForTimeout(3000);
+          continue;
         }
+        if (++accessTries > 8) { code = needHuman('Delegate Access shows no Access Now row for Gail Lynn', text); break; }
       }
     }
     if (code !== 0 && Date.now() - start >= DEADLINE_MS) {
