@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The client-mail checker keeps only real Gmail message IDs (15-16 hex), logs what it drops, and
-# muse_poll_record.sh client-seen refuses anything else. A stub claude stands in for the Haiku pass;
+# muse_poll_record.sh client-seen refuses anything else. A stub gmail_api.py stands in for the Gmail API;
 # a fake HOME holds the state. Nothing live is touched.
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -8,7 +8,6 @@ TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state
 mkdir -p "$H/.claude/scripts" "$H/.config/afa" "$ST"
 echo NX-01 >"$H/.config/afa/machine"
-cp "$HERE/muse_poll.client-check.prompt" "$H/.claude/scripts/"
 printf 'client\trepo_dir\tkind\tgmail_from\nExample Brewing\t/x\tmail\tbrewer@example.test\n' >"$TMP/senders.tsv"
 : >"$TMP/seen.txt"; : >"$TMP/inbox.md"
 # Compute test IDs in the test script for assertions
@@ -18,6 +17,7 @@ id_future=$(printf '%016x' $(( ((now_ms + 172800000) << 20) | 12345 )))
 id_past=$(printf '%016x' $(( ((now_ms - 5184000000) << 20) | 12345 )))
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
+echo "\$*" >"$TMP/stub-args"
 cat <<OUT
 MSG 1792119952000 | brewer@example.test | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
 MSG $id_now | brewer@example.test | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
@@ -28,7 +28,7 @@ MOCK
 chmod +x "$TMP/claude"
 
 check() { HOME=$H MUSE_CLIENT_TSV=$TMP/senders.tsv MUSE_CLIENT_SEEN=$TMP/seen.txt MUSE_CLIENT_INBOX=$TMP/inbox.md \
-  MUSE_CLIENT_CLAUDE=$TMP/claude bash "$HERE/muse_poll_client_check.sh"; }
+  MUSE_CLIENT_GMAIL=$TMP/claude bash "$HERE/muse_poll_client_check.sh"; }
 ok() { [[ "$2" == "$3" ]] && printf 'PASS: %s\n' "$1" || { printf 'FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2; exit 1; }; }
 
 out=$(check)
@@ -122,3 +122,30 @@ ok 'a line with no thread ID at the end is dropped' 0 "$(printf '%s\n' "$out" | 
 ok 'that drop is logged' 1 "$(grep -c "dropped $id_notid: no thread ID" "$ST/muse-poll.log")"
 ok 'a labels field that is not label IDs is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_badlabels")"
 ok 'real label IDs with spaces and a user label pass' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_goodlabels |")"
+
+# No model pass: the stub is called as `messages-list <query>` and nothing else, and its IDs come out byte for byte.
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+echo "\$*" >"$TMP/stub-args"
+echo "MSG 1a15559aee5b0b47 | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 | INBOX,UNREAD | 1a15559aee5b0b47"
+MOCK
+rm -f "$TMP/stub-args"
+out=$(check)
+ok 'the ID prints exactly as listed' 1 "$(printf '%s\n' "$out" | grep -c '^NEW 1a15559aee5b0b47 | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 $' || true)"
+ok 'the lister gets the subcommand and the sender query' 1 "$(grep -c '^messages-list from:(.*shop.example.test.*) newer_than:2d -from:me$' "$TMP/stub-args" || true)"
+
+# A failing lister (dead token, no network) is loud: nothing NEW, exit 1, the reason on stderr, never a quiet "nothing new".
+cat >"$TMP/claude" <<'MOCK'
+#!/usr/bin/env bash
+echo "gmail_api: Gmail API 401 on GET /messages: invalid credentials" >&2
+exit 1
+MOCK
+rc=0; out=$(check 2>"$TMP/err") || rc=$?
+ok 'a failing lister exits 1' 1 "$rc"
+ok 'a failing lister prints no NEW line' 0 "$(printf '%s\n' "$out" | grep -c '^NEW ' || true)"
+ok 'the failure reason reaches stderr' 1 "$(grep -c 'messages-list failed: gmail_api: Gmail API 401' "$TMP/err" || true)"
+
+# An empty list is quiet and fine.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/claude"
+rc=0; out=$(check) || rc=$?
+ok 'an empty list exits 0 with no output' "0:" "$rc:$out"
