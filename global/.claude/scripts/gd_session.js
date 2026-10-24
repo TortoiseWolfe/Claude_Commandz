@@ -123,7 +123,8 @@ async function main() {
         continue;
       }
 
-      if (host.startsWith('sso.')) {
+      // GoDaddy serves Delegate Access on sso.godaddy.com/access too: that page goes to the Access Now block below.
+      if (host.startsWith('sso.') && !/^\/access/.test(new URL(url).pathname)) {
         // Once per run, what the step-up page first says (words only, 6-digit runs masked), so we can see
         // whether GoDaddy texts the phone before offering the choice.
         if (!levelupLogged && /levelup/.test(url)) {
