@@ -224,6 +224,22 @@ class Facts(unittest.TestCase):
         got = [t for t, _ in sp.ticked_since(inbox, since)]
         self.assertEqual(got, ["Date only item", "Timed item"])
 
+    def test_lanes_reported_says_open_or_closed_by_the_open_names(self):
+        lanes = Path(fresh_dir(self))
+        for name in ("2026-10-24-alpha", "2026-10-24-beta"):
+            (lanes / name).mkdir()
+            (lanes / name / "report.md").write_text(f"# R\n\n{name} finished.\n")
+        got = sp.lanes_reported(lanes, self.SINCE, open_names={"alpha"})
+        self.assertEqual(sorted((n, s) for n, _, s in got), [("alpha", "open"), ("beta", "closed")])
+
+    def test_open_lane_names_reads_the_override(self):
+        old = os.environ.get("SESSION_PRIME_OPEN_LANES")
+        self.addCleanup(lambda: os.environ.pop("SESSION_PRIME_OPEN_LANES", None) if old is None else os.environ.update(SESSION_PRIME_OPEN_LANES=old))
+        os.environ["SESSION_PRIME_OPEN_LANES"] = "a,b"
+        self.assertEqual(sp.open_lane_names(), {"a", "b"})
+        os.environ["SESSION_PRIME_OPEN_LANES"] = ""
+        self.assertEqual(sp.open_lane_names(), set())
+
     def test_comment_facts_drops_empty_sections(self):
         f = dict(repo="o/r", branch="main", commits=[("a" * 40, "aaaaaaa", "Did a thing")], unpushed=0, issues_opened=[],
                  issues_closed=[(3, "Closed one", False)], prs_opened=[], prs_closed=[(5, "Merged one", True)], lanes=[], inbox=[])
@@ -231,7 +247,7 @@ class Facts(unittest.TestCase):
         self.assertIn("**Shipped (1 commit, all on `origin/main`):**", text)
         self.assertIn("[`aaaaaaa`](https://github.com/o/r/commit/" + "a" * 40 + ") — Did a thing", text)
         self.assertIn("**Closed:** #3 (Closed one), PR #5 (Merged one, merged)", text)
-        for absent in ("**Opened:**", "Lanes closed", "Inbox items"):
+        for absent in ("**Opened:**", "Lanes reported", "Inbox items"):
             self.assertNotIn(absent, text)
 
     def test_unpushed_commits_are_said(self):
@@ -300,7 +316,7 @@ class Cli(unittest.TestCase):
     def run_cli(self, *extra, repo="o/r", machine="NX-01"):
         cmd = [sys.executable, str(SCRIPT), "--repo", repo, "--dir", str(self.repo), "--machine", machine,
                "--state-dir", str(self.state), "--drift-hook", str(self.hook), "--lanes-dir", str(self.lanes),
-               "--inbox", str(self.inbox), *extra]
+               "--inbox", str(self.inbox), "--inbox-archive", str(self.d / "inbox-archive"), *extra]
         return subprocess.run(cmd, capture_output=True, text=True, env=self.env)
 
     def calls(self):
@@ -322,7 +338,7 @@ class Cli(unittest.TestCase):
                        "new one", "new two", "**Closed:** PR #9 (a merged pr, merged)", "**Opened:** #8 (a new issue)"):
             self.assertIn(needle, r.stdout)
         self.assertNotIn("old commit", r.stdout)
-        self.assertNotIn("Lanes closed", r.stdout)  # not the private hub: no lane or inbox facts
+        self.assertNotIn("Lanes reported", r.stdout)  # not the private hub: no lane or inbox facts
         self.assertEqual(json.loads((self.state / "o__r.json").read_text())["read_at"], "2026-10-16T20:30:00Z")
 
     def test_public_or_other_repos_never_carry_lane_or_inbox_facts(self):
@@ -331,8 +347,9 @@ class Cli(unittest.TestCase):
         self.assertNotIn("Ticked tonight", r.stdout)
 
     def test_private_hub_carries_lanes_and_inbox(self):
+        self.env["SESSION_PRIME_OPEN_LANES"] = "lane-x"
         r = self.run_cli("--dry-run", repo=sp.HUB_REPO)
-        self.assertIn("**Lanes closed (1, first line of each report):**\n- lane-x: Lane x finished.", r.stdout)
+        self.assertIn("**Lanes reported (1, first line of each report; a lane stays open until Jonathan closes it):**\n- lane-x (open): Lane x finished.", r.stdout)
         self.assertIn("**Inbox items ticked (1):**\n- Ticked tonight", r.stdout)
         self.env["FAKE_PRIVATE"] = "0"
         r = self.run_cli("--dry-run", repo=sp.HUB_REPO)
