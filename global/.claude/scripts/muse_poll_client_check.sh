@@ -59,9 +59,15 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
     continue
   fi
   # Labels are the second-to-last field, read from the right so a "|" inside a From or Subject can't move them.
+  # Fail closed: the last field must be a hex thread ID and the labels must be label IDs, or a line missing its
+  # trailer could hand the Date or Subject in as labels and let a DRAFT or SENT through. Such a line is logged.
+  tid=${line##*|}; tid=${tid//[[:space:]]/}
   rest=${line%|*}; labels=${rest##*|}
-  labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z')
-  [[ -n "${labels//[[:space:]]/}" ]] || continue
+  labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z'); labels=${labels//[[:space:]]/}
+  if ! [[ "$tid" =~ ^[0-9a-f]{15,16}$ && "$labels" =~ ^[A-Z0-9_]+(,[A-Z0-9_]+)*$ ]]; then
+    printf '%s client check: dropped %s: no thread ID or label list at the end of the line\n' "$(date '+%F %T')" "$id" >>"$LOG"
+    continue
+  fi
   [[ "$labels" == *DRAFT* || "$labels" == *SENT* ]] && continue
   # Match on the bare sender address the Gmail pass prints right after the ID, never on the From header (anyone
   # can put a client's address in a display name, with "|" or "<>" around it). A field that is not one plain
