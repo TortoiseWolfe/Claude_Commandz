@@ -47,6 +47,12 @@ printf '%s\n' "$out" | grep '^MSG ' | grep -vE '^MSG [0-9a-f]{15,16} \|' | while
 done
 printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r line; do
   id=${line#MSG }; id=${id%% *}
+  ms=$(( 16#$id >> 20 )); now_ms=$(( $(date +%s) * 1000 ))
+  if (( ms > now_ms + 3600000 )) || (( ms + 2592000000 < now_ms )); then
+    impl_time=$(date -d "@$(( ms / 1000 ))" '+%F %T' 2>/dev/null || echo "invalid")
+    printf '%s client check: dropped implausible id %s (decodes to %s)\n' "$(date '+%F %T')" "$id" "$impl_time" >>"$LOG"
+    continue
+  fi
   IFS='|' read -r _ _ _ _ labels _ <<<"${line#MSG }"
   labels=$(printf '%s' "$labels" | tr 'a-z' 'A-Z')
   [[ -n "${labels//[[:space:]]/}" ]] || continue
