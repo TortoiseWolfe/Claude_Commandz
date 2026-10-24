@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The only writes the unattended notes poller may make:
-#   muse_poll_record.sh processed <note-id>   -> appends the ID to the handled-notes state file
+#   muse_poll_record.sh processed <note-id>   -> appends the ID to the handled-notes state file; a draft ID (r123) is also
+#                                                labelled Label_31 and Label_32 through gmail_api.py (failures go to agent-notes-label-fail.log)
 #   muse_poll_record.sh inbox "<one line>"    -> queues a line for Jonathan's next Claude session
 #   muse_poll_record.sh active                -> a note just went to Hatch: the poller checks every minute
 #                                                again, backing off as the exchange goes quiet
@@ -36,6 +37,16 @@ case "${1:-}" in
     id="${2:?note id}"
     [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || { echo "bad id" >&2; exit 1; }
     grep -qxF "$id" "$STATE/agent-notes-processed.txt" 2>/dev/null || echo "$id" >>"$STATE/agent-notes-processed.txt"
+    # Hatch's sweep deletes a note draft only once it carries Label_32, so label a draft id (r123, r-123) here too.
+    # The connector's label tools are refused on drafts; our own Gmail API tool is not. Sent-message ids (16 hex) get none.
+    # A label that fails never fails the record: it is logged and the note stays recorded.
+    if [[ "$id" =~ ^r-?[0-9]+$ ]]; then
+      api=${MUSE_GMAIL_API:-$HOME/.claude/scripts/gmail_api.py}
+      for label in Label_31 Label_32; do
+        timeout 60 python3 "$api" draft-label "$id" "$label" </dev/null >/dev/null 2>&1 \
+          || printf '%s %s %s label failed\n' "$(date -Iseconds)" "$id" "$label" >>"$STATE/agent-notes-label-fail.log"
+      done
+    fi
     ;;
   inbox)
     line="${2:?text}"
