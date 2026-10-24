@@ -11,11 +11,18 @@ echo NX-01 >"$H/.config/afa/machine"
 cp "$HERE/muse_poll.client-check.prompt" "$H/.claude/scripts/"
 printf 'client\trepo_dir\tkind\tgmail_from\nExample Brewing\t/x\tmail\tbrewer@example.test\n' >"$TMP/senders.tsv"
 : >"$TMP/seen.txt"; : >"$TMP/inbox.md"
-cat >"$TMP/claude" <<'MOCK'
+# Compute test IDs in the test script for assertions
+now_ms=$(( $(date +%s) * 1000 ))
+id_now=$(printf '%016x' $(( (now_ms << 20) | 12345 )))
+id_future=$(printf '%016x' $(( ((now_ms + 172800000) << 20) | 12345 )))
+id_past=$(printf '%016x' $(( ((now_ms - 5184000000) << 20) | 12345 )))
+cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
-cat <<'OUT'
-MSG 1792119952000 | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 1a14c8be4df08299
-MSG 1a14c8be4df08299 | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 1a14c8be4df08299
+cat <<OUT
+MSG 1792119952000 | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
+MSG $id_now | Pat <brewer@example.test> | Re: Tap list | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_now
+MSG $id_future | Pat <brewer@example.test> | Future mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_future
+MSG $id_past | Pat <brewer@example.test> | Old mail | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_past
 OUT
 MOCK
 chmod +x "$TMP/claude"
@@ -25,10 +32,14 @@ check() { HOME=$H MUSE_CLIENT_TSV=$TMP/senders.tsv MUSE_CLIENT_SEEN=$TMP/seen.tx
 ok() { [[ "$2" == "$3" ]] && printf 'PASS: %s\n' "$1" || { printf 'FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2; exit 1; }; }
 
 out=$(check)
-ok 'only the real ID comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c '^NEW ')"
-ok 'the NEW line carries the 16-hex ID' 1 "$(printf '%s\n' "$out" | grep -c '^NEW 1a14c8be4df08299 |')"
+ok 'only the current-time ID comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c '^NEW ')"
+ok 'the NEW line carries the 16-hex current ID' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_now |")"
 ok 'the timestamp-as-ID line is not NEW' 0 "$(printf '%s\n' "$out" | grep -c '1792119952000')"
-ok 'the drop is logged' 1 "$(grep -c 'client check: dropped malformed line.*1792119952000' "$ST/muse-poll.log")"
+ok 'the future ID is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_future")"
+ok 'the past ID is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_past")"
+ok 'the malformed drop is logged' 1 "$(grep -c 'client check: dropped malformed line.*1792119952000' "$ST/muse-poll.log")"
+ok 'the future ID drop is logged' 1 "$(grep -c "client check: dropped implausible id.*$id_future" "$ST/muse-poll.log")"
+ok 'the past ID drop is logged' 1 "$(grep -c "client check: dropped implausible id.*$id_past" "$ST/muse-poll.log")"
 
 rec() { MUSE_STATE=$ST bash "$HERE/muse_poll_record.sh" "$@"; }
 : >"$ST/hub-inbox.md"
@@ -38,14 +49,18 @@ rec client-seen "1a14c8be4df08299" && ok 'client-seen takes a 16-hex ID' 1 "$(gr
 
 # A kind=payment sender (Gusto) mails from a no-reply address and must still come out NEW, because its handler
 # marks the invoice paid; a no-reply sender of any other kind is still skipped.
+# Generate fresh IDs for this test case too
+now_ms2=$(( $(date +%s) * 1000 ))
+id_pay=$(printf '%016x' $(( (now_ms2 << 20) | 23456 )))
+id_news=$(printf '%016x' $(( (now_ms2 << 20) | 34567 )))
 printf 'client\trepo_dir\tkind\tgmail_from\nPayroll\t/x\tpayment\tno-reply@pay.example.test\nNews\t/x\tmail\tnoreply@news.example.test\n' >"$TMP/senders.tsv"
-cat >"$TMP/claude" <<'MOCK'
+cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
-cat <<'OUT'
-MSG 2a14c8be4df08299 | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 2a14c8be4df08299
-MSG 3a14c8be4df08299 | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | 3a14c8be4df08299
+cat <<OUT
+MSG $id_pay | Pay <no-reply@pay.example.test> | Payment sent | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_pay
+MSG $id_news | News <noreply@news.example.test> | Digest | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_news
 OUT
 MOCK
 out=$(check)
-ok 'a no-reply payment sender comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c '^NEW 2a14c8be4df08299 |')"
-ok 'a no-reply sender of another kind is skipped' 0 "$(printf '%s\n' "$out" | grep -c 3a14c8be4df08299)"
+ok 'a no-reply payment sender comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_pay |")"
+ok 'a no-reply sender of another kind is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_news")"
