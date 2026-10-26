@@ -9,6 +9,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
@@ -324,7 +325,9 @@ class World(unittest.TestCase):
 
     def test_run_week_writes_the_line_and_the_stamp_and_runs_once(self):
         mon = at("2026-10-26", "07:00")
-        line = H.run_week(self.cfg, mon, "NX-01", self.home + "/wk", if_due=True)
+        with mock.patch.object(H, "refresh_calendar") as refresh:     # the real one would look for a real calendar token
+            line = H.run_week(self.cfg, mon, "NX-01", self.home + "/wk", if_due=True)
+        refresh.assert_called_once()                              # the Monday run starts from a fresh calendar
         self.assertIn("Acme", line)
         self.assertIn("0.3 h", line)                          # 20 minutes = 0.33 h of Tue 20 Oct
         self.assertEqual(open(os.path.join(H.state_dir(), "hours-week.txt")).read().strip(), line)
@@ -332,6 +335,101 @@ class World(unittest.TestCase):
         self.assertTrue(os.path.exists(self.home + "/wk/acme-time-log.tsv"))   # a client with a log_name refreshes its full log
         self.assertIsNone(H.run_week(self.cfg, mon, "NX-01", self.home + "/wk", if_due=True))     # the stamp says it ran today
         self.assertIsNone(H.run_week(self.cfg, at("2026-10-27", "07:00"), "NX-01", self.home + "/wk", if_due=True))   # not a Monday
+
+
+class CalendarRefresh(unittest.TestCase):
+    """calendar-events.tsv is filled from Google Calendar (calendar_api.list_events, replaced here by a fake) for the clients' events only."""
+
+    def setUp(self):
+        self.home = fresh_dir(self)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(lambda: os.environ.pop("HOME", None) if old is None else os.environ.__setitem__("HOME", old))
+        os.makedirs(self.home + "/out")
+        self.tsv = self.home + "/out/calendar-events.tsv"
+        self.cfg = cfg_for(out_dir=self.home + "/out")
+        self.cfg["clients"]["acme"]["calendar"] = {"words": [r"Acme\b"]}
+        self.now = at("2026-10-26", "18:00")
+
+    @staticmethod
+    def ev(start, end, title, attendees=(), declined=False):
+        return {"start": start, "end": end, "title": title, "attendees": list(attendees), "self_declined": declined}
+
+    def events(self):
+        return [
+            self.ev("2026-10-20T16:00:00-04:00", "2026-10-20T16:30:00-04:00", "Acme sync", ["boss@acme.example", OWNER]),
+            self.ev("2026-10-22T10:00:00-04:00", "2026-10-22T11:00:00-04:00", "Planning", ["x@mail.acme.example"]),   # a subdomain of mail_to
+            self.ev("2026-10-23T10:00:00-04:00", "2026-10-23T11:00:00-04:00", "Acme standup"),                          # title words only
+            self.ev("2026-10-24T10:00:00-04:00", "2026-10-24T11:00:00-04:00", "Dentist", [OWNER]),                      # nobody's
+            self.ev("2026-10-25T10:00:00-04:00", "2026-10-25T11:00:00-04:00", "Acme retro", declined=True),             # declined
+            self.ev("2026-10-27T16:00:00-04:00", "2026-10-27T16:30:00-04:00", "Acme sync", ["boss@acme.example"]),     # still ahead
+            self.ev("2026-10-21T10:00:00-04:00", "2026-10-21T11:00:00-04:00", "Lookalike", ["x@notacme.example"]),      # not a subdomain
+        ]
+
+    def test_rows_are_the_clients_events_only_sorted_and_tab_separated(self):
+        ok, msg = H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: self.events())
+        self.assertTrue(ok, msg)
+        rows = [l.split("\t") for l in open(self.tsv).read().splitlines()]
+        self.assertEqual(rows[0][:2], ["start_iso", "end_iso"])
+        self.assertEqual([(r[2], r[3]) for r in rows[1:]],
+                         [("Acme sync", "acme"), ("Planning", "acme"), ("Acme standup", "acme"), ("Acme sync", "acme")])
+        self.assertEqual([r[0][:10] for r in rows[1:]], sorted(r[0][:10] for r in rows[1:]))
+
+    def test_the_rows_feed_the_hours_the_same_way_the_old_file_did(self):
+        H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: self.events())
+        got = [(r[2], r[3]) for r in H.calendar_rows(self.cfg)]
+        self.assertIn(("Acme sync", "acme"), got)
+        self.assertEqual(len(got), 4)
+
+    def test_the_status_line_names_the_newest_past_event_not_a_future_one(self):
+        ok, msg = H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: self.events())
+        self.assertIn("4 client events", msg)
+        self.assertIn("newest past one Fri 23 Oct 10:00 AM Acme standup", msg)
+        self.assertEqual(open(os.path.join(H.state_dir(), "hours-calendar.txt")).read().strip(), msg)
+
+    def test_the_window_asked_for_runs_from_calendar_since_to_two_weeks_ahead(self):
+        asked = []
+        self.cfg["calendar_since"] = "2026-08-01"
+        H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: asked.append((lo, hi)) or [])
+        self.assertEqual(asked, [(at("2026-08-01", "00:00"), self.now + 14 * 86400)])
+
+    def test_a_failure_keeps_the_old_file_and_says_so(self):
+        open(self.tsv, "w").write("start\tend\ttitle\tclient\n2026-10-20T16:00:00-04:00\t2026-10-20T16:30:00-04:00\told call\tacme\n")
+        before = open(self.tsv).read()
+
+        def boom(lo, hi):
+            raise RuntimeError("Calendar API 403: disabled")
+        ok, msg = H.refresh_calendar(self.cfg, self.now, fetch=boom)
+        self.assertFalse(ok)
+        self.assertIn("NOT refreshed", msg)
+        self.assertIn("403", msg)
+        self.assertEqual(open(self.tsv).read(), before)
+        self.assertFalse(os.path.exists(self.tsv + ".tmp"))
+        self.assertIn("NOT refreshed", open(os.path.join(H.state_dir(), "hours-calendar.txt")).read())
+
+    def test_the_first_refresh_keeps_the_old_hand_copy_once(self):
+        open(self.tsv, "w").write("hand copy\n")
+        H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: self.events())
+        H.refresh_calendar(self.cfg, self.now, fetch=lambda lo, hi: [])
+        self.assertEqual(open(self.tsv + ".pre-api").read(), "hand copy\n")      # the second run did not overwrite it
+
+    def test_no_calendar_token_is_a_failure_line_not_a_crash(self):
+        os.environ["AFA_GMAIL_DIR"] = self.home + "/nocreds"
+        self.addCleanup(os.environ.pop, "AFA_GMAIL_DIR", None)
+        ok, msg = H.refresh_calendar(self.cfg, self.now)
+        self.assertFalse(ok)
+        self.assertIn("NOT refreshed", msg)
+
+    def test_calendar_mode_runs_from_the_command_line_and_exits_1_on_failure(self):
+        env = dict(os.environ, HOME=self.home, AFA_GMAIL_DIR=self.home + "/nocreds")
+        r = subprocess.run([sys.executable, str(HERE.parent / "hours.py"), "calendar"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NOT refreshed", r.stdout)
+
+    def test_the_timer_script_runs_the_calendar_refresh_on_every_run(self):
+        sh = (HERE.parent / "openclaw_status_refresh.sh").read_text()
+        line = next(x for x in sh.splitlines() if x.startswith("(") and "hours.py\" calendar" in x)
+        self.assertNotIn("--if-due", line)                      # every run, not only Monday
 
 
 if __name__ == "__main__":
