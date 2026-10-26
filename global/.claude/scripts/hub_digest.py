@@ -14,6 +14,7 @@ No model calls and no Gmail (the client-mail poller already checks Gmail and que
     with the open client lines listed apart;
   - the roadmap issue: active arc, the Next 3 sessions, "Next session should";
   - the Jr Dev tracker's --digest lines (internship_status.py, 20 s limit; no section if the script is missing);
+  - last week's hours line that hours.py writes on Monday (~/.claude/state/hours-week.txt; no section when missing or older than 9 days);
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
     hub/scripts/model_quality_report.py (cached for an hour: the report takes ~15 s).
 
@@ -339,8 +340,20 @@ def internship_lines(script=None, timeout=20):
     return [l for l in _run([sys.executable, str(script), "--digest"], timeout=timeout).splitlines() if l.strip()]
 
 
+def hours_lines(path=None, now=None, max_age_days=9):
+    """The week's hours line that hours.py wrote on Monday (hours-week.txt); none when it is missing or older than a week and a bit."""
+    path = Path(path) if path else Path.home() / ".claude" / "state" / "hours-week.txt"
+    try:
+        age = (now or time.time()) - path.stat().st_mtime
+        if age > max_age_days * 86400:
+            return []
+        return [l for l in path.read_text(errors="replace").splitlines() if l.strip()]
+    except OSError:
+        return []
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
-                   report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None):
+                   report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None):
     sections = []
 
     if open_questions_error:
@@ -374,6 +387,8 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     sections.append(("Open client lines (the poller queued them; read the thread before an absorb lane)", cl or ["- none"]))
     if internship:
         sections.append(("Jr Dev", [f"- {one_line(l, 230)}" for l in internship[:4]]))
+    if hours:
+        sections.append(("Hours", [f"- {one_line(l, 300)}" for l in hours[:3]]))
     il = []
     for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "hub", "other"]:
         items = groups[g]
@@ -474,6 +489,7 @@ def main(argv=None):
     ap.add_argument("--report-hours", type=int, default=24)
     ap.add_argument("--strict", action="store_true",
                     help="treat the inputs as live state even with --roadmap-file (a live build is always strict)")
+    ap.add_argument("--hours-file", help="hours-week.txt to use instead of ~/.claude/state/hours-week.txt")
     ap.add_argument("--internship-file", help="internship_status.py --digest output to use instead of running it")
     ap.add_argument("--spend-file", help="lane_spend.py --json output to use instead of reading the live ledger")
     ap.add_argument("--alert-state", help="dispatch state .json to file the alert in (tests); default the live one")
@@ -525,9 +541,10 @@ def main(argv=None):
             internship = None
     elif not a.roadmap_file:
         internship = internship_lines()
+    hours = hours_lines(a.hours_file) if a.hours_file else (hours_lines() if not a.roadmap_file else None)
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
-                          open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship)
+                          open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours)
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)
