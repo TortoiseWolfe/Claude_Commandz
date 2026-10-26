@@ -39,6 +39,10 @@ timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "opencla
 # lock, ~1 minute, so it runs detached and never holds this task). It writes ~/.claude/state/hours-week.txt, which the hub digest shows.
 ( timeout 1500 python3 "$here/hours.py" week --if-due </dev/null >/dev/null 2>&1 & )
 
+# The hub knowledge graph (~/repos/graphify-out, private, untracked): restage the docs it is built from and, if any changed, re-extract only
+# those files with one headless Sonnet pass, at most once a day (an unchanged corpus costs about a second and no model call). Detached, own lock.
+[ -x "$HOME/repos/hub/scripts/hub-graph-refresh.sh" ] && ( timeout 1500 "$HOME/repos/hub/scripts/hub-graph-refresh.sh" </dev/null >/dev/null 2>&1 & )
+
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 # A live state that no longer parses (the roadmap text changed shape) makes the digest builder exit 3 with the reason on stderr (kept, not
