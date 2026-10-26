@@ -14,6 +14,7 @@ REPOS=(
   "TortoiseWolfe/harmonic-egg:$HOME/actions-runner-harmonic-egg"
   "TortoiseWolfe/Chattanooga-Digital:$HOME/actions-runner-chattanooga-digital"
   "TortoiseWolfe/Eduity:$HOME/actions-runner-eduity"
+  "TortoiseWolfe/ada-stair-generator:$HOME/actions-runner-ada-stair-generator"
 )
 state="$HOME/.claude/state/he-runner"
 mkdir -p "$state"
