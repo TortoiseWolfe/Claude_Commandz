@@ -29,7 +29,7 @@ cat >"$BIN/tmux" <<'STUB'
 # fake lane window "rl-lane": send-keys -l <text> types, C-m submits
 case "$1" in
   has-session) exit 0 ;;
-  list-windows) printf "%s\n" rl-lane q-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
+  list-windows) printf "%s\n" rl-lane sh-lane q-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
   capture-pane) cat "$FAKE_ST/pane" ;;
   send-keys)
     printf '%s\n' "${4:-}" >>"$FAKE_ST/keys.log"
@@ -386,5 +386,71 @@ assert_contains "$LAST_OUT" 'could not set pol-opus to sonnet' 'the recycle says
 grep -q $'\tmodel-switch-failed\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no model-switch-failed row'; ok
 if grep -q $'\tFAILED\t' "$HOME_T/.claude/state/lanes/recycle.log"; then fail 'a model-switch failure must not be logged as FAILED'; fi; ok
 rm -f "$ST/no-pane-line"
+
+# 26 Oct: lane.sh --send typed a hub message into scout-run-2 while it was at 163K, past its 128K line and mid-turn. Claude Code queued it and
+# the queued text blocked the watcher's recycle (the guard above failed safe). A lane past its line, or with a recycle under way, is not typed
+# into: the words go to hub-pending.md in its hand-off folder, the recycle starts, and the re-prime sends the fresh session to read the file.
+PEND="$HAND/hub-pending.md"
+shreset() { reset_fake; rm -f "$PEND" "$HOME_T/.claude/state/lanes/.recycle-sh-lane.tried"; rmdir "$HOME_T/.claude/state/lanes/.recycle-sh-lane.lock" 2>/dev/null || true; usage_rec "$1" >"$PROJ/old-sess.jsonl"; sed -i '/\tsh-lane\t/d' "$INDEX"; add_row sh-lane subscription old-sess; }
+wait_recycled() {  # wait up to 20s for the background recycle to log its row
+  local i; for i in $(seq 1 100); do grep -q $'\tsh-lane\trecycled\t' "$HOME_T/.claude/state/lanes/recycle.log" 2>/dev/null && return 0; sleep 0.2; done; return 1
+}
+shreset 130000
+FAKE_WRITE_HANDOFF=1 lane --send sh-lane 'please also merge the docs PR'
+assert_exit 0 "$LAST_RC" '--send to a lane past its line exits 0'
+assert_contains "$LAST_OUT" 'held for sh-lane' '--send says it held the text back'
+assert_contains "$LAST_OUT" "130K, past its 100K line" '--send names the context and the line'
+assert_contains "$LAST_OUT" "$PEND" '--send names the file it wrote'
+assert_contains "$LAST_OUT" 'started its recycle' '--send says it started the recycle'
+assert_contains "$(cat "$PEND")" 'please also merge the docs PR' 'hub-pending.md holds the text'
+wait_recycled || fail 'the recycle --send started never finished'; ok
+sent=(); while IFS= read -r l; do sent+=("$l"); done <"$ST/sent.log"
+assert_not_contains "$(cat "$ST/sent.log")" 'please also merge the docs PR' 'the held text was never typed into the lane'
+assert_contains "${sent[0]}" 'ready to recycle' 'the first thing typed is the hand-off request, not the text'
+case "${sent[${#sent[@]}-1]}" in *"then $PEND"*"delete that file"*) ok ;; *) fail "the re-prime sends the lane to hub-pending.md: ${sent[${#sent[@]}-1]}" ;; esac
+case "${sent[${#sent[@]}-1]}" in *"Read $HAND/prompt.md, then $HAND/handoff.md, then $PEND"*) ok ;; *) fail "read order is prompt, handoff, pending" ;; esac
+
+# A second --send while that recycle is under way (its lock is held) is held too, and starts no second recycle.
+shreset 60000
+mkdir "$HOME_T/.claude/state/lanes/.recycle-sh-lane.lock"
+lane --send sh-lane 'second thought'
+assert_exit 0 "$LAST_RC" '--send during a recycle exits 0'
+assert_contains "$LAST_OUT" 'a recycle is already under way' '--send says why it held the text'
+assert_contains "$(cat "$PEND")" 'second thought' 'the text waits in hub-pending.md'
+[ ! -s "$ST/sent.log" ] || fail "nothing is typed during a recycle: $(cat "$ST/sent.log")"; ok
+sleep 1; [ ! -s "$ST/sent.log" ] || fail 'a second recycle was started'; ok
+rmdir "$HOME_T/.claude/state/lanes/.recycle-sh-lane.lock"
+# Two held messages are both kept, in order.
+lane --send sh-lane 'third thought'
+rmdir "$HOME_T/.claude/state/lanes/.recycle-sh-lane.lock" 2>/dev/null || true
+[ "$(grep -c '^## ' "$PEND")" -ge 1 ] || fail 'hub-pending.md has no entry'; ok
+
+# Under its line, a lane is typed into as always: no file, no recycle.
+shreset 60000
+lane --send sh-lane 'a normal message'
+assert_exit 0 "$LAST_RC" '--send to a lane under its line exits 0'
+assert_contains "$(cat "$ST/sent.log")" 'a normal message' 'a lane under its line is typed into'
+[ ! -e "$PEND" ] || fail 'no hub-pending.md for a lane under its line'; ok
+assert_not_contains "$LAST_OUT" 'held for' 'nothing is held'
+
+# A lane recycled 3 times in the last 30 minutes is not recycled again by --send; the text is still held, and the output says so.
+shreset 130000
+for m in 25 15 5; do printf '%s\tsh-lane\trecycled\tfrom 120K (session a) to session b, line 128K\n' "$(date -Is -d "-$m min")" >>"$HOME_T/.claude/state/lanes/recycle.log"; done
+lane --send sh-lane 'is anyone there'
+assert_exit 0 "$LAST_RC" '--send to a thrashing lane exits 0'
+assert_contains "$LAST_OUT" 'recycled 3 times in the last 30 minutes' '--send says it did not start another recycle'
+assert_contains "$(cat "$PEND")" 'is anyone there' 'the text is in hub-pending.md'
+sleep 1; [ ! -s "$ST/sent.log" ] || fail "a thrashing lane is not recycled by --send: $(cat "$ST/sent.log")"; ok
+
+# A lane whose context cannot be read (no transcript yet) is typed into as before.
+shreset 130000; rm -f "$PROJ/old-sess.jsonl"
+lane --send sh-lane 'blind send'
+assert_contains "$(cat "$ST/sent.log")" 'blind send' 'an unreadable context is typed into as before'
+[ ! -e "$PEND" ] || fail 'no hub-pending.md when the context is unknown'; ok
+
+# --recycle with a hub-pending.md that is not there leaves the re-prime exactly as before, and --dry-run mentions the file.
+shreset 130000
+lane --dry-run --recycle sh-lane
+assert_contains "$LAST_OUT" 'hub-pending.md' '--recycle --dry-run says the re-prime reads held text'
 
 printf 'ok - %s checks passed\n' "$checks"
