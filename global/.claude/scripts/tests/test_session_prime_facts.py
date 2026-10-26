@@ -106,7 +106,7 @@ Old line.
 """
 
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, sys, shutil
+import json, os, re, sys, shutil
 d = os.environ["FAKE_GH_DIR"]
 a = sys.argv[1:]
 open(os.path.join(d, "calls.log"), "a").write(" ".join(a) + "\n")
@@ -125,7 +125,29 @@ elif cmd == "issue list":
 elif cmd == "pr list":
     out(open(os.path.join(d, "prs.json")).read())
 elif cmd == "issue view":
-    out(open(os.path.join(d, "issue.json")).read())
+    # 26 Oct: the GraphQL issue view with every comment returned 502/504 on the 248-comment roadmap. The script must not call it.
+    sys.stderr.write("HTTP 502: fake gh: issue view is not to be used\n"); sys.exit(1)
+elif a[0] == "api":
+    flaky = os.path.join(d, "api-flaky")  # a count of REST calls that fail with a 502 before one answers
+    if os.path.exists(flaky):
+        n = int(open(flaky).read())
+        if n > 0:
+            open(flaky, "w").write(str(n - 1))
+            sys.stderr.write("gh: HTTP 502\n"); sys.exit(1)
+    iss = json.load(open(os.path.join(d, "issue.json")))
+    path, _, query = a[1].partition("?")
+    base = re.match(r"repos/[^/]+/[^/]+/issues/7", path)
+    base = base.group(0) if base else None
+    if path == base:
+        out({"body": iss["body"], "updated_at": iss["updatedAt"], "created_at": iss["createdAt"], "comments": len(iss["comments"]), "title": "session-prime"})
+    elif base and path == base + "/comments":
+        q = dict(x.split("=") for x in query.split("&"))
+        if q.get("per_page") != "1":
+            sys.stderr.write("fake gh: only per_page=1 may be asked (never every comment)\n"); sys.exit(9)
+        i = int(q["page"]) - 1
+        out([{"created_at": iss["comments"][i]["createdAt"], "body": iss["comments"][i]["body"]}] if 0 <= i < len(iss["comments"]) else [])
+    else:
+        sys.stderr.write("fake gh: unhandled api " + a[1] + "\n"); sys.exit(9)
 elif cmd == "issue edit":
     shutil.copy(arg("--body-file"), os.path.join(d, "edited-body.md"))
 elif cmd == "issue comment":
@@ -303,7 +325,7 @@ class Cli(unittest.TestCase):
             {"number": 9, "title": "a merged pr", "createdAt": "2026-10-15T00:00:00Z", "closedAt": "2026-10-16T22:10:00Z", "mergedAt": "2026-10-16T22:10:00Z"}]))
         (self.lanes / "2026-10-16-lane-x").mkdir()
         (self.lanes / "2026-10-16-lane-x" / "report.md").write_text("# R\n\nLane x finished.\n")
-        self.env = dict(os.environ, PATH=f"{gh.parent}:{os.environ['PATH']}", FAKE_GH_DIR=str(self.d))
+        self.env = dict(os.environ, PATH=f"{gh.parent}:{os.environ['PATH']}", FAKE_GH_DIR=str(self.d), PRIME_GH_RETRY_SLEEP="0")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -340,6 +362,38 @@ class Cli(unittest.TestCase):
         self.assertNotIn("old commit", r.stdout)
         self.assertNotIn("Lanes reported", r.stdout)  # not the private hub: no lane or inbox facts
         self.assertEqual(json.loads((self.state / "o__r.json").read_text())["read_at"], "2026-10-16T20:30:00Z")
+
+    def test_the_issue_is_read_over_rest_and_only_the_last_comment_is_fetched(self):
+        # three comments: the last one's time sets the window, and no call pulls every comment or uses the GraphQL issue view
+        (self.d / "issue.json").write_text(json.dumps({
+            "body": BODY, "updatedAt": "2026-10-16T20:30:00Z", "createdAt": "2026-09-01T00:00:00Z",
+            "comments": [{"createdAt": "2026-09-10T00:00:00Z", "body": "a"}, {"createdAt": "2026-10-01T00:00:00Z", "body": "b"},
+                         {"createdAt": "2026-10-16T20:30:00Z", "body": "c"}]}))
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.calls()
+        self.assertIn("api repos/o/r/issues/7", calls)
+        self.assertIn("api repos/o/r/issues/7/comments?per_page=1&page=3", calls)
+        self.assertFalse([c for c in calls if c.startswith("issue view")], calls)
+        self.assertFalse([c for c in calls if "comments" in c and "per_page=1&page=" not in c], calls)
+        self.assertIn("2026-10-16T20:30:00Z", r.stdout)
+        self.assertEqual(json.loads((self.state / "o__r.json").read_text())["read_at"], "2026-10-16T20:30:00Z")
+
+    def test_an_issue_with_no_comments_uses_its_creation_time(self):
+        (self.d / "issue.json").write_text(json.dumps({"body": BODY, "updatedAt": "2026-10-16T20:30:00Z", "createdAt": "2026-10-16T20:00:00Z", "comments": []}))
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse([c for c in self.calls() if "/comments" in c], self.calls())
+        self.assertIn("2026-10-16T20:00:00Z", r.stdout)
+
+    def test_a_flaky_gateway_is_retried_and_a_dead_one_is_an_error(self):
+        (self.d / "api-flaky").write_text("2")
+        r = self.run_cli()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (self.d / "api-flaky").write_text("99")
+        r = self.run_cli()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("HTTP 502", r.stderr)
 
     def test_public_or_other_repos_never_carry_lane_or_inbox_facts(self):
         r = self.run_cli(repo="o/other")

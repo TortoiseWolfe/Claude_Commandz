@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -302,8 +303,37 @@ def sh(cmd, cwd=None, timeout=60, check=True):
     return r.stdout
 
 
+GH_TRIES = 3
+GH_RETRY_SLEEP = float(os.environ.get("PRIME_GH_RETRY_SLEEP", "2"))
+
+
 def gh_json(args, cwd=None):
-    return json.loads(sh(["gh"] + args, cwd=cwd) or "null")
+    """A read-only gh call, parsed. GitHub's GraphQL endpoint answers 502/504 or an empty body now and then (26 Oct: 6 of 7 tries on the
+    248-comment hub roadmap), so a failed or unparsable read is tried again before it is an error. Writes (issue edit/comment) never come here."""
+    for n in range(GH_TRIES):
+        try:
+            return json.loads(sh(["gh"] + args, cwd=cwd) or "null")
+        except (Fail, ValueError):
+            if n == GH_TRIES - 1:
+                raise
+            time.sleep(GH_RETRY_SLEEP * (n + 1))
+
+
+def rolling_issue(repo, num, cwd=None):
+    """-> (body, updatedAt, createdAt, createdAt of the last comment or None), all from REST. `gh issue view --json comments` pulls every
+    comment body through GraphQL and kept failing on the 248-comment hub roadmap; REST gives the issue's own fields and, with per_page=1
+    and page=<comment count>, only the last comment."""
+    path = f"repos/{repo}/issues/{num}"
+    for _ in range(3):
+        iss = gh_json(["api", path], cwd)
+        n = int(iss.get("comments") or 0)
+        if not n:
+            return iss.get("body") or "", iss["updated_at"], iss["created_at"], None
+        page = gh_json(["api", f"{path}/comments?per_page=1&page={n}"], cwd)
+        if page:
+            return iss.get("body") or "", iss["updated_at"], iss["created_at"], page[-1]["created_at"]
+        # a comment was deleted between the two reads: the count is stale, read the issue again
+    raise Fail(f"{repo}#{num}: the comment count kept changing while reading the last comment", 3)
 
 
 def tip_info(cwd):
@@ -326,8 +356,8 @@ def gather(args, now):
     if len(issues) > 1:
         raise Fail(f"more than one open next-session issue in {repo}: ask the user which is canonical", 5)
     num = issues[0]["number"]
-    iss = gh_json(["issue", "view", str(num), "--repo", repo, "--json", "body,updatedAt,createdAt,comments"], cwd)
-    last = iss["comments"][-1]["createdAt"] if iss["comments"] else iss["createdAt"]
+    body, updated_at, created_at, last_comment = rolling_issue(repo, num, cwd)
+    last = last_comment or created_at
     since = parse_ts(last)
     day = since.strftime("%Y-%m-%d")
 
@@ -354,7 +384,7 @@ def gather(args, now):
         f["lanes"] = lanes_reported(args.lanes_dir, since)
         f["inbox"] = ticked_since(inbox_text(args, since), since)
         f["tidy"] = tidy_summary(sh(["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=40, check=False))
-    return dict(repo=repo, num=num, machine=machine, body=iss["body"], updated_at=iss["updatedAt"], last_comment=last,
+    return dict(repo=repo, num=num, machine=machine, body=body, updated_at=updated_at, last_comment=last,
                 branch=branch, tip_sha=tip_sha, facts=f, private_hub=private_hub)
 
 
