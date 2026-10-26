@@ -507,6 +507,29 @@ out=$(sp_run)
 if [ "$(printf '%s\n' "$out" | grep -c '^spend:')" = 1 ] && printf '%s\n' "$out" | grep -q '^spend: lane third has cost \$41.00'; then
   echo "ok   a lane that crosses later in the day is named, the earlier ones are not repeated"
 else echo "FAIL spend later crossing: $out"; failures=$((failures + 1)); fi
+
+# Hub spend alarm: the hub past the hub limit today wakes the hub once per day.
+hub_sp_home="$TMP/hub-sp-home"; mkdir -p "$hub_sp_home/.claude/state/lanes"
+hub_sp_cmd="$TMP/fake-hub-spend.sh"; hub_sp_calls="$TMP/hub-spend-calls"; hub_sp_args="$TMP/hub-spend-args"; : > "$hub_sp_calls"
+cat > "$hub_sp_cmd" <<'SH'
+#!/usr/bin/env bash
+echo x >> "$HUB_SPEND_CALLS"; echo "$*" > "$HUB_SPEND_ARGS"
+printf '20.00\tlane-a\tsonnet\nhub\t80.50\topus+sonnet\ntotal\t100.50\t0.00\n'
+SH
+chmod +x "$hub_sp_cmd"
+hub_sp_run() { HOME="$hub_sp_home" OPENCLAW_RECONCILE=/nonexistent LANE_SPEND_CMD="$hub_sp_cmd" SPEND_CALLS="$hub_sp_calls" SPEND_ARGS="$hub_sp_args" \
+  HUB_SPEND_CALLS="$hub_sp_calls" HUB_SPEND_ARGS="$hub_sp_args" \
+  LANE_WATCH_SPEND_SECS=0 bash "$SCRIPT" --max-min 0 2>&1 || true; }
+out=$(HUB_SPEND_LIMIT=75 hub_sp_run)
+if printf '%s\n' "$out" | grep -q '^spend: the hub has cost \$80.50 API-equivalent today (opus+sonnet), past the \$75 line' \
+   && ! printf '%s\n' "$out" | grep -q '^spend: lane lane-a'; then
+  echo "ok   the hub past the limit wakes the hub (a lane under its limit does not)"
+else echo "FAIL hub spend wake: $out"; failures=$((failures + 1)); fi
+out=$(HUB_SPEND_LIMIT=75 hub_sp_run)
+if ! printf '%s\n' "$out" | grep -q '^spend: the hub' && [ "$out" = "heartbeat: nothing new in 0 min" ]; then
+  echo "ok   the hub already named today does not wake the hub again"
+else echo "FAIL hub spend named twice: $out"; failures=$((failures + 1)); fi
+
 printf '#!/usr/bin/env bash\nexit 1\n' > "$sp_cmd"; rm -f "$sp_home"/.claude/state/lanes/.spend-alarm-*
 out=$(sp_run)
 if [ "$out" = "heartbeat: nothing new in 0 min" ]; then echo "ok   a failing ledger read wakes nobody and stops nothing"; else echo "FAIL spend failure: $out"; failures=$((failures + 1)); fi
