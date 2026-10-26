@@ -15,6 +15,13 @@ printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/
 
 cat >"$BIN/sleep" <<'STUB'
 #!/usr/bin/env bash
+# A queued input that "runs" (FAKE_QUEUE=run) is logged as dequeued after a few sleeps: the lane works through its queue while lane.sh waits.
+if [ -f "$FAKE_ST/queue-run" ]; then
+  left=$(( $(cat "$FAKE_ST/queue-run") - 1 ))
+  if [ "$left" -le 0 ]; then
+    printf '{"type":"queue-operation","operation":"dequeue"}\n' >>"$FAKE_PROJ/$(cat "$FAKE_ST/cur").jsonl"; rm -f "$FAKE_ST/queue-run" "$FAKE_ST/queued"
+  else echo "$left" >"$FAKE_ST/queue-run"; fi
+fi
 exec /bin/sleep 0.02
 STUB
 cat >"$BIN/tmux" <<'STUB'
@@ -22,10 +29,14 @@ cat >"$BIN/tmux" <<'STUB'
 # fake lane window "rl-lane": send-keys -l <text> types, C-m submits
 case "$1" in
   has-session) exit 0 ;;
-  list-windows) printf "%s\n" rl-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
+  list-windows) printf "%s\n" rl-lane q-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
   capture-pane) cat "$FAKE_ST/pane" ;;
   send-keys)
-    if [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
+    printf '%s\n' "${4:-}" >>"$FAKE_ST/keys.log"
+    # Escape puts queued input back in the input line, which Claude Code logs as popAll (FAKE_QUEUE=stubborn: it does not)
+    if [ "${4:-}" = Escape ] && [ -f "$FAKE_ST/queued" ] && [ "${FAKE_QUEUE:-}" != stubborn ]; then
+      printf '{"type":"queue-operation","operation":"popAll","content":"queued text"}\n' >>"$FAKE_PROJ/$(cat "$FAKE_ST/cur").jsonl"; rm -f "$FAKE_ST/queued"
+    elif [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
     elif [ "${4:-}" = C-m ] && [ -s "$FAKE_ST/pending" ]; then
       python3 -I - "$FAKE_ST" "$FAKE_PROJ" "$(cat "$FAKE_ST/pending")" <<'PY'
 import json, os, sys
@@ -47,6 +58,12 @@ with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
 if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
     open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\nnext step: carry on\n")
+    if os.environ.get("FAKE_QUEUE"):
+        with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
+            f.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "queued text"}) + "\n")
+        open(os.path.join(st, "queued"), "w").close()
+        if os.environ["FAKE_QUEUE"] == "run":
+            open(os.path.join(st, "queue-run"), "w").write("5")
     if os.environ.get("FAKE_IDLE_AFTER") == "1":
         open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f \n")
 PY
@@ -74,7 +91,7 @@ usage_rec() {  # usage_rec <total-tokens>: one assistant turn whose context is t
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
-reset_fake() { rm -f "$ST"/pending "$ST"/sent.log "$HAND/handoff.md" "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+reset_fake() { rm -f "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
 add_row rl-lane subscription old-sess
@@ -220,6 +237,64 @@ FAKE_WRITE_HANDOFF=1 lane --recycle rk-fast
 reset_fake; echo sess-rk >"$ST/cur"
 FAKE_WRITE_HANDOFF=1 lane --recycle rk-lane
 [ "$(rk_last)" = 90 ] || fail "a lane that ran for two hours keeps its line (90K), got: $(rk_last)"; ok
+
+qreset() {  # a fresh q-lane row on old-sess (a recycle moves the lane's row to the new session) and an old transcript with no queue ops
+  reset_fake; usage_rec 130000 >"$PROJ/old-sess.jsonl"; add_row q-lane subscription old-sess
+}
+# 25 Oct, pokeys-site: input queued in the lane (typed mid-turn) survived /clear and reached the FRESH session, which wrote handoff.md and
+# stopped, under its line, with nothing to recycle it. A recycle now makes sure nothing is queued before it types /clear.
+qreset
+FAKE_QUEUE=run FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'queued input that runs by itself lets the recycle go on'
+assert_not_contains "$(cat "$ST/keys.log" 2>/dev/null)" Escape 'input that ran by itself is not popped with Escape'
+mapfile -t sent <"$ST/sent.log"; [ "${#sent[@]}" = 3 ] || fail "a drained queue still gives 3 typed messages, got ${#sent[@]}"; ok
+
+qreset
+FAKE_QUEUE=stuck LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'queued input that does not run is popped with Escape, then the recycle goes on'
+assert_contains "$(cat "$ST/keys.log")" Escape 'Escape is pressed for stuck queued input'
+assert_contains "$(cat "$ST/keys.log")" C-u 'the input line is cleared after Escape'
+esc="$(grep -n '^Escape$' "$ST/keys.log" | head -1 | cut -d: -f1)"; cm="$(grep -c '^C-m$' "$ST/keys.log")"
+[ -n "$esc" ] && [ "$cm" -ge 3 ] || fail "keys: Escape before the Enter that sends /clear ($esc, $cm Enters)"; ok
+mapfile -t sent <"$ST/sent.log"; [ "${sent[1]}" = /clear ] || fail "/clear follows the drain, got: ${sent[1]}"; ok
+
+qreset
+FAKE_QUEUE=stubborn LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'input that cannot be cleared fails the recycle'
+assert_contains "$LAST_OUT" 'still queued' 'the failure says input is still queued'
+assert_contains "$LAST_OUT" 'NOT cleared' 'the failure says the lane kept its context'
+assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear while input is queued'
+grep -q $'\tFAILED\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has a FAILED row for the stuck queue'; ok
+[ -d "$HOME_T/.claude/state/lanes/.recycle-q-lane.lock" ] && fail 'recycle lock left behind after a stuck queue'; ok
+qreset
+
+# The previous handoff.md is kept as handoff-prev<N>.md before the request (handoff-prev.md counts as 1), newest 5 kept.
+qreset; echo "first handoff" >"$HAND/handoff.md"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a recycle with an old handoff.md'
+[ "$(cat "$HAND/handoff-prev1.md" 2>/dev/null || cat "$HAND/handoff-prev2.md" 2>/dev/null)" = "first handoff" ] || fail 'the old handoff.md is kept as a handoff-prev file'; ok
+qreset; for i in 2 3 4 5 6 7 8; do echo "prev $i" >"$HAND/handoff-prev$i.md"; touch -d "-$((10 - i)) hours" "$HAND/handoff-prev$i.md"; done
+echo "prev 1" >"$HAND/handoff-prev.md"; touch -d '-9 hours' "$HAND/handoff-prev.md"; echo "current handoff" >"$HAND/handoff.md"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a recycle with many handoff-prev files'
+[ "$(cat "$HAND/handoff-prev9.md")" = "current handoff" ] || fail "the handoff being replaced becomes handoff-prev9.md (one past the highest), got: $(ls "$HAND")"; ok
+[ "$(ls "$HAND"/handoff-prev*.md | wc -l)" = 5 ] || fail "only the newest 5 handoff-prev files are kept, got: $(ls "$HAND")"; ok
+[ -e "$HAND/handoff-prev9.md" ] && [ -e "$HAND/handoff-prev8.md" ] && [ -e "$HAND/handoff-prev5.md" ] && [ ! -e "$HAND/handoff-prev4.md" ] || fail "the oldest are the ones dropped: $(ls "$HAND")"; ok
+qreset; echo "keep me" >"$HAND/handoff-prev3.md"; rm -f "$HAND/handoff.md"
+FAKE_WRITE_HANDOFF=1 LANE_HANDOFF_PREV_KEEP=2 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a first recycle with no handoff.md yet'
+[ ! -e "$HAND/handoff-prev4.md" ] || fail 'no handoff-prev made from a handoff.md that did not exist'; ok
+
+# The request asks for a handoff a fresh session can use alone, and the re-prime sends it to prompt.md and handoff.md only.
+qreset
+lane --dry-run --recycle q-lane
+assert_contains "$LAST_OUT" 'the next concrete step' 'the handoff request asks for the next concrete step'
+assert_contains "$LAST_OUT" 'what is in flight' 'the handoff request asks for what is in flight'
+assert_contains "$LAST_OUT" 'what to re-arm' 'the handoff request asks for what to re-arm'
+assert_contains "$LAST_OUT" 'do not send the next session to read it' 'the request keeps handoff-prev out of the next session'
+assert_contains "$LAST_OUT" 'ignore it' 'the re-prime tells a fresh session to ignore a leftover request'
+assert_contains "$LAST_OUT" '1b. keep the current handoff.md' 'the dry run shows the rotation step'
+assert_contains "$LAST_OUT" '3b. make sure no input is queued' 'the dry run shows the queue step'
 
 # Headless lanes have no window to recycle; a recycle already running blocks a second.
 lane --recycle cx-lane

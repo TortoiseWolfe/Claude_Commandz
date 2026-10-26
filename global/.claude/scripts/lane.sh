@@ -1086,13 +1086,16 @@ if [ "$mode" = recycle ]; then
     [ "$rk_next" -le "$rk_ceiling" ] || rk_next=$(( rk_ceiling > rk_now ? rk_ceiling : rk_now ))
   fi
   target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
-  msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff: what is done, what is in flight, the next step, and what to re-arm (timers, background jobs, watchers). Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md."
-  msg_reprime="Hub: your context was cleared (recycle, not a restart). Read $p, then $handoff, then carry on from the next step it names and re-arm what it lists. Your hand-off folder is unchanged: $hand."
+  rid="$(date +%s)"   # marks this recycle's request and re-prime, so a leftover copy of the request in a fresh session is recognisable
+  msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
+  msg_reprime="Hub: your context was cleared (recycle $rid, not a restart). Read $p, then $handoff, and nothing else before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one."
   if [ "$dry" = 1 ]; then
     echo "recycle $name ($dir, context $ctxk):"
     echo "  1. wait only for any dialog on its screen to clear (up to ${LANE_RECYCLE_IDLE_SECS:-300}s); a lane mid-turn is not waited for"
+    echo "  1b. keep the current handoff.md as handoff-prev<N>.md and delete all but the newest ${LANE_HANDOFF_PREV_KEEP:-5} handoff-prev files"
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
+    echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
     echo "  4. send: /clear"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime"
@@ -1132,8 +1135,76 @@ if [ "$mode" = recycle ]; then
     return 1
   }
   stamp() { stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none; }
+  # Keep the hand-off the lane is about to overwrite as handoff-prev<N>.md (handoff-prev.md counts as 1) and keep only the newest few: the
+  # pokeys-site lane left 21 of them (25 Oct) and its fresh sessions read them, which is what filled a 128K line again within minutes.
+  rotate_handoff_prev() {
+    local f n max=1 keep="${LANE_HANDOFF_PREV_KEEP:-5}"
+    if [ -s "$handoff" ]; then
+      for f in "$hand"/handoff-prev*.md; do
+        [ -e "$f" ] || continue
+        n="${f##*/handoff-prev}"; n="${n%.md}"; [ -n "$n" ] || n=1
+        [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$max" ] && max="$n"
+      done
+      [ -e "$hand/handoff-prev.md" ] || [ "$max" -gt 1 ] || max=0
+      cp -p "$handoff" "$hand/handoff-prev$((max + 1)).md" || return 1
+    fi
+    ls -t "$hand"/handoff-prev*.md 2>/dev/null | tail -n +"$((keep + 1))" | while IFS= read -r f; do rm -f -- "$f"; done
+    return 0
+  }
+  # Input queued in the lane (typed while it was mid-turn: our own request, a task notification, anything) would run, or sit in the input
+  # line, after /clear and reach the FRESH session (25 Oct, pokeys-site: a re-primed lane at 95K, under its 128K line, wrote handoff.md and
+  # stopped; nothing recycled it and it sat idle seven hours). Claude Code logs each queued input in the transcript: enqueue, then remove or
+  # dequeue when it runs and popAll when Escape puts it back in the input line. queue_pending counts what is still queued.
+  queue_pending() {
+    [ -n "${id:-}" ] && [ "$id" != - ] || { echo 0; return; }
+    python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")/$id.jsonl" <<'PY'
+import json, sys
+q = []
+try:
+    with open(sys.argv[1], "rb") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - 4_000_000))
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+except OSError:
+    print(0); sys.exit(0)
+for line in lines:
+    if '"queue-operation"' not in line[:80]:
+        continue
+    try:
+        o = json.loads(line)
+    except ValueError:
+        continue
+    op, c = o.get("operation"), o.get("content")
+    if op == "enqueue":
+        q.append(c)
+    elif op == "remove":
+        if c in q: q.remove(c)
+    elif op == "dequeue":
+        if q: q.pop(0)
+    elif op == "popAll":
+        q = []
+print(len(q))
+PY
+  }
+  # Wait for queued input to run (a lane that is idle runs it at once), and if it is still there after LANE_RECYCLE_QUEUE_SECS press Escape
+  # once, which puts it back in the input line (logged as popAll), then clear the line. Returns 1 when something is still queued.
+  drain_queue() {
+    local end=$(( $(date +%s) + ${LANE_RECYCLE_QUEUE_SECS:-120} )) n
+    while :; do
+      n="$(queue_pending)"
+      if [ "$n" = 0 ] && lane_idle; then return 0; fi
+      [ "$(date +%s)" -lt "$end" ] || break
+      sleep 2
+    done
+    [ "$n" != 0 ] || return 1   # only a busy lane: the caller waits for idle itself
+    lane_idle || return 1
+    tmux send-keys -t "$SESSION:$name" Escape; sleep 1
+    tmux send-keys -t "$SESSION:$name" C-u; sleep 1
+    [ "$(queue_pending)" = 0 ]
+  }
 
   wait_no_dialog "${LANE_RECYCLE_IDLE_SECS:-300}" || rfail "a dialog stayed on the lane's screen for ${LANE_RECYCLE_IDLE_SECS:-300}s, so the hand-off request was not typed"
+  rotate_handoff_prev || rfail "could not keep the old handoff.md as a handoff-prev file in $hand"
   before="$(stamp)"; t0="$(date +%s)"
   send_to "$name" "$msg_handoff" >/dev/null || rfail "the hand-off request did not reach the lane"
   end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} )); written=0
@@ -1145,6 +1216,7 @@ if [ "$mode" = recycle ]; then
     sleep 2
   done
   [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
+  drain_queue || rfail "input was still queued in the lane after ${LANE_RECYCLE_QUEUE_SECS:-120}s and Escape did not clear it, so /clear would have carried it into the fresh session; the lane was NOT cleared"
 
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
   cpane=""

@@ -34,6 +34,12 @@
 # to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
 # 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
 # LANE_RECYCLE_RETRY_SECS (default 300), counted across re-armed watchers (.recycle-<lane>.tried). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
+# A lane that keeps refilling its line is not recycled forever: when it has been recycled LANE_THRASH_COUNT (default 3) times inside LANE_THRASH_SECS
+# (default 1800), the watcher stops recycling it and wakes the hub ONCE per episode with one line (lane, count, times). 25-26 Oct: pokeys-site
+# was recycled every 5 to 7 minutes for hours because each fresh session loaded about 90K of context before it did anything.
+# A lane that wrote handoff.md, said "ready to recycle" and was not recycled (its context is under its line, so nothing else will) wakes the hub
+# once per handoff.md after LANE_ORPHAN_SECS (default 600) of sitting idle. 26 Oct 1:30 AM: a queued copy of the request reached a freshly
+# primed lane at 95K; it wrote handoff.md, stopped, and sat idle until 8:28 AM.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 set -u
@@ -83,6 +89,61 @@ recycle_due() {
   c=$("$lane_sh" --ctx "$l" 2>/dev/null)
   [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$(recycle_line "$l")" ]
 }
+# Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
+# recycled thrash_count times within thrash_secs by the rows of the recycle log. The marker (.thrash-<lane>) holds the newest recycled stamp
+# of the episode it named, so the same episode is not named twice but a later one is.
+thrash_count=${LANE_THRASH_COUNT:-3}
+thrash_secs=${LANE_THRASH_SECS:-1800}
+recycle_thrash() {
+  local l=$1 now ts e newest='' times='' n=0 mark
+  [ -f "$recycle_log" ] || return 1
+  now=$(date +%s)
+  while IFS= read -r ts; do
+    e=$(date -d "$ts" +%s 2>/dev/null) || continue
+    [ $(( now - e )) -le "$thrash_secs" ] || continue
+    n=$(( n + 1 )); newest=$ts
+    times+="${times:+, }$(date -d "@$e" '+%-I:%M %p')"
+  done < <(command grep -a $'\trecycled\t' "$recycle_log" | awk -F'\t' -v n="$l" '$2 == n {print $1}')
+  [ "$n" -ge "$thrash_count" ] || return 1
+  mark="$recycle_dir/.thrash-$l"
+  if [ "$(cat "$mark" 2>/dev/null)" != "$newest" ]; then
+    printf '%s' "$newest" > "$mark"
+    echo "thrash: lane $l was recycled $n times in $(( thrash_secs / 60 )) min ($times); not recycling it again until that window passes. Each fresh session fills its line again, so what it loads at the start (prompt.md, handoff.md, files it re-reads) is too big for the line: read them and shrink them, or recycle it by hand with lane.sh --recycle $l."
+    hit=1; other=1
+  fi
+  return 0
+}
+
+# Unseen handoff. orphan_check <lane> <pane> (no subshell: it sets hit and other) names a lane that wrote handoff.md after its last recycle,
+# said "ready to recycle", and has sat idle since, with its context under its line so recycle_due will never fire. Once per handoff.md.
+orphan_secs=${LANE_ORPHAN_SECS:-600}
+orphan_check() {
+  local l=$1 pane=$2 rep dir h hm now last ts e c k mark
+  recycle_locked "$l" && return 0
+  printf '%s\n' "$pane" | dialog_waiting && return 0
+  command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 0   # still working
+  rep=$(report_of "$l"); [ -n "$rep" ] || return 0
+  dir=$(dirname "$rep"); h="$dir/handoff.md"
+  hm=$(stat -c %Y "$h" 2>/dev/null) || return 0
+  now=$(date +%s)
+  [ $(( now - hm )) -ge "$orphan_secs" ] || return 0
+  last=0
+  if [ -f "$recycle_log" ]; then
+    ts=$(command grep -a $'\trecycled\t' "$recycle_log" | awk -F'\t' -v n="$l" '$2 == n {t = $1} END {print t}')
+    [ -z "$ts" ] || { e=$(date -d "$ts" +%s 2>/dev/null) && last=$e; }
+  fi
+  [ "$hm" -gt "$last" ] || return 0
+  tmux capture-pane -p -S -120 -t "lanes:$l" 2>/dev/null | command grep -aqi 'ready to recycle' || return 0
+  c=$("$lane_sh" --ctx "$l" 2>/dev/null); k=$(recycle_line "$l")
+  [[ "$c" =~ ^[0-9]+$ ]] || return 0
+  [ "$c" -lt "$k" ] || return 0   # over its line the recycle path takes it
+  mark="$recycle_dir/.orphan-$l"
+  [ "$(cat "$mark" 2>/dev/null)" != "$hm" ] || return 0
+  printf '%s' "$hm" > "$mark"
+  echo "handoff: lane $l wrote handoff.md at $(date -d "@$hm" '+%-I:%M %p') but was never recycled (context ${c}K, under its ${k}K line) and sits idle; recycle it with lane.sh --recycle $l or tell it to carry on. Named once for this handoff."
+  hit=1; other=1
+}
+
 # New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
 recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
 # Sets recycle_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
@@ -315,8 +376,12 @@ while :; do
         # 153K with no recycle because the check sat in the else-branch of the turn checks, and a lane answering Monitor events ends a
         # turn nearly every poll, so almost every pass took a turn branch and skipped it.)
         if [ "$(recycle_tried_age "$l")" -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
-          date +%s > "$recycle_dir/.recycle-$l.tried"
-          setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
+          if ! recycle_thrash "$l"; then   # a lane recycled again and again is named to the hub instead
+            date +%s > "$recycle_dir/.recycle-$l.tried"
+            setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
+          fi
+        else
+          orphan_check "$l" "$pane"
         fi
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
           seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
