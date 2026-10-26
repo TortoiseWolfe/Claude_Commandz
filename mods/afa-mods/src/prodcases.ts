@@ -131,12 +131,9 @@ export const FORWARDERS: [string, string, string | null][] = [
 export const DEPLOY_DIR = `${HOME}/repos/Chattanooga-Digital`
 export const DEPLOY_READS: [string, string][] = [
   ['bash with a bare name reads it from the folder', 'cd ~/repos/Chattanooga-Digital/scripts && bash portainer-deploy.sh status --prod'],
-  ['a source followed by a plain command', 'source scripts/portainer-deploy.sh --prod status; echo done'],
-  ['a source, find_service_container, container_exec', `source scripts/portainer-deploy.sh --prod status; auth; cid="$(find_service_container "\${STACK_NAME}_php")"; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
   ['timeout + deployed-commit', 'timeout 120 scripts/portainer-deploy.sh deployed-commit --prod'],
   ['timeout + drift', 'timeout 120 scripts/portainer-deploy.sh drift --prod'],
   ['timeout + status', 'timeout 120 scripts/portainer-deploy.sh status --prod'],
-  ['source + status, then the functions it defined', `source scripts/portainer-deploy.sh --prod status >/dev/null 2>&1; auth; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
   ['the flag before the action', 'scripts/portainer-deploy.sh --prod status'],
   ['no action (the script defaults to status)', 'scripts/portainer-deploy.sh --prod'],
   ['bash in front, a pipe into tail', 'bash scripts/portainer-deploy.sh status --prod 2>&1 | tail -20'],
@@ -147,10 +144,14 @@ export const DEPLOY_READS: [string, string][] = [
   ['a full path', `${DEPLOY_DIR}/scripts/portainer-deploy.sh status --prod`],
   ['a ~ path', 'timeout 120 ~/repos/Chattanooga-Digital/scripts/portainer-deploy.sh status --prod'],
   ['a cd to the repo first', 'cd ~/repos/Chattanooga-Digital && timeout 120 scripts/portainer-deploy.sh status --prod'],
-  ['a dot-source', '. scripts/portainer-deploy.sh --prod status'],
 ]
-// A sourced script leaves its functions callable: after the read-only call, only its read helpers pass. A bare script name is a PATH lookup.
+// 26 Oct (hub): a sourced script leaves its functions callable (container_exec with any command, api, cmd_delete), so source and dot-source stay held
+// whatever follows, and so does anything unusual before them. A bare script name is a PATH lookup.
 export const DEPLOY_SOURCED_HELD: [string, string][] = [
+  ['a source followed by a plain command', 'source scripts/portainer-deploy.sh --prod status; echo done'],
+  ['a source, find_service_container, container_exec', `source scripts/portainer-deploy.sh --prod status; auth; cid="$(find_service_container "\${STACK_NAME}_php")"; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
+  ['source + status, then the functions it defined', `source scripts/portainer-deploy.sh --prod status >/dev/null 2>&1; auth; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
+  ['a dot-source', '. scripts/portainer-deploy.sh --prod status'],
   ['a write function after a source', 'source scripts/portainer-deploy.sh --prod status; cmd_delete'],
   ['a write function after a source, && joined', 'source scripts/portainer-deploy.sh --prod status && set_service_replicas php 0'],
   ['api with a DELETE after a dot-source', '. scripts/portainer-deploy.sh --prod status; auth; api -X DELETE http://x/api/stacks/1'],
