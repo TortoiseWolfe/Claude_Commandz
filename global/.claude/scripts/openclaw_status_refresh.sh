@@ -27,6 +27,11 @@ timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || ec
 # or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
 timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
 
+# Recycle any lane past its own line, so recycling never depends on the hub having a watcher armed (26 Oct: between two hub sessions
+# nothing was armed and scout-run-2 went 128K to 163K and compacted on its own). The same decision as lane_watch.sh's poll loop, the same
+# thrash and queued-input guards, silent: it wakes nobody. The recycle itself runs detached (it takes minutes).
+timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 || echo "openclaw_status_refresh: lane recycle pass reports a problem" >&2
+
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
 
