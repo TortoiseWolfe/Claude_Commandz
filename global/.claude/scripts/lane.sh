@@ -951,7 +951,54 @@ PY
   echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
   return 1
 }
-if [ "$mode" = send ]; then send_to "$@"; exit $?; fi
+# send_held <name> <text...>: a lane past its recycle line, or with a recycle already under way, is not typed into. Text typed mid-turn queues
+# in Claude Code, and queued input is what --recycle must not carry into the fresh session (26 Oct: a hub message typed into scout-run-2 at
+# 163K, past its 128K line, queued and blocked the watcher's recycle, which failed safe). So the words go to hub-pending.md in the lane's
+# hand-off folder, the recycle starts (unless one is under way or the lane is recycling too often), and the re-prime message sends the fresh
+# session to read the file. Returns 0 when it held the text (and says what it did), 1 when the lane should be typed into as usual.
+send_held() {
+  local name="$1"; shift
+  local text="$*" row d n dir m b p rep id st eff conn rk ent hand pend lockd ctxk line locked=0 past=0 rlog cnt
+  row="$(index_row "$name")"; [ -n "$row" ] || return 1
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  is_headless_billing "${b:-}" && return 1
+  case "${b:-subscription}" in codex|copilot|agy|opencode) return 1 ;; esac
+  [ -n "${rep:-}" ] && [ -z "$(find "$(dirname "$rep")/out.log" -maxdepth 0 2>/dev/null)" ] || return 1
+  tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" || return 1
+  lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
+  if [ -d "$lockd" ] && [ -z "$(find "$lockd" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then locked=1; fi
+  ctxk="?"
+  if [ -n "${id:-}" ] && [ "$id" != - ]; then
+    id="$(follow_session "$name" "$dir" "$id" "${st:-0}")"
+    ctxk="$(ctx_k "$dir" "$id")"; ctxk="${ctxk%K}"
+  fi
+  line="$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")"
+  [[ "$ctxk" =~ ^[0-9]+$ ]] && [ "$ctxk" -ge "$line" ] && past=1
+  [ "$past" = 1 ] || [ "$locked" = 1 ] || return 1
+  hand="$(dirname "$rep")"; pend="$hand/hub-pending.md"
+  mkdir -p "$hand"
+  printf '## %s (typed with lane.sh --send while you were past your recycle line)\n%s\n\n' "$(date '+%-I:%M %p')" "$text" >>"$pend"
+  rlog="$HOME/.claude/state/lanes/recycle.log"
+  cnt=0
+  if [ -f "$rlog" ]; then
+    cnt="$(command grep -a $'\trecycled\t' "$rlog" | awk -F'\t' -v n="$name" -v now="$(date +%s)" -v w="${LANE_THRASH_SECS:-1800}" '$2 == n { cmd = "date -d \"" $1 "\" +%s"; cmd | getline t; close(cmd); if (now - t <= w) c++ } END { print c + 0 }')"
+  fi
+  if [ "$locked" = 1 ]; then
+    echo "held for $name: a recycle is already under way, so I did not type into its box. Your text is in $pend and the re-prime message sends it there to read it."
+  elif [ "$cnt" -ge "${LANE_THRASH_COUNT:-3}" ]; then
+    echo "held for $name: it is at ${ctxk}K, past its ${line}K line, but it was recycled $cnt times in the last $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes so I did not start another. Your text is in $pend; it is read at the next recycle (lane.sh --recycle $name), or tell the lane to read it."
+  else
+    date +%s >"$HOME/.claude/state/lanes/.recycle-$name.tried"
+    setsid nohup timeout 1500 "$(readlink -f "${BASH_SOURCE[0]}")" --recycle "$name" >>"$HOME/.claude/state/lanes/recycle.out" 2>&1 </dev/null &
+    echo "held for $name: it is at ${ctxk}K, past its ${line}K line, so I did not type into its box (queued text would block its recycle). Your text is in $pend; I started its recycle, and its re-prime message tells it to read that file."
+  fi
+  return 0
+}
+if [ "$mode" = send ]; then
+  [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; exit 1; }
+  send_held "$@" && exit 0
+  send_to "$@"; exit $?
+fi
 
 # switch_model <name> <model>: type /model into a running lane, put back the user default, and move the lane's index row to the new model.
 # Claude Code's /model also saves the choice as the USER default model, which moved the hub's own default to sonnet on 21 Oct, so read the
@@ -1088,7 +1135,12 @@ if [ "$mode" = recycle ]; then
   target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
   rid="$(date +%s)"   # marks this recycle's request and re-prime, so a leftover copy of the request in a fresh session is recognisable
   msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
-  msg_reprime="Hub: your context was cleared (recycle $rid, not a restart). Read $p, then $handoff, and nothing else before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one."
+  build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
+    local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
+    [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one."
+  }
+  msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
     echo "recycle $name ($dir, context $ctxk):"
     echo "  1. wait only for any dialog on its screen to clear (up to ${LANE_RECYCLE_IDLE_SECS:-300}s); a lane mid-turn is not waited for"
@@ -1098,7 +1150,7 @@ if [ "$mode" = recycle ]; then
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
     echo "  4. send: /clear"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
-    echo "  5. send: $msg_reprime"
+    echo "  5. send: $msg_reprime (plus, when $hand/hub-pending.md exists by then, the sentence that sends the lane to read it: words lane.sh --send held back while the lane was past its line)"
     echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
@@ -1241,6 +1293,7 @@ PY
       echo "warning: could not set $name to $target_model after the recycle; it is still on $m" >&2
     fi
   fi
+  msg_reprime="$(build_reprime)"   # a --send that arrived while the recycle ran has left hub-pending.md by now
   send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
 
   newid=""

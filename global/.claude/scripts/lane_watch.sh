@@ -2,6 +2,7 @@
 # Wake the hub when a lane has something to report, so Jonathan never has to ask for progress.
 #
 #   lane_watch.sh [--max-min N] [--check 'cmd'] [<lane-name>...]
+#   lane_watch.sh --recycle-once        one silent recycle pass over every live lane, then exit (the 15-minute scheduled task)
 #
 # Exits (printing one line per event) as soon as any of these happens:
 #   - openclaw_dispatch.py open lists an unanswered receptionist question, or a new one is filed. A burst of questions wakes the
@@ -95,7 +96,7 @@ recycle_due() {
 thrash_count=${LANE_THRASH_COUNT:-3}
 thrash_secs=${LANE_THRASH_SECS:-1800}
 recycle_thrash() {
-  local l=$1 now ts e newest='' times='' n=0 mark
+  local l=$1 quiet=${2:-} now ts e newest='' times='' n=0 mark
   [ -f "$recycle_log" ] || return 1
   now=$(date +%s)
   while IFS= read -r ts; do
@@ -105,6 +106,7 @@ recycle_thrash() {
     times+="${times:+, }$(date -d "@$e" '+%-I:%M %p')"
   done < <(command grep -a $'\trecycled\t' "$recycle_log" | awk -F'\t' -v n="$l" '$2 == n {print $1}')
   [ "$n" -ge "$thrash_count" ] || return 1
+  [ "$quiet" != quiet ] || return 0   # the scheduled pass only holds back: naming it is left to a watcher the hub has armed
   mark="$recycle_dir/.thrash-$l"
   if [ "$(cat "$mark" 2>/dev/null)" != "$newest" ]; then
     printf '%s' "$newest" > "$mark"
@@ -142,6 +144,19 @@ orphan_check() {
   printf '%s' "$hm" > "$mark"
   echo "handoff: lane $l wrote handoff.md at $(date -d "@$hm" '+%-I:%M %p') but was never recycled (context ${c}K, under its ${k}K line) and sits idle; recycle it with lane.sh --recycle $l or tell it to carry on. Named once for this handoff."
   hit=1; other=1
+}
+
+# The recycle decision for one lane, shared by the poll loop and the scheduled pass (--recycle-once). recycle_pass <lane> <pane> [quiet]
+# returns 0 when the lane is due: it started `lane.sh --recycle` in the background, or it is recycling too often and the thrash guard held
+# it back (named to the hub unless quiet). It returns 1 when the lane is not due, was tried a moment ago, or has a recycle under way.
+recycle_pass() {
+  local l=$1 pane=$2 quiet=${3:-}
+  [ "$(recycle_tried_age "$l")" -ge "$recycle_retry" ] || return 1
+  printf '%s\n' "$pane" | recycle_due "$l" || return 1
+  recycle_thrash "$l" "$quiet" && return 0   # a lane recycled again and again is named to the hub instead
+  date +%s > "$recycle_dir/.recycle-$l.tried"
+  setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 </dev/null &
+  return 0
 }
 
 # New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
@@ -235,9 +250,10 @@ stale_note() {
 }
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
-max=45; check=''
+max=45; check=''; recycle_once=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --recycle-once) recycle_once=1; shift ;;
     --max-min) max=$2; shift 2 ;;
     --check) check=$2; shift 2 ;;
     *) break ;;
@@ -272,6 +288,18 @@ refresh_watched() { # no names given: add the lanes that started since the last 
     [ "$known" = 1 ] || { lanes+=("$n"); watch_lane "$n" fresh; }
   done < <(live_lanes)
 }
+# --recycle-once: the scheduled pass (openclaw_status_refresh.sh runs it from the 15-minute Windows task). One look at every live lane, the same
+# recycle decision as the poll loop (its own line, no dialog, no recycle under way, the retry spacing, the thrash guard), then exit. It wakes
+# nobody and prints nothing: a recycle that fails is a FAILED row in recycle.log for whichever watcher is armed. It exists because the hub
+# arms a watcher only while a session is open: 26 Oct, between two hub sessions nothing was armed and scout-run-2 went 128K to 163K and
+# compacted on its own.
+if [ "$recycle_once" = 1 ]; then
+  while read -r l; do
+    [ -n "$l" ] || continue
+    recycle_pass "$l" "$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null)" quiet || true
+  done < <(live_lanes)
+  exit 0
+fi
 if [ "$auto" = 1 ]; then
   lanes=()
   while read -r n; do [ -n "$n" ] && { lanes+=("$n"); watch_lane "$n"; }; done < <(live_lanes)
@@ -375,12 +403,7 @@ while :; do
         # The recycle check comes BEFORE the end-of-turn checks and does not depend on them. (21 Oct 2:16-2:25 PM: coop-site went 100K to
         # 153K with no recycle because the check sat in the else-branch of the turn checks, and a lane answering Monitor events ends a
         # turn nearly every poll, so almost every pass took a turn branch and skipped it.)
-        if [ "$(recycle_tried_age "$l")" -ge "$recycle_retry" ] && printf '%s\n' "$pane" | recycle_due "$l"; then
-          if ! recycle_thrash "$l"; then   # a lane recycled again and again is named to the hub instead
-            date +%s > "$recycle_dir/.recycle-$l.tried"
-            setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 &
-          fi
-        else
+        if ! recycle_pass "$l" "$pane"; then
           orphan_check "$l" "$pane"
         fi
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
