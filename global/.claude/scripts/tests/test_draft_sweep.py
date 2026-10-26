@@ -131,6 +131,13 @@ class Inbound(SweepBase):
         self.assertIn("the note text", base64.urlsafe_b64decode(saved[0]["raw"] + "==").decode())
         self.assertLess(self.fake.calls.index(("GET", "/drafts/r-1")), self.fake.calls.index(("DELETE", "/drafts/r-1")))
 
+    def test_archive_is_owner_only(self):
+        self.fake.add("r-1", "[MUSE>CC] done thing", 5, body="the note text")
+        self.mark("r-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.sweep_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.sweep_dir / "2027-01-15.jsonl").stat().st_mode & 0o777, 0o600)
+
     def test_message_id_in_processed_file_counts(self):
         self.fake.add("r-1", "[NCC-74656>NX-01] tower note", 5, mid="mm1")
         self.mark("mm1")

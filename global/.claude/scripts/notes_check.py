@@ -400,11 +400,13 @@ def decide(rec, processed, now, cache, owner):
 
 def _archive(did, mid, rec, sweep_dir, now):
     d = gmail_api._api_retry("GET", f"/drafts/{did}", {"format": "raw"})
-    os.makedirs(sweep_dir, exist_ok=True)
+    os.makedirs(sweep_dir, mode=0o700, exist_ok=True)
+    os.chmod(sweep_dir, 0o700)  # the archive holds raw mail: owner-only
     path = os.path.join(sweep_dir, time.strftime("%Y-%m-%d", time.localtime(now)) + ".jsonl")
     line = json.dumps({"draft_id": did, "message_id": mid, "subject": rec["subject"], "date": rec["date"],
                        "raw": (d.get("message") or {}).get("raw", "")})
-    with open(path, "a", encoding="utf-8") as f:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(line + "\n")
         f.flush()
         os.fsync(f.fileno())
