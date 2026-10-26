@@ -1,0 +1,38 @@
+{
+  "name": "pr-123",
+  "baseUrl": "http://localhost:3000",
+  "title": "Short title of the change (optional, for the result file)",
+  "viewport": {"width": 1280, "height": 800},
+  "gap": 0.7,
+  "runner": {
+    "network": "host",
+    "mounts": [{"host": "~/path/to/the/app/checkout", "container": "/app", "ro": true}],
+    "timeoutSec": 600
+  },
+  "setup": {"module": "hooks.cjs", "export": "setup"},
+  "cleanup": {"module": "hooks.cjs"},
+  "start": {"path": "/", "waitFor": {"css": "main"}, "settleMs": 1000},
+  "steps": [
+    {
+      "say": "One or two plain sentences, as you would say them out loud. This is the narration and, unless caption is set, the on-screen caption.",
+      "caption": "Optional shorter on-screen text if it should differ from the narration",
+      "actions": [
+        {"check": "visible", "target": {"text": "Some heading", "exact": true}, "msg": "the heading shows"},
+        {"do": "scroll_to", "target": {"css": "#section"}},
+        {"do": "point", "target": {"role": "button", "name": "Save"}},
+        {"do": "highlight", "target": {"role": "button", "name": "Save"}, "ms": 2500}
+      ]
+    },
+    {
+      "say": "A second step. Each step is paced to its narration: the clip waits for the voice to finish, then the gap.",
+      "actions": [
+        {"do": "fill", "target": {"label": "Name"}, "value": "Example"},
+        {"do": "click", "target": {"role": "button", "name": "Save"}},
+        {"do": "wait_for", "target": {"text": "Saved"}, "state": "visible"},
+        {"check": "count", "target": {"css": "ul > li"}, "equals": 3},
+        {"check": "order", "within": "ul", "texts": ["First", "Second", "Third"]},
+        {"check": "url", "matches": {"regex": "/done$"}}
+      ]
+    }
+  ]
+}
