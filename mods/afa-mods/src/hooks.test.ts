@@ -890,4 +890,24 @@ describe('blast radius, read-only production proofs', () => {
     await go($, on, `SP=${SP}; STACK_NAME=x $SP/rexec.sh --prod 'drush status'`, {}, REXEC.replace('#!/usr/bin/env bash', "#!/usr/bin/env -S sh -c 'anything'"))
     expect(READS).not.toContain(DEPLOY_PATH)
   })
+  // The ALLOWED proofs for the deploy script run directly live in prodcall.test.ts: the plugin's real pin list cannot be
+  // injected here (no test seam in a security guard), so the stand-in copy is unreviewed and every call stays held.
+  for (const command of [
+    `cd ${HOME}/repos/Chattanooga-Digital && scripts/portainer-deploy.sh redeploy --prod`,
+    `cd ${HOME}/repos/Chattanooga-Digital && timeout 120 scripts/portainer-deploy.sh status --prod`,
+    `${DEPLOY_PATH} drift --prod`,
+  ]) {
+    for (const [who, vars] of MODES) {
+      test(`deploy script run directly with an unreviewed copy: held (${who} asks): ${command.slice(-40)}`, async ($, on) => {
+        const { seen, r } = await go($, on, command, vars)
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+      })
+    }
+    test(`deploy script run directly with an unreviewed copy: denied unattended: ${command.slice(-40)}`, async ($, on) => {
+      const { seen, r } = await go($, on, command, { AFA_LANE_UNATTENDED: '1', AFA_LANE_HAND: `${HOME}/handoff/lane` })
+      expect(seen.asked).toBe('')
+      expect(r.deny).toBeDefined()
+    })
+  }
 })

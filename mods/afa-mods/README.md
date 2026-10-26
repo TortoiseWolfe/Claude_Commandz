@@ -54,6 +54,16 @@ deploy path comes from that same line. The pinned script exports every key of th
 or logged) and holds unless every key is on `DEPLOY_ENV_KEYS` (an allowlist: no `PYTHON*`, `LD_*`, `BASH_ENV`, `PATH`, `*_OVERRIDE` and the like). Values of
 allowed keys are not checked. `python3 mods/afa-mods/scripts/check-pins.py` checks the pins and the key list against the real files on this machine (the
 plugin tests have no real filesystem); run it after a deploy script or the dotenv file changes, and expect it to fail loudly when proofs have gone back to held.
+The deploy script run straight (`timeout 120 scripts/portainer-deploy.sh deployed-commit --prod`, `drift`, `status`) is a read too, when the copy is the
+pinned one (same dotenv rule) and the action is read-only in the script's own dispatcher (`dispatch_action`, parsed in `readOnlyActions`): a case line
+commented `# read-only`, a usage line saying `READ-ONLY`, plus the builtin `status` (the script marks neither `status` nor `config-get`; adding the
+markers there would need a new pin). Wrappers `timeout`, `nice`, `env`, `STACK_NAME=`, `bash`, `sh`, `source` and `.` are looked through; `--prod`,
+`--production` and `--staging` are dropped; one plain operand is allowed only for `config-get`, `state-get` and `logs`. A relative script path needs a
+`cd ~/repos/NAME` earlier in the command or the session's own folder (the hook reads the tool event's `cwd`; with none, a relative path is held).
+Later commands after such a call (`source scripts/portainer-deploy.sh --prod status >/dev/null 2>&1; auth; ...container_exec ... php -r "echo PHP_VERSION"`)
+are judged on their own. One read-only deploy call per command: a second one counts as an earlier non-plain segment and is held. `redeploy`, force-update,
+create, delete, `redeploy-destructive`, `backup`, `live-changes`, `dns-check` and any action not in the script stay held. The ALLOWED proofs are in
+`prodcall.test.ts` (pin injected); `hooks.test.ts` proves the held side, because the real pin list cannot be injected into the hook.
 `hostname NAME` is not a read. Known limits: a `curl` GET can still change state on some endpoints, the file can change between the hook's read and
 the run, and with `sh` in front the forwarder's `source` line fails.
 `#!/usr/bin/env bash`, the forwarder and the deploy script find `timeout`, `bash`, `python3` and `curl` through PATH, so a lane-writable folder early in

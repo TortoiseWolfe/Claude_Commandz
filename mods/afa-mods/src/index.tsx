@@ -217,7 +217,7 @@ export const register: Register = on => {
         if (verdict === 'capped') composeLimited.push(c.key)
       }
     }
-    const baseEnv = { home, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
+    const baseEnv = { home, cwd: e.cwd, tmpdir, volumeDevices, uninspectedVolumes, composeLimited }
     // classify asks for the files a production call needs (the forwarder, the deploy script it sources, then the repo's dotenv file); read what it asks
     // for, up to four rounds, then classify with their text. A file over 400000 characters is not read, so it is held; the forwarder is further bounded
     // by forwarderIsPlain's 40-line limit, the deploy script only by its SHA-256 pin. The dotenv file is reduced to its key names the moment it is read
