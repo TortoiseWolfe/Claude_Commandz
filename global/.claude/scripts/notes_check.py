@@ -345,7 +345,7 @@ def _signed_hatch(did):
     return False
 
 
-def _has_reply(rec, kind_label, cache):
+def _has_reply(rec, kind_label, cache, owner):
     """A later message about the same topic from the other side: a tagged inbound note, or any "Re:" subject."""
     topic = _topic(rec["subject"], kind_label)
     if not topic:
@@ -362,7 +362,10 @@ def _has_reply(rec, kind_label, cache):
         cache[topic] = found
     for f in cache[topic]:
         kind, _ = classify(f["subject"])
-        if f["t"] > rec["t"] and (kind == "inbound" or (kind is None and _REPLY_RE.match(f["subject"]))):
+        # Only the owner's own mailbox identity counts (Hatch and the tower write as the owner): a stranger's "Re:" with
+        # a matching subject must not retire one of our notes.
+        sender = email.utils.parseaddr(f["from"])[1].lower()
+        if sender == owner and f["t"] > rec["t"] and (kind == "inbound" or (kind is None and _REPLY_RE.match(f["subject"]))):
             return f["id"]
     return None
 
@@ -392,7 +395,7 @@ def decide(rec, processed, now, cache, owner):
         return "delete", label, "carries Label_32 (picked up)"
     if age >= OUTBOUND_MAX_AGE:
         return "delete", label, "3 days old"
-    reply = _has_reply(rec, label, cache)
+    reply = _has_reply(rec, label, cache, owner)
     if reply:
         return "delete", label, f"answered (reply message {reply})"
     return "keep", label, "waiting for a reply, under 3 days old"

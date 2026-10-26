@@ -42,7 +42,7 @@ class FakeFolder:
                                 mid=mid or "m-" + did)
 
     def _msg(self, d, mid, fmt):
-        headers = [{"name": "Subject", "value": d["subject"]}, {"name": "Date", "value": "Mon, 26 Oct 2026 10:00:00 -0400"}]
+        headers = [{"name": "Subject", "value": d["subject"]}, {"name": "From", "value": d.get("sender", "Owner <owner@example.com>")}, {"name": "Date", "value": "Mon, 26 Oct 2026 10:00:00 -0400"}]
         if d.get("to"):
             headers.append({"name": "To", "value": d["to"]})
         m = {"id": mid, "labelIds": d["labels"], "internalDate": str(int((NOW - d["age_h"] * H) * 1000)),
@@ -242,6 +242,14 @@ class Outbound(SweepBase):
         self.fake.mail["m-reply"] = dict(subject="Re: Fix is up", age_h=2, labels=["SENT"])
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, ["r-1"])
+
+    def test_reply_from_an_outside_sender_does_not_count(self):
+        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
+        self.fake.mail["m-x"] = dict(subject="Re: [CC>MUSE] Release links", age_h=2, labels=["INBOX"],
+                                     sender="Stranger <stranger@example.org>")
+        res, out = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+        self.assertIn("waiting for a reply", out)
 
     def test_reply_older_than_our_note_does_not_count(self):
         self.fake.add("r-1", "[CC>MUSE] Release links", 10)
