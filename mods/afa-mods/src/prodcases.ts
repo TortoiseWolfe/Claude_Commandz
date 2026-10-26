@@ -19,6 +19,11 @@ container_exec "$cid" "$CMD" "$U"
 export const DEPLOY = `#!/usr/bin/env bash
 # stand-in deploy script for the hook tests
 container_exec() { :; }
+auth() { :; }
+find_service_container() { :; }
+api() { :; }
+cmd_delete() { :; }
+set_service_replicas() { :; }
 dispatch_action() {
   local action="$1"
   case "$action" in
@@ -125,6 +130,9 @@ export const FORWARDERS: [string, string, string | null][] = [
 // 26 Oct, coop-mail: the deploy script run directly with a read-only action. Every one of these is a read when the script is the reviewed copy.
 export const DEPLOY_DIR = `${HOME}/repos/Chattanooga-Digital`
 export const DEPLOY_READS: [string, string][] = [
+  ['bash with a bare name reads it from the folder', 'cd ~/repos/Chattanooga-Digital/scripts && bash portainer-deploy.sh status --prod'],
+  ['a source followed by a plain command', 'source scripts/portainer-deploy.sh --prod status; echo done'],
+  ['a source, find_service_container, container_exec', `source scripts/portainer-deploy.sh --prod status; auth; cid="$(find_service_container "\${STACK_NAME}_php")"; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
   ['timeout + deployed-commit', 'timeout 120 scripts/portainer-deploy.sh deployed-commit --prod'],
   ['timeout + drift', 'timeout 120 scripts/portainer-deploy.sh drift --prod'],
   ['timeout + status', 'timeout 120 scripts/portainer-deploy.sh status --prod'],
@@ -140,6 +148,21 @@ export const DEPLOY_READS: [string, string][] = [
   ['a ~ path', 'timeout 120 ~/repos/Chattanooga-Digital/scripts/portainer-deploy.sh status --prod'],
   ['a cd to the repo first', 'cd ~/repos/Chattanooga-Digital && timeout 120 scripts/portainer-deploy.sh status --prod'],
   ['a dot-source', '. scripts/portainer-deploy.sh --prod status'],
+]
+// A sourced script leaves its functions callable: after the read-only call, only its read helpers pass. A bare script name is a PATH lookup.
+export const DEPLOY_SOURCED_HELD: [string, string][] = [
+  ['a write function after a source', 'source scripts/portainer-deploy.sh --prod status; cmd_delete'],
+  ['a write function after a source, && joined', 'source scripts/portainer-deploy.sh --prod status && set_service_replicas php 0'],
+  ['api with a DELETE after a dot-source', '. scripts/portainer-deploy.sh --prod status; auth; api -X DELETE http://x/api/stacks/1'],
+  ['a write function inside a substitution', 'source scripts/portainer-deploy.sh --prod status; x=$(cmd_delete); echo $x'],
+  ['a write function named after a plain command', 'source scripts/portainer-deploy.sh --prod status; echo ok; cmd_delete'],
+  ['eval after a source', 'source scripts/portainer-deploy.sh --prod status; eval "cmd_delete"'],
+  ['a command word built from an expansion', 'source scripts/portainer-deploy.sh --prod status; $FN'],
+  ['container_exec with a write', `source scripts/portainer-deploy.sh --prod status; auth; container_exec "$cid" 'rm -rf /var/www' 82`],
+  ['container_exec with a double-quoted remote', 'source scripts/portainer-deploy.sh --prod status; container_exec "$cid" "php -r \'echo 1;\'" 82'],
+  ['a bare script name with source (PATH lookup)', 'source portainer-deploy.sh --prod status'],
+  ['a bare script name run directly (PATH lookup)', 'timeout 120 portainer-deploy.sh status --prod'],
+  ['a bare script name with a dot-source', '. portainer-deploy.sh --prod status'],
 ]
 // Everything that is not a read stays held, with or without a wrapper.
 export const DEPLOY_HELD: [string, string][] = [
