@@ -590,33 +590,23 @@ export const envKeyLines = (text: string): string =>
 export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
   keyLines.split('\n').every(k => k === '' || allowed.has(k))
 
-// The functions a deploy script defines at the start of a line (`name() {`).
-export function definedFunctions(text: string): Set<string> {
-  const out = new Set<string>()
-  for (const l of text.split('\n')) {
-    const m = /^([A-Za-z_]\w*)\(\)\s*\{/.exec(l)
-    if (m) out.add(m[1])
-  }
-  return out
-}
-
-// After `source scripts/portainer-deploy.sh --prod status`, the rest of the command can call any function the script defines (`cmd_delete`,
-// `set_service_replicas`, `api -X DELETE`). Only these helpers read: `auth`, `find_service_container`, and `container_exec CID 'REMOTE' [SECONDS]` whose
-// REMOTE is a recognised read. A segment that names any other defined function, uses `eval`, or starts with a word built from an expansion is held.
-const SOURCED_SAFE = new Set(['auth', 'find_service_container', 'container_exec', 'log', 'err'])
-const CONTAINER_EXEC = /^container_exec\s+"?\$\{?\w+\}?"?\s+'([^']*)'(?:\s+\d+)?\s*$/
-export function afterSourcedIsPlain(seg: string, fns: Set<string>): boolean {
-  // `cid="$(find_service_container "${STACK_NAME}_php")"` reaches here cut at its quotes and ";"-free parts: only these pieces of it pass
-  if (/^(?:\w+=)?["']?$/.test(seg) || /^\$\(find_service_container "[^"$`]*(?:\$\{\w+\}[^"$`]*)?"\)?"?$/.test(seg)) return true
-  const stripped = seg.replace(/^(?:\w+=[\w./-]*\s+)*/, '')
-  const first = stripped.split(/\s+/)[0] ?? ''
-  if (first === 'container_exec') {
-    const m = CONTAINER_EXEC.exec(stripped)
+// After `source scripts/portainer-deploy.sh --prod status`, the shell still has every function the script defines, so the rest of the command is held
+// unless it is built only from these statements joined by `;`, `&&` or a newline (an allowlist: nothing is recognised by a blocklist of bad words):
+//   auth
+//   cid="$(find_service_container "${STACK_NAME}_php")"
+//   container_exec "$cid" 'REMOTE' [SECONDS]      REMOTE must be a recognised read (remoteIsRead)
+//   echo LITERAL                                   plain words only
+// Quotes, expansions, pipes, redirects, wrappers (time, command, trap, xargs, exec, eval) and any other word fail it.
+const CONTAINER_EXEC = /^container_exec "\$cid" '([^']*)'(?: \d+)?$/
+const CID = /^cid="\$\(find_service_container "(?:\$\{STACK_NAME\}|[\w-]+)_php"\)"$/
+export function afterSourcedIsPlain(rest: string): boolean {
+  const statements = rest
+    .split(/;|&&|\n/)
+    .map(x => x.trim())
+    .filter(x => x !== '')
+  return statements.every(st => {
+    if (st === 'auth' || CID.test(st) || /^echo [\w .,:=-]*$/.test(st)) return true
+    const m = CONTAINER_EXEC.exec(st)
     return m !== null && remoteIsRead(m[1])
-  }
-  if (!/^[\w./-]*$/.test(first) || first === 'eval' || first === 'source' || first === '.') return false
-  for (const word of seg.match(/[A-Za-z_]\w*/g) ?? []) {
-    if (word === 'eval' || (fns.has(word) && !SOURCED_SAFE.has(word))) return false
-  }
-  return true
+  })
 }

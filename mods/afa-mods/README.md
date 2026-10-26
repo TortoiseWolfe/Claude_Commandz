@@ -61,9 +61,10 @@ markers there would need a new pin). Wrappers `timeout`, `nice`, `env`, `STACK_N
 `--production` and `--staging` are dropped; one plain operand is allowed only for `config-get`, `state-get` and `logs`. A relative script path needs a
 `cd ~/repos/NAME` earlier in the command or the session's own folder (the hook reads the tool event's `cwd`; with none, a relative path is held).
 Later commands after such a call (`source scripts/portainer-deploy.sh --prod status >/dev/null 2>&1; auth; ...container_exec ... php -r "echo PHP_VERSION"`)
-are judged on their own, with one addition for a sourced script (senior review of #123): `source` leaves every function the pinned script defines callable, so a later
-segment passes only when it names none of them except `auth`, `find_service_container`, `log`, `err`, and `container_exec CID 'REMOTE' [SECONDS]` whose single-quoted REMOTE is a
-recognised read; `eval`, `api`, `cmd_*`, a command word built from an expansion, or another `source` is held (`afterSourcedIsPlain`). A bare script name (`portainer-deploy.sh`) is a
+are judged on their own, with one rule for a sourced script (senior reviews of #123 and #124): `source` leaves every function the pinned script defines callable, so everything
+after the sourced call, as written, must be built only from these statements joined by `;`, `&&` or a newline: `auth`; `cid="$(find_service_container "${STACK_NAME}_php")"`;
+`container_exec "$cid" 'REMOTE' [SECONDS]` whose REMOTE is a recognised read; `echo` with plain literal words (`afterSourcedIsPlain`). An allowlist, not a blocklist: quotes, expansions,
+pipes, redirects, wrappers (`time`, `command`, `trap`, `xargs`, `exec`, `eval`) and any other word hold the whole command. A bare script name (`portainer-deploy.sh`) is a
 PATH lookup for the direct and `source`/`.` forms and is held; only `bash NAME` / `sh NAME`, which read the folder, accept it. One read-only deploy call per command: a second one counts as an earlier non-plain segment and is held. `redeploy`, force-update,
 create, delete, `redeploy-destructive`, `backup`, `live-changes`, `dns-check` and any action not in the script stay held. The ALLOWED proofs are in
 `prodcall.test.ts` (pin injected); `hooks.test.ts` proves the held side, because the real pin list cannot be injected into the hook.

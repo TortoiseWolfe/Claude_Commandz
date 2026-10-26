@@ -1,5 +1,5 @@
 // Pure helpers for the three mods: text in, text out, no engine calls.
-import { type DeployPins, afterSourcedIsPlain, definedFunctions, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseDeployCall, parseProdCall, prodLineShape, readOnlyActions, remoteIsRead } from './prodread'
+import { type DeployPins, afterSourcedIsPlain, deployEnvIsPlain, deployIsPinned, deployScript, forwarderIsPlain, hasDotPart, parseDeployCall, parseProdCall, prodLineShape, readOnlyActions, remoteIsRead } from './prodread'
 
 export type Band = { lanes: number; inbox: number; client: number }
 
@@ -813,7 +813,7 @@ function deployCopyIsReviewed(deploy: { repo: string; path: string }, scope: Sco
 // 26 Oct: the deploy script run straight (`timeout 120 scripts/portainer-deploy.sh deployed-commit --prod`, `source scripts/portainer-deploy.sh --prod
 // status`) is a read when the script is the reviewed copy and the action is one its own dispatcher marks read-only. `cwd` is where a relative script
 // word starts: the session's folder, or the one `cd /abs` the line shape allowed.
-function deployReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string> | undefined, depth: number, scope: Scope, env: ScratchEnv, cwd: string | undefined): { fns: Set<string> | undefined } | undefined {
+function deployReadOnly(raw: string, fusedErr: boolean, shape: Map<string, string> | undefined, depth: number, scope: Scope, env: ScratchEnv, cwd: string | undefined): { sourced: boolean } | undefined {
   if (depth > 0 || !shape || scope.mounts || !scope.home.startsWith('/') || hasDotPart(scope.home)) return undefined
   const call = parseDeployCall(raw.trim(), fusedErr)
   if (!call) return undefined
@@ -830,14 +830,13 @@ function deployReadOnly(raw: string, fusedErr: boolean, shape: Map<string, strin
   if (text === undefined) return undefined
   if (!readOnlyActions(text).has(call.action)) return undefined
   if (call.operand !== undefined && !['config-get', 'state-get', 'logs'].includes(call.action)) return undefined
-  // a sourced script leaves its functions callable for the rest of the command: the caller judges later segments by them
-  return { fns: call.sourced ? definedFunctions(text) : undefined }
+  // a sourced script leaves its functions callable for the rest of the command: the caller holds anything after it that is not a read helper
+  return { sourced: call.sourced }
 }
 
 function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope: Scope): Hold[] {
   const holds: Hold[] = []
   const parts = segmentsWithSeps(command)
-  let sourcedFns: Set<string> | undefined
   for (const [index, part] of parts.entries()) {
     const raw = part.text
     // `2>&1` is cut at its "&": the piece ends in `2>` and the next one starts with `1`
@@ -895,12 +894,12 @@ function classifyWithEnv(command: string, depth: number, env: ScratchEnv, scope:
       const after = bare.slice(bare.indexOf('push'))
       if (after.some(x => x === '-f' || x.startsWith('--force') || /^\+\S/.test(x))) add('git push --force', true)
     }
-    // after a sourced deploy script, the functions it defined are callable: only its read helpers pass (afterSourcedIsPlain)
-    if (sourcedFns && !afterSourcedIsPlain(seg, sourcedFns)) add('production deploy', true)
-    else if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr), depth, scope, env)) {
+    if (isProdDeploy(seg) && !prodReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr), depth, scope, env)) {
       const read = deployReadOnly(raw, fusedErr, prodLineShape(command, parts, index, fusedErr, 'more'), depth, scope, env, parts.slice(0, index).some(p => /^\s*cd\b/.test(p.text)) ? scope.cwd : env.cwd)
-      if (!read) add('production deploy', true)
-      else if (read.fns) sourcedFns = read.fns
+      // after a sourced script the rest of the command (everything past this segment, as written) must be read helpers only
+      const at = read?.sourced ? command.indexOf(raw) : -1
+      const after = at < 0 ? '' : command.slice(at + raw.length).replace(fusedErr ? /^\s*&\s*1/ : /^$/, '')
+      if (!read || (read.sourced && (at < 0 || !afterSourcedIsPlain(after)))) add('production deploy', true)
     }
   }
   return holds
