@@ -146,6 +146,43 @@ LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
+
+# index.tsv is written by many lane.sh runs at once (lane_watch's --ctx/--status/--recycle polls, a lane start, --model). 26 Oct: the
+# in-place `cat "$tmp" >"$INDEX"` truncated the file before writing it, a second run read the half-written prefix (364 of 982 rows) and
+# wrote that back, and every lane after row 364 lost its record. Now every write takes one lock, and a rewrite goes to a temp file in the
+# same folder and replaces the index with an atomic mv, so a reader sees the old file or the new one, never a part. A rewrite with fewer
+# rows than the file it replaces is refused and logged (index-guard.log): no lane.sh edit ever removes a row.
+INDEX_LOCK="${INDEX}.lock"
+INDEX_GUARD_LOG="$(dirname "$INDEX")/index-guard.log"
+
+# Run a command (a function in this script) holding the index lock; the lock is released when it returns.
+index_locked() {  # <command> [args...]
+  local fd rc
+  mkdir -p "$(dirname "$INDEX")"
+  exec {fd}>>"$INDEX_LOCK" || return 1
+  if ! flock -w 60 "$fd"; then exec {fd}>&-; echo "lane.sh: could not lock $INDEX within 60 s" >&2; return 1; fi
+  rc=0; "$@" || rc=$?
+  exec {fd}>&-
+  return "$rc"
+}
+
+# With the lock held: replace the index with <tmp-file> (made by index_tmp, so it sits beside the index), unless it has fewer rows.
+index_commit() {  # <tmp-file>
+  local new="$1" old_n new_n
+  old_n="$(wc -l <"$INDEX" 2>/dev/null || echo 0)"; new_n="$(wc -l <"$new")"
+  if [ "$new_n" -lt "$old_n" ]; then
+    printf '%s\trefused a rewrite of index.tsv: %s rows would replace %s (caller %s)\n' "$(date -Is)" "$new_n" "$old_n" "${FUNCNAME[1]:-?}" >>"$INDEX_GUARD_LOG"
+    echo "lane.sh: refused to shrink $INDEX from $old_n rows to $new_n; see $INDEX_GUARD_LOG" >&2
+    rm -f "$new"; return 1
+  fi
+  chmod --reference="$INDEX" "$new" 2>/dev/null || chmod 644 "$new"
+  mv -f "$new" "$INDEX"
+}
+index_tmp() { mkdir -p "$(dirname "$INDEX")"; mktemp "$INDEX.tmp.XXXXXX"; }
+
+# Append one row (a tab-separated line) under the lock, so a rewrite in progress cannot drop it.
+index_append_locked() { printf '%s\n' "$1" >>"$INDEX"; }
+index_append() { index_locked index_append_locked "$1"; }
 PROJ="$HOME/.claude/projects"
 SESS_DIR="$HOME/.claude/state/lanes/sessions"   # lane_session_hook.sh writes one file per lane here: the proof of a lane's live session
 TAB=$'\t'
@@ -310,17 +347,20 @@ session_with_text() {  # <dir> <start-epoch> <text>
 }
 
 # Fill blank session ids in the index (column 8) where a transcript can be found.
-fill_ids() {
-  [ -s "$INDEX" ] || return 0
+fill_ids_locked() {
   local tmp d n dir m b p r id st eff conn rk ent
-  tmp="$(mktemp)"
+  tmp="$(index_tmp)"
   while IFS="$TAB" read -r d n dir m b p r id st eff conn rk ent; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(proven_session "$n" "$st")"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" >>"$tmp"
   done <"$INDEX"
-  cat "$tmp" >"$INDEX"; rm -f "$tmp"
+  index_commit "$tmp"
+}
+fill_ids() {
+  [ -s "$INDEX" ] || return 0
+  index_locked fill_ids_locked || true
 }
 
 # Latest index row for a lane name (tab-separated line), or nothing.
@@ -332,26 +372,28 @@ index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)prin
 # SessionStart hook, if its transcript exists; otherwise the row's id. A change is written back to the lane's last row. Never inferred
 # from file age (23 Oct: that handed a lane in ~/repos the hub's own session). A lane started before the hook existed has no record and
 # keeps its row's id until it is next recycled (lane.sh --recycle finds the new session by the message it typed).
+follow_session_locked() {  # <name> <session-id>: point the lane's last row at the session
+  local tmp; tmp="$(index_tmp)"
+  awk -F'\t' -v OFS='\t' -v n="$1" -v id="$2" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[8]=id; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
+    && index_commit "$tmp" || rm -f "$tmp"
+}
 follow_session() {  # <name> <dir> <session-id> <start-epoch>
-  local name="$1" dir="$2" id="$3" start="${4:-0}" slug best tmp
+  local name="$1" dir="$2" id="$3" start="${4:-0}" slug best
   { [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -s "$INDEX" ]; } || { echo "$id"; return 0; }
   slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
   best="$(proven_session "$name" "$start")"
   if [ -z "$best" ] || [ "$best" = "$id" ] || [ ! -e "$PROJ/$slug/$best.jsonl" ]; then echo "$id"; return 0; fi
-  tmp="$(mktemp)"
-  awk -F'\t' -v OFS='\t' -v n="$name" -v id="$best" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); f[8]=id; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
-    && cat "$tmp" >"$INDEX"
-  rm -f "$tmp"
+  index_locked follow_session_locked "$name" "$best" || true
   echo "$best"
 }
 
 # Set column <col> of the lane's last index row, padding a short row out to 12 fields with "-" (an empty field would collapse in `read`).
-index_set() {  # <name> <col> <value>
-  local tmp; tmp="$(mktemp)"
+index_set_locked() {
+  local tmp; tmp="$(index_tmp)"
   awk -F'\t' -v OFS='\t' -v n="$1" -v c="$2" -v v="$3" '{rows[NR]=$0; if ($2==n) last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { k=split(rows[i], f, "\t"); for (j=k+1;j<c;j++) f[j]="-"; f[c]=v; if (k<c) k=c; line=f[1]; for (j=2;j<=k;j++) line=line OFS f[j]; print line } else print rows[i] }}' "$INDEX" >"$tmp" \
-    && cat "$tmp" >"$INDEX"
-  rm -f "$tmp"
+    && index_commit "$tmp" || rm -f "$tmp"
 }
+index_set() { index_locked index_set_locked "$@"; }  # <name> <col> <value>
 
 # Expand only the current user's ~ forms; never eval data from the repository lists.
 # Match the literal ~/ prefix from list data.
@@ -1306,7 +1348,7 @@ PY
     [ -n "$newid" ] && break; sleep 1
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" >>"$INDEX"
+  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}")"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
   exit 0
@@ -1580,8 +1622,8 @@ if [ "$dry" = 0 ]; then
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
   lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" >>"$INDEX"
+  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent")"
 else
   echo "# would append a row to $INDEX"
 fi
