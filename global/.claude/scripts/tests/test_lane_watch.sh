@@ -476,6 +476,63 @@ echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; date +%s > "$rc_home/.claude/state/lane
 if [ ! -s "$RC_CALLS" ]; then echo "ok   a re-armed watcher honours the retry time of the one before it"; else echo "FAIL second watcher recycled again at once: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
 : > "$TURN_FILE"
 
+# 25-26 Oct, pokeys-site: recycled every 5 to 7 minutes for hours. A lane recycled 3 times inside 30 minutes is named to the hub, once per episode,
+# instead of being recycled again.
+rl_dir="$rc_home/.claude/state/lanes"; rl_hand="$rl_dir/2026-10-26-rl"; rl_log="$rl_dir/recycle.log"
+mkdir -p "$rl_hand"; : > "$rl_hand/report.md"
+ready_pane=$(printf '%s\n' '⏺ handoff written. Ready to recycle.' '✻ Worked for 1m 9s · done 1:09 PM' '❯ ')
+log_row() { # log_row <lane> <minutes ago> [verb]
+  printf '%s\t%s\t%s\tfrom 120K (session a) to session b, line 128K\n' "$(date -Is -d "-$2 min")" "$1" "${3:-recycled}" >> "$rl_log"
+}
+rl_reset() { rm -f "$rl_log" "$rl_dir"/.thrash-* "$rl_dir"/.orphan-* "$rl_dir"/.recycle-rl.tried "$rl_hand/handoff.md"; : > "$RC_CALLS"; printf '%s\n' "$idle_pane" > "$RC_PANE"; : > "$TURN_FILE"; }
+rl_watch() { # rl_watch <ctx> <seconds> <out>
+  echo "$1" > "$CTX_FILE"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+      timeout "$2" bash "$SCRIPT" --max-min 5 rl > "$3" 2>&1 ) || true
+}
+rl_reset; log_row rl 25; log_row rl 15; log_row rl 5; log_row other 3
+rl_watch 130 8 "$TMP/th-out1"
+if [ ! -s "$RC_CALLS" ] && grep -q '^thrash: lane rl was recycled 3 times in 30 min (' "$TMP/th-out1" && [ "$(grep -c '^thrash:' "$TMP/th-out1")" = 1 ]; then
+  echo "ok   a lane recycled 3 times in 30 minutes is not recycled again; the hub is told in one line"
+else echo "FAIL thrash: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/th-out1")"; failures=$((failures + 1)); fi
+if grep -qE '^thrash: .*\([0-9]{1,2}:[0-9]{2} (AM|PM), [0-9]{1,2}:[0-9]{2} (AM|PM), [0-9]{1,2}:[0-9]{2} (AM|PM)\)' "$TMP/th-out1"; then echo "ok   the thrash line names the three times, 12-hour"; else echo "FAIL thrash times: $(cat "$TMP/th-out1")"; failures=$((failures + 1)); fi
+rm -f "$rl_dir/.recycle-rl.tried"
+rl_watch 130 6 "$TMP/th-out2"
+if [ ! -s "$RC_CALLS" ] && ! grep -q '^thrash:' "$TMP/th-out2"; then echo "ok   the same thrash episode wakes the hub once, and the lane still is not recycled"; else echo "FAIL thrash repeated: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/th-out2")"; failures=$((failures + 1)); fi
+log_row rl 1
+rl_watch 130 8 "$TMP/th-out3"
+if grep -q '^thrash: lane rl was recycled 4 times' "$TMP/th-out3"; then echo "ok   a later recycle makes it a new episode that is named again"; else echo "FAIL thrash new episode: $(cat "$TMP/th-out3")"; failures=$((failures + 1)); fi
+rl_reset; log_row rl 25; log_row rl 15
+rl_watch 130 6 "$TMP/th-out4"
+if [ "$(cat "$RC_CALLS")" = rl ] && ! grep -q '^thrash:' "$TMP/th-out4"; then echo "ok   two recycles in 30 minutes still recycle (the third is allowed)"; else echo "FAIL two recycles blocked: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/th-out4")"; failures=$((failures + 1)); fi
+rl_reset; log_row rl 70; log_row rl 55; log_row rl 40; log_row rl 31 FAILED
+rl_watch 130 6 "$TMP/th-out5"
+if [ "$(cat "$RC_CALLS")" = rl ] && ! grep -q '^thrash:' "$TMP/th-out5"; then echo "ok   recycles older than 30 minutes, and failed ones, do not count"; else echo "FAIL old recycles counted: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/th-out5")"; failures=$((failures + 1)); fi
+
+# 26 Oct 1:30-8:28 AM: a lane at 95K (under its line) wrote handoff.md, said it was ready to recycle, and sat idle seven hours. The hub is told,
+# once per handoff.md, when it has been idle 10 minutes.
+orphan_case() { # orphan_case <label> <want yes|no> <ctx> <handoff age min|none> <pane> [last recycle min ago]
+  local label=$1 want=$2 got=no
+  rl_reset; [ "$4" = none ] || { : > "$rl_hand/handoff.md"; touch -d "-$4 min" "$rl_hand/handoff.md"; }
+  [ -z "${6:-}" ] || log_row rl "$6"
+  printf '%s\n' "$5" > "$RC_PANE"
+  rl_watch "$3" 5 "$TMP/or-out"
+  grep -q '^handoff: lane rl wrote handoff.md at ' "$TMP/or-out" && got=yes
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got: $(cat "$TMP/or-out")"; failures=$((failures + 1)); fi
+}
+orphan_case "an idle lane under its line with an unused handoff.md wakes the hub" yes 95 20 "$ready_pane"
+grep -q "(context 95K, under its 120K line)" "$TMP/or-out" && grep -q 'was never recycled' "$TMP/or-out" && echo "ok   the handoff line names the context and the line" || { echo "FAIL handoff line: $(cat "$TMP/or-out")"; failures=$((failures + 1)); }
+rl_watch 95 5 "$TMP/or-out2"
+if ! grep -q '^handoff:' "$TMP/or-out2"; then echo "ok   the same handoff.md is named once"; else echo "FAIL handoff named twice: $(cat "$TMP/or-out2")"; failures=$((failures + 1)); fi
+orphan_case "a handoff.md written a minute ago is not yet an orphan" no 95 1 "$ready_pane"
+orphan_case "a lane that never said ready to recycle is left alone" no 95 20 "$idle_pane"
+orphan_case "a lane still working is left alone" no 95 20 "$(printf '%s\n' '⏺ handoff written. Ready to recycle.' '✻ Thinking… (12s · esc to interrupt)' '❯ ')"
+orphan_case "a handoff.md older than the lane's last recycle was used" no 95 20 "$ready_pane" 5
+orphan_case "no handoff.md, nothing to name" no 95 none "$ready_pane"
+orphan_case "over its line the recycle path takes it, not the orphan check" no 130 20 "$ready_pane"
+echo "ok   (orphan cases done)"
+rm -rf "$rl_hand"; rm -f "$rl_log" "$rl_dir"/.thrash-* "$rl_dir"/.orphan-*; : > "$TURN_FILE"
+
 # Spend alarm: a lane past the limit today wakes the hub once per lane per day; the ledger is asked no more than every few minutes.
 sp_home="$TMP/sp-home"; mkdir -p "$sp_home/.claude/state/lanes"
 sp_cmd="$TMP/fake-spend.sh"; sp_calls="$TMP/spend-calls"; sp_args="$TMP/spend-args"; : > "$sp_calls"
