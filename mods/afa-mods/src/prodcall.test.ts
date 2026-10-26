@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BYPASSES, CALL, DEPLOY, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
+import { BYPASSES, CALL, DEPLOY, DEPLOY_DIR, DEPLOY_HELD, DEPLOY_READS, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
 import { classify } from './lib'
 import { type DeployPins, sha256Hex } from './prodread'
 
@@ -122,5 +122,58 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
   })
   test('a call with CALL and nothing around it needs its variables set', () => {
     expect(prodHolds(CALL)).toBeGreaterThan(0)
+  })
+})
+
+// 26 Oct, coop-mail: the deploy script run straight, behind timeout / source / env / nice, is a read for the actions its own dispatcher marks read-only.
+describe('the deploy script run directly (classifier, deploy pin injected)', () => {
+  const deployHolds = (command: string, over: { cwd?: string | null; deploy?: string; pins?: DeployPins | null; keys?: string } = {}) =>
+    classify(command, 0, {
+      home: HOME,
+      cwd: over.cwd === null ? undefined : (over.cwd ?? DEPLOY_DIR),
+      prodScripts: { [DEPLOY_PATH]: over.deploy ?? DEPLOY, [ENV_PATH]: over.keys ?? KEYS },
+      deployPins: over.pins === null ? undefined : (over.pins ?? PINS),
+    }).filter(h => h.kind === 'production deploy').length
+  for (const [what, command] of DEPLOY_READS) {
+    test(`a read passes: ${what}`, () => {
+      expect(deployHolds(command)).toBe(0)
+    })
+  }
+  for (const [what, command] of DEPLOY_HELD) {
+    test(`still held: ${what}`, () => {
+      expect(deployHolds(command)).toBeGreaterThan(0)
+    })
+  }
+  test('a relative script word with no folder known (no cd, no session folder) is held', () => {
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { cwd: null })).toBe(1)
+  })
+  test('a relative script word in a session folder that is not the repo is held', () => {
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { cwd: `${HOME}/repos/evil` })).toBe(1)
+  })
+  test('the real pin list does not know the stand-in: held', () => {
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { pins: null })).toBe(1)
+  })
+  test('a changed or empty copy of the script is held', () => {
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { deploy: `${DEPLOY}echo evil\n` })).toBe(1)
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { deploy: '' })).toBe(1)
+  })
+  test('a dotenv file with a key that changes how the script starts is held', () => {
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { keys: `${KEYS}\nBASH_ENV` })).toBe(1)
+  })
+  test('an action is a read only because the pinned script says so: a copy whose dispatcher marks nothing holds even status', () => {
+    const bare = DEPLOY.replace(/\n\s+status\)[^\n]*/, '\n    # no status here')
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh status --prod', { deploy: bare, pins: { 'Chattanooga-Digital': [sha256Hex(bare) as string] } })).toBe(1)
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh drift --prod', { deploy: bare, pins: { 'Chattanooga-Digital': [sha256Hex(bare) as string] } })).toBe(0)
+  })
+  test('an action whose marker is removed from the script is held (the markers decide, not a fixed list)', () => {
+    const unmarked = DEPLOY.replace(/cmd_drift ;;.*\n/, 'cmd_drift ;;\n')
+    const pins = { 'Chattanooga-Digital': [sha256Hex(unmarked) as string] }
+    expect(deployHolds('timeout 120 scripts/portainer-deploy.sh drift --prod', { deploy: unmarked, pins })).toBe(1)
+  })
+  test('a deploy script not read yet is asked for and the command is held meanwhile', () => {
+    const wanted = new Set<string>()
+    const holds = classify('timeout 120 scripts/portainer-deploy.sh status --prod', 0, { home: HOME, cwd: DEPLOY_DIR, prodScripts: {}, deployPins: PINS, prodWanted: wanted }).filter(h => h.kind === 'production deploy')
+    expect(holds.length).toBe(1)
+    expect([...wanted]).toEqual([DEPLOY_PATH])
   })
 })
