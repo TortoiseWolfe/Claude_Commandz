@@ -64,7 +64,7 @@ Later commands after such a call (`source scripts/portainer-deploy.sh --prod sta
 are judged on their own, with one rule for a sourced script (senior reviews of #123 and #124): `source` leaves every function the pinned script defines callable, so everything
 after the sourced call, as written, must be built only from these statements joined by `;`, `&&` or a newline: `auth`; `cid="$(find_service_container "${STACK_NAME}_php")"`;
 `container_exec "$cid" 'REMOTE' [SECONDS]` whose REMOTE is a recognised read; `echo` with plain literal words (`afterSourcedIsPlain`). An allowlist, not a blocklist: quotes, expansions,
-pipes, redirects, wrappers (`time`, `command`, `trap`, `xargs`, `exec`, `eval`) and any other word hold the whole command. A bare script name (`portainer-deploy.sh`) is a
+pipes, redirects, wrappers (`time`, `command`, `trap`, `xargs`, `exec`, `eval`) and any other word hold the whole command. What comes before the call is already limited by the line shape (plain assignments or `cd /abs/path` only), so a `trap`, a background job, a function or alias override, `export -f`, `set -a` or a substitution before the `source` holds it (tested in `DEPLOY_SOURCED_HELD`). A bare script name (`portainer-deploy.sh`) is a
 PATH lookup for the direct and `source`/`.` forms and is held; only `bash NAME` / `sh NAME`, which read the folder, accept it. One read-only deploy call per command: a second one counts as an earlier non-plain segment and is held. `redeploy`, force-update,
 create, delete, `redeploy-destructive`, `backup`, `live-changes`, `dns-check` and any action not in the script stay held. The ALLOWED proofs are in
 `prodcall.test.ts` (pin injected); `hooks.test.ts` proves the held side, because the real pin list cannot be injected into the hook.
