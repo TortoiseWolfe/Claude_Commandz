@@ -126,7 +126,8 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
 // 26 Oct: `timeout 120 scripts/portainer-deploy.sh status --prod` and `source scripts/portainer-deploy.sh --prod status` were held as a production
 // deploy. The wrappers are looked through here to the script and its action; the caller decides whether the action is a read.
 
-export type DeployCall = { script: string; action: string; operand?: string }
+// `sourced`: the script was sourced, so every function it defines stays callable in the rest of the command
+export type DeployCall = { script: string; action: string; operand?: string; sourced: boolean }
 
 const DEPLOY_FLAG = /^--(?:prod|production|staging)$/
 const OPERAND = /^[A-Za-z0-9_][\w.:-]*$/
@@ -135,6 +136,7 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
   const t = tokenize(raw, false, fusedErr)
   if (!t || t.commands.length !== 1) return undefined
   let w = t.commands[0]
+  let runner = ''
   for (let n = 0; n < 6 && w[0]?.quote === 'none'; n += 1) {
     const head = w[0].v
     if (/^[A-Za-z_]\w*=/.test(head)) {
@@ -152,12 +154,15 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
       if (nv === 2 && !/^-?\d+$/.test(w[2]?.v ?? '')) return undefined
       w = w.slice(nv + 1)
     } else if (['bash', 'sh', 'source', '.'].includes(head)) {
+      runner = head
       w = w.slice(1)
       break
     } else break
   }
   const [script, ...args] = w
   if (!script || script.v.split('/').pop() !== 'portainer-deploy.sh') return undefined
+  // a bare name is looked up on PATH (and, for source, PATH first), never in the folder: only bash and sh read it from the folder
+  if (!script.v.includes('/') && runner !== 'bash' && runner !== 'sh') return undefined
   const words: Word[] = []
   for (const a of args) {
     if (a.quote === 'none' && DEPLOY_FLAG.test(a.v)) continue
@@ -168,7 +173,7 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
   if (action && !/^[a-z][a-z-]*$/.test(action.v)) return undefined
   if (operand && !OPERAND.test(operand.v)) return undefined
   // the script's own default action is status
-  return { script: script.v, action: action?.v ?? 'status', operand: operand?.v }
+  return { script: script.v, action: action?.v ?? 'status', operand: operand?.v, sourced: runner === 'source' || runner === '.' }
 }
 
 // The actions of the pinned deploy script's dispatcher that only read: a case line whose comment says `read-only`, or a usage line that says READ-ONLY.
@@ -584,3 +589,34 @@ export const envKeyLines = (text: string): string =>
 // load_env would skip it, so the hook never has to agree with bash about what counts as a name.
 export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
   keyLines.split('\n').every(k => k === '' || allowed.has(k))
+
+// The functions a deploy script defines at the start of a line (`name() {`).
+export function definedFunctions(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const l of text.split('\n')) {
+    const m = /^([A-Za-z_]\w*)\(\)\s*\{/.exec(l)
+    if (m) out.add(m[1])
+  }
+  return out
+}
+
+// After `source scripts/portainer-deploy.sh --prod status`, the rest of the command can call any function the script defines (`cmd_delete`,
+// `set_service_replicas`, `api -X DELETE`). Only these helpers read: `auth`, `find_service_container`, and `container_exec CID 'REMOTE' [SECONDS]` whose
+// REMOTE is a recognised read. A segment that names any other defined function, uses `eval`, or starts with a word built from an expansion is held.
+const SOURCED_SAFE = new Set(['auth', 'find_service_container', 'container_exec', 'log', 'err'])
+const CONTAINER_EXEC = /^container_exec\s+"?\$\{?\w+\}?"?\s+'([^']*)'(?:\s+\d+)?\s*$/
+export function afterSourcedIsPlain(seg: string, fns: Set<string>): boolean {
+  // `cid="$(find_service_container "${STACK_NAME}_php")"` reaches here cut at its quotes and ";"-free parts: only these pieces of it pass
+  if (/^(?:\w+=)?["']?$/.test(seg) || /^\$\(find_service_container "[^"$`]*(?:\$\{\w+\}[^"$`]*)?"\)?"?$/.test(seg)) return true
+  const stripped = seg.replace(/^(?:\w+=[\w./-]*\s+)*/, '')
+  const first = stripped.split(/\s+/)[0] ?? ''
+  if (first === 'container_exec') {
+    const m = CONTAINER_EXEC.exec(stripped)
+    return m !== null && remoteIsRead(m[1])
+  }
+  if (!/^[\w./-]*$/.test(first) || first === 'eval' || first === 'source' || first === '.') return false
+  for (const word of seg.match(/[A-Za-z_]\w*/g) ?? []) {
+    if (word === 'eval' || (fns.has(word) && !SOURCED_SAFE.has(word))) return false
+  }
+  return true
+}

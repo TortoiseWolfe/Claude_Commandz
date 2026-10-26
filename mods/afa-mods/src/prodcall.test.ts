@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BYPASSES, CALL, DEPLOY, DEPLOY_DIR, DEPLOY_HELD, DEPLOY_READS, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
+import { BYPASSES, CALL, DEPLOY, DEPLOY_DIR, DEPLOY_HELD, DEPLOY_READS, DEPLOY_SOURCED_HELD, FORWARDERS, HOME, PLAIN, REXEC, SP, WRITES, prod } from './prodcases'
 import { classify } from './lib'
 import { type DeployPins, sha256Hex } from './prodread'
 
@@ -137,6 +137,11 @@ describe('the deploy script run directly (classifier, deploy pin injected)', () 
   for (const [what, command] of DEPLOY_READS) {
     test(`a read passes: ${what}`, () => {
       expect(deployHolds(command)).toBe(0)
+    })
+  }
+  for (const [what, command] of DEPLOY_SOURCED_HELD) {
+    test(`held after a source or by a bare name: ${what}`, () => {
+      expect(deployHolds(command)).toBeGreaterThan(0)
     })
   }
   for (const [what, command] of DEPLOY_HELD) {
