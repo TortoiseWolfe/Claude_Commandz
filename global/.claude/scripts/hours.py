@@ -5,10 +5,12 @@
   hours.py log    --client NAME [--since ..] [--until ..] [--out DIR] [--rows-in FILE ...]   (the sitting-by-sitting log)
   hours.py rows   --client NAME [--since ..] [--until ..] [--machine NAME] --out FILE        (interval rows to send to another machine)
   hours.py week   [--now ISO] [--out DIR] [--if-due]                                           (what the Monday timer runs)
+  hours.py calendar [--out DIR]                                                                (refresh calendar-events.tsv from Google Calendar; the 15-minute timer runs it)
   hours.py unclear --client NAME [--since ..] [--until ..]                                     (the prompts the rules could not place)
 
 Read-only: it reads Claude Code transcripts (~/.claude/projects/*/*.jsonl), the git history of the client's repos, Gmail
-sent mail (through gmail_api.py, metadata only) and the call recordings; it never writes to any of them.
+sent mail (through gmail_api.py, metadata only), Google Calendar (through calendar_api.py, calendar.readonly) and the call
+recordings; it never writes to any of them. Its only writes are its own outputs, calendar-events.tsv among them.
 
 What counts as the owner's time (the internship method of 25 Oct, now the standing rule):
   - typed:  only what the owner typed or clicked: prompts in hub/direct sessions plus their answers on question cards.
@@ -30,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from zoneinfo import ZoneInfo
@@ -65,7 +68,9 @@ def load_config():
        owner_emails      addresses that are the owner's (also read from "author_emails")
        relay_patterns    extra regexes (anchored at the start of a prompt) for hub relays typed into lane windows
        clients           {key: {label, repos: [globs of repo names], words: [regexes], projects: {name: {repos, words}},
-                                mail_to: [addresses or domains], git_repos: [paths], calls: [{dir, slot}]}}
+                                mail_to: [addresses or domains], git_repos: [paths], calls: [{dir, slot}],
+                                calendar: {words: [regexes on an event title], domains: [attendee domains; default mail_to]}}}
+       calendar_since    first day the calendar refresh asks for (YYYY-MM-DD; default 400 days back)
        overrides         {"<sid6>|<Day dd hh:mm AM/PM>": key}  hand-labelled prompts the rules cannot read
        weekly            [client keys the Monday run reports]
     """
@@ -625,6 +630,66 @@ def calendar_rows(cfg):
     return rows
 
 
+CAL_HEADER = "start_iso\tend_iso\ttitle\tclient"
+
+
+def calendar_client(cfg, ev):
+    """The client key an event belongs to, or None: the title matches a client's calendar words, or an attendee is on one of its
+       domains (calendar.domains, else mail_to). An event the owner declined is nobody's."""
+    if ev.get("self_declined"):
+        return None
+    for key, c in cfg["clients"].items():
+        cal = c.get("calendar") or {}
+        if any(re.search(w, ev["title"], re.I) for w in cal.get("words", [])):
+            return key
+        doms = [d.lower() for d in cal.get("domains", c.get("mail_to", []))]
+        for addr in ev.get("attendees", []):
+            dom = addr.rsplit("@", 1)[-1]
+            if any(addr == d or dom == d or dom.endswith("." + d) for d in doms):
+                return key
+    return None
+
+
+def calendar_tsv_text(cfg, events):
+    rows = sorted((e["start"], e["end"], e["title"], k) for e in events for k in [calendar_client(cfg, e)] if k)
+    return CAL_HEADER + "\n" + "".join("\t".join(r) + "\n" for r in rows), rows
+
+
+def refresh_calendar(cfg, now_ts=None, fetch=None):
+    """Rewrite <out_dir>/calendar-events.tsv from Google Calendar (the clients' events only) and note the outcome in
+       ~/.claude/state/hours-calendar.txt. Any failure leaves the old file in place. Returns (ok, one-line message)."""
+    now_ts = now_ts or dt.datetime.now(ET).timestamp()
+    stamp = dt.datetime.fromtimestamp(now_ts, ET).strftime("%a %-d %b %-I:%M %p")
+    path = os.path.join(out_dir(cfg), "calendar-events.tsv")
+    try:
+        if fetch is None:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import calendar_api
+            fetch = calendar_api.list_events
+        since = day_start(cfg["calendar_since"]) if cfg.get("calendar_since") else now_ts - 400 * 86400
+        text, rows = calendar_tsv_text(cfg, fetch(since, now_ts + 14 * 86400))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and not os.path.exists(path + ".pre-api"):
+            shutil.copy2(path, path + ".pre-api")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+        past = [r for r in rows if (parse_ts(r[0]) or 0) <= now_ts]
+        newest = "%s %s" % (dt.datetime.fromtimestamp(parse_ts(past[-1][0]), ET).strftime("%a %-d %b %-I:%M %p"), past[-1][2]) if past else "none"
+        msg = "calendar refreshed %s: %d client events, newest past one %s" % (stamp, len(rows), newest)
+        ok = True
+    except Exception as e:  # noqa: BLE001 - the timer must never die on a calendar problem; the old file stays
+        msg, ok = "calendar NOT refreshed %s: %s (the old calendar-events.tsv is still in use)" % (stamp, str(e)[:200]), False
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        with open(os.path.join(state_dir(), "hours-calendar.txt"), "w") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
+    return ok, msg
+
+
 def call_raws(cfg, key, lo, hi):
     """Calls with a recording folder (length measured from the .srt) and calendar events. A recording's start is the calendar event
        of that day if there is one, else the configured weekly slot; a calendar event with no recording counts for its own length."""
@@ -1040,6 +1105,7 @@ def run_week(cfg, now_ts, machine, outdir, if_due=False):
         return None
     if if_due and not due(now_ts):
         return None
+    refresh_calendar(cfg, now_ts)
     this_mon = week_start_ts(now_ts)
     lo, hi = this_mon - 7 * 86400, this_mon
     keys = [k for k in cfg["weekly"] if k in cfg["clients"]]
@@ -1085,7 +1151,7 @@ def pick_clients(cfg, arg):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("mode", choices=["report", "log", "rows", "week", "unclear"])
+    ap.add_argument("mode", choices=["report", "log", "rows", "week", "unclear", "calendar"])
     ap.add_argument("--client")
     ap.add_argument("--since")
     ap.add_argument("--until")
@@ -1100,6 +1166,10 @@ def main(argv=None):
     cfg = load_config()
     machine = a.machine if a.machine is not None else machine_name()
     outdir = os.path.expanduser(a.out) if a.out and a.mode in ("log", "week") else out_dir(cfg)
+    if a.mode == "calendar":
+        ok, msg = refresh_calendar(cfg)
+        print(msg)
+        return 0 if ok else 1
     lo, hi = window(a.since, a.until)
     if a.mode == "week":
         now = parse_ts(a.now) if a.now else dt.datetime.now(ET).timestamp()

@@ -35,6 +35,11 @@ timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 || echo "opencl
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
 
+# Every run: pull the calendar events that belong to a client into hours/calendar-events.tsv (hours.py calendar; read-only, its own
+# calendar-token.json, so the Gmail token is untouched). Until 26 Oct that file was a one-time copy and never refreshed. A failure
+# keeps the old file and says so in ~/.claude/state/hours-calendar.txt. Detached: it never holds this task.
+( timeout 120 python3 "$here/hours.py" calendar </dev/null >/dev/null 2>&1 & )
+
 # Monday morning, once: last week's co-op and internship hours (hours.py week --if-due; Monday after 6:00 AM Eastern, one run a day, its own
 # lock, ~1 minute, so it runs detached and never holds this task). It writes ~/.claude/state/hours-week.txt, which the hub digest shows.
 ( timeout 1500 python3 "$here/hours.py" week --if-due </dev/null >/dev/null 2>&1 & )
