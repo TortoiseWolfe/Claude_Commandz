@@ -35,6 +35,11 @@ timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 || echo "opencl
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
 
+# Handled fleet-note drafts leave the owner's Drafts folder (26 Oct: the real drafts were buried under Hatch and tower notes). notes_check.py --sweep
+# --apply deletes only drafts with a fleet tag in the subject once they are handled (rules at the top of its sweep section), saving each one's raw
+# text to ~/.claude/state/draft-sweep/ first. No model. Gmail errors leave the folder as it was.
+timeout 150 python3 "$here/notes_check.py" --sweep --apply >/dev/null 2>&1 || echo "openclaw_status_refresh: draft sweep failed (see ~/.claude/state/notes-check.log)" >&2
+
 # Every run: pull the calendar events that belong to a client into hours/calendar-events.tsv (hours.py calendar; read-only, its own
 # calendar-token.json, so the Gmail token is untouched). Until 26 Oct that file was a one-time copy and never refreshed. A failure
 # keeps the old file and says so in ~/.claude/state/hours-calendar.txt. Detached: it never holds this task.
