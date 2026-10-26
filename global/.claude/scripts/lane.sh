@@ -1230,7 +1230,10 @@ for line in lines:
     if op == "enqueue":
         q.append(c)
     elif op == "remove":
+        # A subagent hand-back is enqueued with content None (its text is in a later queued_command attachment) but removed with its text
+        # (26 Oct, scout-run-2: the remove never matched, one item counted forever, every recycle failed). No match: drop a None entry.
         if c in q: q.remove(c)
+        elif None in q: q.remove(None)
     elif op == "dequeue":
         if q: q.pop(0)
     elif op == "popAll":
