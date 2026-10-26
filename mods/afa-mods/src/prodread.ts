@@ -122,12 +122,12 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
   return { script: script.v, remote: remote.v, user: user?.v }
 }
 
-// ---- the deploy script run directly: [STACK_NAME=x] [env] [timeout N] [nice -n N] [bash|sh|source|.] SCRIPT [--prod] ACTION [OPERAND] ----
-// 26 Oct: `timeout 120 scripts/portainer-deploy.sh status --prod` and `source scripts/portainer-deploy.sh --prod status` were held as a production
-// deploy. The wrappers are looked through here to the script and its action; the caller decides whether the action is a read.
+// ---- the deploy script run directly: [STACK_NAME=x] [env] [timeout N] [nice -n N] [bash|sh] SCRIPT [--prod] ACTION [OPERAND] ----
+// 26 Oct: `timeout 120 scripts/portainer-deploy.sh status --prod` was held as a production deploy. The wrappers are looked through here to the script
+// and its action; the caller decides whether the action is a read. `source` and `.` are not looked through: a sourced script leaves its functions
+// (container_exec with any command, api, cmd_delete) callable for the rest of the command, so that form stays held for a person to approve (hub, 26 Oct).
 
-// `sourced`: the script was sourced, so every function it defines stays callable in the rest of the command
-export type DeployCall = { script: string; action: string; operand?: string; sourced: boolean }
+export type DeployCall = { script: string; action: string; operand?: string }
 
 const DEPLOY_FLAG = /^--(?:prod|production|staging)$/
 const OPERAND = /^[A-Za-z0-9_][\w.:-]*$/
@@ -153,7 +153,7 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
       const nv = w[1]?.v === '-n' ? 2 : /^-\d+$/.test(w[1]?.v ?? '') ? 1 : 0
       if (nv === 2 && !/^-?\d+$/.test(w[2]?.v ?? '')) return undefined
       w = w.slice(nv + 1)
-    } else if (['bash', 'sh', 'source', '.'].includes(head)) {
+    } else if (['bash', 'sh'].includes(head)) {
       runner = head
       w = w.slice(1)
       break
@@ -161,7 +161,7 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
   }
   const [script, ...args] = w
   if (!script || script.v.split('/').pop() !== 'portainer-deploy.sh') return undefined
-  // a bare name is looked up on PATH (and, for source, PATH first), never in the folder: only bash and sh read it from the folder
+  // a bare name is looked up on PATH, never in the folder: only bash and sh read it from the folder
   if (!script.v.includes('/') && runner !== 'bash' && runner !== 'sh') return undefined
   const words: Word[] = []
   for (const a of args) {
@@ -173,7 +173,7 @@ export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | un
   if (action && !/^[a-z][a-z-]*$/.test(action.v)) return undefined
   if (operand && !OPERAND.test(operand.v)) return undefined
   // the script's own default action is status
-  return { script: script.v, action: action?.v ?? 'status', operand: operand?.v, sourced: runner === 'source' || runner === '.' }
+  return { script: script.v, action: action?.v ?? 'status', operand: operand?.v }
 }
 
 // The actions of the pinned deploy script's dispatcher that only read: a case line whose comment says `read-only`, or a usage line that says READ-ONLY.
@@ -589,24 +589,3 @@ export const envKeyLines = (text: string): string =>
 // load_env would skip it, so the hook never has to agree with bash about what counts as a name.
 export const deployEnvIsPlain = (keyLines: string, allowed: ReadonlySet<string> = DEPLOY_ENV_KEYS): boolean =>
   keyLines.split('\n').every(k => k === '' || allowed.has(k))
-
-// After `source scripts/portainer-deploy.sh --prod status`, the shell still has every function the script defines, so the rest of the command is held
-// unless it is built only from these statements joined by `;`, `&&` or a newline (an allowlist: nothing is recognised by a blocklist of bad words):
-//   auth
-//   cid="$(find_service_container "${STACK_NAME}_php")"
-//   container_exec "$cid" 'REMOTE' [SECONDS]      REMOTE must be a recognised read (remoteIsRead)
-//   echo LITERAL                                   plain words only
-// Quotes, expansions, pipes, redirects, wrappers (time, command, trap, xargs, exec, eval) and any other word fail it.
-const CONTAINER_EXEC = /^container_exec "\$cid" '([^']*)'(?: \d+)?$/
-const CID = /^cid="\$\(find_service_container "(?:\$\{STACK_NAME\}|[\w-]+)_php"\)"$/
-export function afterSourcedIsPlain(rest: string): boolean {
-  const statements = rest
-    .split(/;|&&|\n/)
-    .map(x => x.trim())
-    .filter(x => x !== '')
-  return statements.every(st => {
-    if (st === 'auth' || CID.test(st) || /^echo [\w .,:=-]*$/.test(st)) return true
-    const m = CONTAINER_EXEC.exec(st)
-    return m !== null && remoteIsRead(m[1])
-  })
-}

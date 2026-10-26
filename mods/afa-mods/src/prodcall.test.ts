@@ -125,7 +125,7 @@ describe('read-only production proofs (classifier, deploy pin injected)', () => 
   })
 })
 
-// 26 Oct, coop-mail: the deploy script run straight, behind timeout / source / env / nice, is a read for the actions its own dispatcher marks read-only.
+// 26 Oct, coop-mail: the deploy script run straight, behind timeout / env / nice / bash, is a read for the actions its own dispatcher marks read-only.
 describe('the deploy script run directly (classifier, deploy pin injected)', () => {
   const deployHolds = (command: string, over: { cwd?: string | null; deploy?: string; pins?: DeployPins | null; keys?: string } = {}) =>
     classify(command, 0, {
@@ -140,7 +140,7 @@ describe('the deploy script run directly (classifier, deploy pin injected)', () 
     })
   }
   for (const [what, command] of DEPLOY_SOURCED_HELD) {
-    test(`held after a source or by a bare name: ${what}`, () => {
+    test(`held (source, dot-source, bare name): ${what}`, () => {
       expect(deployHolds(command)).toBeGreaterThan(0)
     })
   }
