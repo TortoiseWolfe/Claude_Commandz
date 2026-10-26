@@ -11,6 +11,7 @@
 #   - a watched lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
+#   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
 #   - a recycle (see below) failed
@@ -143,6 +144,26 @@ orphan_check() {
   [ "$(cat "$mark" 2>/dev/null)" != "$hm" ] || return 0
   printf '%s' "$hm" > "$mark"
   echo "handoff: lane $l wrote handoff.md at $(date -d "@$hm" '+%-I:%M %p') but was never recycled (context ${c}K, under its ${k}K line) and sits idle; recycle it with lane.sh --recycle $l or tell it to carry on. Named once for this handoff."
+  hit=1; other=1
+}
+
+# A step for Jonathan with no link. step_url_check <lane> (no subshell: it sets hit and other) looks at the lane's report.md: when line 1 starts
+# with STEP-FOR-JONATHAN and holds no https:// URL, it names the lane to the hub ("step without URL: <lane>") and types a note into the lane
+# through lane.sh --send asking it to rewrite line 1 with the URL. Once per distinct line 1, so a lane that rewrites it is checked again.
+# 26 Oct 11:52 AM, Jonathan, after a relayed lane step reached him with no link: "so you are asking me to do something with out givng me the
+# url to do it, again".
+step_url_check() {
+  local l=$1 rep first sum mark
+  rep=$(report_of "$l"); [ -n "$rep" ] || return 0
+  first=$(head -n 1 "$rep" 2>/dev/null)
+  case "$first" in STEP-FOR-JONATHAN*) ;; *) return 0 ;; esac
+  case "$first" in *https://*) return 0 ;; esac
+  sum=$(printf '%s' "$first" | cksum | cut -d' ' -f1)
+  mark="$recycle_dir/.stepurl-$l"
+  [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
+  printf '%s' "$sum" > "$mark"
+  echo "step without URL: $l (line 1 of $rep starts STEP-FOR-JONATHAN and has no https:// link); asked the lane to rewrite it"
+  "$lane_sh" --send "$l" "Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link. Rewrite line 1 so it carries the full https:// URL of the exact page, says which browser (the fleet Chromium and its tab title, or his own) and how he will know it is done; bring the fleet tab to the front first. He cannot act on a step without the URL." >/dev/null 2>&1 || true
   hit=1; other=1
 }
 
@@ -382,6 +403,7 @@ while :; do
     if [ "$s" != "${seen[$l]}" ]; then
       note=$(stale_note "$l")
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
+      step_url_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
