@@ -77,6 +77,7 @@ fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
 ok() { checks=$((checks + 1)); }
 assert_contains() { case "$1" in *"$2"*) ok ;; *) fail "$3 (missing: $2; got: $1)" ;; esac; }
 assert_not_contains() { case "$1" in *"$2"*) fail "$3 (unexpected: $2)" ;; *) ok ;; esac; }
+assert_eq() { [ "$1" = "$2" ] || fail "$3 (expected $2, got $1)"; ok; }
 assert_exit() { [ "$2" = "$1" ] || fail "$3 (expected exit $1, got $2)"; ok; }
 
 lane() {  # lane <args...>: run lane.sh against the fake home and window
@@ -452,5 +453,24 @@ assert_contains "$(cat "$ST/sent.log")" 'blind send' 'an unreadable context is t
 shreset 130000
 lane --dry-run --recycle sh-lane
 assert_contains "$LAST_OUT" 'hub-pending.md' '--recycle --dry-run says the re-prime reads held text'
+
+# 26 Oct, scout-run-2 (session 717475de): a subagent hand-back was enqueued with content None (13:24:19Z, its text arrives in a later
+# queued_command attachment) and removed 9s later with its text, so the remove never matched, queue_pending counted one item forever and every
+# recycle failed. Run queue_pending's own python on that exact sequence.
+qp_py="$TMP/queue_pending.py"
+sed -n "/queue_pending() {/,/^  }/p" "$SCRIPT" | sed -n "/<<'PY'/,/^PY$/p" | sed '1d;$d' >"$qp_py"
+[ -s "$qp_py" ] || { echo "FAIL could not extract queue_pending's python"; exit 1; }
+qp() { python3 -I "$qp_py" "$1"; }
+qp_t="$TMP/qp.jsonl"
+cat >"$qp_t" <<'EOF2'
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-26T13:24:19.000Z"}
+{"type":"attachment","attachment":{"type":"queued_command","prompt":"<agent-message from=\"sub\">done</agent-message>"}}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-10-26T13:24:28.000Z","content":"<agent-message from=\"sub\">done</agent-message>"}
+EOF2
+assert_eq "$(qp "$qp_t")" 0 'an enqueue with no content, removed later by its text, leaves nothing queued'
+printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"typed text"}' >>"$qp_t"
+assert_eq "$(qp "$qp_t")" 1 '... and a real queued item after it still counts'
+printf '%s\n' '{"type":"queue-operation","operation":"remove","content":"other text"}' >>"$qp_t"
+assert_eq "$(qp "$qp_t")" 1 '... a remove that matches nothing, with no None entry left, changes nothing'
 
 printf 'ok - %s checks passed\n' "$checks"
