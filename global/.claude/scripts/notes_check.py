@@ -4,12 +4,19 @@
 Read-only toward Gmail: lists drafts and messages matching note queries, drops IDs
 already handled or marked Label_32 (agent-notes-cc-processed), and reports new notes.
 Never labels, edits, or deletes anything in Gmail. Never prints a secret or token.
+
+--sweep is the one exception: it deletes fleet-note DRAFTS that are handled (rules below), so the owner's
+Drafts folder holds the owner's own drafts. Dry run by default; --apply deletes. See sweep().
 """
 
 import argparse
 import email.utils
+import fcntl
+import json
 import os
+import re
 import sys
+import time
 from datetime import datetime, timezone
 
 try:
@@ -227,15 +234,256 @@ def check_notes(processed_path, log):
     log.write(f"finished notes_check run: {len(remaining_notes)} note(s) reported")
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# --sweep: delete HANDLED fleet-note drafts (26 Oct: fleet notes buried the owner's real drafts).
+#
+# Only a draft whose subject carries a fleet tag is ever a candidate, and one to or from anyone but the owner is kept:
+#   notes to us   [MUSE>CC], [NCC-74656>NX-01], and a "Re:" of one of our tags (Hatch's / the tower's replies):
+#                 deleted once the ID is in the processed file (or the message wears Label_32) AND the draft is over 2 hours old.
+#   untagged H-7CH notes (no tag in the subject): same, but only if the ID is in the processed file AND the body is signed H-7CH.
+#   notes from us [CC>MUSE], [NX-01>NCC-74656]: deleted once handled (Label_32, or a later reply with the same topic in
+#                 its subject) or when 3 days old.
+# Everything else (no fleet tag: his real mail, client drafts) is counted and never touched. Gmail has no Trash for drafts,
+# so each draft's raw text is saved to ~/.claude/state/draft-sweep/YYYY-MM-DD.jsonl BEFORE it is deleted (the undo).
+# ---------------------------------------------------------------------------------------------------------------
+
+INBOUND_TAGS = ("[MUSE>CC]", "[NCC-74656>NX-01]")
+OUTBOUND_TAGS = ("[CC>MUSE]", "[NX-01>NCC-74656]")
+INBOUND_MIN_AGE = 2 * 3600
+OUTBOUND_MAX_AGE = 3 * 86400
+SWEEP_DIR = os.path.expanduser("~/.claude/state/draft-sweep")
+_REPLY_RE = re.compile(r"^\s*(re|fwd?|aw)\s*:", re.I)
+
+
+def classify(subject):
+    """(kind, label) for a fleet subject, or (None, None). kind: inbound (to us), outbound (from us). A "Re:" in front of
+    an outbound tag is the other side's reply, so it is inbound and its label starts with "Re: "."""
+    subj = subject or ""
+    for tag in INBOUND_TAGS:
+        if tag in subj:
+            return "inbound", tag
+    for tag in OUTBOUND_TAGS:
+        if tag in subj:
+            if _REPLY_RE.match(subj):
+                return "inbound", "Re: " + tag
+            return "outbound", tag
+    return None, None
+
+
+def _topic(subject, tag):
+    t = (subject or "").replace(tag.replace("Re: ", ""), " ")
+    t = " ".join(t.split())
+    while _REPLY_RE.match(t):
+        t = _REPLY_RE.sub("", t, count=1).strip()
+    t = re.sub(r'["\[\]()<>\\]', " ", t)
+    return " ".join(t.split())[:80]
+
+
+def _read_processed(path):
+    ids = set()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            ids = {ln.strip() for ln in f if ln.strip()}
+    return ids
+
+
+def _msg_meta(m):
+    h = {}
+    for hdr in (m.get("payload") or {}).get("headers") or []:
+        h[(hdr.get("name") or "").lower()] = " ".join((hdr.get("value") or "").split())
+    return {
+        "subject": h.get("subject", ""), "from": h.get("from", ""),
+        "recipients": [a.lower() for k in ("to", "cc", "bcc") if h.get(k)
+                       for _, a in email.utils.getaddresses([h[k]]) if a],
+        "date": h.get("date", ""), "t": int(m.get("internalDate") or 0) / 1000.0,
+        "labels": list(m.get("labelIds") or []),
+    }
+
+
+def _list_all_drafts():
+    out, token = [], None
+    while True:
+        params = {"maxResults": 100}
+        if token:
+            params["pageToken"] = token
+        page = gmail_api._api_retry("GET", "/drafts", params)
+        for d in page.get("drafts") or []:
+            if d.get("id"):
+                out.append((d["id"], (d.get("message") or {}).get("id")))
+        token = page.get("nextPageToken")
+        if not token:
+            return out
+
+
+def _draft_meta(did):
+    try:
+        d = gmail_api._api_retry("GET", f"/drafts/{did}", {"format": "metadata",
+                                                           "metadataHeaders": ["Subject", "From", "To", "Cc", "Bcc", "Date"]})
+    except gmail_api.GmailError as e:
+        if " 404 " in str(e):
+            return None  # deleted while we ran
+        raise
+    m = d.get("message") or {}
+    rec = _msg_meta(m)
+    rec["draft_id"], rec["message_id"] = did, m.get("id")
+    return rec
+
+
+def _signed_hatch(did):
+    d = gmail_api._api_retry("GET", f"/drafts/{did}", {"format": "full"})
+    stack = [(d.get("message") or {}).get("payload") or {}]
+    while stack:
+        part = stack.pop()
+        stack.extend(part.get("parts") or [])
+        data = (part.get("body") or {}).get("data")
+        if data and part.get("mimeType", "").startswith("text/"):
+            try:
+                if "H-7CH" in gmail_api.b64u_decode(data).decode("utf-8", "replace"):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _has_reply(rec, kind_label, cache):
+    """A later message about the same topic from the other side: a tagged inbound note, or any "Re:" subject."""
+    topic = _topic(rec["subject"], kind_label)
+    if not topic:
+        return None
+    if topic not in cache:
+        found = []
+        page = gmail_api._api_retry("GET", "/messages", {"q": f'subject:"{topic}"', "maxResults": 10})
+        for m in (page.get("messages") or [])[:10]:
+            if m.get("id") == rec["message_id"]:
+                continue
+            msg = gmail_api._api_retry("GET", f"/messages/{m['id']}", {
+                "format": "metadata", "metadataHeaders": ["Subject", "From", "To", "Cc", "Bcc", "Date"]})
+            found.append(_msg_meta(msg) | {"id": m["id"]})
+        cache[topic] = found
+    for f in cache[topic]:
+        kind, _ = classify(f["subject"])
+        if f["t"] > rec["t"] and (kind == "inbound" or (kind is None and _REPLY_RE.match(f["subject"]))):
+            return f["id"]
+    return None
+
+
+def decide(rec, processed, now, cache, owner):
+    """-> (action, category, reason). action: delete | keep | other (not a fleet draft; never touched)."""
+    kind, label = classify(rec["subject"])
+    age = now - rec["t"]
+    ids = {rec["draft_id"], rec["message_id"]}
+    handled = bool(ids & processed) or LABEL_CC_PROCESSED in rec["labels"]
+    if kind is None:
+        if ids & processed and age > INBOUND_MIN_AGE and _signed_hatch(rec["draft_id"]):
+            kind, label = "inbound", "untagged H-7CH"
+        else:
+            return "other", None, "no fleet tag"
+    outside = sorted({a for a in rec["recipients"] if a.lower() != owner})
+    if outside:
+        return "keep", label, "addressed outside the mailbox owner's own address: " + ", ".join(outside)
+    if kind == "inbound":
+        if age <= INBOUND_MIN_AGE:
+            return "keep", label, "under 2 hours old"
+        if handled:
+            return "delete", label, "handled (ID in processed file or Label_32), over 2 hours old"
+        stale = " and over 3 days old: never seen by notes_check (it looks 3 days back)" if age > OUTBOUND_MAX_AGE else ""
+        return "keep", label, "not handled yet" + stale
+    if LABEL_CC_PROCESSED in rec["labels"]:
+        return "delete", label, "carries Label_32 (picked up)"
+    if age >= OUTBOUND_MAX_AGE:
+        return "delete", label, "3 days old"
+    reply = _has_reply(rec, label, cache)
+    if reply:
+        return "delete", label, f"answered (reply message {reply})"
+    return "keep", label, "waiting for a reply, under 3 days old"
+
+
+def _archive(did, mid, rec, sweep_dir, now):
+    d = gmail_api._api_retry("GET", f"/drafts/{did}", {"format": "raw"})
+    os.makedirs(sweep_dir, exist_ok=True)
+    path = os.path.join(sweep_dir, time.strftime("%Y-%m-%d", time.localtime(now)) + ".jsonl")
+    line = json.dumps({"draft_id": did, "message_id": mid, "subject": rec["subject"], "date": rec["date"],
+                       "raw": (d.get("message") or {}).get("raw", "")})
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, owner=None):
+    out = out or sys.stdout
+    # The mailbox owner is read from the account once per run, never written into this public repo. If the lookup
+    # fails the GmailError ends the sweep before anything is listed or deleted.
+    owner = (owner or gmail_api.api("GET", "/profile")["emailAddress"]).lower()
+    now = time.time() if now is None else now
+    sweep_dir = sweep_dir or SWEEP_DIR
+    processed = _read_processed(processed_path)
+    recs = [r for r in (_draft_meta(did) for did, _ in _list_all_drafts()) if r]
+    cache = {}
+    rows = [(r,) + decide(r, processed, now, cache, owner) for r in recs]
+    by_tag = {}
+    for r, action, label, reason in rows:
+        if action != "other":
+            by_tag.setdefault(label, {"delete": 0, "keep": 0})[action] += 1
+    others = sum(1 for row in rows if row[1] == "other")
+    fleet = [row for row in rows if row[1] != "other"]
+    dels = [row for row in fleet if row[1] == "delete"]
+    deleted = 0
+    if apply:
+        for r, _, label, reason in dels:
+            try:
+                _archive(r["draft_id"], r["message_id"], r, sweep_dir, now)
+            except (OSError, gmail_api.GmailError) as e:
+                log.write(f"sweep: NOT deleting {r['draft_id']}: archive failed: {e}")
+                continue
+            try:
+                gmail_api.draft_delete(r["draft_id"])
+            except gmail_api.GmailError as e:
+                if " 404 " not in str(e):
+                    raise
+            deleted += 1
+            log.write(f"sweep: deleted {r['draft_id']} [{label}] {r['subject']!r}: {reason}")
+    mode = "APPLIED" if apply else "DRY RUN"
+    print(f"draft sweep ({mode}): {len(recs)} drafts, {len(fleet)} fleet notes, {others} not fleet notes (never touched)", file=out)
+    for label in sorted(by_tag):
+        print(f"  {label}: {by_tag[label]['delete'] + by_tag[label]['keep']} (delete {by_tag[label]['delete']}, keep {by_tag[label]['keep']})", file=out)
+    if fleet:
+        oldest = min(fleet, key=lambda row: row[0]["t"])[0]
+        print(f"  oldest fleet draft: {oldest['date'] or time.ctime(oldest['t'])}", file=out)
+    verb = "deleted" if apply else "would delete"
+    print(f"  {verb}: {deleted if apply else len(dels)}", file=out)
+    for r, action, label, reason in fleet:
+        if action == "keep":
+            print(f"  keep {r['draft_id']} {label} {r['subject'][:70]!r}: {reason}", file=out)
+    print(f"  not fleet notes remaining: {others}", file=out)
+    log.write(f"sweep {mode}: {len(recs)} drafts, {len(fleet)} fleet, {len(dels)} to delete, {deleted} deleted, {others} other")
+    return {"drafts": len(recs), "fleet": len(fleet), "deleted": deleted, "would_delete": len(dels), "other": others}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check for new notes from Hatch and the second tower.")
     parser.add_argument("--processed", default=os.path.expanduser("~/.claude/state/agent-notes-processed.txt"),
                         help="Path to processed IDs file")
     parser.add_argument("--log", default=os.path.expanduser("~/.claude/state/notes-check.log"),
                         help="Path to log file")
+    parser.add_argument("--sweep", action="store_true",
+                        help="Delete handled fleet-note drafts (dry run unless --apply); prints counts, never note bodies")
+    parser.add_argument("--apply", action="store_true", help="With --sweep: really delete")
     args = parser.parse_args(argv)
     log = Logger(args.log)
     try:
+        if args.sweep:
+            lock = None
+            if args.apply:
+                state_dir = os.path.expanduser("~/.claude/state")
+                os.makedirs(state_dir, exist_ok=True)
+                lock = open(os.path.join(state_dir, "draft-sweep.lock"), "w")
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return 0  # another sweep is running
+            sweep(args.processed, log, apply=args.apply)
+            return 0
         check_notes(args.processed, log)
         return 0
     except gmail_api.GmailError as e:
