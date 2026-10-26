@@ -309,6 +309,19 @@ class Page(unittest.TestCase):
         (d / "slow.py").write_text("import time; time.sleep(5)\n")
         self.assertEqual(hd.internship_lines(d / "slow.py", timeout=1), [])
 
+    def test_hours_section_shows_the_weekly_line_and_a_stale_or_missing_file_adds_nothing(self):
+        d = Path(fresh_dir(self))
+        f = d / "hours-week.txt"
+        f.write_text("Hours, week of Mon 19 Oct: Acme 9.4 h (typed 9.0 h, call 0.4 h)\n")
+        page = self.build(hours=hd.hours_lines(f))
+        self.assertIn("## Hours", page)
+        self.assertIn("- Hours, week of Mon 19 Oct: Acme 9.4 h", page)
+        self.assertNotIn("## Hours", self.build())
+        self.assertNotIn("## Hours", self.build(hours=hd.hours_lines(d / "missing.txt")))
+        self.assertEqual(hd.hours_lines(f, now=f.stat().st_mtime + 10 * 86400), [])
+        self.assertEqual(hd.hours_lines(f, now=f.stat().st_mtime + 2 * 86400), ["Hours, week of Mon 19 Oct: Acme 9.4 h (typed 9.0 h, call 0.4 h)"])
+        self.assertLessEqual(len(page.encode()), hd.CAP_DEFAULT)
+
     def test_no_secret_shaped_text_reaches_the_page(self):
         secret = fake("sk-")
         inbox = f"- [ ] 2026-10-14 10:00 | Job: use {secret} for it | https://example.test/reset/abc | r-1\n"
