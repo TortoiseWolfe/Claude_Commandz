@@ -1,0 +1,30 @@
+{
+  "name": "smoke",
+  "baseUrl": "http://localhost:8765",
+  "runner": {"network": "host"},
+  "start": {"path": "/index.html", "waitFor": {"css": "#list"}, "settleMs": 500},
+  "steps": [
+    {
+      "say": "This is a shopping list with three items.",
+      "actions": [
+        {"check": "count", "target": {"css": "#list li"}, "equals": 3},
+        {"do": "highlight", "target": {"text": "Bread", "exact": true}, "ms": 1500}
+      ]
+    },
+    {
+      "say": "I add one more item, and it joins the list.",
+      "actions": [
+        {"do": "fill", "target": {"placeholder": "Add an item"}, "value": "Dates"},
+        {"do": "click", "target": {"role": "button", "name": "Add"}},
+        {"check": "order", "within": "#list", "texts": ["Apples", "Bread", "Cheese", "Dates"]}
+      ]
+    },
+    {
+      "say": "Then I scroll to the bottom of the page.",
+      "actions": [
+        {"do": "scroll", "to": "bottom"},
+        {"check": "visible", "target": {"text": "The end"}}
+      ]
+    }
+  ]
+}
