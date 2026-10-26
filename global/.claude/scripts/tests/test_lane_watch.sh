@@ -638,5 +638,30 @@ if [ "$(printf '%s\n' "$out" | grep -c '^tier:')" = 1 ] && printf '%s\n' "$out" 
   echo "ok   a lane that moves to opus later in the day is named, the earlier one is not repeated"
 else echo "FAIL high-tier later lane: $out"; failures=$((failures + 1)); fi
 
+# --recycle-once: the 15-minute Windows task (openclaw_status_refresh.sh) runs one silent pass over every live lane, same line, same
+# thrash and queued-input guards as the watcher, and wakes nobody. 26 Oct, scout-run-2 auto-compacted because no watcher was armed.
+ro_run() { # ro_run <ctx> <pane> ; leaves the output in $ro_out and the exit code in $ro_rc, then waits out the fake's background recycle
+  echo "$1" > "$CTX_FILE"; printf '%s\n' "$2" > "$RC_PANE"; : > "$RC_CALLS"
+  ro_rc=0; ro_out=$(HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" LANE_RECYCLE_RETRY_SECS=600 timeout 30 bash "$SCRIPT" --recycle-once 2>&1) || ro_rc=$?
+  sleep 1
+}
+ro_case() { # ro_case <label> <want calls> ; checks exit 0, no output, calls
+  if [ "$ro_rc" = 0 ] && [ -z "$ro_out" ] && [ "$(tr '\n' ' ' < "$RC_CALLS" | sed 's/ $//')" = "$2" ]; then echo "ok   $1"
+  else echo "FAIL $1: rc=$ro_rc calls='$(tr '\n' ' ' < "$RC_CALLS")' out=$ro_out"; failures=$((failures + 1)); fi
+}
+sleep 3   # let any earlier fake recycle finish
+rl_reset; ro_run 130 "$idle_pane"; ro_case "--recycle-once recycles a lane past its line, silently, exit 0" rl
+sleep 3; rl_reset; ro_run 100 "$idle_pane"; ro_case "--recycle-once leaves a lane under its line alone" ""
+sleep 3; rl_reset; log_row rl 25; log_row rl 15; log_row rl 5; ro_run 130 "$idle_pane"
+ro_case "--recycle-once does not recycle a thrashing lane, and says nothing" ""
+if [ ! -e "$rl_dir/.thrash-rl" ] && ! ls "$rl_dir"/.thrash-* >/dev/null 2>&1; then echo "ok   ... and leaves no thrash marker, so an armed watcher can still name it"; else echo "FAIL thrash marker left by --recycle-once"; failures=$((failures + 1)); fi
+sleep 3; rl_reset; mkdir "$rl_dir/.recycle-rl.lock"; ro_run 130 "$idle_pane"; rmdir "$rl_dir/.recycle-rl.lock"
+ro_case "--recycle-once leaves a lane whose recycle is already under way" ""
+sleep 3; rl_reset; date +%s > "$rl_dir/.recycle-rl.tried"; ro_run 130 "$idle_pane"
+ro_case "--recycle-once honours the retry spacing (a fresh .tried file)" ""
+sleep 3; rl_reset; ro_run 130 "$busy_pane"; ro_case "--recycle-once recycles a lane mid-turn too" rl
+sleep 3; rl_reset
+if grep -q -- '--recycle-once' "$(dirname "$SCRIPT")/openclaw_status_refresh.sh"; then echo "ok   openclaw_status_refresh.sh runs lane_watch.sh --recycle-once"; else echo "FAIL openclaw_status_refresh.sh does not run --recycle-once"; failures=$((failures + 1)); fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
