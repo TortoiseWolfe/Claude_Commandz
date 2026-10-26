@@ -15,7 +15,37 @@ container_exec "$cid" "$CMD" "$U"
 `
 // A stand-in for the repo's portainer-deploy.sh. The real pin list holds only reviewed copies of the real scripts, so the classifier tests inject this
 // one's hash through ScratchEnv.deployPins; the hook tests, which cannot reach the plugin's list, see it as an unreviewed copy.
-export const DEPLOY = '#!/usr/bin/env bash\n# stand-in deploy script for the hook tests\ncontainer_exec() { :; }\n'
+// Its dispatcher has the same shape as the real one: status and config-get carry no marker on the case line, drift has a doubled comment.
+export const DEPLOY = `#!/usr/bin/env bash
+# stand-in deploy script for the hook tests
+container_exec() { :; }
+dispatch_action() {
+  local action="$1"
+  case "$action" in
+    status)               cmd_status ;;
+    backup)               cmd_backup ;;
+    delete)               cmd_delete ;;
+    create)               cmd_create ;;
+    redeploy)             cmd_git_redeploy ;;
+    live-changes)         cmd_live_changes ;;
+    redeploy-destructive) cmd_redeploy_destructive ;;
+    force-update)         cmd_force_update ;;
+    config-get)           cmd_config_get ;;
+    deployed-commit)      cmd_deployed_commit ;;  # read-only; prints the commit Portainer deployed
+    logs)                 cmd_logs ;;          # read-only; tail a service container log
+    state-get)            cmd_state_get ;;     # read-only; print one Drupal State value
+    drift)                cmd_drift ;;         # read-only; deployed commit vs branch head (#319)   # read-only; prints one active config object
+    dns-check)            dns_postcheck ;;  # standalone hostname probe (#56); no Portainer auth needed
+    *)
+      err "unknown action: $action"
+      echo "Usage: $0 {status|backup|redeploy|config-get} [--prod|--staging] [--skip-backup]" >&2
+      echo "  config-get <name>     READ-ONLY: print one active config object (runs as www-data)" >&2
+      echo "  redeploy              SAFE DEFAULT: git redeploy; preserves every named volume" >&2
+      return 1
+      ;;
+  esac
+}
+`
 export const prod = (remote: string, q = "'") => `SP=${SP}; STACK_NAME=x timeout 120 bash $SP/rexec.sh --prod ${q}${remote}${q} 2>&1 | tail -5`
 export const WRITES: [string, string, string?][] = [
   ['drush updb -y', prod('drush updb -y')],
@@ -90,4 +120,55 @@ export const FORWARDERS: [string, string, string | null][] = [
   ['a forwarder with an indented cd', prod('drush status'), REXEC.replace('cd ~/repos', '  cd ~/repos')],
   ['a forwarder with a tab-indented cd', prod('drush status'), REXEC.replace('cd ~/repos', '\tcd ~/repos')],
   ['a forwarder script that is not found', prod('drush status'), null],
+]
+
+// 26 Oct, coop-mail: the deploy script run directly with a read-only action. Every one of these is a read when the script is the reviewed copy.
+export const DEPLOY_DIR = `${HOME}/repos/Chattanooga-Digital`
+export const DEPLOY_READS: [string, string][] = [
+  ['timeout + deployed-commit', 'timeout 120 scripts/portainer-deploy.sh deployed-commit --prod'],
+  ['timeout + drift', 'timeout 120 scripts/portainer-deploy.sh drift --prod'],
+  ['timeout + status', 'timeout 120 scripts/portainer-deploy.sh status --prod'],
+  ['source + status, then the functions it defined', `source scripts/portainer-deploy.sh --prod status >/dev/null 2>&1; auth; container_exec "$cid" 'php -r "echo PHP_VERSION"' 82`],
+  ['the flag before the action', 'scripts/portainer-deploy.sh --prod status'],
+  ['no action (the script defaults to status)', 'scripts/portainer-deploy.sh --prod'],
+  ['bash in front, a pipe into tail', 'bash scripts/portainer-deploy.sh status --prod 2>&1 | tail -20'],
+  ['nice and env in front', 'env STACK_NAME=x nice -n 5 scripts/portainer-deploy.sh status --production'],
+  ['config-get with its operand', 'timeout 60 scripts/portainer-deploy.sh config-get system.site --prod'],
+  ['state-get with its operand', 'scripts/portainer-deploy.sh state-get system.cron_last --prod'],
+  ['logs', 'scripts/portainer-deploy.sh logs --prod'],
+  ['a full path', `${DEPLOY_DIR}/scripts/portainer-deploy.sh status --prod`],
+  ['a ~ path', 'timeout 120 ~/repos/Chattanooga-Digital/scripts/portainer-deploy.sh status --prod'],
+  ['a cd to the repo first', 'cd ~/repos/Chattanooga-Digital && timeout 120 scripts/portainer-deploy.sh status --prod'],
+  ['a dot-source', '. scripts/portainer-deploy.sh --prod status'],
+]
+// Everything that is not a read stays held, with or without a wrapper.
+export const DEPLOY_HELD: [string, string][] = [
+  ['redeploy', 'scripts/portainer-deploy.sh redeploy --prod'],
+  ['redeploy behind timeout', 'timeout 120 scripts/portainer-deploy.sh redeploy --prod'],
+  ['force-update', 'timeout 120 scripts/portainer-deploy.sh force-update --prod'],
+  ['create', 'scripts/portainer-deploy.sh create --prod'],
+  ['delete', 'scripts/portainer-deploy.sh delete --prod'],
+  ['redeploy-destructive', 'scripts/portainer-deploy.sh redeploy-destructive --prod'],
+  ['backup', 'scripts/portainer-deploy.sh backup --prod'],
+  ['live-changes', 'scripts/portainer-deploy.sh live-changes --prod'],
+  ['dns-check', 'scripts/portainer-deploy.sh dns-check --prod'],
+  ['an action the script does not know', 'scripts/portainer-deploy.sh frobnicate --prod'],
+  ['status with --skip-backup', 'scripts/portainer-deploy.sh status --prod --skip-backup'],
+  ['status with an extra word', 'scripts/portainer-deploy.sh status --prod now please'],
+  ['an operand on an action that takes none', 'scripts/portainer-deploy.sh status system.site --prod'],
+  ['a substitution as the action', 'scripts/portainer-deploy.sh $(echo redeploy) --prod'],
+  ['a variable as the action', 'scripts/portainer-deploy.sh $ACTION --prod'],
+  ['bash -x in front', 'bash -x scripts/portainer-deploy.sh status --prod'],
+  ['env -i in front', 'env -i scripts/portainer-deploy.sh status --prod'],
+  ['an environment word that is not STACK_NAME', 'PATH=/tmp/x scripts/portainer-deploy.sh status --prod'],
+  ['a script of another name', 'timeout 120 scripts/other-deploy.sh status --prod'],
+  ['a .. in the script word', 'timeout 120 scripts/../scripts/portainer-deploy.sh status --prod'],
+  ['a repo folder that is not on the pin list', '~/repos/evil/scripts/portainer-deploy.sh status --prod'],
+  ['a worktree copy', '~/repos/.worktrees/Chattanooga-Digital--x/scripts/portainer-deploy.sh status --prod'],
+  ['an earlier segment rewrites the script', 'echo x >> scripts/portainer-deploy.sh; timeout 120 scripts/portainer-deploy.sh status --prod'],
+  ['a background run', 'scripts/portainer-deploy.sh status --prod &'],
+  ['a pipe into tee', 'scripts/portainer-deploy.sh status --prod | tee scripts/portainer-deploy.sh'],
+  ['an || list', 'true || scripts/portainer-deploy.sh status --prod'],
+  ['a heredoc anywhere', 'scripts/portainer-deploy.sh status --prod; cat <<EOF\nx\nEOF'],
+  ['a second deploy call that redeploys', 'scripts/portainer-deploy.sh status --prod; scripts/portainer-deploy.sh redeploy --prod'],
 ]

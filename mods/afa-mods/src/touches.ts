@@ -239,6 +239,11 @@ async function deployLines($: Probe, segment: string): Promise<string[]> {
   const hosts = [...segment.matchAll(/https?:\/\/([^\s/"']+)/g)].map(m => m[1])
   const flag = /--prod(?:uction)?\b/.exec(segment)?.[0] ?? 'redeploy aimed at prod'
   const named = hosts.length > 0 ? `; host named: ${hosts.join(', ')}` : ''
+  const portainer = /portainer-deploy\.sh\b(.*)$/.exec(segment)
+  if (portainer) {
+    const action = (portainer[1] ?? '').split(/\s+/).find(x => x !== '' && !x.startsWith('-')) ?? 'status'
+    return [`service: the Portainer stack deploy script (${action.slice(0, 40)}); target: production (${flag})${named}`]
+  }
   if (DEPLOY_TOOLS[tool]) return [`service: ${DEPLOY_TOOLS[tool]}; target: production (${flag})${named}`]
   if (['npm', 'pnpm', 'yarn', 'npx', 'bun'].includes(tool)) {
     const script = t.slice(1).find(x => !x.startsWith('-') && x !== 'run')
@@ -272,7 +277,7 @@ export const RULE_SAMPLES: Record<string, string[]> = {
   'docker compose down -v': ['docker compose down -v', 'docker compose -f ci.yml -p demo down --volumes'],
   'docker run without limits': ['docker run --rm ada-stair-generator-site-tools', 'docker compose run --rm app make test', 'docker-compose -f ci.yml run web npm test'],
   'git push --force': ['git push --force origin main', 'git push -f', 'git push origin +feat/x'],
-  'production deploy': ['vercel --prod', 'npm run deploy --production', 'redeploy prod now', 'mystery-tool --prod'],
+  'production deploy': ['vercel --prod', 'npm run deploy --production', 'redeploy prod now', 'mystery-tool --prod', 'timeout 120 scripts/portainer-deploy.sh redeploy --prod'],
   'tmux shared lanes': [
     'tmux kill-server',
     'tmux kill-session -t lanes',

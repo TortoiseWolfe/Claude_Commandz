@@ -122,6 +122,78 @@ export function parseProdCall(raw: string, fusedErr: boolean): ProdCall | undefi
   return { script: script.v, remote: remote.v, user: user?.v }
 }
 
+// ---- the deploy script run directly: [STACK_NAME=x] [env] [timeout N] [nice -n N] [bash|sh|source|.] SCRIPT [--prod] ACTION [OPERAND] ----
+// 26 Oct: `timeout 120 scripts/portainer-deploy.sh status --prod` and `source scripts/portainer-deploy.sh --prod status` were held as a production
+// deploy. The wrappers are looked through here to the script and its action; the caller decides whether the action is a read.
+
+export type DeployCall = { script: string; action: string; operand?: string }
+
+const DEPLOY_FLAG = /^--(?:prod|production|staging)$/
+const OPERAND = /^[A-Za-z0-9_][\w.:-]*$/
+
+export function parseDeployCall(raw: string, fusedErr: boolean): DeployCall | undefined {
+  const t = tokenize(raw, false, fusedErr)
+  if (!t || t.commands.length !== 1) return undefined
+  let w = t.commands[0]
+  for (let n = 0; n < 6 && w[0]?.quote === 'none'; n += 1) {
+    const head = w[0].v
+    if (/^[A-Za-z_]\w*=/.test(head)) {
+      if (!/^STACK_NAME=[\w-]+$/.test(head)) return undefined
+      w = w.slice(1)
+    } else if (head === 'env') {
+      w = w.slice(1)
+    } else if (head === 'timeout') {
+      let j = 1
+      while (w[j]?.v.startsWith('-')) j += ['-s', '-k', '--signal', '--kill-after'].includes(w[j].v) ? 2 : 1
+      if (!/^\d+[smh]?$/.test(w[j]?.v ?? '')) return undefined
+      w = w.slice(j + 1)
+    } else if (head === 'nice') {
+      const nv = w[1]?.v === '-n' ? 2 : /^-\d+$/.test(w[1]?.v ?? '') ? 1 : 0
+      if (nv === 2 && !/^-?\d+$/.test(w[2]?.v ?? '')) return undefined
+      w = w.slice(nv + 1)
+    } else if (['bash', 'sh', 'source', '.'].includes(head)) {
+      w = w.slice(1)
+      break
+    } else break
+  }
+  const [script, ...args] = w
+  if (!script || script.v.split('/').pop() !== 'portainer-deploy.sh') return undefined
+  const words: Word[] = []
+  for (const a of args) {
+    if (a.quote === 'none' && DEPLOY_FLAG.test(a.v)) continue
+    words.push(a)
+  }
+  if (words.length > 2) return undefined
+  const [action, operand] = words
+  if (action && !/^[a-z][a-z-]*$/.test(action.v)) return undefined
+  if (operand && !OPERAND.test(operand.v)) return undefined
+  // the script's own default action is status
+  return { script: script.v, action: action?.v ?? 'status', operand: operand?.v }
+}
+
+// The actions of the pinned deploy script's dispatcher that only read: a case line whose comment says `read-only`, or a usage line that says READ-ONLY.
+// `status` has neither in the real script, so it counts when the dispatcher lists it. Anything not named here (redeploy, force-update, create, delete,
+// backup, live-changes, redeploy-destructive, dns-check, an action the dispatcher does not know) stays held. The text is the pinned copy, never a lane's.
+export function readOnlyActions(text: string): Set<string> {
+  const lines = text.split('\n')
+  const start = lines.findIndex(l => /^dispatch_action\(\)\s*\{\s*$/.test(l))
+  const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && l === '}')
+  if (start < 0 || end < 0) return new Set()
+  const labels = new Set<string>()
+  const reads = new Set<string>()
+  for (const line of lines.slice(start + 1, end)) {
+    const c = /^\s*([a-z][a-z0-9-]*)\)\s+\S/.exec(line)
+    if (c) {
+      labels.add(c[1])
+      if (/#.*read-only/i.test(line)) reads.add(c[1])
+    }
+    const u = /^\s*echo\s+"\s+([a-z][a-z0-9-]*)\b[^"]*\bREAD-ONLY\b/.exec(line)
+    if (u) reads.add(u[1])
+  }
+  if (labels.has('status')) reads.add('status')
+  return new Set([...reads].filter(a => labels.has(a)))
+}
+
 // ---- the whole command line around the call ----
 // The hook reads the forwarder before the command runs, so nothing else in the command may touch that file or run beside it:
 // only plain assignments or `cd /abs/path` before the call (joined by ; newline or &&), then the call, then optionally 2>&1,
@@ -134,6 +206,8 @@ const ASSIGN = /^([A-Za-z_]\w*)=([\w./:,@%+=-]*|'[\w./:,@%+=-]*'|"[\w./:,@%+=-]*
 // Only these names may be set before the call: bash gives many other names a meaning of their own (readonly, recomputed, or `$_`), and a value stored here would then differ from what bash holds.
 const ASSIGN_OK = /^(?:SP|L|DIR|SCRIPTS|STACK_NAME)$/
 const CD_ABS = /^cd\s+\/[\w./-]*$/
+// the deploy script's own read-only actions also accept `cd ~/repos/NAME`: bash expands the ~ the same way the hook does
+const CD_HOME = /^cd\s+~\/[\w./-]*$/
 
 // bash keeps CR, NBSP and other odd characters inside a word where JS .trim() drops them, so the hook and the shell would read different lines.
 // Anything but printable ASCII, tab and newline refuses the exception.
@@ -147,14 +221,16 @@ const lineEnd = (sep: string) => sep === '' || sep === '\n' || sep === ';'
 
 // Returns the plain assignments before the call (the only variables the script path may use), or undefined when the line is not the plain shape.
 // A `<<` anywhere refuses it: the splitter drops heredoc bodies it takes for text, and the shell would not see the line the same way.
-export function prodLineShape(command: string, parts: Piece[], index: number, fusedErr: boolean): Map<string, string> | undefined {
+// `rest` says what may follow the call: 'none' (the forwarder proof: nothing but an optional tail/head pipe) or 'more' (the deploy script's own
+// read-only actions: later commands may follow once the call has finished, joined by ; newline or &&; they are judged on their own).
+export function prodLineShape(command: string, parts: Piece[], index: number, fusedErr: boolean, rest: 'none' | 'more' = 'none'): Map<string, string> | undefined {
   if (command.includes('<<') || !PLAIN_ASCII.test(command)) return undefined
   const vars = new Map<string, string>()
-  const ok = lineShape(parts, index, fusedErr, vars)
+  const ok = lineShape(parts, index, fusedErr, vars, rest)
   return ok ? vars : undefined
 }
 
-function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<string, string>): boolean {
+function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<string, string>, rest: 'none' | 'more'): boolean {
   for (let i = 0; i < index; i += 1) {
     const { text, sep } = parts[i]
     const t = text.trim()
@@ -165,7 +241,7 @@ function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<s
       return false
     }
     const a = ASSIGN.exec(t)
-    if (!(a ? ASSIGN_OK.test(a[1]) : CD_ABS.test(t) && !hasDotPart(t.slice(2).trim()))) return false
+    if (!(a ? ASSIGN_OK.test(a[1]) : (CD_ABS.test(t) || (rest === 'more' && CD_HOME.test(t))) && !hasDotPart(t.slice(2).trim()))) return false
     if (a) vars.set(a[1], a[2].replace(/^(['"])(.*)\1$/, '$2'))
     if (sep === '&') {
       if (!(blank(parts[i + 1]) && parts[i + 1].sep === '&')) return false // a lone & puts it in the background
@@ -184,6 +260,7 @@ function lineShape(parts: Piece[], index: number, fusedErr: boolean, vars: Map<s
     sep = next.sep
     k += 1
   }
+  if (rest === 'more') return lineEnd(sep) || (sep === '&' && blank(parts[k]) && parts[k].sep === '&')
   if (!lineEnd(sep)) return false
   return parts.slice(k).every(p => blank(p) && (p.sep === '' || p.sep === '\n'))
 }
