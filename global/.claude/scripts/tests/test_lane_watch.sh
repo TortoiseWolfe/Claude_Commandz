@@ -364,6 +364,7 @@ case "$1" in
   --ctx) cat "$CTX_FILE" ;;
   --turn) cat "${TURN_FILE:-/dev/null}" ;;
   --recycle-point) cat "${POINT_FILE:-/dev/null}" ;;
+  --send) printf '%s\t%s\n' "$2" "$3" >> "${SEND_LOG:-/dev/null}" ;;
   --recycle)
     echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
     [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
@@ -662,6 +663,41 @@ ro_case "--recycle-once honours the retry spacing (a fresh .tried file)" ""
 sleep 3; rl_reset; ro_run 130 "$busy_pane"; ro_case "--recycle-once recycles a lane mid-turn too" rl
 sleep 3; rl_reset
 if grep -q -- '--recycle-once' "$(dirname "$SCRIPT")/openclaw_status_refresh.sh"; then echo "ok   openclaw_status_refresh.sh runs lane_watch.sh --recycle-once"; else echo "FAIL openclaw_status_refresh.sh does not run --recycle-once"; failures=$((failures + 1)); fi
+
+# A STEP-FOR-JONATHAN report with no https:// link wakes the hub ("step without URL: <lane>") and the lane is asked, through lane.sh --send, to
+# rewrite line 1 (26 Oct 11:52 AM: a relayed step reached him with no link). A throwaway lane folder stands in for the lane.
+export SEND_LOG="$TMP/send-log"
+su_dir="$rl_dir/2026-10-26-rl"; su_rep="$su_dir/report.md"; mkdir -p "$su_dir"
+su_watch() { # su_watch <report line 1> <out>: the report appears 1.5 s after the watcher starts
+  rl_reset; rm -f "$rl_dir"/.stepurl-*; : > "$SEND_LOG"; echo 50 > "$CTX_FILE"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+      timeout 8 bash "$SCRIPT" --max-min 5 rl > "$2" 2>&1 ) &
+  suw=$!
+  sleep 1.5; printf '%s\nbody line two\n' "$1" > "$su_rep"
+  wait "$suw" || true
+}
+su_watch 'STEP-FOR-JONATHAN open the Vercel dashboard and approve the deploy' "$TMP/su-out1"
+if grep -q '^step without URL: rl' "$TMP/su-out1" && [ "$(wc -l < "$SEND_LOG")" = 1 ] && grep -q "^rl	Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link" "$SEND_LOG" && grep -q 'https://' "$SEND_LOG"; then
+  echo "ok   a STEP-FOR-JONATHAN report with no URL wakes the hub and the lane is asked to rewrite line 1"
+else echo "FAIL step without URL: out=$(cat "$TMP/su-out1") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+su_watch 'STEP-FOR-JONATHAN open https://vercel.com/acme/site/deployments (fleet Chromium tab "Deployments"), approve; done when it says Ready' "$TMP/su-out2"
+if ! grep -q 'step without URL' "$TMP/su-out2" && [ ! -s "$SEND_LOG" ]; then echo "ok   a STEP-FOR-JONATHAN report with an https:// URL is left alone"; else echo "FAIL step with URL flagged: out=$(cat "$TMP/su-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+su_watch 'DONE 11:00 AM shipped, see the page at none' "$TMP/su-out3"
+if ! grep -q 'step without URL' "$TMP/su-out3" && [ ! -s "$SEND_LOG" ]; then echo "ok   an ordinary report with no URL is left alone"; else echo "FAIL ordinary report flagged: out=$(cat "$TMP/su-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+# The same bad line 1 is named once, even across a re-armed watcher (the mark is a file); a rewrite that still has no URL is a new line.
+su_again() { # su_again <out>: another watcher, the report touched after it starts
+  : > "$SEND_LOG"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 6 bash "$SCRIPT" --max-min 5 rl > "$1" 2>&1 ) &
+  suw=$!; sleep 1.5; touch "$su_rep"; wait "$suw" || true
+}
+su_watch 'STEP-FOR-JONATHAN click the button' "$TMP/su-out4"
+su_again "$TMP/su-out5"
+if grep -q '^step without URL' "$TMP/su-out4" && ! grep -q '^step without URL' "$TMP/su-out5" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same bad line is named once, across a re-armed watcher"; else echo "FAIL repeated naming: first=$(cat "$TMP/su-out4") second=$(cat "$TMP/su-out5")"; failures=$((failures + 1)); fi
+printf 'STEP-FOR-JONATHAN click the other button\n' > "$su_rep"
+su_again "$TMP/su-out6"
+# su_again touches the report after the rewrite, so the new line 1 is the one checked
+if grep -q '^step without URL' "$TMP/su-out6" && [ "$(wc -l < "$SEND_LOG")" = 1 ]; then echo "ok   a rewrite that still has no URL is named again"; else echo "FAIL rewrite not re-checked: $(cat "$TMP/su-out6")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-*
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
