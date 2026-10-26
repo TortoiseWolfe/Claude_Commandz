@@ -97,24 +97,42 @@ recycle_failures() {
 # Spend alarm. spend_check sets spend_out (one "<lane>\t<usd>\t<models>" per lane that has newly passed the limit today). It asks the ledger at
 # most every LANE_WATCH_SPEND_SECS (default 300; the stamp is a file, so a re-armed watcher keeps the spacing) and names a lane once a day
 # (.spend-alarm-<date> in $recycle_dir lists the lanes already named), so a lane that stays over the limit does not wake the hub again.
+# Separately, the hub itself has a limit (HUB_SPEND_LIMIT, default 75).
 spend_limit=${LANE_SPEND_LIMIT:-25}
+hub_limit=${HUB_SPEND_LIMIT:-75}
 spend_every=${LANE_WATCH_SPEND_SECS:-300}
 spend_cmd=${LANE_SPEND_CMD:-"python3 $(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_spend.py"}
 spend_check() {
-  local now last f out usd n fam
+  local now last f out hub_out usd n fam col1 col2 col3
   spend_out=''
   now=$(date +%s); last=$(cat "$recycle_dir/.spend-checked" 2>/dev/null)
   [[ "$last" =~ ^[0-9]+$ ]] && [ $(( now - last )) -lt "$spend_every" ] && return 0
   printf '%s' "$now" > "$recycle_dir/.spend-checked"
   f="$recycle_dir/.spend-alarm-$(date +%F)"
-  out=$(timeout 90 $spend_cmd --over "$spend_limit" 2>/dev/null) || return 0
-  while IFS=$'\t' read -r usd n fam; do
-    [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || continue   # the "total" line and anything else
-    [ -n "$n" ] || continue
-    grep -qxF -- "$n" "$f" 2>/dev/null && continue
-    printf '%s\n' "$n" >> "$f"
-    spend_out+="$n"$'\t'"$usd"$'\t'"$fam"$'\n'
-  done <<<"$out"
+  hub_out=$(timeout 90 $spend_cmd 2>/dev/null) || hub_out=''
+  if [ -n "$hub_out" ]; then
+    while IFS=$'\t' read -r col1 col2 col3; do
+      [ "$col1" = hub ] || continue
+      usd=$col2; fam=$col3
+      [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || continue
+      [ "$(awk -v u="$usd" -v l="$hub_limit" 'BEGIN{print (u >= l)}')" = 1 ] || continue
+      grep -qxF -- "hub" "$f" 2>/dev/null && continue
+      printf 'hub\n' >> "$f"
+      spend_out+="hub"$'\t'"$usd"$'\t'"$fam"$'\n'
+    done <<<"$hub_out"
+  fi
+  out=$(timeout 90 $spend_cmd --over "$spend_limit" 2>/dev/null) || out=''
+  if [ -n "$out" ]; then
+    while IFS=$'\t' read -r col1 col2 col3; do
+      usd=$col1; n=$col2; fam=$col3
+      [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || continue
+      [ -n "$n" ] || continue
+      [ "$(awk -v u="$usd" -v l="$spend_limit" 'BEGIN{print (u >= l)}')" = 1 ] || continue
+      grep -qxF -- "$n" "$f" 2>/dev/null && continue
+      printf '%s\n' "$n" >> "$f"
+      spend_out+="$n"$'\t'"$usd"$'\t'"$fam"$'\n'
+    done <<<"$out"
+  fi
   find "$recycle_dir" -maxdepth 1 -name '.spend-alarm-*' -mtime +3 -delete 2>/dev/null
   return 0
 }
@@ -312,9 +330,18 @@ while :; do
   recycle_failures
   while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
   spend_check
-  while IFS=$'\t' read -r n usd fam; do
-    [ -n "$n" ] && { echo "spend: lane $n has cost \$$usd API-equivalent today ($fam), past the \$$spend_limit line. Read what it is doing; a mail lane belongs on sonnet (lane.sh --model $n sonnet) and an open-ended one needs a stop. Named once today."; hit=1; other=1; }
-  done <<<"$spend_out"
+  if [ -n "$spend_out" ]; then
+    while IFS=$'\t' read -r n usd fam; do
+      [ -n "$n" ] || continue
+      [[ "$usd" =~ ^[0-9]+(\.[0-9]+)?$ ]] || continue
+      if [ "$n" = hub ]; then
+        echo "spend: the hub has cost \$$usd API-equivalent today ($fam), past the \$$hub_limit line. Named once today."
+      else
+        echo "spend: lane $n has cost \$$usd API-equivalent today ($fam), past the \$$spend_limit line. Read what it is doing; a mail lane belongs on sonnet (lane.sh --model $n sonnet) and an open-ended one needs a stop. Named once today."
+      fi
+      hit=1; other=1
+    done <<<"$spend_out"
+  fi
   a=$(ask_stamp)
   if [ "$a" != "$ask_seen" ]; then
     echo "ask: a new 'Jonathan via OpenClaw:' line is in hub-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1
