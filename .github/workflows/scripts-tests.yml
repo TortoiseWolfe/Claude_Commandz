@@ -1,0 +1,57 @@
+name: scripts tests
+
+# Runs the hub scripts' test suite (global/.claude/scripts/tests) on every push to main and every pull request.
+# Tests run with an empty HOME, so none of them can read or write a developer's live ~/.claude.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scripts-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python3 -m pip install pytest
+      - name: pytest (a skip other than the known live-machine check fails the job)
+        working-directory: global/.claude/scripts
+        run: |
+          export HOME="$(mktemp -d)"
+          python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
+          # A skipped test is not a passing test. The one allowed skip checks a machine-only file (~/.config/panel/classes.json);
+          # its logic is covered by test_the_class_list_decides_whether_jev_may_see_notes.
+          skips="$(grep '^SKIPPED' "$RUNNER_TEMP/pytest.out" | grep -vc 'test_muse_jev.py:[0-9]*: no live classes.json' || true)"
+          if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
+
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: shell tests
+        working-directory: global/.claude/scripts
+        run: |
+          export HOME="$(mktemp -d)"
+          failed=0
+          for t in tests/test_*.sh; do
+            # Needs wsl.exe and the OpenClawGateway distro: it only runs inside that distro, so a runner cannot.
+            [ "$t" = tests/test_openclaw_uid_stage.sh ] && { echo "excluded (WSL only): $t"; continue; }
+            echo "::group::$t"
+            if timeout 300 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
