@@ -48,6 +48,8 @@ jobs:
           export HOME="$(mktemp -d)"
           failed=0
           for t in tests/test_*.sh; do
+            # Needs wsl.exe and the OpenClawGateway distro: it only runs inside that distro, so a runner cannot.
+            [ "$t" = tests/test_openclaw_uid_stage.sh ] && { echo "excluded (WSL only): $t"; continue; }
             echo "::group::$t"
             if timeout 300 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
             echo "::endgroup::"
