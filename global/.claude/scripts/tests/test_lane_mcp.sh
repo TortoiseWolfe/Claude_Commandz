@@ -76,7 +76,7 @@ lane --claude-because "needs Docker" row-off "$PLAIN" sonnet "$P"
 lane --claude-because "needs Docker" --connectors --recycle-at 90 row-set "$PLAIN" sonnet "$P"
 [ "$(awk -F'\t' '$2=="row-set"{print $12}' "$LANES/index.tsv")" = 90 ] || fail "--recycle-at wins over the connector default"; ok
 
-# 27 Oct: a connector lane with Scout-sized tool lists primed near 130K and hit the 150K ceiling six minutes after a re-prime. With the
+# 27 Oct: a connector lane with large tool lists primed near 130K and hit the 150K ceiling six minutes after a re-prime. With the
 # connectors on, --recycle-at goes up to 165K (just under where Claude Code compacts) and the backstop window follows the line up to the cap.
 lane --claude-because "needs Docker" --connectors --recycle-at 160 row-high "$PLAIN" sonnet "$P"
 [ "$LAST_RC" = 0 ] || fail "--recycle-at 160 with the connectors on was refused: $LAST_OUT"; ok

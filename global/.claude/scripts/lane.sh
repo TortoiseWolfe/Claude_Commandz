@@ -302,7 +302,7 @@ case "$effort_opt" in
 esac
 
 if [ "$recycle_at_set" = 1 ]; then
-  # A connector lane starts near 77K, and with Scout-sized tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
+  # A connector lane starts near 77K, and with large tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
   # go to LANE_RECYCLE_MAX_CONN_K (165, just under where Claude Code compacts, about 168K); the 150 ceiling holds for the rest.
   # A resume's connectors come from its index row, so it is checked again once they are known.
   rk_max=150; { [ "$connectors_opt" = 1 ] || [ "$mode" = resume ]; } && rk_max=${LANE_RECYCLE_MAX_CONN_K:-165}
@@ -664,7 +664,7 @@ lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | 
   elif command grep -qE 'portainer|traefik|nextcloud|docker compose|deploy|watchdog|cron|systemd|\bops\b' <<<"$t"; then echo ops
   else echo code; fi
 }
-# A lane with the claude.ai connectors loaded starts near 77K tokens (their tool list alone; Job 26 Oct, pokeys-site and others), so a
+# A lane with the claude.ai connectors loaded starts near 77K tokens (their tool list alone; Job 26 Oct), so a
 # 100K line left it 23K of room and it recycled every few turns. Its line is its start load plus the same 50K of working room as above.
 LANE_CONNECTOR_START_K=${LANE_CONNECTOR_START_K:-77}
 LANE_WORKING_ROOM_K=${LANE_WORKING_ROOM_K:-50}
@@ -691,7 +691,7 @@ window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (2
 # plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
 # The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
 # Project MCP servers (a .mcp.json in the lane's folder or above it) are off for lanes. Claude Code asks about each new one with a
-# "New MCP server found" dialog that nobody is there to answer, so the lane stalls before its prompt arrives (23 Oct, SpokeToWork's
+# "New MCP server found" dialog that nobody is there to answer, so the lane stalls before its prompt arrives (23 Oct, a repo's
 # playwright). Listing the servers as disabled in the lane's own settings answers the dialog in advance and loads none of them.
 # Prints a JSON array of server names ([] when there is none); servers the user added to Claude Code itself are not affected.
 project_mcp_names() {  # <dir>
