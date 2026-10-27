@@ -184,25 +184,39 @@ class Parts(unittest.TestCase):
             self.assertEqual(got[0][2], "2026-10-16-new-lane says hello.")
 
     def test_lane_reports_uses_handoff_when_newer(self):
-        with tempfile.TemporaryDirectory() as d:
-            name = "2026-10-27-handoff-lane"
-            (Path(d) / name).mkdir()
-            p_rep = Path(d) / name / "report.md"
-            p_hand = Path(d) / name / "handoff.md"
+        d = Path(fresh_dir(self))
+        name = "2026-10-27-handoff-lane"
+        (d / name).mkdir()
+        p_rep = d / name / "report.md"
+        p_hand = d / name / "handoff.md"
 
-            p_rep.write_text("# Report\nStale report line\n")
-            p_hand.write_text("# Handoff\nDone: task A\nNext: task B\n")
+        p_rep.write_text("# Report\nStale report line\n")
+        p_hand.write_text("# Handoff\nDone: task A\nNext: task B\n")
 
-            # Make handoff newer
-            t_rep = (NOW - timedelta(minutes=10)).timestamp()
-            t_hand = (NOW - timedelta(minutes=5)).timestamp()
-            os.utime(p_rep, (t_rep, t_rep))
-            os.utime(p_hand, (t_hand, t_hand))
+        # Make handoff newer
+        t_rep = (NOW - timedelta(minutes=10)).timestamp()
+        t_hand = (NOW - timedelta(minutes=5)).timestamp()
+        os.utime(p_rep, (t_rep, t_rep))
+        os.utime(p_hand, (t_hand, t_hand))
 
-            got = hd.lane_reports(d, NOW, 24)
-            self.assertEqual(len(got), 1)
-            # The handoff summary comes before the report line
-            self.assertEqual(got[0][2], "(Done: task A | Next: task B) Stale report line")
+        got = hd.lane_reports(str(d), NOW, 24)
+        self.assertEqual(len(got), 1)
+        # The handoff summary comes before the report line
+        self.assertEqual(got[0][2], "(Done: task A | Next: task B) Stale report line")
+
+    def test_lane_reports_handoff_only_no_report(self):
+        d = Path(fresh_dir(self))
+        name = "2026-10-27-handoff-only"
+        (d / name).mkdir()
+        p_hand = d / name / "handoff.md"
+
+        p_hand.write_text("# Handoff\nDone: only handoff task\nNext: follow up\n")
+        t_hand = (NOW - timedelta(minutes=5)).timestamp()
+        os.utime(p_hand, (t_hand, t_hand))
+
+        got = hd.lane_reports(str(d), NOW, 24)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][2], "(Done: only handoff task | Next: follow up)")
 
 
 class Scrub(unittest.TestCase):
