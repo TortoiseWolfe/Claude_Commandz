@@ -35,6 +35,7 @@ from pathlib import Path
 
 HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lane_handoff_summary import handoff_summary  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
 CAP_DEFAULT = 5800  # the page must stay under 6 KB
@@ -170,44 +171,6 @@ def report_first_line(path, limit=140):
             continue
         return one_line(s, limit)
     return one_line(fallback, limit)
-
-
-def handoff_summary(path):
-    """-> "Done: ... | Next: ..." from the first non-empty lines under those headings (or on the heading line)."""
-    try:
-        lines = Path(path).read_text(errors="replace").splitlines()
-    except OSError:
-        return ""
-    done, nxt = "", ""
-    in_done, in_next = False, False
-    for ln in lines:
-        s = ln.strip()
-        if not s:
-            continue
-        d_m = re.match(r"^(?:[-*]\s+)?#*\s*Done[:\s]*(.*)", s, re.I)
-        if d_m:
-            in_done, in_next = True, False
-            if d_m.group(1).strip():
-                done, in_done = d_m.group(1).strip().lstrip("- ").strip(), False
-            continue
-        n_m = re.match(r"^(?:[-*]\s+)?#*\s*Next[:\s]*(.*)", s, re.I)
-        if n_m:
-            in_next, in_done = True, False
-            if n_m.group(1).strip():
-                nxt, in_next = n_m.group(1).strip().lstrip("- ").strip(), False
-            continue
-        if in_done and not done:
-            done, in_done = s.lstrip("- ").strip(), False
-        elif in_next and not nxt:
-            nxt, in_next = s.lstrip("- ").strip(), False
-        if done and nxt:
-            break
-    parts = []
-    if done:
-        parts.append(f"Done: {done}")
-    if nxt:
-        parts.append(f"Next: {nxt}")
-    return " | ".join(parts)
 
 
 def lane_reports(lanes_dir, now, hours):

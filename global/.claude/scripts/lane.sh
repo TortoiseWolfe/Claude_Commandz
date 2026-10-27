@@ -895,6 +895,12 @@ if [ "$mode" = status ]; then
       case "${b:-subscription}" in codex|copilot|agy|opencode) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
       printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      # A hand-off newer than the report (or with no report) is the lane's latest word: show its Done and Next first lines, read by the
+      # same rules as hub_digest.py, so a recycled lane's state is visible here without opening its folder.
+      if [ -n "${rep:-}" ] && [ -s "$(dirname "$rep")/handoff.md" ] && { [ ! -e "$rep" ] || [ "$(dirname "$rep")/handoff.md" -nt "$rep" ]; }; then
+        hand="$(python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_handoff_summary.py" "$(dirname "$rep")/handoff.md" 2>/dev/null | cut -c1-300 || true)"
+        [ -z "$hand" ] || printf '    hand-off (newer than report): %s\n' "$hand"
+      fi
     done < <(tmux list-windows -t "$SESSION" -F '#{window_name}')
   else
     echo "(no tmux session \"$SESSION\")"

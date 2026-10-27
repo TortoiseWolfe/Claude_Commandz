@@ -725,6 +725,17 @@ assert_contains "$STATUS_DIM" 'something the lane said' '--status still shows th
 assert_not_contains "$(status_with_pane "$TMP/pane-typed")" 'suggestion:' '--status does not call normal-colour text a suggestion'
 assert_not_contains "$(status_with_pane "$TMP/pane-bare")" 'suggestion:' '--status shows no suggestion for an empty prompt'
 
+# A hand-off newer than the report (or with no report) shows its Done and Next first lines under the lane's row; an older one does not.
+HD="$TMP/hand-lane-dir"; mkdir -p "$HD"
+printf '%s\thand-lane\t%s\tsonnet\tsubscription\t%s\t%s\t-\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$PROMPT" "$HD/report.md" >>"$HOME_TEST/.claude/state/lanes/index.tsv"
+hand_status() { TMUX_PANE_FILE="$TMP/pane-bare" TMUX_HAS_SESSION=1 TMUX_WINDOWS=hand-lane HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1; }
+printf '# handoff\n## Done\nmerged the widget fix\n## Next\nrun the suite then open the PR\n' >"$HD/handoff.md"
+assert_contains "$(hand_status)" 'hand-off (newer than report): Done: merged the widget fix | Next: run the suite then open the PR' '--status shows Done and Next when the lane has a hand-off and no report'
+echo "report text" >"$HD/report.md"; touch -d '-1 hour' "$HD/handoff.md"
+assert_not_contains "$(hand_status)" 'hand-off (newer' '--status hides an older hand-off behind the newer report'
+touch "$HD/handoff.md"
+assert_contains "$(hand_status)" 'hand-off (newer than report): Done: merged the widget fix' '--status shows a hand-off written after the report'
+
 # 19 Oct: "report:yes idle" got tigard-trace closed while it was mid-work. A report is the last word only when it is newer than
 # every input the lane got and no background job is running; otherwise --status says report:stale.
 # Times relative to now: lane_report_state.py calls a job lost after LOST_JOB_HOURS (12), so fixed 19 Oct stamps went red on 20 Oct.
