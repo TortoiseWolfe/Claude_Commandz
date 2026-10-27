@@ -80,7 +80,7 @@
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
-#   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150, default by kind: see default_recycle_k)
+#   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --tier <name>               "<model> TAB <reason>": the model in the lane's row and the --allow-high-tier reason written there ("-" = none;
 #                                       "site-model" for a site-model prompt). lane_watch.sh names a live lane on opus or fable with no reason.
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
@@ -302,8 +302,12 @@ case "$effort_opt" in
 esac
 
 if [ "$recycle_at_set" = 1 ]; then
-  [[ "$recycle_at_opt" =~ ^[0-9]+$ ]] && [ "$recycle_at_opt" -ge 40 ] && [ "$recycle_at_opt" -le 150 ] \
-    || { echo "--recycle-at needs a whole number of K tokens from 40 to 150 (Claude Code compacts at about 168K), got: $recycle_at_opt" >&2; exit 1; }
+  # A connector lane starts near 77K, and with large tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
+  # go to LANE_RECYCLE_MAX_CONN_K (165, just under where Claude Code compacts, about 168K); the 150 ceiling holds for the rest.
+  # A resume's connectors come from its index row, so it is checked again once they are known.
+  rk_max=150; { [ "$connectors_opt" = 1 ] || [ "$mode" = resume ]; } && rk_max=${LANE_RECYCLE_MAX_CONN_K:-165}
+  [[ "$recycle_at_opt" =~ ^[0-9]+$ ]] && [ "$recycle_at_opt" -ge 40 ] && [ "$recycle_at_opt" -le "$rk_max" ] \
+    || { echo "--recycle-at needs a whole number of K tokens from 40 to 150 (up to ${LANE_RECYCLE_MAX_CONN_K:-165} with --connectors; Claude Code compacts at about 168K), got: $recycle_at_opt" >&2; exit 1; }
   case "$mode" in start|resume) ;; *) echo "--recycle-at only applies when starting or resuming a lane" >&2; exit 1 ;; esac
 fi
 [ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
@@ -660,15 +664,21 @@ lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | 
   elif command grep -qE 'portainer|traefik|nextcloud|docker compose|deploy|watchdog|cron|systemd|\bops\b' <<<"$t"; then echo ops
   else echo code; fi
 }
-default_recycle_k() {  # <kind> -> K tokens
+# A lane with the claude.ai connectors loaded starts near 77K tokens (their tool list alone; Job 26 Oct), so a
+# 100K line left it 23K of room and it recycled every few turns. Its line is its start load plus the same 50K of working room as above.
+LANE_CONNECTOR_START_K=${LANE_CONNECTOR_START_K:-77}
+LANE_WORKING_ROOM_K=${LANE_WORKING_ROOM_K:-50}
+default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
+  local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
-    ops) echo 110 ;;
-    mail|code|3d) echo 100 ;;
-    *) echo 100 ;;
+    ops) k=110 ;;
+    *) k=100 ;;
   esac
+  if [ "${2:--}" = on ] && [ "$k" -lt "$floor" ]; then k=$floor; fi
+  echo "$k"
 }
 lane_recycle_k() {  # <stored value or empty> <prompt-file> <dir> <connectors> -> K tokens
-  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then echo "$1"; else default_recycle_k "$(lane_kind "${2:-}" "${3:-}" "${4:--}")"; fi
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then echo "$1"; else default_recycle_k "$(lane_kind "${2:-}" "${3:-}" "${4:--}")" "${4:--}"; fi
 }
 window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (200000: the window of every tier a lane runs on)
   local cap=${LANE_WINDOW_CAP:-200000} w
@@ -680,13 +690,41 @@ window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (2
 # Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction backstop from window_for,
 # plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
 # The workspace CLAUDE.md is excluded only when the rule file exists to replace it.
-claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K]
-  local json p s r
+# Project MCP servers (a .mcp.json in the lane's folder or above it) are off for lanes. Claude Code asks about each new one with a
+# "New MCP server found" dialog that nobody is there to answer, so the lane stalls before its prompt arrives (23 Oct, a repo's
+# playwright). Listing the servers as disabled in the lane's own settings answers the dialog in advance and loads none of them.
+# Prints a JSON array of server names ([] when there is none); servers the user added to Claude Code itself are not affected.
+project_mcp_names() {  # <dir>
+  python3 -I -c '
+import json, os, sys
+names, d = [], os.path.abspath(sys.argv[1])
+while True:
+    try:
+        with open(os.path.join(d, ".mcp.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        servers = cfg.get("mcpServers") if isinstance(cfg, dict) else None
+        for n in (servers if isinstance(servers, dict) else {}):
+            if n not in names:
+                names.append(n)
+    except (OSError, ValueError):
+        pass
+    parent = os.path.dirname(d)
+    if parent == d:
+        break
+    d = parent
+print(json.dumps(names, separators=(",", ":")))
+' "${1:-.}" 2>/dev/null || echo '[]'
+}
+
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir]
+  local json p s r mcp
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
   json='{"autoCompactWindow":'"$(window_for "${4:-100}")"
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
+  mcp="$(project_mcp_names "${5:-.}")"
+  [ "$mcp" = '[]' ] || json+=',"disabledMcpjsonServers":'"$mcp"
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
   json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}]}'
   json+=',"enabledPlugins":{'
@@ -1161,7 +1199,9 @@ if [ "$mode" = recycle ]; then
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
-  if is_headless_billing "${b:-}" || [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
+  # Judged by the newest index row's engine only: a folder can hold an out.log from an earlier headless run (26 Oct) while the lane now
+  # in it, the one on this row, is an interactive window.
+  if is_headless_billing "${b:-}"; then
     echo "$name is a headless lane; there is no window to recycle" >&2; exit 1
   fi
   [ -n "${rep:-}" ] || { echo "$name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
@@ -1390,7 +1430,8 @@ if [ "$mode" = resume ]; then
   # Reuse the recorded connectors choice; a row from before the column was started with them on.
   if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
   rk="${recycle_at_opt:-$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")}"
-  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk")"
+  if [ "$conn" != on ] && [ "$rk" -gt 150 ]; then echo "--recycle-at above 150K is only for lanes with the connectors on ($name has them off), got: $rk" >&2; exit 1; fi
+  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir")"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
@@ -1515,8 +1556,8 @@ target="$SESSION:$name"
 eff="-"; flags=""; conn="-"; rk=""
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
-  rk="${recycle_at_opt:-$(default_recycle_k "$(lane_kind "$prompt" "$dir" "$conn")")}"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk")"; eff="${eff:--}"
+  rk="${recycle_at_opt:-$(default_recycle_k "$(lane_kind "$prompt" "$dir" "$conn")" "$conn")}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"

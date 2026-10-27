@@ -301,6 +301,36 @@ assert_contains "$LAST_OUT" '3b. make sure no input is queued' 'the dry run show
 lane --recycle cx-lane
 assert_exit 1 "$LAST_RC" 'a Codex lane is refused'
 assert_contains "$LAST_OUT" 'headless' 'the refusal says why'
+# 26 Oct: --recycle judged headless by any out.log in the lane's folder, so a folder with a leftover log from an earlier headless run
+# refused a lane that is an interactive window now. Only the newest index row's engine decides.
+printf 'finished long ago\nexit 0\n' >"$HAND/out.log"
+lane --dry-run --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'an interactive lane is recycled although its folder holds a stale out.log'
+assert_not_contains "$LAST_OUT" 'headless' 'and is not called headless'
+rm -f "$HAND/out.log"
+printf '%s\teng-lane\t%s\tsonnet\tcodex\t%s\t%s\tsess-eng\t-\t-\t-\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
+lane --dry-run --recycle eng-lane
+assert_exit 1 "$LAST_RC" 'a lane whose newest row is codex is still refused'
+add_row eng-lane subscription old-sess
+lane --dry-run --recycle eng-lane
+assert_exit 0 "$LAST_RC" 'the newest row wins: a codex row followed by an interactive row of the same name is recycled'
+
+# 26 Oct: connector lanes start near 77K, so the 100K default left them 23K of room and they recycled every few turns. With the connectors
+# on, the default line is the start load plus 50K of working room (127K); a line stored in the row (--recycle-at, or a thrash raise) wins.
+printf '%s\tconn-lane\t%s\tsonnet\tsubscription\t%s\t%s\tsess-conn\t-\thigh\ton\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
+lane --recycle-point conn-lane; [ "$LAST_OUT" = 127 ] || fail "a connector lane with no stored line gets 77K + 50K = 127K, got: $LAST_OUT"; ok
+LANE_CONNECTOR_START_K=80 LANE_WORKING_ROOM_K=40 lane --recycle-point conn-lane; [ "$LAST_OUT" = 120 ] || fail "the start load and the room are the two numbers, got: $LAST_OUT"; ok
+printf '%s\tconn-set\t%s\tsonnet\tsubscription\t%s\t%s\tsess-cs\t-\thigh\ton\t90\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
+lane --recycle-point conn-set; [ "$LAST_OUT" = 90 ] || fail "a stored line wins over the connector default, got: $LAST_OUT"; ok
+printf '%s\tconn-off\t%s\tsonnet\tsubscription\t%s\t%s\tsess-co\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
+lane --recycle-point conn-off; [ "$LAST_OUT" = 100 ] || fail "a lane without connectors keeps 100K, got: $LAST_OUT"; ok
+lane --dry-run --recycle conn-lane
+assert_contains "$LAST_OUT" 'recycle line 127K' 'the recycle dry run shows the connector line for the new row'
+printf '%s\tconn-high\t%s\tsonnet\tsubscription\t%s\t%s\tsess-ch\t-\thigh\ton\t160\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
+lane --recycle-point conn-high; [ "$LAST_OUT" = 160 ] || fail "a connector lane's stored line above 150 is kept, got: $LAST_OUT"; ok
+lane --dry-run --recycle conn-high
+assert_contains "$LAST_OUT" 'recycle line 160K' 'the recycle carries a connector lane line above 150 into the new row'
+
 reset_fake; mkdir -p "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock"
 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
 assert_exit 1 "$LAST_RC" 'a second recycle of the same lane is refused'
