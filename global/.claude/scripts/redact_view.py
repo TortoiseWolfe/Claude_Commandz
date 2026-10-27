@@ -14,6 +14,10 @@ import sys
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
         r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer|webhook)")
 KEY_RE = re.compile(WORD, re.I)
+# A field named just "key", or <kind>_key / <kind>Key, holds a secret too: OBS keeps the Twitch
+# stream key in service.json under "settings.key". Names that merely contain "key" (keyboard,
+# monkey, keys_only, hotkey_name) are not matched.
+KEYNAME = re.compile(r"(?:^|[^a-z0-9])(?:stream|licen[cs]e|signing|encryption|master|access|secret)?[_-]?key$", re.I)
 SAFE_KEY = re.compile(r"(?:(?:max|min)[_-]?\w*tokens|tokens?[_-](?:limit|count|used))$", re.I)
 
 PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
@@ -22,6 +26,7 @@ TOKENS = re.compile("|".join([
     r"sk_(?:live|test)_\w{10,}", r"AKIA[0-9A-Z]{16}", r"ASIA[0-9A-Z]{16}",
     r"AIza[\w-]{30,}", r"xox[abprs]-[\w-]{10,}", r"glpat-[\w-]{20,}",
     r"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}",
+    r"live_\d{5,}_[A-Za-z0-9]{20,}",  # Twitch stream key
 ]))
 # Credentials carried inside a URL, whatever its key is called. A webhook's token is a path
 # segment, so neither the key name nor a token shape gives it away. The host and the path up to
@@ -82,7 +87,7 @@ def scrub(s):
 
 
 def secret_key(k):
-    return bool(KEY_RE.search(k)) and not SAFE_KEY.search(k)
+    return bool(KEY_RE.search(k) or KEYNAME.search(k)) and not SAFE_KEY.search(k)
 
 
 def walk(o, key="", force=False):
