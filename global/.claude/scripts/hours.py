@@ -21,6 +21,9 @@ What counts as the owner's time (the internship method of 25 Oct, now the standi
   Time rule (usage_ledger.py): each event is worth HUMAN_FLOOR seconds, events up to HUMAN_GAP apart bridge, and every
   source is merged into one set of intervals so no minute is counted twice. Each source also keeps its own column.
 
+Each row also carries a category, what the time was FOR (default "task"; "member support" and any other are entries in the
+private config's "categories" list, first match on repos/words wins, like projects). Project says whose work, category says why.
+
 Which folders, words and addresses mean which client lives in private config, read at run time:
   ~/.config/ledger/clients.json  ->  "hours": {...}   (see load_config; nothing in this file names a client)
 """
@@ -68,6 +71,8 @@ def load_config():
        owner_emails      addresses that are the owner's (also read from "author_emails")
        relay_patterns    extra regexes (anchored at the start of a prompt) for hub relays typed into lane windows
        clients           {key: {label, repos: [globs of repo names], words: [regexes], projects: {name: {repos, words}},
+                                categories: [{name, repos, words}] (what the time was FOR, first match wins; default_category
+                                         is the fallback, "task"), default_category,
                                 mail_to: [addresses or domains], git_repos: [paths], calls: [{dir, slot}],
                                 calendar: {words: [regexes on an event title], domains: [attendee domains; default mail_to]}}}
        calendar_since    first day the calendar refresh asks for (YYYY-MM-DD; default 400 days back)
@@ -431,6 +436,15 @@ def project_of(client, names, text):
     return client.get("default_project", "general")
 
 
+def category_of(client, names, text):
+    """What the time was FOR (task, member support, ...), a second axis beside the project. First configured category whose repos or
+       words match wins; anything else is the default (task)."""
+    for cat in client.get("categories") or []:
+        if repo_hit(cat, names) or words_hit(cat, text):
+            return cat["name"]
+    return client.get("default_category", "task")
+
+
 def ov_keys(ts, sid):
     d = dt.datetime.fromtimestamp(ts, ET)
     return sid[:6] + "|" + d.strftime("%a %d %I:%M:%S %p"), sid[:6] + "|" + d.strftime("%a %d %I:%M %p")
@@ -442,7 +456,7 @@ def label_event(cfg, r, ask=False):
     clients = cfg["clients"]
     names = repo_names(r.get("cwd"))
     text = (r["q"] + " " + r["text"]) if ask else r["text"]
-    out = {"clients": [], "weak": [], "why": "", "project": {}}
+    out = {"clients": [], "weak": [], "why": "", "project": {}, "category": {}}
     ov = None
     for k in ov_keys(r["ts"], r["sid"]):
         ov = ov or cfg["overrides"].get(k)
@@ -475,6 +489,8 @@ def label_event(cfg, r, ask=False):
                         out["weak"], out["why"] = hit, "short reply; only the message before it names the client"
     for k in out["clients"] + out["weak"]:
         out["project"][k] = project_of(clients[k], names, text + " " + (r.get("prev") or ""))
+        # a category reads the event's own words; the message before it only places a short reply
+        out["category"][k] = category_of(clients[k], names, text + (" " + (r.get("prev") or "") if len(text.strip()) < 80 else ""))
     return out
 
 
@@ -529,8 +545,16 @@ PRIO = {"call": 0, "typed": 1, "mail": 2, "git": 3}      # who gets the label wh
 SRC_WORD = {"typed": "typed", "call": "call", "mail": "mail sent", "git": "commit by hand"}
 
 
-def raw(s, e, src, project, what, evid):
-    return {"s": s, "e": e, "src": src, "project": project, "what": what, "evid": evid}
+def raw(s, e, src, project, what, evid, category="task"):
+    return {"s": s, "e": e, "src": src, "project": project, "what": what, "evid": evid, "category": category}
+
+
+def pick_category(cats, default="task"):
+    """The category of a run of events: the most common one; a tie goes to the one that is not the default."""
+    c = collections.Counter(cats)
+    top = max(c.values())
+    tied = [k for k, v in c.items() if v == top]
+    return next((k for k in tied if k != default), tied[0])
 
 
 def typed_raws(events, client):
@@ -546,18 +570,20 @@ def typed_raws(events, client):
         for s, e in stream_iv(ts):
             inside = [x for x in evs if s <= x["ts"] < e]
             proj = collections.Counter(x["project"][client] for x in inside).most_common(1)[0][0]
-            out.append(raw(s, e, "typed", proj, inside[0]["what"], "%d typed, session %s" % (len(inside), sid[:6])))
+            cat = pick_category([x["category"].get(client, "task") for x in inside])
+            out.append(raw(s, e, "typed", proj, inside[0]["what"], "%d typed, session %s" % (len(inside), sid[:6]), cat))
     return out
 
 
 def point_raws(points, src):
-    """points = [(ts, project, what, evid)] -> raws by the same rule (a point is worth 5 min; points <= 15 min apart bridge)."""
+    """points = [(ts, project, what, evid[, category])] -> raws by the same rule (a point is worth 5 min; points <= 15 min apart bridge)."""
     pts = sorted(points)
     out, i = [], 0
     for s, e in stream_iv([p[0] for p in pts]):
         inside = [p for p in pts if s <= p[0] < e]
         proj = collections.Counter(p[1] for p in inside).most_common(1)[0][0]
-        out.append(raw(s, e, src, proj, inside[0][2], "%d %s" % (len(inside), "; ".join(sorted({p[3] for p in inside}))[:60])))
+        cat = pick_category([p[4] if len(p) > 4 else "task" for p in inside])
+        out.append(raw(s, e, src, proj, inside[0][2], "%d %s" % (len(inside), "; ".join(sorted({p[3] for p in inside}))[:60]), cat))
     return out
 
 
@@ -774,7 +800,8 @@ def mail_raws(cfg, key, lo, hi):
     c = cfg["clients"][key]
     out = []
     for ts, subj, mid in sent_mail(cfg, key, lo, hi):
-        out.append(raw(ts - MAIL_LEAD, ts, "mail", project_of(c, [], subj), "mail: " + subj[:70], "sent %s, id %s" % (f12(ts), mid[:8])))
+        out.append(raw(ts - MAIL_LEAD, ts, "mail", project_of(c, [], subj), "mail: " + subj[:70], "sent %s, id %s" % (f12(ts), mid[:8]),
+                       category_of(c, [], subj)))
     return out
 
 
@@ -809,7 +836,7 @@ def git_raws(cfg, key, lo, hi, first_transcript):
             tag = name if not ai else name + ", AI-assisted, no transcript"
             if ts < first_transcript:
                 tag += ", git only"
-            pts.append((ts, project_of(c, [name], f[3]), "commit: " + f[3][:70], tag))
+            pts.append((ts, project_of(c, [name], f[3]), "commit: " + f[3][:70], tag, category_of(c, [name], f[3])))
     return point_raws(pts, "git")
 
 
@@ -827,14 +854,15 @@ def machine_name():
         return ""
 
 
-def read_rows_in(paths):
+def read_rows_in(paths, clients=None):
     """Rows another machine exported with `rows`: machine, client, project, src, start, end, what, evid (tab separated)."""
     out = collections.defaultdict(list)
     for p in paths:
         for line in open(p):
             f = line.rstrip("\n").split("\t")
             if len(f) >= 8 and f[0] != "machine":
-                out[f[1]].append(raw(float(f[4]), float(f[5]), f[3], f[2], f[6], "%s: %s" % (f[0], f[7])))
+                cat = f[8] if len(f) > 8 and f[8] else (category_of(clients[f[1]], [], f[6]) if clients and f[1] in clients else "task")
+                out[f[1]].append(raw(float(f[4]), float(f[5]), f[3], f[2], f[6], "%s: %s" % (f[0], f[7]), cat))
     return out
 
 
@@ -867,7 +895,7 @@ def analyze(cfg, keys, lo, hi, machine="", sources=True, rows_in=()):
     recs, sessions = load_records(0.0)
     events, cls, info = build_events(cfg, recs, lo, hi, machine)
     first_tr = min([s["first"] for s in sessions if s["first"]] or [0])
-    extra = read_rows_in(rows_in)
+    extra = read_rows_in(rows_in, cfg["clients"])
     res = {"events": events, "info": info, "cls": cls, "first_transcript": first_tr, "clients": {}, "machine": machine}
     for key in keys:
         counted = [e for e in events if key in e["clients"]]
@@ -903,6 +931,13 @@ def per_day(segs):
     return d
 
 
+def category_secs(segs):
+    d = collections.defaultdict(float)
+    for g in segs:
+        d[g.get("category", "task")] += g["e"] - g["s"]
+    return dict(d)
+
+
 def week_of(day):
     d = dt.datetime.strptime(day, "%Y-%m-%d")
     return (d - dt.timedelta(days=d.weekday())).strftime("%Y-%m-%d")
@@ -912,20 +947,23 @@ def sit_row(st):
     segs = st["segs"]
     tot = sum(g["e"] - g["s"] for g in segs)
     proj = collections.Counter()
+    cat = collections.Counter()
     what = collections.Counter()
     bysrc = collections.Counter()
     for g in segs:
         proj[g["project"]] += g["e"] - g["s"]
+        cat[g.get("category", "task")] += g["e"] - g["s"]
         what[g["what"]] += g["e"] - g["s"]
         bysrc[g["src"]] += g["e"] - g["s"]
     ps = [p for p, v in proj.most_common() if v >= 0.2 * tot] or [proj.most_common(1)[0][0]]
+    cs = [c for c, v in cat.most_common() if v >= 0.2 * tot] or [cat.most_common(1)[0][0]]
     ws = [w for w, _ in what.most_common(3)]
     srcs = ", ".join("%s %d min" % (SRC_WORD[s], round(bysrc[s] / 60)) for s in PRIO if bysrc[s])
     evid = sorted({g["evid"] for g in segs})
     s, e = st["s"], st["e"]
     endtxt = f12(e) if fday(e - 1) == fday(s) else "%s (%s)" % (f12(e), dt.datetime.fromtimestamp(e - 1, ET).strftime("%a %-d %b"))
     return {"date": fday(s), "dow": fdow(s), "start": f12(s), "end": endtxt, "minutes": round(tot / 60), "secs": tot,
-            "project": " + ".join(ps), "what": " / ".join(ws), "source": srcs, "evidence": "; ".join(evid)[:240]}
+            "project": " + ".join(ps), "category": " + ".join(cs), "what": " / ".join(ws), "source": srcs, "evidence": "; ".join(evid)[:240]}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -945,6 +983,8 @@ def report_text(cfg, res, key, lo, hi, join_min=30):
       + " ; added beyond typed time: %s h" % hh(sm["total"] - sm["typed"]))
     kinds = collections.Counter(e["kind"] for e in r["counted"])
     P("   his typed prompts and card answers: %d (%s)" % (len(r["counted"]), dict(kinds)))
+    cats = category_secs(r["segs"])
+    P("   by category (what the time was for): " + ", ".join("%s %s h" % (c, hh(v)) for c, v in sorted(cats.items(), key=lambda x: -x[1])))
     days = per_day(r["segs"])
     P("   hours by day: " + ", ".join("%s %s" % (dt.datetime.strptime(d, "%Y-%m-%d").strftime("%a %-d %b"), hh(v)) for d, v in sorted(days.items())))
     sit = sittings(r["segs"], join_min * 60)
@@ -964,7 +1004,7 @@ def week_start_ts(ts):
     return (d.replace(hour=0, minute=0, second=0, microsecond=0) - dt.timedelta(days=d.weekday())).timestamp()
 
 
-TSV_COLS = ["date", "start", "end", "minutes", "project", "what", "source", "evidence", "machine"]
+TSV_COLS = ["date", "start", "end", "minutes", "project", "what", "source", "evidence", "machine", "category"]   # category last: older readers keep their columns
 
 
 def log_files(cfg, res, key, lo, hi, machine, outdir):
@@ -983,11 +1023,15 @@ def log_files(cfg, res, key, lo, hi, machine, outdir):
     days = per_day(r["segs"])
     weeks = collections.defaultdict(lambda: collections.defaultdict(float))
     projs = collections.defaultdict(float)
+    cat_weeks = collections.defaultdict(lambda: collections.defaultdict(float))
     for g in r["segs"]:
         for d, v in split_days([(g["s"], g["e"])]).items():
             weeks[week_of(d)]["total"] += v
             weeks[week_of(d)][g["src"]] += v
+            cat_weeks[week_of(d)][g.get("category", "task")] += v
         projs[g["project"]] += g["e"] - g["s"]
+    cats = category_secs(r["segs"])
+    cat_names = sorted(cats, key=lambda c: -cats[c])
     md = []
     P = md.append
     P("# %s: every sitting, minute by minute" % label)
@@ -1014,6 +1058,20 @@ def log_files(cfg, res, key, lo, hi, machine, outdir):
     P("")
     P("Columns after minutes are minutes labelled by the highest-priority source covering them (call, typed, mail, commit); they add up to the total.")
     P("")
+    P("## Totals per category (what the time was for)")
+    P("")
+    P("| category | hours | minutes |")
+    P("|---|---|---|")
+    for c in cat_names:
+        P("| %s | %s | %d |" % (c, hh(cats[c]), round(cats[c] / 60)))
+    P("")
+    P("Per week, minutes by category:")
+    P("")
+    P("| week of | " + " | ".join(cat_names) + " |")
+    P("|---|" + "---|" * len(cat_names))
+    for w in sorted(cat_weeks):
+        P("| %s | " % w + " | ".join(str(round(cat_weeks[w].get(c, 0) / 60)) for c in cat_names) + " |")
+    P("")
     P("## Totals per project")
     P("")
     P("| project | hours | minutes |")
@@ -1023,11 +1081,11 @@ def log_files(cfg, res, key, lo, hi, machine, outdir):
     P("")
     P("## The sittings")
     P("")
-    P("| date | start | end | min | project | what | source |")
-    P("|---|---|---|---|---|---|---|")
+    P("| date | start | end | min | project | category | what | source |")
+    P("|---|---|---|---|---|---|---|---|")
     for w in rows:
-        P("| %s | %s | %s | %d | %s | %s | %s |" % (w["dow"] + " " + w["date"][:4], w["start"], w["end"], w["minutes"], w["project"],
-                                                    w["what"].replace("|", "/"), w["source"]))
+        P("| %s | %s | %s | %d | %s | %s | %s | %s |" % (w["dow"] + " " + w["date"][:4], w["start"], w["end"], w["minutes"], w["project"],
+                                                         w["category"], w["what"].replace("|", "/"), w["source"]))
     P("")
     P("## Unclear: not counted, here so you can decide")
     P("")
@@ -1068,12 +1126,12 @@ def unclear_text(cfg, res, key):
 
 def rows_file(res, keys, machine, path, all_sources=False):
     with open(path, "w") as fh:
-        fh.write("\t".join(["machine", "client", "project", "src", "start", "end", "what", "evid"]) + "\n")
+        fh.write("\t".join(["machine", "client", "project", "src", "start", "end", "what", "evid", "category"]) + "\n")
         for k in keys:
             for x in res["clients"][k]["raws"]:
                 if all_sources or x["src"] in ("typed", "git"):
                     fh.write("\t".join([machine, k, x["project"], x["src"], "%.0f" % x["s"], "%.0f" % x["e"],
-                                        x["what"].replace("\t", " "), x["evid"].replace("\t", " ")]) + "\n")
+                                        x["what"].replace("\t", " "), x["evid"].replace("\t", " "), x.get("category", "task")]) + "\n")
 
 
 # ---------------------------------------------------------------------------------------------------------------

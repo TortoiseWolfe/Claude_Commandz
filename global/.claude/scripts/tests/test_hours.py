@@ -138,6 +138,35 @@ class Unit(unittest.TestCase):
         lab = H.label_event(cfg, grey, ask=True)
         self.assertEqual((lab["clients"], lab["why"]), ([], "question card text (unclear)"))
 
+    def test_category_is_a_second_axis_first_match_wins_and_defaults_to_task(self):
+        c = {"categories": [{"name": "member support", "repos": ["help-*"], "words": ["locked out"]},
+                            {"name": "upkeep", "words": ["renew", "locked out"]}]}
+        self.assertEqual(H.category_of(c, [], "I am locked out"), "member support")      # listed first
+        self.assertEqual(H.category_of(c, [], "renew the cert"), "upkeep")
+        self.assertEqual(H.category_of(c, ["help-desk"], "anything"), "member support")  # by folder
+        self.assertEqual(H.category_of(c, [], "build the page"), "task")
+        self.assertEqual(H.category_of({"default_category": "work"}, [], "x"), "work")
+        self.assertEqual(H.category_of({}, [], "x"), "task")                              # no config, no change in behaviour
+
+    def test_pick_category_most_common_and_a_tie_goes_to_the_non_default(self):
+        self.assertEqual(H.pick_category(["task", "task", "member support"]), "task")
+        self.assertEqual(H.pick_category(["task", "member support"]), "member support")
+        self.assertEqual(H.pick_category(["task"]), "task")
+
+    def test_label_event_category_reads_own_words_and_the_message_before_only_for_a_short_reply(self):
+        cfg = cfg_for()
+        cfg["clients"]["acme"]["categories"] = [{"name": "member support", "words": ["locked out"]}]
+        home = fresh_dir(self)
+        os.environ["HOME"], old = home, os.environ.get("HOME")
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old else os.environ.pop("HOME", None))
+        cwd = home + "/repos/acme-site"
+        self.assertEqual(H.label_event(cfg, self.rec("a member is locked out", cwd=cwd))["category"], {"acme": "member support"})
+        self.assertEqual(H.label_event(cfg, self.rec("build the page", cwd=cwd))["category"], {"acme": "task"})
+        self.assertEqual(H.label_event(cfg, self.rec("yes", cwd=cwd, prev="she is locked out, shall I reset it?"))["category"],
+                         {"acme": "member support"})
+        long_reply = "build the page and then " + "x" * 80
+        self.assertEqual(H.label_event(cfg, self.rec(long_reply, cwd=cwd, prev="she is locked out"))["category"], {"acme": "task"})
+
     def test_srt_length_reads_last_cue(self):
         d = fresh_dir(self)
         p = os.path.join(d, "t.srt")
@@ -308,6 +337,58 @@ class World(unittest.TestCase):
         text = open(md).read()
         for head in ("## Totals per week", "## Totals per project", "## The sittings", "## Unclear", "## Every session on disk"):
             self.assertIn(head, text)
+
+    def with_categories(self):
+        self.cfg["clients"]["acme"]["categories"] = [{"name": "member support", "words": ["invoice"]}]
+
+    def test_category_splits_typed_runs_and_every_minute_has_exactly_one(self):
+        self.with_categories()
+        res = self.run_analyze(sources=False)
+        cats = H.category_secs(res["clients"]["acme"]["segs"])
+        # the 4:05-4:15 run says nothing about invoices (10 min, task); the 6:00 PM prompt does (5 min, member support)
+        self.assertEqual({k: round(v / 60) for k, v in cats.items()}, {"task": 10, "member support": 5})
+        self.assertEqual(sum(cats.values()), H.ksum(res["clients"]["acme"])["total"])
+        # without categories in the config nothing changes: all task
+        self.cfg["clients"]["acme"].pop("categories")
+        res = self.run_analyze(sources=False)
+        self.assertEqual({k: round(v / 60) for k, v in H.category_secs(res["clients"]["acme"]["segs"]).items()}, {"task": 15})
+
+    def test_category_survives_the_overlap_merge_with_other_sources(self):
+        self.with_categories()
+        res = H.analyze(self.cfg, ["acme"], self.lo, self.hi, machine="NX-01")
+        cats = H.category_secs(res["clients"]["acme"]["segs"])
+        self.assertEqual(sum(cats.values()), H.ksum(res["clients"]["acme"])["total"])   # still no minute counted twice
+        self.assertEqual(round(cats["member support"] / 60), 5)
+
+    def test_log_files_carry_the_category_last_and_total_it_per_week(self):
+        self.with_categories()
+        res = H.analyze(self.cfg, ["acme"], 0.0, self.hi, machine="NX-01")
+        md, tsv, rows = H.log_files(self.cfg, res, "acme", 0.0, self.hi, "NX-01", os.path.join(self.home, "log"))
+        lines = open(tsv).read().splitlines()
+        self.assertEqual(H.TSV_COLS[-1], "category")          # older readers keep the columns they know
+        self.assertEqual(H.TSV_COLS[:9], ["date", "start", "end", "minutes", "project", "what", "source", "evidence", "machine"])
+        col = lines[0].split("\t").index("category")
+        self.assertTrue(any("member support" in l.split("\t")[col] for l in lines[1:]))
+        text = open(md).read()
+        self.assertIn("## Totals per category", text)
+        self.assertIn("| member support |", text)
+        self.assertIn("by category", H.report_text(self.cfg, res, "acme", 0.0, self.hi))
+
+    def test_rows_from_the_other_machine_keep_or_derive_their_category(self):
+        self.with_categories()
+        res = self.run_analyze(sources=False)
+        p = os.path.join(self.home, "rows.tsv")
+        H.rows_file(res, ["acme"], "NCC-74656", p)
+        self.assertEqual(open(p).readline().rstrip("\n").split("\t")[-1], "category")
+        back = H.read_rows_in([p], self.cfg["clients"])
+        self.assertEqual(sorted({r["category"] for r in back["acme"]}), ["member support", "task"])
+        # an older export (8 columns, no category) gets its category from the words in its "what"
+        old = os.path.join(self.home, "rows-old.tsv")
+        open(old, "w").write("machine\tclient\tproject\tsrc\tstart\tend\twhat\tevid\n"
+                             "NCC-74656\tacme\tgeneral\ttyped\t1000\t1300\tfix the invoice\te1\n"
+                             "NCC-74656\tacme\tgeneral\ttyped\t2000\t2300\tbuild the page\te2\n")
+        got = {r["what"]: r["category"] for r in H.read_rows_in([old], self.cfg["clients"])["acme"]}
+        self.assertEqual(got, {"fix the invoice": "member support", "build the page": "task"})
 
     def test_main_modes_run_end_to_end(self):
         os.makedirs(os.path.join(self.home, ".config/ledger"))
