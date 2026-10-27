@@ -183,6 +183,27 @@ class Parts(unittest.TestCase):
             self.assertEqual([g[1] for g in got], ["new-lane", "mid-lane"])
             self.assertEqual(got[0][2], "2026-10-16-new-lane says hello.")
 
+    def test_lane_reports_uses_handoff_when_newer(self):
+        with tempfile.TemporaryDirectory() as d:
+            name = "2026-10-27-handoff-lane"
+            (Path(d) / name).mkdir()
+            p_rep = Path(d) / name / "report.md"
+            p_hand = Path(d) / name / "handoff.md"
+
+            p_rep.write_text("# Report\nStale report line\n")
+            p_hand.write_text("# Handoff\nDone: task A\nNext: task B\n")
+
+            # Make handoff newer
+            t_rep = (NOW - timedelta(minutes=10)).timestamp()
+            t_hand = (NOW - timedelta(minutes=5)).timestamp()
+            os.utime(p_rep, (t_rep, t_rep))
+            os.utime(p_hand, (t_hand, t_hand))
+
+            got = hd.lane_reports(d, NOW, 24)
+            self.assertEqual(len(got), 1)
+            # The handoff summary comes before the report line
+            self.assertEqual(got[0][2], "(Done: task A | Next: task B) Stale report line")
+
 
 class Scrub(unittest.TestCase):
     def test_keys_tokens_and_reset_links_are_redacted(self):
