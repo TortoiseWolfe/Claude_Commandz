@@ -172,18 +172,71 @@ def report_first_line(path, limit=140):
     return one_line(fallback, limit)
 
 
+def handoff_summary(path):
+    """-> "Done: ... | Next: ..." from the first non-empty lines under those headings (or on the heading line)."""
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    done, nxt = "", ""
+    in_done, in_next = False, False
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        d_m = re.match(r"^(?:[-*]\s+)?#*\s*Done[:\s]*(.*)", s, re.I)
+        if d_m:
+            in_done, in_next = True, False
+            if d_m.group(1).strip():
+                done, in_done = d_m.group(1).strip().lstrip("- ").strip(), False
+            continue
+        n_m = re.match(r"^(?:[-*]\s+)?#*\s*Next[:\s]*(.*)", s, re.I)
+        if n_m:
+            in_next, in_done = True, False
+            if n_m.group(1).strip():
+                nxt, in_next = n_m.group(1).strip().lstrip("- ").strip(), False
+            continue
+        if in_done and not done:
+            done, in_done = s.lstrip("- ").strip(), False
+        elif in_next and not nxt:
+            nxt, in_next = s.lstrip("- ").strip(), False
+        if done and nxt:
+            break
+    parts = []
+    if done:
+        parts.append(f"Done: {done}")
+    if nxt:
+        parts.append(f"Next: {nxt}")
+    return " | ".join(parts)
+
+
 def lane_reports(lanes_dir, now, hours):
-    """-> [(mtime, lane name, first line)] newest first, for report.md files written in the window."""
+    """-> [(mtime, lane name, first line)] newest first, for report.md or fresh handoff.md files."""
     out = []
-    for p in Path(lanes_dir).glob("*/report.md"):
+    if not Path(lanes_dir).is_dir():
+        return []
+    for d in Path(lanes_dir).iterdir():
+        if not d.is_dir():
+            continue
+        p_rep, p_hand = d / "report.md", d / "handoff.md"
         try:
-            mt = datetime.fromtimestamp(p.stat().st_mtime)
+            s_rep = p_rep.stat() if p_rep.exists() else None
+            s_hand = p_hand.stat() if p_hand.exists() else None
         except OSError:
             continue
-        if now - mt > timedelta(hours=hours):
+        if not (s_rep or s_hand):
             continue
-        name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", p.parent.name)
-        out.append((mt, name, report_first_line(p)))
+        mt = max(s_rep.st_mtime if s_rep else 0, s_hand.st_mtime if s_hand else 0)
+        dt = datetime.fromtimestamp(mt)
+        if now - dt > timedelta(hours=hours):
+            continue
+        name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", d.name)
+        line = report_first_line(p_rep)
+        if s_hand and (not s_rep or s_hand.st_mtime > s_rep.st_mtime):
+            hand = handoff_summary(p_hand)
+            if hand:
+                line = f"({hand}) {line}".strip()
+        out.append((dt, name, line))
     out.sort(key=lambda x: x[0], reverse=True)
     return out
 
