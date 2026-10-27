@@ -186,5 +186,44 @@ class Misc(Fixture):
         self.assertEqual(rv.scrub("see https://example.com/docs/webhooks/"), "see https://example.com/docs/webhooks/")
 
 
+# A made-up value in the shape of a Twitch stream key (live_<user id>_<30 letters and digits>).
+STREAM = "live_" + "123456789" + "_" + "AbC1dEf2" * 4
+
+
+class BareKey(Fixture):
+    """A field named just "key" (or stream_key, streamKey...) holds a secret.
+
+    OBS keeps the Twitch stream key in profiles/<name>/service.json under "settings.key";
+    on 27 Oct 2026 that field printed in full because only api_key/private_key were matched.
+    """
+
+    def test_obs_service_json(self):
+        p = self.write("service.json", json.dumps(
+            {"type": "rtmp_common", "settings": {"service": "Twitch", "server": "auto", "key": STREAM}}))
+        out = self.run_cli(p).stdout
+        self.assertNotIn(STREAM[5:], out)
+        self.assertIn('"service": "Twitch"', out)
+        self.assertIn('"server": "auto"', out)
+
+    def test_key_name_variants(self):
+        for name in ("key", "stream_key", "streamKey", "STREAM-KEY", "license_key", "x.key"):
+            self.assertEqual(rv.walk({name: "abcdefgh"}), {name: "<redacted:8>"}, name)
+
+    def test_names_that_only_contain_key_stay(self):
+        doc = {"keyboard": "us", "monkey": "george", "keys_only": "yes-please", "hotkey_name": "start"}
+        self.assertEqual(rv.walk(doc), doc)
+
+    def test_env_line(self):
+        p = self.write("obs.env", "STREAM_KEY=abcdefgh\nSTREAM_SERVER=auto\n")
+        out = self.run_cli(p).stdout
+        self.assertNotIn("abcdefgh", out)
+        self.assertIn("STREAM_SERVER=auto", out)
+
+    def test_stream_key_shape_in_free_text(self):
+        out = rv.scrub("rtmp://live.twitch.tv/app/" + STREAM + " started")
+        self.assertNotIn(STREAM[5:], out)
+        self.assertIn("rtmp://live.twitch.tv/app/", out)
+
+
 if __name__ == "__main__":
     unittest.main()
