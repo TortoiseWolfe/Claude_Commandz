@@ -610,7 +610,7 @@ class LiveAlert(unittest.TestCase):
             self.assertFalse((d / "state").exists())
 
     def test_the_refresh_script_keeps_the_digests_stderr(self):
-        line = next(x for x in (HERE.parent / "openclaw_status_refresh.sh").read_text().splitlines() if x.startswith("timeout") and "hub_digest.py" in x)
+        line = next(x for x in (HERE.parent / "openclaw_status_refresh.sh").read_text().splitlines() if "timeout" in x and "hub_digest.py" in x)
         self.assertNotIn("2>/dev/null", line)
 
 
