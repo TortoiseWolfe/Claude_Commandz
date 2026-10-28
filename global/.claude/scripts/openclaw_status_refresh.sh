@@ -57,7 +57,9 @@ timeout 150 python3 "$here/notes_check.py" --sweep --apply >/dev/null 2>&1 || ec
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
 # A live state that no longer parses (the roadmap text changed shape) makes the digest builder exit 3 with the reason on stderr (kept, not
 # discarded) and put an alert on the hub's list, which wakes the hub; the previous page stays.
-timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
+# --publish-budget also sets the FLEET_BUDGET variable on the hub repo (one line, numbers and times; the tower reads it with
+# gh variable get FLEET_BUDGET -R TortoiseWolfe/workspace because it can't read this disk). A failed publish never fails the digest.
+timeout 60 python3 "$here/hub_digest.py" --publish-budget --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
 
 # Every lane's new or changed report.md goes into his chat here, so a result reaches him with no hub session open (this task is
 # the safety net; lane_watch.sh does the same the moment a report lands). One post per report version; the first run only records.
