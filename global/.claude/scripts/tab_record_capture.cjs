@@ -122,12 +122,16 @@ const shoot = async (page) => {
   const buf = Buffer.from(r.data, 'base64')
   // Pixels per CSS pixel as the picture really came out (its width over the page's CSS width), not as the page claims: the
   // blur rectangles are CSS pixels, so a wrong ratio would put every box beside its text.
-  let dpr = 1
+  let dpr = null // unknown: the blurred video then blurs this whole frame
   try {
     const m = await s.send('Page.getLayoutMetrics')
     const cssW = (m.cssContentSize || m.contentSize).width
-    if (cssW > 0) dpr = buf.readUInt32BE(16) / cssW
-  } catch (e) { /* keep 1 */ }
+    const ratio = cssW > 0 ? buf.readUInt32BE(16) / cssW : 0
+    const claimed = await page.evaluate(() => window.devicePixelRatio || 1).catch(() => 0)
+    // The measured ratio must agree with what the page says, or the picture is not the page we measured.
+    if (ratio >= 0.5 && ratio <= 4 && claimed > 0 && Math.abs(ratio - claimed) / claimed < 0.05) dpr = ratio
+    else log('pixel ratio not trusted: measured', ratio.toFixed(3), 'page says', claimed)
+  } catch (e) { log('pixel ratio unreadable:', String(e).slice(0, 80)) }
   return { buf, dpr }
 }
 const CONFIRM = /confirmation|thank-?you|thanks|submitted|success|applied/i

@@ -105,10 +105,10 @@ def merge_rects(rects, scale, width, height, pad=PAD):
     return [tuple(b) for b in boxes]
 
 
-def blur_scale(video_w, png_w, dpr):
+def blur_scale(video_w, png_w, dpr):  # dpr must be a real ratio; the caller blurs the whole frame when it is unknown
     """Page rectangles are in CSS pixels; the screenshot has png_w pixels (CSS width x device pixel ratio) and the video video_w.
     Scale = video pixels per CSS pixel."""
-    return (video_w / float(png_w)) * float(dpr or 1)
+    return (video_w / float(png_w)) * float(dpr)
 
 
 def window_top(prev_top, bbox, frame_h, win_h=H):
@@ -350,7 +350,7 @@ def render_frames(d, blurred, workdir):
         for line in rf.read_text().splitlines():
             try:
                 j = json.loads(line)
-                rects[j["ms"]] = (j.get("dpr") or 1, j["rects"])
+                rects[j["ms"]] = (j.get("dpr"), j["rects"])
             except Exception:
                 pass
     frames = sorted((d / "frames").glob("f*.png"), key=lambda p: int(p.stem[1:]))
@@ -360,10 +360,11 @@ def render_frames(d, blurred, workdir):
     for i, fp in enumerate(frames):
         ms = int(fp.stem[1:])
         im = Image.open(fp).convert("RGB")
-        dpr, frame_rects = rects.get(ms, (1, None))
-        scale = blur_scale(W, im.width, dpr)
+        dpr, frame_rects = rects.get(ms, (None, None))
+        px_scale = W / im.width  # how much the picture is shrunk to fit the video
+        css_scale = blur_scale(W, im.width, dpr) if dpr else None  # video pixels per CSS pixel, for the rectangles
         if im.width != W:
-            im = im.resize((W, max(1, round(im.height * scale))))
+            im = im.resize((W, max(1, round(im.height * px_scale))))
         # the area that changed, from the unblurred pictures (so the window follows the typing)
         bbox = None
         if prev is not None and prev.size == im.size:
@@ -372,7 +373,8 @@ def render_frames(d, blurred, workdir):
         if blurred:
             # the page reported its personal data in page pixels; a rectangle written for this frame is scaled the same way
             # a frame with no saved rectangles (the capture died between picture and read) is blurred whole: never show it unchecked
-            boxes = merge_rects(frame_rects, scale, im.width, im.height) if frame_rects is not None else [(0, 0, im.width, im.height)]
+            # (and so is one whose pixel ratio could not be measured, since the rectangles could not be placed)
+            boxes = merge_rects(frame_rects, css_scale, im.width, im.height) if frame_rects is not None and css_scale else [(0, 0, im.width, im.height)]
             im = blur_boxes(im, boxes)
         last = i == len(frames) - 1
         top = 0 if (last or i == 0) else window_top(top, bbox, im.height)

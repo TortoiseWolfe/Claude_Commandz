@@ -68,9 +68,6 @@ class BlurScale(unittest.TestCase):
     def test_retina_screenshot_of_a_narrow_page(self):
         self.assertEqual(tr.blur_scale(1280, 2000, 2), 1.28)  # 1000 CSS px at 2x shown in 1280 px: 1.28 video px per CSS px
 
-    def test_missing_ratio_means_one(self):
-        self.assertEqual(tr.blur_scale(1280, 1280, None), 1.0)
-
     def test_huge_unreadable_marker_covers_the_whole_frame(self):
         (box,) = tr.merge_rects([{"x": 0, "y": 0, "w": 100000, "h": 100000}], 1.0, 1280, 900)
         self.assertEqual(box, (0, 0, 1280, 900))
