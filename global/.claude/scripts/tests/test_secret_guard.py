@@ -98,6 +98,23 @@ class RuleA(Base):
         ]:
             self.allowed(c)
 
+    def test_public_numeric_id_in_a_url_is_allowed(self):
+        """Greenhouse's embed link carries its public job id as token=<7 to 10 digits>; punctuation after it must not matter."""
+        url = "https://job-boards.greenhouse.io/embed/job_app?for=elastic&token=8257322"
+        for tail in ["", " ", ".", ",", "`", ">", "]", ")", '\\"', "\\'", "/", "?x=1", "#a", "\\n", "*", "!", ":", ";", "&gh_src=x"]:
+            self.allowed('echo "see ' + url + tail + ' ok"')
+        self.allowed("lane.sh --send scout-run-2 'open " + url + ".'")
+        self.allowed("curl -s '" + url.replace("8257322", "1234567890") + "'")
+
+    def test_tokens_in_urls_still_block(self):
+        base = "https://job-boards.greenhouse.io/embed/job_app?for=elastic&token="
+        mixed = "8257322" + "abcdEFGH" + "1234" + "wxyz"          # digits that run on into letters, 23 characters
+        for value in [GHO, "github" + "_pat_" + "A1b2" * 8, mixed, "a1B2" * 6, "123456" + "qzk" + "9" * 12]:
+            self.blocked('echo "' + base + value + '"')
+            self.blocked('echo "' + base + value + '."')
+        self.blocked("curl 'https://api.example.com/v1/x?api_key=" + "a1B2" * 6 + "&id=1'")
+        self.blocked('echo "' + base + "12345678901" + "q" + '"')   # eleven digits then a letter: not a plain id
+
     def test_reason_never_echoes_secret(self):
         for c in ["export GREG_PASSWORD=hunter2pass", "echo " + GHO]:
             self.assertNotIn("hunter2pass", self.blocked(c)[1])
