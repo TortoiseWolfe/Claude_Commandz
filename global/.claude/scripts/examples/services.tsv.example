@@ -1,0 +1,7 @@
+# Copy to ~/.config/afa/services.tsv. One long job per line, tab-separated:
+#   name  enabled(1 or 0)  working-folder  check-command (exit 0 = running)  start-command
+# fleet-up.sh runs the check after a crash or restart and, only when enabled is 1, the start command.
+# A job that goes live in public (a stream) ships with enabled 0: it comes back only when its owner says so.
+# A name listed here is never restarted as a lane.
+#renderer	1	~/work/renderer	pgrep -f render_loop.py >/dev/null	nohup ./render_loop.py >>render.log 2>&1 &
+#stream	0	~/work/stream	tmux has-session -t stream 2>/dev/null	tmux new-session -d -s stream ./go-live.sh

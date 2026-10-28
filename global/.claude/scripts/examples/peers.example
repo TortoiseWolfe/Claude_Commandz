@@ -1,0 +1,4 @@
+# Copy to ~/.config/afa/peers. One line per other machine: its machine name, then a ssh target that reaches
+# its home folder without a password (key login). fleet-up.sh reads <home>/.claude/state/heartbeat there and puts
+# one inbox line when the other machine goes silent for 10 minutes or comes back. No file, no check.
+#OTHER-MACHINE	user@192.0.2.10

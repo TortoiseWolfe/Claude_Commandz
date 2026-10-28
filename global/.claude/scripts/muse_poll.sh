@@ -87,6 +87,9 @@ if [[ "${1:-}" == --weekly-dry-run ]]; then
   exit $?
 fi
 
+# The fleet heartbeat (fleet-up.sh): stamped every minute, before any gate below can exit. This is the one job that runs every minute here.
+[ -x "$HOME/.claude/scripts/fleet-up.sh" ] && timeout 100 "$HOME/.claude/scripts/fleet-up.sh" --heartbeat >/dev/null 2>&1
+
 H=$(date +%-H)
 exec 9>"${MUSE_POLL_LOCK:-/tmp/muse-poll.lock}"   # a test passes its own, so it never waits on the live poller
 flock -n 9 || exit 0

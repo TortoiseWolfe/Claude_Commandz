@@ -1,0 +1,4 @@
+# Copy to ~/.config/afa/pause-dirs. One folder per line (~ allowed). When a battery or UPS reports it is discharging,
+# fleet-up.sh writes a file called PAUSE into each folder so a render or batch job that checks for PAUSE stops;
+# when power returns it removes only the PAUSE files it wrote.
+#~/work/renders
