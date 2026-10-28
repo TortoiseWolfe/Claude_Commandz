@@ -12,8 +12,10 @@ Run it again after any `graphify install` or `graphify hook install`. Safe to re
 already portable is left alone. --check changes nothing and exits 1 when a file would change.
 """
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 SETTINGS = Path(".claude") / ("settings" + ".json")
@@ -66,9 +68,13 @@ def main(argv):
         if check:
             print("would change %d hook(s): %s" % (n, f))
             continue
-        tmp = f.with_name(f.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        tmp.replace(f)
+        # A fresh, exclusively created temp file beside the target (never a fixed name another process could
+        # pre-plant as a symlink), then an atomic rename onto the target.
+        fd, tmp = tempfile.mkstemp(dir=str(f.parent), prefix=f.name + ".")
+        with os.fdopen(fd, "w") as out:
+            out.write(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, f.stat().st_mode & 0o777)
+        os.replace(tmp, f)
         print("rewrote %d hook(s): %s" % (n, f))
     return 1 if (check and would_change) else 0
 
