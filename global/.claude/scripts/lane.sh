@@ -1442,7 +1442,8 @@ if [ "$mode" = resume ]; then
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
   else
-    cmd="${uenv}claude --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
+    # --add-dir: the hand-off folder is outside the lane's cwd; without it a recycle re-prime stalls on a "Read outside the working directories" dialog (28 Oct 2026).
+    cmd="${uenv}claude --resume $(printf %q "$id") --model $(printf %q "$m") --add-dir $(printf %q "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")") $flags"
   fi
   if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
@@ -1599,7 +1600,8 @@ elif [ "$headless" = 1 ]; then
 elif [ "$console" = 1 ]; then
   cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
 else
-  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
+  # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
+  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $flags \"\$(cat $(printf %q "$hprompt"))\""
 fi
 t send-keys -t "$target" "$cmd" Enter
 

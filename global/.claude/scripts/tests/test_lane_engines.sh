@@ -135,6 +135,8 @@ run_lane default-lane "$REPO" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'default Claude lane starts'
 assert_contains "$LAST_COMMAND" 'claude --model sonnet' 'default command uses Claude'
 assert_contains "$LAST_COMMAND" '$(cat ' 'default command reads the prompt file'
+assert_contains "$LAST_COMMAND" '--add-dir' 'Claude lane start gets its hand-off folder as a working folder'
+assert_contains "$LAST_COMMAND" 'default-lane' 'Claude lane --add-dir names the hand-off folder'
 assert_not_contains "$LAST_COMMAND" 'touch injected' 'default prompt is not interpolated into the shell command'
 # A Claude lane start also refreshes the hub's lean project settings (hub_lean.py), so the tower gets them too.
 HUB_LEAN_FILE="$HOME_TEST/repos/.claude/settings.json"
@@ -453,6 +455,7 @@ printf '%s\tclaude-resume-check\t%s\tsonnet\tsubscription\t%s\t%s\tsession-123\t
 run_lane --dry-run --resume claude-resume-check
 assert_exit 0 "$LAST_STATUS" 'Claude lane still supports --resume'
 assert_contains "$LAST_OUTPUT" 'claude\ --resume\ session-123\ --model\ sonnet' 'Claude resume command remains unchanged'
+assert_contains "$LAST_OUTPUT" "--add-dir\\ $TMP" 'Claude resume gets the report folder as a working folder'
 
 # Existing subscription rows and new engine values remain readable in --status.
 assert_contains "$(cut -f5 "$INDEX")" 'subscription' 'default lane keeps the old billing value'
