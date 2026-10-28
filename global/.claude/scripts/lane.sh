@@ -318,10 +318,19 @@ esac
 
 # An engine whose program this machine does not have is refused up front, with the machine named, instead of a window that opens and dies
 # on "command not found" (28 Oct 2026: the tower has no agy or OpenCode, so the dispatcher's agy-first order started lanes that died at once).
-# AFA_ENGINES_AVAILABLE (a comma list of engine names, or *) says an engine is present when this shell's PATH cannot show it.
+# AFA_ENGINES_AVAILABLE (a comma list of engine names, or *) says an engine is present when nothing below can show it.
+# The lookup matches what the lane window will see, because lane.sh and the dispatcher run from scheduled tasks whose PATH can lack the
+# user's bin folders while the window resolves the engine through an interactive shell: (1) this PATH, (2) the user's login and interactive
+# shell, (3) the usual install folders. openclaw_dispatch.py engine_installed() applies the same rule; keep the two in step.
 engine_present() {  # <engine>
   case ",${AFA_ENGINES_AVAILABLE:-}," in *,"*",*|*,"$1",*) return 0 ;; esac
-  command -v "$1" >/dev/null 2>&1
+  command -v "$1" >/dev/null 2>&1 && return 0
+  if command -v timeout >/dev/null 2>&1 && [ -n "$(timeout 5 bash -lic 'command -v "$1"' _ "$1" 2>/dev/null </dev/null)" ]; then return 0; fi
+  local d
+  for d in "$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin" /usr/local/bin; do
+    [ -x "$d/$1" ] && [ -f "$d/$1" ] && return 0
+  done
+  return 1
 }
 if [ "$mode" = start ] && ! engine_present "$engine"; then
   echo "refusing engine $engine: the program '$engine' is not installed on this machine ($(cat "$HOME/.config/afa/machine" 2>/dev/null || hostname)); pick another engine, or install it" >&2
