@@ -10,6 +10,7 @@ import os
 import random
 import re
 import sys
+from unittest import mock
 import tempfile
 import time
 import unittest
@@ -1255,6 +1256,55 @@ class Sweep(Base):
         self.assertEqual(self.state()["opencode_blocked_until"], NOW + 100 + dp.OPENCODE_BLOCK_SECONDS)
         self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 200)[:2], ("claude", "own repo, OpenCode is out of usage"))
         self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 101 + dp.OPENCODE_BLOCK_SECONDS)[0], "opencode")
+
+    def test_an_engine_not_installed_on_this_machine_is_skipped_to_the_next_one(self):
+        with mock.patch.object(dp, "engine_installed", side_effect=lambda e: e in ("codex", "copilot")):
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "codex")
+            self.assertIn("agy is not installed on this machine", r[1])
+            self.block(codex_blocked_until=NOW + 10**6)
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "copilot")
+            self.assertIn("agy is not installed", r[1])
+            self.assertIn("Codex is out of usage", r[1])
+
+    def test_with_every_engine_missing_the_lane_goes_to_claude(self):
+        with mock.patch.object(dp, "engine_installed", return_value=False):
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "claude")
+            self.assertIn("not installed on this machine", r[1])
+
+    def test_engine_installed_finds_an_engine_only_in_the_home_bin_folder_or_a_login_shell(self):
+        with tempfile.TemporaryDirectory() as home:
+            home = Path(home)
+            env = {"AFA_ENGINES_AVAILABLE": "", "HOME": str(home), "PATH": "/usr/bin:/bin"}
+            with mock.patch.dict(os.environ, env), mock.patch.object(dp, "HOME", home):
+                self.assertFalse(dp.engine_installed("agy-testengine"))
+                (home / ".local/bin").mkdir(parents=True)
+                tool = home / ".local/bin/agy-testengine"
+                tool.write_text("#!/bin/sh\nexit 0\n")
+                self.assertFalse(dp.engine_installed("agy-testengine"))  # not executable yet
+                tool.chmod(0o755)
+                self.assertTrue(dp.engine_installed("agy-testengine"))  # PATH lacks ~/.local/bin; the folder check finds it
+                tool.unlink()
+                (home / ".profile").write_text('export PATH="%s/extra:$PATH"\n' % home)
+                (home / "extra").mkdir()
+                other = home / "extra/agy-testengine"
+                other.write_text("#!/bin/sh\nexit 0\n")
+                other.chmod(0o755)
+                self.assertTrue(dp.engine_installed("agy-testengine"))  # only the login and interactive shell's PATH shows it
+
+    def test_engine_installed_reads_the_list_and_the_path(self):
+        with tempfile.TemporaryDirectory() as home:
+            home = Path(home)
+            with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": "agy", "HOME": str(home), "PATH": "/usr/bin:/bin"}), mock.patch.object(dp, "HOME", home):
+                self.assertTrue(dp.engine_installed("agy"))
+            (home / "bin").mkdir()
+            tool = home / "bin/codex-testengine"
+            tool.write_text("#!/bin/sh\nexit 0\n")
+            tool.chmod(0o755)
+            with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": "", "HOME": str(home), "PATH": "%s/bin:/usr/bin:/bin" % home}), mock.patch.object(dp, "HOME", home):
+                self.assertTrue(dp.engine_installed("codex-testengine"))
 
     def test_an_opencode_failure_that_is_not_about_quota_does_not_block_it(self):
         self.opencode_lane_with_log("opencode: model google/gemini-3-flash-preview\nError: the test suite failed")
