@@ -219,7 +219,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -254,10 +254,11 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
+    --restart) restart_opt=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --engine)
       [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, agy, or opencode" >&2; exit 1; }
@@ -1574,9 +1575,30 @@ fi
 guard_external_engine || exit 1
 agy_default_ok "$name" "$dir" "$model" "$prompt" || exit 1
 
+# A start gets today's dated folder, and its prompt.md is write-once (see lprompt below). A lane name is reused for new work (a client's mail
+# batch starts "<client>-mail" again each time), so a later day without --restart is a new lane: a fresh folder with its own prompt.md and no
+# restart header. --restart is the explicit restart of the same lane: it reuses the previous row's folder (when that folder still exists), so
+# prompt.md, handoff.md and report.md stay together, and it keeps the lane's last recycle line (28 Oct 2026: a next-day restart split
+# bandwagon-live across two folders, and a restart reset 120K to 100K so the lane recycled two minutes later).
+prev_row="$(index_row "$name")"; prev_rk=
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"
+if [ -n "$prev_row" ]; then
+  prev_rep="$(cut -f7 <<<"$prev_row")"; prev_dir=
+  [ -n "$prev_rep" ] && prev_dir="$(dirname "$prev_rep")"
+  if [ "$restart_opt" = 1 ] && [ -n "$prev_dir" ] && [ -d "$prev_dir" ]; then hand="$prev_dir"; fi
+  # The recycle line carries over only when this start lands in the previous row's folder (--restart, or a same-day start).
+  [ "$hand" = "$prev_dir" ] && prev_rk="$(cut -f12 <<<"$prev_row")"
+fi
 hprompt="$hand/prompt.md"
 report="$hand/report.md"
+# lprompt is the file the lane reads as its first message. prompt.md is write-once: a different prompt for a folder that already has one is
+# a restart note, stored as prompt-<HHMM>.md; the index keeps pointing at prompt.md, so every recycle re-primes from the original mission.
+lprompt="$hprompt"; restart_note=0
+if [ -e "$hprompt" ] && [ "$prompt" != "$hprompt" ] && ! cmp -s -- "$prompt" "$hprompt"; then
+  restart_note=1
+  lprompt="$hand/prompt-$(date +%H%M).md"
+  [ ! -e "$lprompt" ] || lprompt="$hand/prompt-$(date +%H%M%S).md"
+fi
 
 under_repos=0
 case "$dir/" in "$(cd "$HOME/repos" && pwd -P)/"*) under_repos=1 ;; esac
@@ -1590,17 +1612,22 @@ if [ "$dry" = 0 ]; then
   fi
 fi
 
+restart_header() {  # the one line a restart note starts with, so the lane knows where its mission and last hand-off are
+  printf 'This lane was restarted. Your original mission is %s and your last hand-off is %s/handoff.md (when it exists): read both first, then continue with the note below.\n\n' "$hprompt" "$hand"
+}
 if [ "$dry" = 1 ]; then
   echo "mkdir -p $hand"
-  [ "$prompt" = "$hprompt" ] || echo "cp $prompt $hprompt"
-  [ "$engine" != agy ] || echo "# prepend the agy edit-only header to $hprompt"
+  if [ "$restart_note" = 1 ]; then echo "# restart: $hprompt stays as it is; the new prompt is stored as $lprompt"; echo "cp $prompt $lprompt"
+  elif [ "$prompt" != "$hprompt" ]; then echo "cp $prompt $hprompt"; fi
+  [ "$engine" != agy ] || echo "# prepend the agy edit-only header to $lprompt"
 else
   mkdir -p "$hand"
-  [ "$prompt" = "$hprompt" ] || cp "$prompt" "$hprompt"
+  if [ "$restart_note" = 1 ]; then { restart_header; cat -- "$prompt"; } >"$lprompt"
+  elif [ "$prompt" != "$hprompt" ]; then cp "$prompt" "$hprompt"; fi
   # Once only: a restarted lane's prompt already in the hand-off folder keeps its one header.
-  if [ "$engine" = agy ] && ! head -n1 -- "$hprompt" | grep -q '^You can edit files but cannot run commands'; then
+  if [ "$engine" = agy ] && ! head -n1 -- "$lprompt" | grep -q '^You can edit files but cannot run commands'; then
     { printf 'You can edit files but cannot run commands. Make the change, then write %s/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit. Open only files in this checkout and in %s: any other read is refused and ends the run, so leave the live copies a task names under ~/.claude alone.\n\n' "$hand" "$hand"
-      cat -- "$hprompt"; } >"$hprompt.agy" && mv "$hprompt.agy" "$hprompt"
+      cat -- "$lprompt"; } >"$lprompt.agy" && mv "$lprompt.agy" "$lprompt"
   fi
 fi
 
@@ -1627,13 +1654,14 @@ target="$SESSION:$name"
 eff="-"; flags=""; conn="-"; rk=""
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
-  rk="${recycle_at_opt:-$(default_recycle_k "$(lane_kind "$prompt" "$dir" "$conn")" "$conn")}"
+  # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).
+  rk="${recycle_at_opt:-$(lane_recycle_k "$prev_rk" "$prompt" "$dir" "$conn")}"
   eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "${project_mcp_opt:--}")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"
-  prompt_cmd="\$(cat -- $(printf %q "$hprompt"))"
+  prompt_cmd="\$(cat -- $(printf %q "$lprompt"))"
   out_cmd="$(printf %q "$out")"
   if [ "$engine" = codex ]; then
     # GIT_SSH_COMMAND: inside the sandbox's user namespace root-owned system files look
@@ -1646,7 +1674,7 @@ if [ "$engine" != claude ]; then
     if ! is_claude_model "$model"; then cmd+=" -m $(printf %q "$model")"; fi
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
   elif [ "$engine" = opencode ]; then
-    cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/opencode_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(opencode_model "$model")") $(printf %q "$hprompt")"
+    cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/opencode_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(opencode_model "$model")") $(printf %q "$lprompt")"
     cmd+=" >$out_cmd 2>&1"
   elif [ "$engine" = agy ]; then
     cmd="cd $(printf %q "$dir") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --add-dir $(printf %q "$hand") --model $(printf %q "$(agy_model "$model")")"
@@ -1660,12 +1688,12 @@ if [ "$engine" != claude ]; then
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$lprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $flags \"\$(cat $(printf %q "$lprompt"))\""
 else
   # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
-  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $flags \"\$(cat $(printf %q "$hprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $flags \"\$(cat $(printf %q "$lprompt"))\""
 fi
 t send-keys -t "$target" "$cmd" Enter
 
