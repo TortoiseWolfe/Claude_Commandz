@@ -1758,7 +1758,7 @@ class TheWeeksPhases(unittest.TestCase):
 
     def test_the_boundaries_are_the_named_constants(self):
         self.assertEqual((dp.WEEK_RESET, dp.PHASE2_START, dp.PHASE3_START), ((2, 12, 0), (0, 6, 0), (1, 6, 0)))
-        self.assertEqual((dp.PROJECTION_LIMIT, dp.USED_LIMIT), (90.0, 95.0))
+        self.assertEqual((dp.PROJECTION_LIMIT, dp.USED_LIMIT, dp.USED_LIMIT_END), (90.0, 95.0, 100.0))
 
     def test_a_reset_the_report_names_is_the_one_used_and_the_week_follows_a_dst_change(self):
         # clocks go back Sun 1 Nov 2026: Mon 2 Nov 6:00 AM is still 6:00 AM on the wall
@@ -1778,14 +1778,30 @@ class TheWeeksPhases(unittest.TestCase):
         # (when, projected, used, held?)
         for when, proj, used, held in [
             (ET(2026, 10, 19, 5, 59), 90.0, 99, False), (ET(2026, 10, 19, 5, 59), 90.1, 10, True),  # phase 1: projected, past 90
-            (ET(2026, 10, 19, 6, 1), 108, 94.9, False), (ET(2026, 10, 19, 6, 1), 20, 95.0, True),    # phase 2: used, at 95
-            (ET(2026, 10, 20, 5, 59), 200, 94, False), (ET(2026, 10, 20, 5, 59), 20, 96, True),
+            (ET(2026, 10, 19, 6, 1), 108, 94.9, False), (ET(2026, 10, 19, 6, 1), 20, 95.1, True),    # phase 2: used, at 95 and rising
+            (ET(2026, 10, 20, 5, 59), 200, 99.9, False), (ET(2026, 10, 20, 5, 59), 20, 100, True),
             (ET(2026, 10, 20, 6, 1), 200, 99.9, False), (ET(2026, 10, 21, 11, 59), 200, 100, False),  # phase 3: nothing
             (ET(2026, 10, 21, 12, 1), 91, 2, True), (ET(2026, 10, 21, 12, 1), 40, 2, False),         # the new week is phase 1 again
         ]:
             with self.subTest(when=when, proj=proj, used=used):
                 over = dp.budget_over({"projected": proj, "used": used, "reset": None}, when, held=True)
                 self.assertEqual(over is not None, held, over)
+
+    def test_phase_2_limit_rises_in_a_straight_line_from_95_to_100(self):
+        # the week of 19-21 Oct: phase 2 is Mon 19 Oct 6:00 AM to Tue 20 Oct 6:00 AM, 24 hours
+        self.assertEqual(dp.used_limit(ET(2026, 10, 19, 6, 0)), 95.0)               # the start
+        self.assertAlmostEqual(dp.used_limit(ET(2026, 10, 19, 18, 0)), 97.5)        # the middle
+        self.assertAlmostEqual(dp.used_limit(ET(2026, 10, 19, 12, 0)), 96.25)       # a quarter of the way
+        self.assertAlmostEqual(dp.used_limit(ET(2026, 10, 20, 5, 59)), 100.0, places=2)  # the end
+        self.assertEqual(dp.used_limit(ET(2026, 10, 20, 6, 0)), 100.0)
+        self.assertEqual(dp.used_limit(ET(2026, 10, 18, 12, 0)), 95.0)              # before phase 2: the starting limit
+        self.assertEqual(dp.used_limit(ET(2026, 10, 21, 3, 0)), 100.0)              # after it (phase 3 has no gate at all)
+
+    def test_phase_2_holds_at_the_limit_of_the_moment(self):
+        mid = ET(2026, 10, 19, 18, 0)  # limit 97.5
+        self.assertIsNone(dp.budget_over({"projected": 10, "used": 97.4, "reset": None}, mid))
+        self.assertIn("holds at 97.5% used", dp.budget_over({"projected": 10, "used": 97.5, "reset": None}, mid))
+        self.assertIsNone(dp.budget_over({"projected": 10, "used": 96, "reset": None}, mid))  # held at 96 early Monday, free by Monday evening
 
     def test_an_unknown_figure_holds_in_phases_1_and_2_and_not_in_phase_3(self):
         for when, held in [(ET(2026, 10, 19, 5, 59), True), (ET(2026, 10, 19, 6, 1), True), (ET(2026, 10, 20, 6, 1), False)]:
@@ -1801,7 +1817,7 @@ class TheWeeksPhases(unittest.TestCase):
         self.assertEqual(dp.budget_over({"projected": 108, "used": 84, "reset": None}, ET(2026, 10, 18, 9)),
                          "the week is projected at 108% (phase 1, reset to Mon 6:00 AM, holds past 90% projected)")
         self.assertEqual(dp.budget_over({"projected": 108, "used": 96, "reset": None}, ET(2026, 10, 19, 9)),
-                         "the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95% used)")
+                         "the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95.6% used, rising to 100%)")
 
 
 class TheStepDownFollowsThePhase(Base):

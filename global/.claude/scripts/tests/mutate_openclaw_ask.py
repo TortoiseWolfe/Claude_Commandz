@@ -167,6 +167,8 @@ MUTANTS = [
     (DISPATCH, "budget note dropped for Sonnet", "            note = \" (Sonnet only: %s)\" % over", "            pass"),
     (DISPATCH, "projection limit raised to 100", "PROJECTION_LIMIT = 90.0", "PROJECTION_LIMIT = 100.0"),
     (DISPATCH, "used limit raised to 100", "USED_LIMIT = 95.0", "USED_LIMIT = 100.0"),
+    (DISPATCH, "used limit never rises", "return USED_LIMIT + (USED_LIMIT_END - USED_LIMIT) * frac", "return USED_LIMIT"),
+    (DISPATCH, "used limit rises a quarter too slowly", "return USED_LIMIT + (USED_LIMIT_END - USED_LIMIT) * frac", "return USED_LIMIT + (USED_LIMIT_END - USED_LIMIT) * frac * 0.75"),
     (DISPATCH, "phase 2 holds only past the used limit", "over = pct is not None and pct >= limit", "over = pct is not None and pct > limit"),
     (DISPATCH, "phase 2 starts an hour late", "PHASE2_START = (0, 6, 0)", "PHASE2_START = (0, 7, 0)"),
     (DISPATCH, "phase 3 starts a day late", "PHASE3_START = (1, 6, 0)", "PHASE3_START = (2, 6, 0)"),
