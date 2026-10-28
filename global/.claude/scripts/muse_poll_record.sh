@@ -6,7 +6,7 @@
 #   muse_poll_record.sh active                -> a note just went to Hatch: the poller checks every minute
 #                                                again, backing off as the exchange goes quiet
 #   muse_poll_record.sh done <our-draft-id>   -> Hatch's done-note arrived: ticks the open inbox lines
-#                                                ("Waiting on Hatch: ...") that end with that draft ID
+#                                                ("Waiting on Hatch: ...") that end with that draft ID or name it as a whole word
 #   muse_poll_record.sh client-mail <Client mail|Client alert> "<client>" "<id> [<id>...]"
 #                                             -> queues "<label>: <client> | absorb lane | <ids>", leaving out
 #                                                every ID already in client-mail-seen.txt or already on an
@@ -65,9 +65,19 @@ case "${1:-}" in
     id="${2:?our draft id}"
     [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || { echo "bad id" >&2; exit 1; }
     lock
-    n=$(grep -c -- "^- \[ \] .*| $id\$" "$INBOX" || true)
-    sed -i -- "s/^- \[ \] \(.*| $id\)\$/- [x] \1/" "$INBOX"
-    echo "ticked $n"
+    # An open line ticks when it ends "| <id>" (any owner), or when it is a "Waiting on ..." line that names the id as a whole
+    # word anywhere ("... note r-123 (details)") and names no other draft id: the id carries "r-" and sits after prose as often
+    # as after a bar, but a line waiting on several notes ticks only through the trailing form, never on the first done-note.
+    tmp=$(mktemp)
+    awk -v id="$id" '
+      function ids(l,  c) { c = l; return gsub(/(^|[^A-Za-z0-9_-])r-?[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]+/, "", c) }
+      BEGIN { tok = "(^|[^A-Za-z0-9_-])" id "([^A-Za-z0-9_-]|$)"; tail = "[|] " id "$" }
+      /^- \[ \] / && ($0 ~ tail || ($0 ~ /^- \[ \] [^|]*[|] Waiting on / && $0 ~ tok && ids($0) == 1)) { sub(/^- \[ \]/, "- [x]"); n++ }
+      { print }
+      END { print n + 0 > "/dev/stderr" }' "$INBOX" >"$tmp" 2>"$tmp.n"
+    cat "$tmp" >"$INBOX"
+    echo "ticked $(cat "$tmp.n")"
+    rm -f "$tmp" "$tmp.n"
     ;;
   client-mail)
     label="${2:?label}"; client="${3:?client}"; ids="${4:?ids}"
