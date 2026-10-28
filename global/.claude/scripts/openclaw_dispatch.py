@@ -1294,18 +1294,46 @@ def resolve_engine(state, engine, now):
     names = [e for e, _ in ENGINE_CHAIN]
     if engine not in names:
         return engine, None, ""
-    skipped = []
+    skipped, missing = [], []
     for e, label in ENGINE_CHAIN[names.index(engine):]:
+        if not engine_installed(e):
+            missing.append(label)
+            continue
         if state.get(e + "_blocked_until", 0) > now:
             skipped.append(label)
             continue
-        return (e, None, "") if not skipped else (e,) + _out_of_usage(skipped)
-    return ("claude",) + _out_of_usage(skipped)
+        return (e, None, "") if not (skipped or missing) else (e,) + _out_of_usage(skipped, missing)
+    return ("claude",) + _out_of_usage(skipped, missing)
 
 
-def _out_of_usage(skipped):
-    who = skipped[0] if len(skipped) == 1 else ", ".join(skipped[:-1]) + " and " + skipped[-1]
-    words = "%s %s out of usage" % (who, "is" if len(skipped) == 1 else "are")
+ENGINE_DIRS = (".local/bin", ".npm-global/bin", ".opencode/bin", ".bun/bin")  # under the home folder; /usr/local/bin is checked too
+
+
+def engine_installed(e):
+    """True when this machine has the engine's program, looked up the way the lane window will see it (this task's PATH can lack the
+    user's bin folders, as CLAUDE_BIN above shows): AFA_ENGINES_AVAILABLE (a comma list, or *), then this PATH, then the user's login and
+    interactive shell, then the usual install folders. lane.sh engine_present() applies the same rule; keep the two in step."""
+    listed = [x.strip() for x in os.environ.get("AFA_ENGINES_AVAILABLE", "").split(",")]
+    if "*" in listed or e in listed or shutil.which(e):
+        return True
+    try:
+        r = subprocess.run(["timeout", "5", "bash", "-lic", 'command -v "$1"', "_", e], stdout=subprocess.PIPE, text=True,
+                           stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if r.stdout.strip():
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    dirs = [HOME / d for d in ENGINE_DIRS] + [Path("/usr/local/bin")]
+    return any((d / e).is_file() and os.access(d / e, os.X_OK) for d in dirs)
+
+
+def _out_of_usage(skipped, missing=()):
+    words = []
+    for names, tail in ((skipped, "out of usage"), (missing, "not installed on this machine")):
+        if names:
+            who = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+            words.append("%s %s %s" % (who, "is" if len(names) == 1 else "are", tail))
+    words = "; ".join(words)
     return "own repo, " + words, " (%s)" % words
 
 

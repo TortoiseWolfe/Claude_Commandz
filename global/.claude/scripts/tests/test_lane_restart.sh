@@ -4,6 +4,8 @@
 # Now prompt.md is write-once, a different prompt for a folder that has one is stored as prompt-<HHMM>.md, --restart reuses the previous
 # row's folder and recycle line (a reused name WITHOUT it gets a fresh dated folder), and --recycle-at always wins. A fake HOME and a fake tmux hold everything: nothing here touches a live lane.
 set -euo pipefail
+# The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
+export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-restart.XXXXXX")"
