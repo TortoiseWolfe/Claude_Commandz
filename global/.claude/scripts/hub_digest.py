@@ -308,6 +308,20 @@ def budget_line(budget_file, now_ts, ttl=BUDGET_TTL):
         return "budget report unavailable"
 
 
+def phase_note(now):
+    """The token week's phase (openclaw_dispatch.week_phase, the one place its boundaries live), as the line the Budget section adds.
+    Phase 3 (Tuesday 6:00 AM to the reset) holds no reserve: Jonathan, 28 Oct about 9:20 AM, "the closer we get the the reset, the
+    less we need in reserve". Empty when the dispatcher module can't be read."""
+    try:
+        from openclaw_dispatch import week_phase
+        phase = week_phase(now.timestamp())[0]
+    except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
+        return ""
+    if phase == 3:
+        return "Phase 3: no reserve; start anything held for after the reset now"
+    return f"Phase {phase} of 3"
+
+
 def tidy_summary(text):
     """tidy-report.sh prints '## heading' then item lines; keep the heading and a count."""
     out, head, n = [], None, 0
@@ -449,7 +463,11 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     sections.append(("Roadmap (the issue body has the rest: gh issue view 1 -R " + HUB_REPO + ")", rl))
 
     # Git, tidy, budget
-    sections.append(("Budget this week", [budget or "budget report unavailable"]))
+    bl = [budget or "budget report unavailable"]
+    phase_line = phase_note(now)
+    if phase_line:
+        bl.append(phase_line)
+    sections.append(("Budget this week", bl))
     gl = [one_line(x, 88) for x in (git_log or "").splitlines() if x.strip()][:10]
     sections.append(("~/repos, last 10 commits", [f"- {g}" for g in gl] or ["- git log unavailable"]))
     sections.append(("Tidy report (hub/scripts/tidy-report.sh; counts)", [f"- {x}" for x in tidy_summary(tidy_text or "")] or ["- clean"]))
