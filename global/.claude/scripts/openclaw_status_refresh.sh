@@ -7,6 +7,8 @@
 #   openclaw_status_refresh.sh            build and deliver (what the scheduled task and lane_watch.sh call)
 #   openclaw_status_refresh.sh --build    build only, print the digest path
 #
+# On any machine other than NX-01 only the keeper steps run (bridge probe, lane recycle, inbox archive, hub digest); see "One machine switch".
+#
 # Scheduling: this distro has no systemd (PID 1 is init), so the 15-minute timer is a Windows Task
 # Scheduler task, like \AFA\MuseNotesPoll: \AFA\OpenClawStatus runs
 #   conhost.exe --headless wsl.exe -d Debian -- bash -lc ~/.claude/scripts/openclaw_status_refresh.sh
@@ -23,10 +25,6 @@ flock -n 9 || exit 0
 # 19 Oct: the bridge went quiet at 5:21 PM and 8:15 PM; see wsl_bridge_watchdog.py.
 timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || echo "openclaw_status_refresh: wsl bridge watchdog reports a problem (see ~/.claude/state/wsl-bridge/heal.log)" >&2
 
-# Harmonic Egg CI runs on this machine while its repo variable RUNNER_LABEL=workstation (harmonic-egg#351): start the runner if WSL, Docker
-# or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
-timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
-
 # Recycle any lane past its own line, so recycling never depends on the hub having a watcher armed (26 Oct: between two hub sessions
 # nothing was armed and scout-run-2 went 128K to 163K and compacted on its own). The same decision as lane_watch.sh's poll loop, the same
 # thrash and queued-input guards, silent: it wakes nobody. The recycle itself runs detached (it takes minutes).
@@ -34,6 +32,20 @@ timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 || echo "opencl
 
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
+
+# One machine switch (28 Oct 2026, fleet review finding 3): NX-01 owns the OpenClaw gateway, the Gmail sweeps, the CI runners and the hours
+# jobs, so it runs everything below. Any other machine (the tower, NCC-74656) is a keeper only: the steps above, plus its own hub digest, and
+# stops here. The name comes from ~/.config/afa/machine; a missing file counts as another machine, because doing less is the safe mistake.
+machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || echo unknown)
+if [ "$machine" != NX-01 ]; then
+  timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
+  exit 0
+fi
+
+# Harmonic Egg CI runs on this machine while its repo variable RUNNER_LABEL=workstation (harmonic-egg#351): start the runner if WSL, Docker
+# or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
+timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
+
 
 # Handled fleet-note drafts leave the owner's Drafts folder (26 Oct: the real drafts were buried under Hatch and tower notes). notes_check.py --sweep
 # --apply deletes only drafts with a fleet tag in the subject once they are handled (rules at the top of its sweep section), saving each one's raw

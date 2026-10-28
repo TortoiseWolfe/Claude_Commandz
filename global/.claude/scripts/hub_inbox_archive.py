@@ -129,10 +129,19 @@ def run(inbox, archive_dir, today, days, dry_run=False):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def default_inbox_name():
+    """NX-01 keeps hub-inbox.md; any other machine's notes arrive in its own peer-inbox.md (same rule as hub_digest.py)."""
+    try:
+        machine = (HOME / ".config/afa/machine").read_text().strip()
+    except OSError:
+        machine = ""
+    return "hub-inbox.md" if machine in ("", "NX-01") else "peer-inbox.md"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--days", type=int, default=7)
-    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
+    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state" / default_inbox_name()))
     ap.add_argument("--archive-dir", default=None)
     ap.add_argument("--today", help="YYYY-MM-DD (tests)")
     ap.add_argument("--dry-run", action="store_true")

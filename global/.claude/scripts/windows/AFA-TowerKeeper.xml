@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows scheduled task for a machine that only keeps the fleet running (the tower): every 15 minutes it runs
+  openclaw_status_refresh.sh, which on any machine other than NX-01 does the keeper steps only.
+  No UserId is written, so Task Scheduler uses the user who registers it, and no password is stored:
+  LogonType InteractiveToken runs only while that user is signed in. Automatic sign-in stays off.
+
+  Install (from WSL, as the signed-in user):
+    iconv -f UTF-8 -t UTF-16 ~/.claude/scripts/windows/AFA-TowerKeeper.xml > /tmp/AFA-TowerKeeper.utf16.xml
+    schtasks.exe /create /tn '\AFA\TowerKeeper' /xml "$(wslpath -w /tmp/AFA-TowerKeeper.utf16.xml)"
+  Check that no password is stored:  schtasks.exe /query /tn '\AFA\TowerKeeper' /xml
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\AFA\TowerKeeper</URI>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+  </Settings>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>2026-10-28T00:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT15M</Interval>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>--headless wsl.exe -d Debian -- bash -lc "~/.claude/scripts/openclaw_status_refresh.sh &gt;&gt;~/.claude/state/status-refresh.log 2&gt;&amp;1"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
