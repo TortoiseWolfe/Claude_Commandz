@@ -287,5 +287,30 @@ class Digest(unittest.TestCase):
         self.assertEqual(groups["other"], [])
 
 
+class DefaultInboxNameTests(unittest.TestCase):
+    """Which inbox file the archive step reads when --inbox is not given: NX-01 keeps hub-inbox.md, every other machine peer-inbox.md."""
+
+    def _name_for(self, machine):
+        home = Path(fresh_dir())
+        if machine is not None:
+            (home / ".config/afa").mkdir(parents=True)
+            (home / ".config/afa/machine").write_text(machine + "\n")
+        old = arch.HOME
+        arch.HOME = home
+        try:
+            return arch.default_inbox_name()
+        finally:
+            arch.HOME = old
+
+    def test_nx01_keeps_the_hub_inbox(self):
+        self.assertEqual(self._name_for("NX-01"), "hub-inbox.md")
+
+    def test_a_missing_machine_file_keeps_the_hub_inbox(self):
+        self.assertEqual(self._name_for(None), "hub-inbox.md")
+
+    def test_any_other_machine_reads_its_peer_inbox(self):
+        self.assertEqual(self._name_for("NCC-74656"), "peer-inbox.md")
+
+
 if __name__ == "__main__":
     unittest.main()
