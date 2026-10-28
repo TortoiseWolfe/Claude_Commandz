@@ -219,7 +219,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -254,10 +254,11 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
+    --restart) restart_opt=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --engine)
       [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, agy, or opencode" >&2; exit 1; }
@@ -1574,14 +1575,19 @@ fi
 guard_external_engine || exit 1
 agy_default_ok "$name" "$dir" "$model" "$prompt" || exit 1
 
-# One folder per lane name. A name with an earlier index row whose folder still exists is a restart: it keeps that folder, so prompt.md,
-# handoff.md and report.md stay together (28 Oct 2026: a same-day restart overwrote bandwagon-comic's prompt.md and a next-day restart
-# split bandwagon-live across two folders). A name with no earlier row gets today's folder.
+# A start gets today's dated folder, and its prompt.md is write-once (see lprompt below). A lane name is reused for new work (a client's mail
+# batch starts "<client>-mail" again each time), so a later day without --restart is a new lane: a fresh folder with its own prompt.md and no
+# restart header. --restart is the explicit restart of the same lane: it reuses the previous row's folder (when that folder still exists), so
+# prompt.md, handoff.md and report.md stay together, and it keeps the lane's last recycle line (28 Oct 2026: a next-day restart split
+# bandwagon-live across two folders, and a restart reset 120K to 100K so the lane recycled two minutes later).
 prev_row="$(index_row "$name")"; prev_rk=
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"
 if [ -n "$prev_row" ]; then
-  prev_rep="$(cut -f7 <<<"$prev_row")"; prev_rk="$(cut -f12 <<<"$prev_row")"
-  [ -n "$prev_rep" ] && [ -d "$(dirname "$prev_rep")" ] && hand="$(dirname "$prev_rep")"
+  prev_rep="$(cut -f7 <<<"$prev_row")"; prev_dir=
+  [ -n "$prev_rep" ] && prev_dir="$(dirname "$prev_rep")"
+  if [ "$restart_opt" = 1 ] && [ -n "$prev_dir" ] && [ -d "$prev_dir" ]; then hand="$prev_dir"; fi
+  # The recycle line carries over only when this start lands in the previous row's folder (--restart, or a same-day start).
+  [ "$hand" = "$prev_dir" ] && prev_rk="$(cut -f12 <<<"$prev_row")"
 fi
 hprompt="$hand/prompt.md"
 report="$hand/report.md"

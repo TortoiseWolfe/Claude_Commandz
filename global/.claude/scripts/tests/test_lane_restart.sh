@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for lane.sh restarting a lane under a name it already has (28 Oct 2026: a same-day restart overwrote bandwagon-comic's
 # prompt.md and reset its recycle line from 120K to 100K; a next-day restart of bandwagon-live made a second folder).
-# Now prompt.md is write-once, a restart note is stored as prompt-<HHMM>.md, one folder serves one lane name, and the recycle
-# line carries over unless --recycle-at is given. A fake HOME and a fake tmux hold everything: nothing here touches a live lane.
+# Now prompt.md is write-once, a different prompt for a folder that has one is stored as prompt-<HHMM>.md, --restart reuses the previous
+# row's folder and recycle line (a reused name WITHOUT it gets a fresh dated folder), and --recycle-at always wins. A fake HOME and a fake tmux hold everything: nothing here touches a live lane.
 set -euo pipefail
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
@@ -51,16 +51,29 @@ grep -q "$DIR1/prompt.md" "$note" || fail "the restart line names the original m
 lane --recycle-at 90 comic "$WORK" sonnet "$TMP/restart.md"
 [ "$(rk_of comic)" = 90 ] || fail "--recycle-at on a restart overrides the old line, got $(rk_of comic)"; ok
 
-# 4. Restart on a later day: a row dated earlier points at the old folder, which is reused.
+# 4. A name reused on a later day WITHOUT --restart is new work: a fresh dated folder, its own prompt.md, no restart header, no inherited line.
 OLD="$LANES/2026-01-02-live"; mkdir -p "$OLD"; cp "$TMP/orig.md" "$OLD/prompt.md"; echo 'old report' >"$OLD/report.md"
 printf '2026-01-02\tlive\t%s\tsonnet\tsubscription\t%s\t%s\tid\t1700000000\thigh\toff\t125\t-\t-\n' "$WORK" "$OLD/prompt.md" "$OLD/report.md" >>"$LANES/index.tsv"
+NEW="$LANES/$(date +%F)-live"
 lane live "$WORK" sonnet "$TMP/restart.md"
-[ "$LAST_RC" = 0 ] || fail "a next-day restart works ($LAST_OUT)"; ok
-[ ! -e "$LANES/$(date +%F)-live" ] || fail "a next-day restart makes no second folder"; ok
-ls "$OLD"/prompt-[0-9]*.md >/dev/null 2>&1 || fail "the restart note lands in the old folder"; ok
-[ "$(rk_of live)" = 125 ] || fail "the old line (125) carries over, got $(rk_of live)"; ok
+[ "$LAST_RC" = 0 ] || fail "a reused name on a later day starts ($LAST_OUT)"; ok
+cmp -s "$NEW/prompt.md" "$TMP/restart.md" || fail "the new day's folder has its own prompt.md, the new prompt as it is"; ok
+! ls "$OLD"/prompt-[0-9]*.md >/dev/null 2>&1 || fail "the old folder gets no restart note"; ok
+! grep -q 'was restarted' "$NEW/prompt.md" || fail "no restart header on a fresh folder's prompt"; ok
 cmp -s "$OLD/prompt.md" "$TMP/orig.md" || fail "the old prompt.md is intact"; ok
-[ "$(ls -t "$LANES"/*-live/report.md | head -1)" = "$OLD/report.md" ] || fail "lane_watch's report lookup (newest *-live/report.md) finds the one report"; ok
+[ "$(rk_of live)" != 125 ] || fail "a fresh folder does not inherit the old recycle line"; ok
+[ "$(awk -F'\t' '$2=="live"{print $7}' "$LANES/index.tsv" | tail -1)" = "$NEW/report.md" ] || fail "the index row names the new folder's report"; ok
+
+# 4b. The same, with --restart: the previous folder is reused, a note is stored there, the old recycle line carries over.
+rm -rf "$NEW"
+sed -i '$d' "$LANES/index.tsv"
+lane --restart live "$WORK" sonnet "$TMP/restart.md"
+[ "$LAST_RC" = 0 ] || fail "a --restart on a later day works ($LAST_OUT)"; ok
+[ ! -e "$NEW" ] || fail "--restart makes no second folder"; ok
+ls "$OLD"/prompt-[0-9]*.md >/dev/null 2>&1 || fail "the restart note lands in the old folder"; ok
+[ "$(rk_of live)" = 125 ] || fail "--restart keeps the old line (125), got $(rk_of live)"; ok
+cmp -s "$OLD/prompt.md" "$TMP/orig.md" || fail "--restart keeps the old prompt.md"; ok
+[ "$(ls -t "$LANES"/*-live/report.md | head -1)" = "$OLD/report.md" ] || fail "lane_watch's report lookup finds the one report"; ok
 
 # 5. Passing the folder's own prompt.md, or the same text again, makes no note.
 lane comic "$WORK" sonnet "$DIR1/prompt.md"
