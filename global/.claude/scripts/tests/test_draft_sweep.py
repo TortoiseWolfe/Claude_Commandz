@@ -139,7 +139,7 @@ class Inbound(SweepBase):
         self.assertEqual((self.sweep_dir / "2027-01-15.jsonl").stat().st_mode & 0o777, 0o600)
 
     def test_message_id_in_processed_file_counts(self):
-        self.fake.add("r-1", "[NCC-74656>NX-01] tower note", 5, mid="mm1")
+        self.fake.add("r-1", "[NCC-74656>NX-01] tower note", 80, mid="mm1")
         self.mark("mm1")
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, ["r-1"])
@@ -214,6 +214,60 @@ class Untagged(SweepBase):
         self.assertEqual(self.fake.deleted, [])
 
 
+class TowerNotes(SweepBase):
+    """A subject naming NCC-74656 is kept until 3 days old, whatever its tag, labels or replies (28 Oct)."""
+
+    SUBJECTS = ["[MUSE>NCC-74656] ask", "[NX-01>NCC-74656] ask", "[NCC-74656>NX-01] reply", "[NCC-74656>MUSE] hi",
+                "Re: [MUSE>NCC-74656] ask", "Re: [NX-01>NCC-74656] ask", "Re: [NCC-74656>NX-01] reply",
+                "Re: [NCC-74656>MUSE] hi", "Fwd: [MUSE>NCC-74656] ask"]
+
+    def test_young_tower_notes_are_kept_even_when_handled(self):
+        for i, subj in enumerate(self.SUBJECTS):
+            did = f"t-{i}"
+            self.fake.add(did, subj, 30, labels=["DRAFT", "Label_32"], body="-- H-7CH")
+            self.mark(*[f"t-{j}" for j in range(len(self.SUBJECTS))])
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_young_tower_note_with_a_reply_is_kept(self):
+        self.fake.add("t-1", "[NX-01>NCC-74656] ask topic", 10)
+        self.fake.mail["m-reply"] = dict(subject="[NCC-74656>NX-01] ask topic", age_h=5, labels=[])
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_kept_line_names_the_reason(self):
+        self.fake.add("t-1", "[MUSE>NCC-74656] ask", 30, body="-- H-7CH")
+        self.mark("t-1")
+        _, out = self.run_sweep()
+        self.assertIn("names NCC-74656", out)
+
+    def test_just_under_three_days_is_kept(self):
+        self.fake.add("t-1", "[NX-01>NCC-74656] ask", 71, labels=["DRAFT", "Label_32"])
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_old_tagged_tower_notes_are_handled_as_before(self):
+        self.fake.add("o-out", "[NX-01>NCC-74656] ask", 73)
+        self.fake.add("o-in", "[NCC-74656>NX-01] reply", 73)
+        self.fake.add("o-re", "Re: [NX-01>NCC-74656] ask", 73)
+        self.mark("o-in", "o-re")
+        self.run_sweep(apply=True)
+        self.assertEqual(sorted(self.fake.deleted), ["o-in", "o-out", "o-re"])
+
+    def test_old_untagged_tower_note_follows_the_h7ch_rule(self):
+        self.fake.add("o-1", "[MUSE>NCC-74656] ask", 73, body="-- H-7CH")
+        self.fake.add("o-2", "[MUSE>NCC-74656] other", 73, body="-- H-7CH")
+        self.mark("o-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["o-1"])
+
+    def test_notes_not_naming_the_tower_are_unaffected(self):
+        self.fake.add("n-1", "[MUSE>CC] done thing", 5)
+        self.mark("n-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["n-1"])
+
+
 class Outbound(SweepBase):
     def test_three_days_old_is_deleted(self):
         self.fake.add("r-1", "[CC>MUSE] old ask", 73)
@@ -221,7 +275,7 @@ class Outbound(SweepBase):
         self.assertEqual(self.fake.deleted, ["r-1"])
 
     def test_young_unanswered_is_kept(self):
-        self.fake.add("r-1", "[NX-01>NCC-74656] ask", 10)
+        self.fake.add("r-1", "[CC>MUSE] ask", 10)
         res, out = self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
         self.assertIn("waiting for a reply", out)
