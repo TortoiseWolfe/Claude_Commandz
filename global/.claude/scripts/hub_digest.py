@@ -308,6 +308,35 @@ def budget_line(budget_file, now_ts, ttl=BUDGET_TTL):
         return "budget report unavailable"
 
 
+BUDGET_VARIABLE = "FLEET_BUDGET"
+NO_BUDGET = "budget report unavailable"
+
+
+def budget_published_value(budget, phase_line, now):
+    """The one line the tower reads: when it was written, then the Budget section's two lines. Numbers and times only;
+    "" when there is no real figure (an old good value is better than "unavailable")."""
+    if not budget or budget == NO_BUDGET:
+        return ""
+    stamp = now.astimezone().strftime("%a %Y-%m-%d %-I:%M %p %Z")
+    return " | ".join(x for x in (f"updated {stamp}", budget, phase_line) if x)
+
+
+def publish_budget(value, repo=HUB_REPO, run=subprocess.run):
+    """Set the FLEET_BUDGET repository variable (the tower can read GitHub, never this disk; 28 Oct). Read it with:
+    gh variable get FLEET_BUDGET -R <repo>. A failure is reported on stderr and never stops the digest. Returns True on success."""
+    if not value:
+        return False
+    try:
+        r = run(["gh", "variable", "set", BUDGET_VARIABLE, "-R", repo], input=value, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write("hub_digest: could not publish %s: %s\n" % (BUDGET_VARIABLE, type(exc).__name__))
+        return False
+    if r.returncode != 0:
+        sys.stderr.write("hub_digest: could not publish %s: %s\n" % (BUDGET_VARIABLE, (r.stderr or "").strip()[:200]))
+        return False
+    return True
+
+
 def phase_note(now):
     """The token week's phase (openclaw_dispatch.week_phase, the one place its boundaries live), as the line the Budget section adds.
     Phase 3 (Tuesday 6:00 AM to the reset) holds no reserve: Jonathan, 28 Oct about 9:20 AM, "the closer we get the the reset, the
@@ -520,6 +549,8 @@ def main(argv=None):
     ap.add_argument("--git-repo", default=str(HOME / "repos"))
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")
     ap.add_argument("--budget-file", default=str(HOME / ".claude/state/hub-digest-budget.txt"))
+    ap.add_argument("--publish-budget", action="store_true",
+                    help="after a live build on NX-01, set the FLEET_BUDGET variable on %s for the tower" % HUB_REPO)
     ap.add_argument("--report-hours", type=int, default=24)
     ap.add_argument("--strict", action="store_true",
                     help="treat the inputs as live state even with --roadmap-file (a live build is always strict)")
@@ -598,6 +629,9 @@ def main(argv=None):
         tmp.replace(p)
     else:
         sys.stdout.write(page)
+    # Only NX-01 owns the figure, and only a live build: a fixture run (--roadmap-file) never publishes.
+    if a.publish_budget and machine == "NX-01" and not a.roadmap_file:
+        publish_budget(budget_published_value(budget, phase_note(now), now))
     return 0
 
 
