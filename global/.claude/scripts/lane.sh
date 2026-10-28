@@ -364,6 +364,17 @@ fi
 # Run a tmux command, or just print it under --dry-run.
 t() { if [ "$dry" = 1 ]; then printf 'tmux'; printf ' %q' "$@"; echo; else tmux "$@"; fi; }
 
+# A new lanes session starts at a fixed size and keeps it. A detached session otherwise sits at 80x24, and Claude Code's narrow-pane layout
+# hides the spinner and input line that send_to reads (28 Oct 2026: two recycles on the tower reported FAILED although the re-prime message
+# was in the lane's transcript). window-size manual keeps detached windows at default-size; windows in a session that already exists are
+# never resized, so only a session created here gets these options.
+SESSION_SIZE_X=200; SESSION_SIZE_Y=50
+new_lane_session() {  # <window name> <dir>
+  t new-session -d -x "$SESSION_SIZE_X" -y "$SESSION_SIZE_Y" -s "$SESSION" -n "$1" -c "$2"
+  t set-option -t "$SESSION" window-size manual
+  t set-option -t "$SESSION" default-size "${SESSION_SIZE_X}x${SESSION_SIZE_Y}"
+}
+
 # A lane's session is never guessed from file age: a folder like ~/repos also holds the hub's sessions and a person's own, and the newest
 # unclaimed transcript there is not the lane's (23 Oct: mac-mini-prep was handed the hub director's session). The proof is the lane's own
 # process: lane_session_hook.sh (a SessionStart hook in every lane's settings) records the session id against AFA_LANE_NAME, and the pane it
@@ -1112,10 +1123,13 @@ PY
   elif dialog_up; then echo "sent to $name: NOT SUBMITTED (a dialog came up after the Enter; no second Enter was sent)"; return 1
   else tmux send-keys -t "$target" C-m; if took 6; then how="submitted after a second Enter"; fi; fi
   pane="$(tmux capture-pane -e -p -t "$target")"
-  if [ -z "$how" ] && ! pane_input_empty "$pane"; then
+  # The lane's transcript is the deciding check; the screen checks above only choose the wording. A screen that cannot be read (a narrow
+  # or odd layout) must not turn a delivered message into a failure.
+  rc=0; confirmed "${LANE_SEND_CONFIRM_SECS:-15}" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$how" ]; then how="the screen check could not tell"; fi
+  if [ "$rc" -ne 0 ] && [ -z "$how" ] && ! pane_input_empty "$pane"; then
     echo "sent to $name: DID NOT TAKE (text still in the input line after two Enters)"; return 1
   fi
-  rc=0; confirmed "${LANE_SEND_CONFIRM_SECS:-15}" || rc=$?
   if [ "$rc" -eq 0 ]; then echo "sent to $name: confirmed in its transcript${how:+ ($how)}"; return 0; fi
   if [ "$rc" -eq 2 ] && [ -n "$how" ]; then echo "sent to $name: $how (input empty, spinner showing; no index row, so no transcript to check)"; return 0; fi
   echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
@@ -1532,7 +1546,7 @@ if [ "$mode" = resume ]; then
     cmd="${uenv}claude --resume $(printf %q "$id") --model $(printf %q "$m") --add-dir $(printf %q "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")") $flags"
   fi
   if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
+    new_lane_session "$name" "$dir"
   else
     t new-window -t "$SESSION:" -n "$name" -c "$dir"
   fi
@@ -1660,10 +1674,10 @@ if top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [ ! -d "$top/
 fi
 
 if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
-  tmux new-session -d -s "$SESSION" -n "$name" -c "$dir"
+  new_lane_session "$name" "$dir"
 elif [ "$dry" = 1 ]; then
   echo "# if session $SESSION is missing:"
-  t new-session -d -s "$SESSION" -n "$name" -c "$dir"
+  new_lane_session "$name" "$dir"
   echo "# else:"
   t new-window -t "$SESSION:" -n "$name" -c "$dir"
 else
