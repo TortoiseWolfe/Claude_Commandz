@@ -11,6 +11,10 @@ A Monitor event reaches the transcript as a user entry whose text begins with <t
 A finished background command or agent sends the same wrapper without those words, so it stays real. The words after the last real input
 are the lane's answer: a "?" in them, or an AskUserQuestion call, means it is asking and the hub must hear.
 
+28 Oct: the tower lane bandwagon-live used a scheduled job (CronCreate) to check Google Drive every 10 minutes, and each check woke the hub
+for nothing. A scheduled prompt is a user entry marked "isMeta" with plain text. It starts a new turn only when the last turn has ended (a
+"turn_duration" or "stop_hook_summary" entry); a meta entry in the middle of a turn, such as skill text, is ignored.
+
 usage: lane_turn_kind.py <transcript.jsonl>"""
 
 import json
@@ -27,19 +31,27 @@ def blocks(content):
 
 def turn_kind(lines):
     trigger, answer, asks = None, [], False
+    scheduled, ended = False, False
     for line in lines:
         try:
             o = json.loads(line)
         except ValueError:
             continue
         kind, msg = o.get("type"), o.get("message")
+        if kind == "system" and o.get("subtype") in ("turn_duration", "stop_hook_summary") and not o.get("isSidechain"):
+            ended = True
+            continue
         if not isinstance(msg, dict) or o.get("isSidechain"):
             continue
         parts = blocks(msg.get("content"))
         if kind == "user":
             text = "\n".join(b.get("text", "") for b in parts if b.get("type") == "text").strip()
             if text and not any(b.get("type") == "tool_result" for b in parts):
-                trigger, answer, asks = text, [], False  # a new input: everything before it is a finished turn
+                meta = bool(o.get("isMeta"))
+                if meta and trigger is not None and not ended:
+                    continue  # meta text inside a turn (skill text and the like) is not a new input
+                # a new input: everything before it is a finished turn
+                trigger, answer, asks, scheduled, ended = text, [], False, meta, False
         elif kind == "assistant":
             for b in parts:
                 if b.get("type") == "text":
@@ -50,7 +62,7 @@ def turn_kind(lines):
         return "?"
     # the wrapper's own <summary> tag, not the words anywhere in the text: a finished job whose output mentions "Monitor event" is real
     from_monitor = trigger.startswith("<task-notification>") and "<summary>Monitor event" in trigger.split("</summary>")[0]
-    if from_monitor and not asks and "?" not in "\n".join(answer):
+    if (from_monitor or scheduled) and not asks and "?" not in "\n".join(answer):
         return "monitor"
     return "real"
 

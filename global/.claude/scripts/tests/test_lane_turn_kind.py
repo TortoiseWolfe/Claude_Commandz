@@ -30,6 +30,14 @@ def used(name):
     return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": name, "input": {}}]}}
 
 
+def meta(text):
+    return {"type": "user", "isMeta": True, "message": {"role": "user", "content": text}}
+
+
+def ended():
+    return {"type": "system", "subtype": "turn_duration"}
+
+
 def kind(*entries):
     return ltk.turn_kind([json.dumps(e) for e in entries])
 
@@ -74,6 +82,21 @@ class TurnKind(unittest.TestCase):
 
     def test_garbage_lines_are_skipped(self):
         self.assertEqual(ltk.turn_kind(["not json", json.dumps(user(MONITOR)), "{", json.dumps(said("40%"))]), "monitor")
+
+    def test_scheduled_check_after_a_finished_turn_is_monitor(self):
+        self.assertEqual(kind(user("go"), said("Done."), ended(), meta("Check the Drive folder"), said("No new files.")), "monitor")
+
+    def test_scheduled_check_that_asks_in_words_is_real(self):
+        self.assertEqual(kind(user("go"), said("Done."), ended(), meta("Check the Drive folder"), said("A file arrived. Use it?")), "real")
+
+    def test_scheduled_check_that_opens_a_dialog_is_real(self):
+        self.assertEqual(kind(user("go"), said("Done."), ended(), meta("Check the Drive folder"), used("AskUserQuestion")), "real")
+
+    def test_meta_entry_mid_turn_does_not_take_over(self):
+        self.assertEqual(kind(ended(), user("Merge it"), meta("skill text"), said("Merged.")), "real")
+
+    def test_meta_entry_without_an_end_marker_stays_real(self):
+        self.assertEqual(kind(user("go"), said("Done."), meta("Check the Drive folder"), said("No new files.")), "real")
 
     def test_command_line(self):
         import subprocess, tempfile, os
