@@ -91,4 +91,49 @@ lane --dry-run --claude-because "needs Docker" --connectors --recycle-at 160 win
 LANE_WINDOW_CAP=300000 lane --dry-run --claude-because "needs Docker" --connectors --recycle-at 160 win-b "$PLAIN" sonnet "$P"
 [ "$(win_of)" = 270000 ] || fail "the backstop follows the line (160K + 60K room, over 0.84) when the cap allows; got $(win_of)"; ok
 
+# 28 Oct: --project-mcp <name[,name]> leaves the named servers out of disabledMcpjsonServers and pre-approves them in enabledMcpjsonServers,
+# so a lane that works through a project's MCP server (scout-run-2 and the Scout MCP) has its tools and still meets no dialog.
+enabled_of() {  # -> the enabledMcpjsonServers list as JSON, or "none"
+  python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); print(json.dumps(d.get("enabledMcpjsonServers","none"), separators=(",", ":")))' "$(settings_of)"
+}
+lane --dry-run --claude-because "needs Docker" probe-f "$WITH" sonnet "$P"
+[ "$(enabled_of)" = '"none"' ] || fail "without --project-mcp nothing is enabled; got $(enabled_of)"; ok
+lane --dry-run --claude-because "needs Docker" --project-mcp playwright probe-g "$WITH" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "--project-mcp dry run failed: $LAST_OUT"; ok
+[ "$(servers_of)" = '["files"]' ] && [ "$(enabled_of)" = '["playwright"]' ] || fail "--project-mcp playwright keeps it on and the rest off; got $(servers_of) / $(enabled_of)"; ok
+lane --dry-run --claude-because "needs Docker" --project-mcp=playwright,files probe-h "$WITH" sonnet "$P"
+[ "$(servers_of)" = '"none"' ] && [ "$(enabled_of)" = '["playwright","files"]' ] || fail "a comma list keeps every named server on, and no disabled key is left; got $(servers_of) / $(enabled_of)"; ok
+lane --dry-run --claude-because "needs Docker" --project-mcp nosuch probe-i "$WITH" sonnet "$P"
+[ "$(servers_of)" = '["playwright","files"]' ] && [ "$(enabled_of)" = '"none"' ] || fail "a name that is in no .mcp.json changes nothing; got $(servers_of) / $(enabled_of)"; ok
+lane --dry-run --claude-because "needs Docker" --project-mcp 'bad name;x' probe-j "$WITH" sonnet "$P"
+[ "$LAST_RC" = 1 ] || fail "a server name with a space or semicolon is refused"; ok
+lane --dry-run --claude-because "needs Docker" --project-mcp probe-k "$WITH" sonnet "$P"
+[ "$LAST_RC" = 1 ] || fail "--project-mcp with no server name before the lane name is refused"; ok
+lane --tier --project-mcp playwright
+[ "$LAST_RC" = 1 ] || fail "--project-mcp only applies to a start or a resume"; ok
+
+# A real start records the choice in column 14 of the index row; a lane without it records "-".
+lane --claude-because "needs Docker" --project-mcp playwright mcp-row "$WITH" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "real start with --project-mcp failed: $LAST_OUT"; ok
+[ "$(awk -F'\t' '$2=="mcp-row"{print NF" "$14}' "$LANES/index.tsv")" = "14 playwright" ] || fail "the index row has 14 columns, 14th = playwright; row: $(grep mcp-row "$LANES/index.tsv")"; ok
+lane --claude-because "needs Docker" mcp-none "$WITH" sonnet "$P"
+[ "$(awk -F'\t' '$2=="mcp-none"{print NF" "$14}' "$LANES/index.tsv")" = "14 -" ] || fail "a lane without --project-mcp records - in column 14"; ok
+lane --status
+assert_contains "$LAST_OUT" 'project-mcp playwright' '--status shows the servers a lane keeps on'
+case "$(printf '%s\n' "$LAST_OUT" | grep '^mcp-none')" in *project-mcp*) fail "--status shows no project-mcp for a lane without it" ;; *) ok ;; esac
+
+# Resume: the stored column carries over, a new value replaces it (and is stored), a 13-column row from before the column still works.
+sid="11111111-2222-3333-4444-555555555555"
+awk -F'\t' -v OFS='\t' -v s="$sid" '$2=="mcp-row"||$2=="mcp-none"{$8=s} {print}' "$LANES/index.tsv" >"$TMP/idx" && cp "$TMP/idx" "$LANES/index.tsv"
+lane --dry-run --resume mcp-row
+[ "$LAST_RC" = 0 ] || fail "resume of a lane with project-mcp failed: $LAST_OUT"; ok
+[ "$(servers_of)" = '["files"]' ] && [ "$(enabled_of)" = '["playwright"]' ] || fail "resume keeps the stored --project-mcp; got $(servers_of) / $(enabled_of)"; ok
+lane --dry-run --resume --project-mcp files mcp-none
+[ "$(enabled_of)" = '["files"]' ] || fail "resume with --project-mcp turns it on; got $(enabled_of)"; ok
+lane --resume --project-mcp files mcp-none
+[ "$(awk -F'\t' '$2=="mcp-none"{l=$14} END{print l}' "$LANES/index.tsv")" = files ] || fail "a resume with --project-mcp stores it in column 14"; ok
+awk -F'\t' -v OFS='\t' '$2=="mcp-row"{NF=13} {print}' "$LANES/index.tsv" >"$TMP/idx" && cp "$TMP/idx" "$LANES/index.tsv"
+lane --dry-run --resume mcp-row
+[ "$LAST_RC" = 0 ] && [ "$(enabled_of)" = '"none"' ] || fail "a 13-column row resumes with no project servers on; rc $LAST_RC, $(enabled_of)"; ok
+
 printf 'ok: %d checks\n' "$checks"

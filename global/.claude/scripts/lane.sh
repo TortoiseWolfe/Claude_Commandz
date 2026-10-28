@@ -86,7 +86,7 @@
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)
+#   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)  project-mcp(comma list of .mcp.json servers kept on; "-" = none)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the one the lane's own SessionStart hook recorded (lane_session_hook.sh, ~/.claude/state/lanes/sessions/<name>), never
 # a guess from file age; if it is not there yet at start, the next --status fills it in.
@@ -219,7 +219,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -227,7 +227,7 @@ Usage:
   lane.sh [--dry-run] --recycle <name>
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
-  (start and --resume also take --recycle-at <K>)
+  (start and --resume also take --recycle-at <K> and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
 
 Claude is the default engine. Codex, Copilot, agy and opencode run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
@@ -254,7 +254,7 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0
+dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -271,6 +271,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--recycle-at requires a number of K tokens (40 to 150)" >&2; exit 1; }
       recycle_at_opt="$2"; recycle_at_set=1; shift 2 ;;
     --recycle-at=*) recycle_at_opt="${1#*=}"; recycle_at_set=1; shift ;;
+    --project-mcp)
+      [ $# -ge 2 ] || { echo "--project-mcp requires a server name, or a comma list of them" >&2; exit 1; }
+      project_mcp_opt="$2"; shift 2 ;;
+    --project-mcp=*) project_mcp_opt="${1#*=}"; shift ;;
     --ask)
       [ $# -ge 2 ] || { echo "--ask requires an ask id (oc-xxxxxxxx)" >&2; exit 1; }
       ask_id="$2"; shift 2 ;;
@@ -325,6 +329,11 @@ if [ "$recycle_at_set" = 1 ]; then
     || { echo "--recycle-at needs a whole number of K tokens from 40 to 150 (up to ${LANE_RECYCLE_MAX_CONN_K:-165} with --connectors; Claude Code compacts at about 168K), got: $recycle_at_opt" >&2; exit 1; }
   case "$mode" in start|resume) ;; *) echo "--recycle-at only applies when starting or resuming a lane" >&2; exit 1 ;; esac
 fi
+if [ -n "$project_mcp_opt" ]; then
+  [[ "$project_mcp_opt" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] \
+    || { echo "--project-mcp needs server names of letters, digits, _ . - separated by commas, got: $project_mcp_opt" >&2; exit 1; }
+  case "$mode" in start|resume) ;; *) echo "--project-mcp only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+fi
 [ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
 [ -z "$ask_id" ] || [ "$mode" = start ] || { echo "--ask only applies when starting a lane" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
@@ -367,13 +376,13 @@ session_with_text() {  # <dir> <start-epoch> <text>
 
 # Fill blank session ids in the index (column 8) where a transcript can be found.
 fill_ids_locked() {
-  local tmp d n dir m b p r id st eff conn rk ent
+  local tmp d n dir m b p r id st eff conn rk ent pm
   tmp="$(index_tmp)"
-  while IFS="$TAB" read -r d n dir m b p r id st eff conn rk ent; do
+  while IFS="$TAB" read -r d n dir m b p r id st eff conn rk ent pm; do
     if { [ -z "$id" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
       id="$(proven_session "$n" "$st")"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" >>"$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" "${pm:--}" >>"$tmp"
   done <"$INDEX"
   index_commit "$tmp"
 }
@@ -752,15 +761,31 @@ print(json.dumps({n: "off" for n in sorted(names - keep)}, separators=(",", ":")
 ' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
 }
 
-claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir]
-  local json p s r mcp
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b]
+  local json p s r mcp keep
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
   json='{"autoCompactWindow":'"$(window_for "${4:-100}")"
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   mcp="$(project_mcp_names "${5:-.}")"
-  [ "$mcp" = '[]' ] || json+=',"disabledMcpjsonServers":'"$mcp"
+  # --project-mcp <name[,name]>: those servers stay out of the disabled list and are pre-approved, so no dialog and the lane has their tools.
+  keep="${6:--}"
+  if [ "$keep" != - ] && [ "$mcp" != '[]' ]; then
+    mcp="$(python3 -I -c '
+import json, sys
+names, keep = json.loads(sys.argv[1]), sys.argv[2].split(",")
+off = [n for n in names if n not in keep]
+on = [n for n in names if n in keep]
+out = []
+if off: out.append("\"disabledMcpjsonServers\":" + json.dumps(off, separators=(",", ":")))
+if on: out.append("\"enabledMcpjsonServers\":" + json.dumps(on, separators=(",", ":")))
+print(",".join(out))
+' "$mcp" "$keep" 2>/dev/null)"
+    [ -z "$mcp" ] || json+=",$mcp"
+  elif [ "$mcp" != '[]' ]; then
+    json+=',"disabledMcpjsonServers":'"$mcp"
+  fi
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"],\"autoMemoryEnabled\":false"
   json+=',"skillOverrides":'"$(lane_skill_overrides)"',"syncClaudeAiSkills":false'
   json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}]}'
@@ -899,7 +924,7 @@ if [ "$mode" = status ]; then
       pane_e="$(tmux capture-pane -e -p -t "$SESSION:$w" 2>/dev/null || true)"
       pane="$(strip_ansi <<<"$pane_e")"
       row="$(index_row "$w")"
-      IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"${row:-}"
+      IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"${row:-}"
       if [ -z "$row" ]; then
         rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
@@ -931,7 +956,7 @@ if [ "$mode" = status ]; then
       case "${b:-subscription}" in codex|copilot|agy|opencode) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
       case "${b:-subscription}" in codex|copilot|agy|opencode) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
-      printf '    dir:%s model:%s effort:%s connectors:%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      printf '    dir:%s model:%s effort:%s connectors:%s%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$([ "${pm:--}" = - ] || printf ' project-mcp:%s' "$pm")" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
       # A hand-off newer than the report (or with no report) is the lane's latest word: show its Done and Next first lines, read by the
       # same rules as hub_digest.py, so a recycled lane's state is visible here without opening its folder.
       if [ -n "${rep:-}" ] && [ -s "$(dirname "$rep")/handoff.md" ] && { [ ! -e "$rep" ] || [ "$(dirname "$rep")/handoff.md" -nt "$rep" ]; }; then
@@ -945,11 +970,11 @@ if [ "$mode" = status ]; then
   # Index lanes from the last 3 days with no window and no report.
   if [ -s "$INDEX" ]; then
     cutoff="$(date -d '3 days ago' +%F)"
-    while IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent; do
+    while IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm; do
       [[ "$d" < "$cutoff" ]] && continue
       case "$live" in *" $n "*) continue ;; esac
       [ -n "${rep:-}" ] && [ -s "$rep" ] && continue
-      printf '%-18s dead, resume with: lane.sh --resume %s   (%s, %s, engine/billing %s, session %s)\n' "$n" "$n" "$dir" "$m" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")"
+      printf '%-18s dead, resume with: lane.sh --resume %s   (%s, %s, engine/billing %s, session %s%s)\n' "$n" "$n" "$dir" "$m" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$([ "${pm:--}" = - ] || printf ', project-mcp %s' "$pm")"
     done < <(awk -F'\t' '{r[$2]=$0; if(!($2 in o)){o[$2]=++c; k[c]=$2}} END{for(i=1;i<=c;i++)print r[k[i]]}' "$INDEX")
   fi
   exit 0
@@ -962,7 +987,7 @@ send_to() {  # <name> <text...>
   text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
-    IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+    IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
     if is_headless_billing "${b:-}"; then
       echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of sending text to its window" >&2
       return 1
@@ -1081,9 +1106,9 @@ PY
 # session to read the file. Returns 0 when it held the text (and says what it did), 1 when the lane should be typed into as usual.
 send_held() {
   local name="$1"; shift
-  local text="$*" row d n dir m b p rep id st eff conn rk ent hand pend lockd ctxk line locked=0 past=0 rlog cnt
+  local text="$*" row d n dir m b p rep id st eff conn rk ent pm hand pend lockd ctxk line locked=0 past=0 rlog cnt
   row="$(index_row "$name")"; [ -n "$row" ] || return 1
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   is_headless_billing "${b:-}" && return 1
   case "${b:-subscription}" in codex|copilot|agy|opencode) return 1 ;; esac
   [ -n "${rep:-}" ] && [ -z "$(find "$(dirname "$rep")/out.log" -maxdepth 0 2>/dev/null)" ] || return 1
@@ -1160,7 +1185,7 @@ if [ "$mode" = model ]; then
   is_claude_model "$newm" || { echo "--model needs a Claude model name (opus, sonnet, haiku, fable or claude-...), got: $newm" >&2; exit 1; }
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   site_tier_ok "$newm" "${p:-}" || exit 1
   mail_tier_ok "$newm" "$name" "${p:-}" || exit 1
   high_tier_ok "$newm" "$name" "${p:-}" "${ent:-}" || exit 1
@@ -1185,7 +1210,7 @@ if [ "$mode" = tier ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --tier <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { printf '?\t-\n'; exit 0; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   reason="${ent:--}"
   if [ "$reason" = - ] && is_high_model "${m:-}" && site_prompt "${p:-}"; then reason=site-model; fi
   printf '%s\t%s\n' "${m:-?}" "$reason"
@@ -1197,7 +1222,7 @@ if [ "$mode" = point ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --recycle-point <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   if [ -z "$row" ]; then default_recycle_k code; exit 0; fi
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   lane_recycle_k "${rk:-}" "${p:-}" "${dir:-}" "${conn:--}"
   exit 0
 fi
@@ -1208,7 +1233,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   case "${b:-subscription}" in codex|copilot|agy|opencode) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
@@ -1241,7 +1266,7 @@ if [ "$mode" = recycle ]; then
   name="$1"
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   # Judged by the newest index row's engine only: a folder can hold an out.log from an earlier headless run (26 Oct) while the lane now
   # in it, the one on this row, is an interactive window.
   if is_headless_billing "${b:-}"; then
@@ -1431,7 +1456,7 @@ PY
     [ -n "$newid" ] && break; sleep 1
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
-  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}")"
+  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}")"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
   exit 0
@@ -1443,7 +1468,7 @@ if [ "$mode" = resume ]; then
   fill_ids
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
-  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent <<<"$row"
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm <<<"$row"
   if is_headless_billing "${b:-}"; then
     echo "$name is a $b headless lane; start a new lane with a follow-up prompt instead of resuming it" >&2
     exit 1
@@ -1474,7 +1499,9 @@ if [ "$mode" = resume ]; then
   if [ "$connectors_opt" = 1 ] || [ "${conn:--}" != off ]; then conn=on; else conn=off; fi
   rk="${recycle_at_opt:-$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")}"
   if [ "$conn" != on ] && [ "$rk" -gt 150 ]; then echo "--recycle-at above 150K is only for lanes with the connectors on ($name has them off), got: $rk" >&2; exit 1; fi
-  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir")"
+  pm="${project_mcp_opt:-${pm:--}}"
+  [ -z "$project_mcp_opt" ] || index_set "$name" 14 "$pm"
+  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm")"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $flags"
@@ -1601,7 +1628,7 @@ eff="-"; flags=""; conn="-"; rk=""
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   rk="${recycle_at_opt:-$(default_recycle_k "$(lane_kind "$prompt" "$dir" "$conn")" "$conn")}"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir")"; eff="${eff:--}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "${project_mcp_opt:--}")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
@@ -1708,8 +1735,8 @@ if [ "$dry" = 0 ]; then
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
   lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
-  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent")"
+  index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" "${project_mcp_opt:--}")"
 else
   echo "# would append a row to $INDEX"
 fi
