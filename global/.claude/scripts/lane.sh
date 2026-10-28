@@ -316,6 +316,18 @@ case "$engine" in
   *) echo "unknown engine: $engine (choose claude, codex, copilot, agy, or opencode)" >&2; exit 1 ;;
 esac
 
+# An engine whose program this machine does not have is refused up front, with the machine named, instead of a window that opens and dies
+# on "command not found" (28 Oct 2026: the tower has no agy or OpenCode, so the dispatcher's agy-first order started lanes that died at once).
+# AFA_ENGINES_AVAILABLE (a comma list of engine names, or *) says an engine is present when this shell's PATH cannot show it.
+engine_present() {  # <engine>
+  case ",${AFA_ENGINES_AVAILABLE:-}," in *,"*",*|*,"$1",*) return 0 ;; esac
+  command -v "$1" >/dev/null 2>&1
+}
+if [ "$mode" = start ] && ! engine_present "$engine"; then
+  echo "refusing engine $engine: the program '$engine' is not installed on this machine ($(cat "$HOME/.config/afa/machine" 2>/dev/null || hostname)); pick another engine, or install it" >&2
+  exit 1
+fi
+
 case "$effort_opt" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
