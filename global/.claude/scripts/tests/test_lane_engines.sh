@@ -488,6 +488,7 @@ assert_not_contains "$LAST_COMMAND" 'security-guidance' 'security-guidance stays
 assert_contains "$LAST_COMMAND" '--disallowedTools Artifact' 'the Artifact tools are withheld'
 assert_not_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is kept while no rule file exists'
 assert_not_contains "$LAST_COMMAND" 'append-system-prompt-file' 'no rule file, no appended rules'
+assert_not_contains "$LAST_COMMAND" 'autoMemoryEnabled' 'the memory index is kept while no rule file exists'
 assert_contains "$LAST_OUTPUT" 'connectors off' 'start line reports connectors off'
 run_lane lean-haiku "$REPO" haiku "$PROMPT"
 assert_not_contains "$LAST_COMMAND" '--effort' 'haiku takes no effort'
@@ -495,10 +496,21 @@ run_lane --allow-high-tier "engines test fixture" --effort max lean-max "$REPO" 
 assert_contains "$LAST_COMMAND" '--effort max' '--effort still overrides'
 
 printf '# Lane rules\n' >"$HOME_TEST/repos/hub/lane-rules.md"
+mkdir -p "$HOME_TEST/.claude/commands" "$HOME_TEST/.claude/skills/zz-off-skill" "$HOME_TEST/.claude/skills/graphify" "$HOME_TEST/.claude/skills/no-skill-file"
+: >"$HOME_TEST/.claude/commands/zz-off-cmd.md"; : >"$HOME_TEST/.claude/commands/prep.md"
+: >"$HOME_TEST/.claude/skills/zz-off-skill/SKILL.md"; : >"$HOME_TEST/.claude/skills/graphify/SKILL.md"
 run_lane lean-rules "$REPO" sonnet "$PROMPT"
 assert_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is excluded once the rule file exists'
 assert_contains "$LAST_COMMAND" "$HOME_TEST/repos/CLAUDE.md" 'the exclude names the workspace CLAUDE.md'
 assert_contains "$LAST_COMMAND" "--append-system-prompt-file $HOME_TEST/repos/hub/lane-rules.md" 'the slim rules are appended'
+assert_contains "$LAST_COMMAND" 'autoMemoryEnabled' 'the memory index is off once the rule file exists'
+assert_contains "$LAST_COMMAND" 'syncClaudeAiSkills' 'claude.ai synced skills are off'
+assert_contains "$LAST_COMMAND" 'skillOverrides' 'skills not on the keep list are switched off'
+assert_contains "$LAST_COMMAND" 'zz-off-cmd\":\"off' 'a command not on the keep list is off'
+assert_contains "$LAST_COMMAND" 'zz-off-skill\":\"off' 'a skill not on the keep list is off'
+assert_not_contains "$LAST_COMMAND" 'prep\":\"off' 'a kept command stays on'
+assert_not_contains "$LAST_COMMAND" 'graphify\":\"off' 'a kept skill stays on'
+assert_not_contains "$LAST_COMMAND" 'no-skill-file' 'a folder without SKILL.md is not a skill'
 
 run_lane lean-mail "$REPO" sonnet "$PROMPT_MAIL"
 assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a prompt that mentions Gmail keeps the connectors'

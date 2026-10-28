@@ -115,7 +115,10 @@
 #   - --disallowedTools LANE_TOOLS_OFF (the Artifact tools: their schema is about a quarter of a lane's start);
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
 #     the slim rule file LANE_RULES (default ~/repos/hub/lane-rules.md). Both happen only when that
-#     file exists; a repo's own CLAUDE.md files load as usual.
+#     file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
+#     memory index (MEMORY.md, about 4K tokens) is not loaded: the rule file carries the rules;
+#   - skillOverrides "off" for every skill and command not in LANE_SKILLS_KEEP, and syncClaudeAiSkills false so the
+#     claude.ai-synced skills (anthropic-skills:*) are not loaded (the skill listing is about 14K tokens).
 #
 # The hub (claude started in ~/repos) gets the same lean launch from hub_lean.py through a project settings file, so it
 # needs no flags. Every Claude lane start refreshes that file, so a machine that mostly runs lanes keeps it current.
@@ -141,6 +144,18 @@ LANE_PLUGINS_OFF="
 # Tools withheld from every Claude lane (--disallowedTools). The Artifact tool's schema alone is about a
 # quarter of a lane's starting context, and the standing rule is that nothing is published to Artifacts.
 LANE_TOOLS_OFF="Artifact ArtifactComments ArtifactData"
+
+# Skills and slash commands a lane keeps in its start-up listing (~14K tokens for all of them). Every other skill under
+# ~/.claude/skills and every command under ~/.claude/commands is set to "off" through --settings skillOverrides, worked out at
+# each start so a newly added one is off by default. Picked from the skills named in lane prompts (prep, session-prime,
+# code-review, goal, run, graphify, email-voice-check, demo-video ...) plus the spec-kit set the app repos' lanes run.
+LANE_SKILLS_KEEP="
+  prep session-prime goal code-review commit ship log graphify graphify-init graph-refresh email-voice-check demo-video
+  site-model agent-notes greg council director weekly-review rescuedogs-weekly-review security-review
+  specify clarify plan tasks implement analyze constitution
+  speckit.analyze speckit.checklist speckit.clarify speckit.constitution speckit.implement speckit.plan speckit.specify
+  speckit.tasks speckit.taskstoissues speckit.workflow
+"
 # The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
@@ -716,6 +731,27 @@ print(json.dumps(names, separators=(",", ":")))
 ' "${1:-.}" 2>/dev/null || echo '[]'
 }
 
+# JSON object {"skill":"off",...} for every skill dir and command file in the claude home that is not in LANE_SKILLS_KEEP.
+lane_skill_overrides() {
+  python3 -I -c '
+import json, os, sys
+home, keep = sys.argv[1], set(sys.argv[2].split())
+names = set()
+for sub, is_skill in (("commands", False), ("skills", True)):
+    d = os.path.join(home, sub)
+    try:
+        entries = sorted(os.listdir(d))
+    except OSError:
+        continue
+    for e in entries:
+        if is_skill and os.path.isfile(os.path.join(d, e, "SKILL.md")):
+            names.add(e)
+        elif not is_skill and e.endswith(".md"):
+            names.add(e[:-3])
+print(json.dumps({n: "off" for n in sorted(names - keep)}, separators=(",", ":")))
+' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
+}
+
 claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir]
   local json p s r mcp
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
@@ -725,7 +761,8 @@ claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recy
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   mcp="$(project_mcp_names "${5:-.}")"
   [ "$mcp" = '[]' ] || json+=',"disabledMcpjsonServers":'"$mcp"
-  [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"]"
+  [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"],\"autoMemoryEnabled\":false"
+  json+=',"skillOverrides":'"$(lane_skill_overrides)"',"syncClaudeAiSkills":false'
   json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}]}'
   json+=',"enabledPlugins":{'
   for p in $LANE_PLUGINS_OFF; do json+="\"$p\":false,"; done
