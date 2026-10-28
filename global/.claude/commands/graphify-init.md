@@ -129,6 +129,17 @@ graphify install --project
 Project-scoped keeps this contained to repos you deliberately set up. Writes a
 `CLAUDE.md` section plus a `PreToolUse` hook nudging toward `graphify query`.
 
+Then make its hooks portable. `graphify install` writes the absolute path of the graphify program
+(for example `/home/<user>/.local/bin/graphify`) into the repo's Claude settings, and that hook fails on
+every Bash, Grep, Read and Glob call on a machine where the path differs. Run this in the repo, and again
+after any later `graphify install` or `graphify hook install`:
+
+```bash
+python3 ~/.claude/scripts/graphify_hook_portable.py .
+```
+
+It is safe to repeat. Commit the rewritten settings file with the other wiring.
+
 It also copies the skill into `.claude/skills/graphify/`. **Don't commit that copy**: the
 global `~/.claude/skills/graphify` serves it, and none of the graphed repos track it. Delete
 it after install. Keep `.claude/CLAUDE.md`, which is committed in the other repos.
