@@ -27,6 +27,8 @@ jobs:
       - name: pytest (a skip other than the known live-machine check fails the job)
         working-directory: global/.claude/scripts
         run: |
+          # GitHub's default shell has no pipefail, so without this a failing pytest piped into tee left the job green.
+          set -o pipefail
           export HOME="$(mktemp -d)"
           python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
           # A skipped test is not a passing test. The one allowed skip checks a machine-only file (~/.config/panel/classes.json);
