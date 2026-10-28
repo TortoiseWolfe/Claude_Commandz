@@ -36,9 +36,10 @@ timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "opencla
 # One machine switch (28 Oct 2026, fleet review finding 3): NX-01 owns the OpenClaw gateway, the Gmail sweeps, the CI runners and the hours
 # jobs, so it runs everything below. Any other machine (the tower, NCC-74656) is a keeper only: the steps above, plus its own hub digest, and
 # stops here. The name comes from ~/.config/afa/machine; a missing file counts as another machine, because doing less is the safe mistake.
+build_digest() { timeout 60 python3 "$here/hub_digest.py" "$@" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2; }
 machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || echo unknown)
 if [ "$machine" != NX-01 ]; then
-  timeout 60 python3 "$here/hub_digest.py" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
+  build_digest
   exit 0
 fi
 
@@ -71,7 +72,7 @@ timeout 150 python3 "$here/notes_check.py" --sweep --apply >/dev/null 2>&1 || ec
 # discarded) and put an alert on the hub's list, which wakes the hub; the previous page stays.
 # --publish-budget also sets the FLEET_BUDGET variable on the hub repo (one line, numbers and times; the tower reads it with
 # gh variable get FLEET_BUDGET -R TortoiseWolfe/workspace because it can't read this disk). A failed publish never fails the digest.
-timeout 60 python3 "$here/hub_digest.py" --publish-budget --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2
+build_digest --publish-budget
 
 # Every lane's new or changed report.md goes into his chat here, so a result reaches him with no hub session open (this task is
 # the safety net; lane_watch.sh does the same the moment a report lands). One post per report version; the first run only records.
