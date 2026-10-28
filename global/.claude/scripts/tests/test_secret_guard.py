@@ -113,6 +113,8 @@ class RuleA(Base):
             self.blocked('echo "' + base + value + '"')
             self.blocked('echo "' + base + value + '."')
         self.blocked("curl 'https://api.example.com/v1/x?api_key=" + "a1B2" * 6 + "&id=1'")
+        self.blocked("run.sh&to" + "ken=8257322.")                  # a shell & is not a URL query
+        self.blocked("run.sh --x ?to" + "ken=8257322.")
         self.blocked('echo "' + base + "12345678901" + "q" + '"')   # eleven digits then a letter: not a plain id
 
     def test_reason_never_echoes_secret(self):
