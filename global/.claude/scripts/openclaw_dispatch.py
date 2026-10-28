@@ -98,7 +98,8 @@ WEEK_RESET = (2, 12, 0)    # weekday (Mon=0), hour, minute: Wednesday 12:00 PM E
 PHASE2_START = (0, 6, 0)   # Monday 6:00 AM ET
 PHASE3_START = (1, 6, 0)   # Tuesday 6:00 AM ET
 PROJECTION_LIMIT = 90.0    # phase 1: past this projection a code lane waits (hub/lane-rules.md); Claude lanes step down to Sonnet, and the waiting room holds
-USED_LIMIT = 95.0          # phase 2: at or past this much USED a code lane waits, the same way; the projection no longer matters
+USED_LIMIT = 95.0          # phase 2: at or past this much USED a code lane waits, the same way; the projection no longer matters. This is the limit
+USED_LIMIT_END = 100.0     # at Monday 6:00 AM; it rises in a straight line to this at Tuesday 6:00 AM (Jonathan, 28 Oct about 9:20 AM: the closer to the reset, the less reserve)
 # phase 3: no budget gate at all
 PROJECTION_CACHE_SECONDS = 30 * 60
 TASK_MAX = 1500
@@ -3934,6 +3935,16 @@ def week_phase(now, reset=None):
     """-> (phase 1, 2 or 3, the phase's end as a 12-hour string or None, the week's reset as one). The week is the seven days to
     `reset` (epoch; the quality report's own reset, passed in when known), otherwise to the next Wednesday 12:00 PM Eastern.
     Phase 1: reset to Monday 6:00 AM. Phase 2: to Tuesday 6:00 AM. Phase 3: to the reset."""
+    t, phase2, phase3, r = _week_edges(now, reset)
+    if t < phase2:
+        return 1, _et_clock(phase2), _et_clock(r)
+    if t < phase3:
+        return 2, _et_clock(phase3), _et_clock(r)
+    return 3, None, _et_clock(r)
+
+
+def _week_edges(now, reset=None):
+    """-> (now, phase 2 start, phase 3 start, reset), all Eastern datetimes of the week `now` is in."""
     t = _et(now)
     r = _et(reset) if isinstance(reset, (int, float)) and reset > now else None
     if r is None:
@@ -3943,11 +3954,16 @@ def week_phase(now, reset=None):
     start = r - datetime.timedelta(days=7)  # wall-clock: both are Eastern datetimes of the same zone
     phase2 = _at(start + datetime.timedelta(days=1), PHASE2_START)
     phase3 = _at(phase2 + datetime.timedelta(days=1), PHASE3_START)
-    if t < phase2:
-        return 1, _et_clock(phase2), _et_clock(r)
-    if t < phase3:
-        return 2, _et_clock(phase3), _et_clock(r)
-    return 3, None, _et_clock(r)
+    return t, phase2, phase3, r
+
+
+def used_limit(now, reset=None):
+    """Phase 2's limit on the USED figure at `now`: USED_LIMIT at the phase's start, rising in a straight line to USED_LIMIT_END at its
+    end, so the reserve shrinks with the hours left. Outside phase 2 it is the nearer end (phase 1 start, phase 3 end)."""
+    t, phase2, phase3, _r = _week_edges(now, reset)
+    span = (phase3 - phase2).total_seconds()
+    frac = min(1.0, max(0.0, (t - phase2).total_seconds() / span)) if span > 0 else 1.0
+    return USED_LIMIT + (USED_LIMIT_END - USED_LIMIT) * frac
 
 
 def budget_over(budget, now, held=False):
@@ -3960,9 +3976,10 @@ def budget_over(budget, now, held=False):
         over = pct is not None and pct > limit
         label = "phase 1, reset to %s, holds past %d%% projected" % (until, limit)
     elif phase == 2:
-        pct, what, limit = budget.get("used"), "used", USED_LIMIT
+        limit = used_limit(now, budget.get("reset"))
+        pct, what = budget.get("used"), "used"
         over = pct is not None and pct >= limit
-        label = "phase 2, to %s, holds at %d%% used" % (until, limit)
+        label = "phase 2, to %s, holds at %.1f%% used, rising to %d%%" % (until, limit, USED_LIMIT_END)
     else:
         return None
     if pct is None:
@@ -3983,7 +4000,7 @@ def _room_hold(ctx, host, count, reason, key, now, reset=None):
         save_state(ctx.state_path, state)
     plural = "%d lanes are" % count if count != 1 else "1 lane is"
     phase, until, _reset = week_phase(now, reset)
-    nxt = ("from %s, when the limit becomes %d%% used" % (until, USED_LIMIT) if phase == 1 else "from %s, when there is no limit" % until)
+    nxt = ("from %s, when the limit becomes %d%% used, rising to %d%% by Tue 6:00 AM" % (until, USED_LIMIT, USED_LIMIT_END) if phase == 1 else "from %s, when there is no limit" % until)
     chat = "%s waiting in the queue: %s. They start when the figure is known and within the limit, or %s." % (plural, reason, nxt)
     progress(host, chat)
     return [("%s | room | held: %s, %d waiting" % (_stamp(now), reason, count), chat)]
