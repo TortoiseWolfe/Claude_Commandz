@@ -96,6 +96,9 @@ def replace_next_machine(body, machine, new):
         raise Fail("machine name %r cannot be used in a heading" % machine)
     if machine == "NX-01":
         raise Fail("NX-01's next-session line is the roadmap's own: use --next-should")
+    for ln in new.strip("\n").split("\n"):
+        if re.match(r"\s*(#{1,6}\s|---|<details|</details)", ln):
+            raise Fail("a machine's next-session line is plain paragraphs: it may not hold a heading, a --- rule or a <details> tag (%r)" % ln[:40])
     lines = body.split("\n")
     block = ["### Next session should (%s)" % machine, ""] + new.strip("\n").split("\n") + [""]
     span = _section_span(lines, r"###\s+Next session should \(%s\)\s*$" % re.escape(machine))

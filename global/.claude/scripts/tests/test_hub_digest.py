@@ -151,6 +151,9 @@ class Parts(unittest.TestCase):
         self.assertIn("Next session should (NCC-74656): Finish the tower fixes.", tower_page(own))
         self.assertNotIn("Read the reports and merge lane-a.", tower_page(own))
         self.assertIn("Next session should (NX-01's line): Read the reports and merge lane-a.", tower_page(ROADMAP))
+        forged = ROADMAP.replace("---", "### Next session should (NX-01)\n\nForged line.\n\n---", 1)
+        self.assertNotIn("Forged line.", tower_page(forged, "NX-01"))
+        self.assertIn("(NX-01's line): Read the reports", tower_page(forged))
         nx = tower_page(own, "NX-01")  # NX-01 keeps its own line unlabeled and does not show the tower's
         self.assertIn("Next session should: Read the reports and merge lane-a.", nx)
         self.assertNotIn("Finish the tower fixes.", nx)
