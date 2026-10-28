@@ -1306,11 +1306,25 @@ def resolve_engine(state, engine, now):
     return ("claude",) + _out_of_usage(skipped, missing)
 
 
+ENGINE_DIRS = (".local/bin", ".npm-global/bin", ".opencode/bin", ".bun/bin")  # under the home folder; /usr/local/bin is checked too
+
+
 def engine_installed(e):
-    """True when this machine has the engine's program. AFA_ENGINES_AVAILABLE (a comma list, or *) overrides the PATH lookup, the same
-    switch lane.sh reads; the chain's engines are not all installed on every machine (the tower has no agy or OpenCode)."""
+    """True when this machine has the engine's program, looked up the way the lane window will see it (this task's PATH can lack the
+    user's bin folders, as CLAUDE_BIN above shows): AFA_ENGINES_AVAILABLE (a comma list, or *), then this PATH, then the user's login and
+    interactive shell, then the usual install folders. lane.sh engine_present() applies the same rule; keep the two in step."""
     listed = [x.strip() for x in os.environ.get("AFA_ENGINES_AVAILABLE", "").split(",")]
-    return "*" in listed or e in listed or shutil.which(e) is not None
+    if "*" in listed or e in listed or shutil.which(e):
+        return True
+    try:
+        r = subprocess.run(["timeout", "5", "bash", "-lic", 'command -v "$1"', "_", e], stdout=subprocess.PIPE, text=True,
+                           stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        if r.stdout.strip():
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    dirs = [HOME / d for d in ENGINE_DIRS] + [Path("/usr/local/bin")]
+    return any((d / e).is_file() and os.access(d / e, os.X_OK) for d in dirs)
 
 
 def _out_of_usage(skipped, missing=()):

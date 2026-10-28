@@ -44,4 +44,21 @@ lane2 "copilot" --dry-run --engine agy lane1 "$WORK" sonnet "$TMP/p.md"
 lane2 "*" --dry-run --engine opencode lane1 "$WORK" sonnet "$TMP/p.md"
 case "$LAST_OUT" in *"not installed on this machine"*) fail "* lets every engine through: $LAST_OUT" ;; *) ok ;; esac
 
+# 6. An engine only in ~/.local/bin (a scheduled task's PATH lacks it) is found, so NX-01's code lanes do not fall to Claude.
+mkdir -p "$HOME_T/.local/bin"; printf '#!/usr/bin/env bash\nexit 0\n' >"$HOME_T/.local/bin/agy"
+lane2 "" --dry-run --engine agy lane1 "$WORK" sonnet "$TMP/p.md"
+[ "$LAST_RC" = 1 ] || fail "a file that is not executable is not an engine"; ok
+chmod +x "$HOME_T/.local/bin/agy"
+lane2 "" --dry-run --engine agy lane1 "$WORK" sonnet "$TMP/p.md"
+case "$LAST_OUT" in *"not installed on this machine"*) fail "an engine only in ~/.local/bin is found: $LAST_OUT" ;; *) ok ;; esac
+rm -f "$HOME_T/.local/bin/agy"
+
+# 7. An engine only on the PATH of the user's login and interactive shell is found.
+mkdir -p "$HOME_T/extra"; printf '#!/usr/bin/env bash\nexit 0\n' >"$HOME_T/extra/opencode"; chmod +x "$HOME_T/extra/opencode"
+lane2 "" --dry-run --engine opencode lane1 "$WORK" sonnet "$TMP/p.md"
+[ "$LAST_RC" = 1 ] || fail "opencode is missing before the login profile names its folder"; ok
+printf 'export PATH="%s/extra:$PATH"\n' "$HOME_T" >"$HOME_T/.profile"
+lane2 "" --dry-run --engine opencode lane1 "$WORK" sonnet "$TMP/p.md"
+case "$LAST_OUT" in *"not installed on this machine"*) fail "an engine on the login shell's PATH is found: $LAST_OUT" ;; *) ok ;; esac
+
 printf 'ok: %s checks\n' "$checks"
