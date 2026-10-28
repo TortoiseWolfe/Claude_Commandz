@@ -405,7 +405,7 @@ while :; do
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       step_url_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
-      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >/dev/null 2>&1 &
+      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
       setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 &
     fi
