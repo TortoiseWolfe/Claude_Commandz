@@ -31,7 +31,7 @@ BOARD = """- [x] 2026-09-20 10:00 | Job: Old finished thing | detail | aa11aa11
 - [ ] 2026-10-14 12:31 | Job: Taphouse model | run it as lanes | 1a2b3c4d5e6f7a8b
 - [ ] 2026-10-15 08:00 | Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d
 - [ ] 2026-10-15 09:00 | Question: pick the venture | his call | r-44
-- [ ] 2026-10-16 09:00 | Hub: check the disk | self | r-45
+- [ ] 2026-10-16 09:00 | Hub: check the disk | self | r-4545454
 """
 
 
@@ -85,6 +85,36 @@ class Board(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "ticked 1")
         self.assertTrue(self.link.is_symlink())
         self.assertIn("- [x] 2026-10-08 09:53 | Waiting on Hatch: Four notes", self.board.read_text())
+
+    def test_done_ticks_a_waiting_line_that_names_an_r_id_mid_line(self):
+        # 28 Oct: "... house-band page spec note r-281050173835387196" never matched "| <id>" at the end of the line
+        with self.board.open("a") as f:
+            f.write("- [ ] 2026-10-28 17:36 | Waiting on tower: house-band page spec note r-281050173835387196\n")
+            f.write("- [ ] 2026-10-28 17:27 | Waiting on tower: second-sweep note r-555659515986060782 (n04, psy-3)\n")
+            f.write("- [ ] 2026-10-28 17:40 | Waiting on tower: lookalike r-2810501738353871960\n")
+            f.write("- [ ] 2026-10-28 17:41 | Job: not a wait, names r-281050173835387196 in prose\n")
+            f.write("- [ ] 2026-10-28 14:11 | Waiting on tower: three notes (r5630017581431312620, r-3784884258224798881, r-8895793243164643092)\n")
+        r = run(["done", "r-281050173835387196"], self.st)
+        self.assertEqual(r.stdout.strip(), "ticked 1", r.stderr)
+        text = self.board.read_text()
+        self.assertIn("- [x] 2026-10-28 17:36 | Waiting on tower: house-band page spec note r-281050173835387196", text)
+        self.assertIn("- [ ] 2026-10-28 17:27 | Waiting on tower: second-sweep", text)
+        self.assertIn("- [ ] 2026-10-28 17:40 | Waiting on tower: lookalike", text)
+        self.assertIn("- [ ] 2026-10-28 17:41 | Job: not a wait", text)
+        self.assertEqual(run(["done", "r5630017581431312620"], self.st).stdout.strip(), "ticked 0")  # one of three: stays open
+        r = run(["done", "r-555659515986060782"], self.st)
+        self.assertEqual(r.stdout.strip(), "ticked 1")
+        self.assertIn("- [x] 2026-10-28 17:27 | Waiting on tower: second-sweep note r-555659515986060782 (n04, psy-3)", self.board.read_text())
+
+    def test_done_still_ticks_a_trailing_bar_id_of_any_owner_and_leaves_the_rest(self):
+        before = self.board.read_text().splitlines()
+        r = run(["done", "r-4545454"], self.st)
+        self.assertEqual(r.stdout.strip(), "ticked 1")
+        after = self.board.read_text().splitlines()
+        changed = [(a, b) for a, b in zip(before, after) if a != b]
+        self.assertEqual(len(changed), 1)
+        self.assertTrue(changed[0][1].startswith("- [x] ") and "r-4545454" in changed[0][1])
+        self.assertEqual(run(["done", "r-9999999"], self.st).stdout.strip(), "ticked 0")
 
     def test_muse_inbox_env_still_works(self):
         r = run(["inbox", "Hub: via the old env var"], self.st, MUSE_INBOX=str(self.link))
