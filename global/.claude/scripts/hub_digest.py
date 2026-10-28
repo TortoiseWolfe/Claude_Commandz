@@ -212,9 +212,15 @@ GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
           ("the tower", re.compile(r"^waiting on (?:the )?tower", re.I)),
           ("Jonathan", re.compile(r"^waiting on jonathan|^question:", re.I)),
           ("jobs", re.compile(r"^job:", re.I)),
-          ("hub", re.compile(r"^hub:", re.I))]
+          ("hub", re.compile(r"^hub:", re.I)),
+          # The tower's inbox (peer-inbox.md): notes from the other machine and from Muse, and what the tower waits on NX-01 for.
+          ("From NX-01", re.compile(r"^\[NX-01>[\w-]+\]", re.I)),
+          ("From Muse", re.compile(r"^\[MUSE>[\w-]+\]", re.I)),
+          ("NX-01", re.compile(r"^waiting on nx-01", re.I))]
+PEER_INBOX = "peer-inbox.md"  # a machine other than NX-01 reads this by default; NX-01 reads hub-inbox.md
+OWNER_SHOWN = {"NX-01": 5, "other": 15}  # lines listed per group: NX-01's page keeps 5, any other machine's lists up to 15
 STALE_WAIT_DAYS = 5   # a "Waiting on ..." line older than this is flagged: the hub sends one reminder or closes it with a reason
-OWNER_PREFIX = re.compile(r"^(?:waiting on |job:|question:|hub:)", re.I)  # the canonical owners (the legacy "[CC>MUSE]" start stays under other when a line is unreadable)
+OWNER_PREFIX = re.compile(r"^(?:waiting on |job:|question:|hub:|\[(?:NX-01|MUSE)>)", re.I)  # the canonical owners (the legacy "[CC>MUSE]" start stays under other when a line is unreadable)
 CLIENT_LINE = re.compile(r"^client (?:mail|alert):", re.I)
 
 
@@ -256,7 +262,7 @@ def open_inbox(text):
                 title = text.split(" | ")[0].strip()  # a line with more fields than OPEN_LINE reads still has its owner prefix up front
                 for g, rx in GROUPS:
                     if OWNER_PREFIX.match(title) and rx.match(title):
-                        groups[g].append((day, re.sub(r"^waiting on \w+:\s*", "", title, flags=re.I)))
+                        groups[g].append((day, re.sub(r"^(?:waiting on [\w-]+:|\[(?:NX-01|MUSE)>[\w-]+\])\s*", "", title, flags=re.I)))
                         break
                 else:
                     groups["other"].append((day, text))
@@ -269,7 +275,7 @@ def open_inbox(text):
             continue
         for g, rx in GROUPS:
             if rx.match(title):
-                groups[g].append((day, re.sub(r"^waiting on \w+:\s*", "", title, flags=re.I)))
+                groups[g].append((day, re.sub(r"^(?:waiting on [\w-]+:|\[(?:NX-01|MUSE)>[\w-]+\])\s*", "", title, flags=re.I)))
                 break
         else:
             groups["other"].append((day, title))
@@ -412,7 +418,8 @@ def hours_lines(path=None, now=None, max_age_days=9):
 
 
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
-                   report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None):
+                   report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
+                   machine="NX-01"):
     sections = []
 
     if open_questions_error:
@@ -449,17 +456,18 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if hours:
         sections.append(("Hours", [f"- {one_line(l, 300)}" for l in hours[:3]]))
     il = []
-    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "jobs", "hub", "other"]:
+    shown = OWNER_SHOWN["NX-01" if machine == "NX-01" else "other"]
+    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "NX-01", "From NX-01", "From Muse", "jobs", "hub", "other"]:
         items = groups[g]
         if not items:
             continue
-        waits = g in ("Hatch", "the tower", "Jonathan")
-        il.append(f"{'Waiting on ' + g if waits else g.capitalize()} ({len(items)}):")
-        for d, t in items[:5]:
+        waits = g in ("Hatch", "the tower", "Jonathan", "NX-01")
+        il.append(f"{'Waiting on ' + g if waits else g.capitalize() if g.islower() else g} ({len(items)}):")
+        for d, t in items[:shown]:
             age = wait_age_days(d, now) if waits else 0
             il.append(f"- {d} {one_line(t, 105)}" + (f" ({age} days: chase or close)" if age > STALE_WAIT_DAYS else ""))
-        if len(items) > 5:
-            il.append(f"- and {len(items) - 5} more")
+        if len(items) > shown:
+            il.append(f"- and {len(items) - shown} more")
     sections.append(("Open hub-inbox items", il or ["- none"]))
 
     # Roadmap
@@ -536,6 +544,22 @@ def render(sections, now, machine, cap):
     return s
 
 
+def this_machine():
+    try:
+        return (HOME / ".config/afa/machine").read_text().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def default_inbox():
+    """HUB_INBOX or MUSE_INBOX when set; else NX-01's hub-inbox.md, and on any other machine its own peer-inbox.md (the tower's notes
+    arrive there; hub-inbox.md does not exist on it, so the digest used to show an empty inbox)."""
+    env = os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX")
+    if env:
+        return env
+    return str(HOME / ".claude/state" / ("hub-inbox.md" if this_machine() in ("NX-01", "unknown") else PEER_INBOX))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", help="write here (atomically) instead of stdout")
@@ -544,7 +568,7 @@ def main(argv=None):
     ap.add_argument("--roadmap-file")
     ap.add_argument("--lane-status-file")
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
-    ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
+    ap.add_argument("--inbox", default=default_inbox())
     ap.add_argument("--open-questions-file", help="openclaw_dispatch.py open output to use instead of reading live state")
     ap.add_argument("--git-repo", default=str(HOME / "repos"))
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")
@@ -561,10 +585,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     now = datetime.fromisoformat(a.now) if a.now else datetime.now()
-    try:
-        machine = (HOME / ".config/afa/machine").read_text().strip() or "unknown"
-    except OSError:
-        machine = "unknown"
+    machine = this_machine()
     body = Path(a.roadmap_file).read_text() if a.roadmap_file else _run(
         ["gh", "issue", "view", "1", "-R", HUB_REPO, "--json", "body", "-q", ".body"])
     status = Path(a.lane_status_file).read_text() if a.lane_status_file else _run(
@@ -609,7 +630,7 @@ def main(argv=None):
     hours = hours_lines(a.hours_file) if a.hours_file else (hours_lines() if not a.roadmap_file else None)
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
-                          open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours)
+                          open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, machine=machine)
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)
