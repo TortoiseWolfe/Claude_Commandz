@@ -1,9 +1,10 @@
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+
+from tmpdirs import fresh_dir
 
 SCRIPT = Path(__file__).resolve().parent.parent / "graphify_hook_portable.py"
 NAME = "settings" + ".json"
@@ -20,7 +21,7 @@ def run(*args):
 
 class PortableHooks(unittest.TestCase):
     def repo(self, data):
-        d = Path(tempfile.mkdtemp())
+        d = Path(fresh_dir(self))
         (d / ".claude").mkdir()
         (d / ".claude" / NAME).write_text(json.dumps(data))
         return d
@@ -59,12 +60,12 @@ class PortableHooks(unittest.TestCase):
         d = self.repo(OLD)
         run(str(d))
         cmd = self.cmds(d)[0]
-        home = tempfile.mkdtemp()
+        home = fresh_dir(self)
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "HOME": home})
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
 
     def test_missing_settings_is_skipped(self):
-        r = run(tempfile.mkdtemp())
+        r = run(fresh_dir(self))
         self.assertEqual(r.returncode, 0)
         self.assertIn("skip", r.stdout)
 
