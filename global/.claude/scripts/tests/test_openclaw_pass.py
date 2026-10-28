@@ -1485,7 +1485,7 @@ class TheWaitingRoom(PassBase):
                 self.assertEqual(len(out), 1)
                 self.assertEqual(self.host.notes, [
                     "2 lanes are waiting in the queue: the week is projected at %d%% (phase 1, reset to Mon 6:00 AM, holds past 90%% projected). "
-                    "They start when the figure is known and within the limit, or from Mon 6:00 AM, when the limit becomes 95%% used." % round(pct)])
+                    "They start when the figure is known and within the limit, or from Mon 6:00 AM, when the limit becomes 95%% used, rising to 100%% by Tue 6:00 AM." % round(pct)])
                 self.assertEqual(self.state()["room_held"], {"phase": 1, "pct": round(pct), "count": 2})
                 self.assertEqual(dp.room_due(self.ctx, self.host, NOW + 60), [])
                 self.assertEqual(len(self.host.notes), 1)
@@ -1514,9 +1514,10 @@ class TheWaitingRoom(PassBase):
             (ET(2026, 10, 19, 5, 59), 90, 99, True),     # phase 1 ignores used
             (ET(2026, 10, 19, 6, 1), 108, 84, True),     # Mon 6:01 AM, today's numbers: phase 2 gates on used, 84 is under 95
             (ET(2026, 10, 19, 6, 1), 20, 94.9, True),
-            (ET(2026, 10, 19, 6, 1), 20, 95, False),     # at 95% used it holds
+            (ET(2026, 10, 19, 6, 1), 20, 95.1, False),   # just past the starting 95% (the limit rises 0.2 points an hour) it holds
             (ET(2026, 10, 19, 6, 1), 20, 99, False),
-            (ET(2026, 10, 20, 5, 59), 20, 96, False),    # Tue 5:59 AM: still phase 2
+            (ET(2026, 10, 20, 5, 59), 20, 99.9, True),   # Tue 5:59 AM: the limit is almost 100, so 99.9 starts
+            (ET(2026, 10, 20, 5, 59), 20, 100, False),   # and 100 still holds
             (ET(2026, 10, 20, 6, 1), 300, 99.9, True),   # Tue 6:01 AM: phase 3, spend what is left
             (ET(2026, 10, 21, 11, 59), 300, 100, True),  # Wed 11:59 AM: last minute of phase 3
             (ET(2026, 10, 21, 12, 1), 95, 1, False),     # Wed 12:01 PM: a new week, phase 1 again
@@ -1537,7 +1538,7 @@ class TheWaitingRoom(PassBase):
     def test_the_hold_names_the_phase_and_its_limit_and_when_it_lifts(self):
         self.at(ET(2026, 10, 19, 9), 20, 96)
         self.assertEqual(self.host.notes, [
-            "1 lane is waiting in the queue: the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95% used). "
+            "1 lane is waiting in the queue: the week is used at 96% (phase 2, to Tue 6:00 AM, holds at 95.6% used, rising to 100%). "
             "They start when the figure is known and within the limit, or from Tue 6:00 AM, when there is no limit."])
         self.assertEqual(self.state()["room_held"], {"phase": 2, "pct": 96, "count": 1})
 
