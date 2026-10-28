@@ -380,6 +380,65 @@ class Page(unittest.TestCase):
         self.assertNotIn("/reset/", page)
 
 
+class PublishBudget(unittest.TestCase):
+    def test_value_is_one_line_with_a_stamp_the_figure_and_the_phase(self):
+        v = hd.budget_published_value("Week resets Wed: used 1.5%", "Phase 1 of 3", datetime(2026, 10, 28, 14, 5))
+        self.assertEqual(v.count("\n"), 0)
+        self.assertRegex(v, r"^updated Wed 2026-10-28 2:05 PM \S+ \| Week resets Wed: used 1\.5% \| Phase 1 of 3$")
+
+    def test_no_figure_means_nothing_to_publish(self):
+        self.assertEqual(hd.budget_published_value("", "Phase 1 of 3", NOW), "")
+        self.assertEqual(hd.budget_published_value("budget report unavailable", "Phase 1 of 3", NOW), "")
+        self.assertFalse(hd.publish_budget("", run=lambda *a, **k: self.fail("must not call gh")))
+
+    def test_publish_sets_the_variable_with_the_value_on_stdin_never_in_the_command(self):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        self.assertTrue(hd.publish_budget("updated x | used 1%", repo="o/r", run=run))
+        cmd, kw = calls[0]
+        self.assertEqual(cmd, ["gh", "variable", "set", "FLEET_BUDGET", "-R", "o/r"])
+        self.assertEqual(kw["input"], "updated x | used 1%")
+        self.assertNotIn("used 1%", " ".join(cmd))
+
+    def test_a_failed_publish_is_reported_and_returns_false(self):
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, "", "HTTP 403")
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertFalse(hd.publish_budget("v", run=run))
+            self.assertFalse(hd.publish_budget("v", run=lambda *a, **k: (_ for _ in ()).throw(OSError("no gh"))))
+        self.assertIn("could not publish FLEET_BUDGET", err.getvalue())
+        self.assertIn("HTTP 403", err.getvalue())
+
+    def test_a_fixture_build_never_publishes(self):
+        # --publish-budget with --roadmap-file must not call gh: put a gh that fails the test first on PATH.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "bin").mkdir()
+            marker = d / "gh-called"
+            gh = d / "bin" / "gh"
+            gh.write_text(f"#!/bin/sh\ntouch {marker}\n")
+            gh.chmod(0o755)
+            for name, text in (("roadmap.md", ROADMAP), ("lanes.txt", LANE_STATUS), ("inbox.md", INBOX), ("tidy.txt", TIDY),
+                               ("budget.txt", "Week resets Wed: used 1%\n"), ("questions.txt", ""), ("spend.json", '{"lanes": [], "other": 0, "total": 0}')):
+                (d / name).write_text(text)
+            (d / "lanes").mkdir()
+            r = subprocess.run([sys.executable, str(HERE.parent / "hub_digest.py"), "--publish-budget", "--out", str(d / "o.md"),
+                                "--roadmap-file", str(d / "roadmap.md"), "--lane-status-file", str(d / "lanes.txt"),
+                                "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"),
+                                "--budget-file", str(d / "budget.txt"), "--lanes-dir", str(d / "lanes"),
+                                "--git-repo", str(d), "--open-questions-file", str(d / "questions.txt"),
+                                "--spend-file", str(d / "spend.json"), "--now", "2026-10-16T21:00:00"],
+                               capture_output=True, text=True, env={**os.environ, "PATH": f"{d / 'bin'}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(marker.exists())
+
+
 class Cli(unittest.TestCase):
     def test_end_to_end_with_fixtures_writes_a_private_small_file(self):
         with tempfile.TemporaryDirectory() as d:
