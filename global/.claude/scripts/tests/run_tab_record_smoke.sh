@@ -18,6 +18,7 @@ cat > "$out/page.html" <<'HTML'
 <p>Contact: jane.smoke@example.com</p>
 <p>Phone: 423-555-0187</p>
 <p>Profile: linkedin.com/in/jane-smoke</p>
+<iframe srcdoc="&lt;p style='font:24px sans-serif'&gt;Inside: frame.person@example.com&lt;/p&gt;" style="width:600px;height:80px;border:1px solid #888"></iframe>
 <p id="late" style="display:none">Application submitted</p>
 </body></html>
 HTML
@@ -25,7 +26,7 @@ cat > "$out/browser.cjs" <<JS
 const { chromium } = require('$pw')
 ;(async () => {
   const b = await chromium.launch({ args: ['--remote-debugging-port=$port'] })
-  const p = await b.newPage({ viewport: { width: 1000, height: 600 } })
+  const p = await b.newPage({ viewport: { width: 1000, height: 600 }, deviceScaleFactor: 2 })
   await p.goto('file://$out/page.html')
   setTimeout(() => process.exit(0), 120000)
 })()
@@ -44,8 +45,10 @@ d = sys.argv[1]
 rects = [json.loads(l) for l in open(d + "/rects.ndjson")]
 kinds = {r["why"] for line in rects for r in line["rects"]}
 assert "text" in kinds, kinds
-# three personal strings -> at least three text rectangles in the first frame
+# three personal strings on the page and one inside an iframe; the page runs at 2x so the scale is proved too
 assert sum(1 for r in rects[0]["rects"] if r["why"] == "text") >= 3, rects[0]
+assert any(r["why"].startswith("frame-") for r in rects[0]["rects"]), rects[0]
+assert rects[0]["dpr"] > 0.5, rects[0]
 def frame(video, out):
     subprocess.check_call(["ffmpeg", "-v", "error", "-y", "-ss", "1", "-i", video, "-frames:v", "1", out])
 frame(d + "/smoke-raw.mp4", d + "/raw.png")

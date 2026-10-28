@@ -15,6 +15,8 @@ const crypto = require('crypto')
 
 const cfg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const { chromium } = require(cfg.playwright)
+// A private pattern that does not compile is dropped, loudly, instead of breaking the page reader (which would leave frames unblurred).
+const goodExtra = (cfg.extraPatterns || []).filter((p) => { try { new RegExp(p, 'gi'); return true } catch (e) { fs.appendFileSync(path.join(cfg.dir, 'capture.log'), 'DROPPED a private blur pattern that does not compile: ' + String(e).slice(0, 80) + '\n'); return false } })
 const log = (...a) => fs.appendFileSync(path.join(cfg.dir, 'capture.log'), new Date().toISOString() + ' ' + a.join(' ') + '\n')
 
 // Words and shapes that are always blurred wherever they show as page text or inside a field.
@@ -24,16 +26,16 @@ const TEXT_RES = [
   '\\+\\d[\\d ()-]{8,}\\d', // international phone number
   'linkedin\\.com/in/[\\w%-]+', // LinkedIn address
   '\\$\\s?\\d[\\d,]*(?:\\.\\d+)?\\s?[kK]?', // money (salary)
-  'Mercor', 'Harmonic\\s*Egg', 'Tech\\s*Joy(?:\\s+Software)?', ...(cfg.extraPatterns || []),
+  'Mercor', 'Harmonic\\s*Egg', 'Tech\\s*Joy(?:\\s+Software)?', ...goodExtra,
 ]
 // A field whose label, name or placeholder says one of these has its whole answer blurred.
 const FIELD_RE = '(e-?mail|phone|mobile|linkedin|address|street|zip|postal|salary|compensation|pay\\b|ssn|social security|birth|gender|race|ethnic|veteran|disabilit|pronoun|sexual|hispanic|latino|resume|cv\\b|cover letter|github|portfolio|website|twitter)'
 
 // Runs inside the page (and inside each frame). Read only: it measures, it changes nothing.
-const COLLECT = ({ texts, fieldRe }) => {
+const COLLECT = ({ texts, fieldRe, top }) => {
   const re = new RegExp(texts.join('|'), 'gi')
   const fre = new RegExp(fieldRe, 'i')
-  const sx = window.scrollX, sy = window.scrollY
+  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0 // a child frame is placed by its own box, so its rectangles stay frame-relative
   const out = []
   const add = (r, why) => { if (r.width > 1 && r.height > 1) out.push({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height, why }) }
   // 1. page text
@@ -75,18 +77,34 @@ const COLLECT = ({ texts, fieldRe }) => {
   return out
 }
 
+// Whole-page rectangle: what a frame that could not be read is blurred with (fail closed: never leave it unblurred).
+const EVERYTHING = { x: 0, y: 0, w: 100000, h: 100000, why: 'unreadable' }
 const collectAll = async (page) => {
   const all = []
-  const arg = { texts: TEXT_RES, fieldRe: FIELD_RE }
   for (const fr of page.frames()) {
-    if (fr !== page.mainFrame() && /recaptcha|hcaptcha|doubleclick|google\.com\/(recaptcha|accounts)/.test(fr.url())) continue
+    const isMain = fr === page.mainFrame()
+    if (!isMain && /recaptcha|hcaptcha|doubleclick|google\.com\/(recaptcha|accounts)/.test(fr.url())) continue
+    const arg = { texts: TEXT_RES, fieldRe: FIELD_RE, top: isMain }
     try {
       const rects = await fr.evaluate(COLLECT, arg)
-      if (fr === page.mainFrame()) { all.push(...rects); continue }
-      const box = await (await fr.frameElement()).boundingBox() // viewport coordinates
+      if (isMain) { all.push(...rects); continue }
+      const box = await (await fr.frameElement()).boundingBox() // viewport coordinates of the frame
+      if (!box) continue // a frame with no box is not on screen
       const sc = await page.evaluate(() => [window.scrollX, window.scrollY])
-      if (box) for (const r of rects) all.push({ x: r.x - 0 + box.x + sc[0], y: r.y + box.y + sc[1], w: r.w, h: r.h, why: 'frame-' + r.why })
-    } catch (e) { /* a frame that went away mid-read: the next tick reads again */ }
+      for (const r of rects) all.push({ x: r.x + box.x + sc[0], y: r.y + box.y + sc[1], w: r.w, h: r.h, why: 'frame-' + r.why })
+    } catch (e) {
+      // Could not read this frame: blur its whole box (or the whole page for the main frame) rather than risk showing it.
+      let boxed = false
+      if (!isMain) {
+        try {
+          const box = await (await fr.frameElement()).boundingBox()
+          const sc = await page.evaluate(() => [window.scrollX, window.scrollY])
+          if (box) { all.push({ x: box.x + sc[0], y: box.y + sc[1], w: box.width, h: box.height, why: 'frame-unreadable' }); boxed = true }
+        } catch (e2) { /* fall through */ }
+      }
+      if (!boxed) all.push(EVERYTHING)
+      log('unreadable frame, blurred whole:', fr.url().slice(0, 60))
+    }
   }
   return all
 }
@@ -101,7 +119,16 @@ const shoot = async (page) => {
     s.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: true }),
     new Promise((_, rej) => setTimeout(() => rej(new Error('screenshot timeout')), 10000)),
   ])
-  return Buffer.from(r.data, 'base64')
+  const buf = Buffer.from(r.data, 'base64')
+  // Pixels per CSS pixel as the picture really came out (its width over the page's CSS width), not as the page claims: the
+  // blur rectangles are CSS pixels, so a wrong ratio would put every box beside its text.
+  let dpr = 1
+  try {
+    const m = await s.send('Page.getLayoutMetrics')
+    const cssW = (m.cssContentSize || m.contentSize).width
+    if (cssW > 0) dpr = buf.readUInt32BE(16) / cssW
+  } catch (e) { /* keep 1 */ }
+  return { buf, dpr }
 }
 const CONFIRM = /confirmation|thank-?you|thanks|submitted|success|applied/i
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -148,7 +175,7 @@ const flagFresh = () => {
     if (endAt && Date.now() > endAt) break
     try {
       const before = await collectAll(page)
-      const buf = await shoot(page)
+      const { buf, dpr } = await shoot(page)
       const h = crypto.createHash('md5').update(buf).digest('hex')
       if (h !== last) {
         last = h
@@ -156,7 +183,7 @@ const flagFresh = () => {
         const ms = Date.now()
         const f = path.join(cfg.dir, 'frames', 'f' + ms + '.png')
         fs.writeFileSync(f, buf, { mode: 0o600 })
-        fs.appendFileSync(rectsFile, JSON.stringify({ ms, url: page.url().split('?')[0], rects: before.concat(after) }) + '\n', { mode: 0o600 })
+        fs.appendFileSync(rectsFile, JSON.stringify({ ms, dpr, url: page.url().split('?')[0], rects: before.concat(after) }) + '\n', { mode: 0o600 })
         n++
       }
     } catch (e) { log('tick failed', String(e).slice(0, 100)) }

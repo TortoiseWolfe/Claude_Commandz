@@ -58,6 +58,24 @@ class BlurBoxes(unittest.TestCase):
         self.assertEqual(box, (50, 50, 100, 75))
 
 
+class BlurScale(unittest.TestCase):
+    def test_one_to_one_screen(self):
+        self.assertEqual(tr.blur_scale(1280, 1280, 1), 1.0)
+
+    def test_wide_screenshot_is_shrunk(self):
+        self.assertEqual(tr.blur_scale(1280, 2560, 2), 1.0)  # 1280 CSS px at 2x: a CSS pixel is one video pixel
+
+    def test_retina_screenshot_of_a_narrow_page(self):
+        self.assertEqual(tr.blur_scale(1280, 2000, 2), 1.28)  # 1000 CSS px at 2x shown in 1280 px: 1.28 video px per CSS px
+
+    def test_missing_ratio_means_one(self):
+        self.assertEqual(tr.blur_scale(1280, 1280, None), 1.0)
+
+    def test_huge_unreadable_marker_covers_the_whole_frame(self):
+        (box,) = tr.merge_rects([{"x": 0, "y": 0, "w": 100000, "h": 100000}], 1.0, 1280, 900)
+        self.assertEqual(box, (0, 0, 1280, 900))
+
+
 class Window(unittest.TestCase):
     def test_short_page_is_not_scrolled(self):
         self.assertEqual(tr.window_top(0, (0, 0, 10, 10), 700), 0)
