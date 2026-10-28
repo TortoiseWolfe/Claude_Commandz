@@ -150,5 +150,71 @@ class Home(unittest.TestCase):
         self.assertFalse(tr.pid_alive(None))
 
 
+class Clips(unittest.TestCase):
+    def _clip(self, blurred=True, approve=True, size=1000):
+        d = fresh_dir(self)
+        clip = os.path.join(d, "c.mp4")
+        with open(clip, "wb") as f:
+            f.write(b"x" * size)
+        if blurred is not None:
+            with open(clip + ".json", "w") as f:
+                f.write('{"blurred": %s}' % ("true" if blurred else "false"))
+        if approve:
+            with open(clip + ".approved", "w") as f:
+                f.write("{}")
+            now = os.path.getmtime(clip) + 5
+            os.utime(clip + ".approved", (now, now))
+        return clip
+
+    def test_bitrate_fits_the_limit(self):
+        kb = tr.bitrate_kbps(9.5, 60)
+        self.assertLess(kb * 1000 / 8 * 60, 9.5 * 1024 * 1024)
+        self.assertGreater(kb, 1000)
+
+    def test_bitrate_has_a_floor_and_survives_zero_length(self):
+        self.assertEqual(tr.bitrate_kbps(1, 100000), 50)
+        self.assertGreater(tr.bitrate_kbps(9.5, 0), 0)
+
+    def test_covering_picks_recordings_that_span_the_moment(self):
+        rows = [("a", 100, 200), ("b", 150, 400), ("c", 500, 600)]
+        self.assertEqual([r[0] for r in tr.recordings_covering(rows, 160)], ["b", "a"])
+        self.assertEqual(tr.recordings_covering(rows, 450), [])
+
+    def test_an_approved_blurred_small_clip_may_leave(self):
+        self.assertEqual(tr.clip_ok(self._clip()), (True, ""))
+
+    def test_no_sidecar_means_not_made_by_cut(self):
+        ok, why = tr.clip_ok(self._clip(blurred=None))
+        self.assertFalse(ok)
+        self.assertIn("sidecar", why)
+
+    def test_a_sidecar_that_is_not_blurred_is_refused(self):
+        self.assertFalse(tr.clip_ok(self._clip(blurred=False))[0])
+
+    def test_unapproved_is_refused(self):
+        ok, why = tr.clip_ok(self._clip(approve=False))
+        self.assertFalse(ok)
+        self.assertIn("not approved", why)
+
+    def test_a_clip_changed_after_approval_is_refused(self):
+        clip = self._clip()
+        later = os.path.getmtime(clip + ".approved") + 10
+        os.utime(clip, (later, later))
+        ok, why = tr.clip_ok(clip)
+        self.assertFalse(ok)
+        self.assertIn("changed", why)
+
+    def test_over_the_limit_is_refused_and_a_larger_limit_allows_it(self):
+        clip = self._clip(size=2 * 1024 * 1024)
+        self.assertFalse(tr.clip_ok(clip, 1.0)[0])
+        self.assertTrue(tr.clip_ok(clip, 3.0)[0])
+
+    def test_only_mp4(self):
+        clip = self._clip()
+        os.rename(clip, clip[:-4] + ".webm")
+        self.assertFalse(tr.clip_ok(clip[:-4] + ".webm")[0])
+        self.assertFalse(tr.clip_ok(clip + "-missing.mp4")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

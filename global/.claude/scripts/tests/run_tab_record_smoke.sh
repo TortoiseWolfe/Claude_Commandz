@@ -60,3 +60,21 @@ diff = ImageChops.difference(a, b).point(lambda v: 255 if v > 40 else 0).getbbox
 assert diff, "blurred video is identical to the raw one"
 print("tab_record smoke: ok (blurred differs from raw at", diff, ")")
 PY
+# the delivery steps: cut (with a size limit), check, approve, find, ok. This clip is of the fake page only.
+tr="python3 $scripts/tab_record.py"
+secs="$(python3 -c "import json,sys;f=json.load(open('$d/finished.json'));print(f['startMs']//1000)")"
+from_t="$(date -d @"$secs" +%H:%M:%S)"
+to_t="$(date -d @"$((secs + 4))" +%H:%M:%S)"
+clip="$d/smoke-clip.mp4"
+$tr cut smoke --from "$from_t" --to "$to_t" --out "$clip" --max-mb 9.5
+test -s "$clip" && test -s "$clip.json"
+$tr ok "$clip" && { echo "an unapproved clip passed ok"; exit 1; } || true
+$tr approve "$clip" --by smoke && { echo "approve ran without check"; exit 1; } || true
+$tr check "$clip" --frames 3 >/dev/null
+test -s "$clip.check/check-00.png"
+$tr approve "$clip" --by smoke
+$tr ok "$clip"
+$tr cut smoke --from "$from_t" --to "$to_t" --out "$d/tiny.mp4" --max-mb 0.001 && { echo "a clip over the limit was not reported"; exit 1; } || true
+$tr find --at "$(date -d @"$((secs + 2))" +%H:%M:%S)" | grep -q smoke
+[ -n "${TAB_RECORD_KEEP_CLIP:-}" ] && { cp "$clip" "$clip.json" "$clip.approved" "$TAB_RECORD_KEEP_CLIP"/; true; }
+echo "tab_record smoke: delivery steps ok"

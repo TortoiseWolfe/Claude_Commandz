@@ -6,8 +6,11 @@
   tab_record.py status                  recordings that are running now
   tab_record.py list [--limit N]        finished recordings, newest last
   tab_record.py finish <dir>            make the videos from a finished capture (the capture does this itself)
-  tab_record.py cut <name> --from HH:MM:SS --to HH:MM:SS [--out FILE]   a blurred clip for one finding
-  tab_record.py check <name> [--frames N]   full-size frames from the blurred video, to look at before it leaves the machine
+  tab_record.py cut <name> --from HH:MM:SS --to HH:MM:SS [--out FILE] [--max-mb N]   a blurred clip for one finding, small enough to attach (default 9.5 MB)
+  tab_record.py check <name or clip.mp4> [--frames N]   full-size frames from the blurred video or clip, to look at before it leaves the machine
+  tab_record.py approve <clip.mp4> --by WHO   after the frames were looked at: writes <clip>.approved. Only an approved clip may be uploaded
+  tab_record.py find --at HH:MM[:SS] [--date YYYY-MM-DD]   which recordings cover that time (to name a finding's clip)
+  tab_record.py ok <clip.mp4> [--limit-mb N]   exit 0 only if the clip is an approved, blurred mp4 within the size limit
   tab_record.py prune [--days N]        delete the capture frames of recordings older than N days (default 7)
 
 How it records: tab_record_capture.cjs attaches to the browser's debugging port and follows ONE tab, taking a screenshot of the
@@ -181,6 +184,38 @@ def pid_alive(pid):
         return True
     except (ValueError, ProcessLookupError, PermissionError, TypeError):
         return False
+
+
+def bitrate_kbps(limit_mb, seconds, margin=0.9):
+    """Video bitrate that keeps a clip of this length under the size limit (a margin for the container)."""
+    return max(50, int(limit_mb * 8 * 1024 * 1024 * margin / max(seconds, 1.0) / 1000))
+
+
+def recordings_covering(rows, at_ms):
+    """rows: [(name, startMs, endMs)]. The recordings whose film covers the moment, nearest start first."""
+    hit = [r for r in rows if r[1] <= at_ms <= r[2]]
+    return sorted(hit, key=lambda r: abs(at_ms - r[1]))
+
+
+def clip_ok(path, limit_mb=10.0):
+    """(True, '') only for an approved, blurred mp4 within the size limit that has not changed since it was approved."""
+    p = Path(path)
+    if p.suffix.lower() != ".mp4" or not p.is_file():
+        return False, "not an mp4 file"
+    side, appr = Path(str(p) + ".json"), Path(str(p) + ".approved")
+    try:
+        meta = json.loads(side.read_text())
+    except Exception:
+        return False, "no sidecar %s (only a clip made by tab_record.py cut may leave)" % side.name
+    if meta.get("blurred") is not True:
+        return False, "the sidecar does not say the clip is blurred"
+    if not appr.is_file():
+        return False, "not approved: run tab_record.py check, look at the frames at full size, then approve"
+    if appr.stat().st_mtime < p.stat().st_mtime:
+        return False, "the clip changed after it was approved"
+    if p.stat().st_size > limit_mb * 1024 * 1024:
+        return False, "%.1f MB is over the %.1f MB limit" % (p.stat().st_size / 1048576, limit_mb)
+    return True, ""
 
 
 # ---------- browser port ----------
@@ -440,6 +475,23 @@ def cmd_finish(a):
     return 0
 
 
+def _duration(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def _encode(src, out, s, e, extra):
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.2f" % s, "-to", "%.2f" % e, "-i", str(src),
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", *extra, str(out)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        print(r.stderr[-300:], file=sys.stderr)
+    return r.returncode == 0
+
+
 def cmd_cut(a):
     d = find_rec(a.name)
     fin = json.loads((d / "finished.json").read_text())
@@ -448,31 +500,92 @@ def cmd_cut(a):
     s = video_offset(rows, wall_ms(date, a.frm))
     e = video_offset(rows, wall_ms(date, a.to)) + 2
     out = Path(a.out) if a.out else d / ("%s-clip-%s-%s.mp4" % (d.name, a.frm.replace(":", ""), a.to.replace(":", "")))
-    r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.2f" % s, "-to", "%.2f" % e, "-i", fin["blurred"],
-                        "-c:v", "libx264", "-crf", "23", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)], capture_output=True, text=True)
-    if r.returncode:
-        print(r.stderr[-300:], file=sys.stderr)
+    for old in (Path(str(out) + ".approved"), Path(str(out) + ".json")):
+        old.unlink(missing_ok=True)
+    limit = a.max_mb * 1024 * 1024
+    if not _encode(fin["blurred"], out, s, e, ["-crf", "23"]):
         return 1
+    if out.stat().st_size > limit:  # too big to attach: encode again at a bitrate that fits, then smaller if it still does not
+        kb = bitrate_kbps(a.max_mb, e - s)
+        for vf in ([], ["-vf", "scale=960:-2"]):
+            if not _encode(fin["blurred"], out, s, e, ["-b:v", "%dk" % kb, "-maxrate", "%dk" % kb, "-bufsize", "%dk" % (kb * 2), *vf]):
+                return 1
+            if out.stat().st_size <= limit:
+                break
+            kb = int(kb * 0.7)
     os.chmod(out, 0o600)
-    print("blurred clip (%.1fs to %.1fs of the video):" % (s, e), out)
+    size = out.stat().st_size
+    Path(str(out) + ".json").write_text(json.dumps({"recording": d.name, "from": a.frm, "to": a.to, "blurred": True, "bytes": size, "seconds": round(e - s, 1)}))
+    print("blurred clip (%.1fs to %.1fs of the video, %.1f MB):" % (s, e, size / 1048576), out)
+    if size > limit:
+        print("still over %.1f MB; cut a shorter span" % a.max_mb, file=sys.stderr)
+        return 2
     return 0
 
 
 def cmd_check(a):
-    d = find_rec(a.name)
-    fin = json.loads((d / "finished.json").read_text())
-    outdir = d / "check"
+    if Path(a.name).is_file():  # a clip
+        clip = Path(a.name).resolve()
+        outdir = Path(str(clip) + ".check")
+        src, secs = clip, _duration(clip)
+    else:
+        d = find_rec(a.name)
+        fin = json.loads((d / "finished.json").read_text())
+        outdir = d / "check"
+        src, secs = fin["blurred"], fin["seconds"]
     shutil.rmtree(outdir, ignore_errors=True)
     outdir.mkdir(mode=0o700)
-    secs = fin["seconds"]
     n = max(2, a.frames)
     for i in range(n):
         t = secs * (i + 0.5) / n
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.2f" % t, "-i", fin["blurred"], "-frames:v", "1", str(outdir / ("check-%02d.png" % i))])
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.2f" % t, "-i", str(src), "-frames:v", "1", str(outdir / ("check-%02d.png" % i))])
     print("look at these at full size before the blurred video leaves the machine:")
     for p in sorted(outdir.glob("*.png")):
         print(" ", p)
     return 0
+
+
+def cmd_approve(a):
+    clip = Path(a.clip).resolve()
+    if not Path(str(clip) + ".check").is_dir() or not list(Path(str(clip) + ".check").glob("*.png")):
+        print("tab_record: run `check %s` and look at its frames first" % clip, file=sys.stderr)
+        return 2
+    if Path(str(clip) + ".check").stat().st_mtime < clip.stat().st_mtime:
+        print("tab_record: the clip is newer than its check frames; run check again", file=sys.stderr)
+        return 2
+    Path(str(clip) + ".approved").write_text(json.dumps({"by": a.by, "at": dt.datetime.now().isoformat(timespec="seconds")}))
+    print("approved:", clip)
+    return 0
+
+
+def cmd_find(a):
+    date = a.date or dt.date.today().isoformat()
+    at = wall_ms(date, a.at if a.at.count(":") == 2 else a.at + ":00")
+    rows = []
+    for d in rec_dirs():
+        if d.parent.name != date:
+            continue
+        try:
+            f = json.loads((d / "finished.json").read_text())
+            try:  # a page that never changed has one frame; the capture's own end time says how long it was filmed
+                ended = json.loads((d / "ended.json").read_text()).get("endedMs", 0)
+            except Exception:
+                ended = 0
+            rows.append((d.name, f["startMs"], max(f["endMs"], ended)))
+        except Exception:
+            continue
+    hits = recordings_covering(rows, at)
+    for name, st, en in hits:
+        print("%s  %s-%s" % (name, dt.datetime.fromtimestamp(st / 1000).strftime("%H:%M:%S"), dt.datetime.fromtimestamp(en / 1000).strftime("%H:%M:%S")))
+    if not hits:
+        print("no recording covers %s %s" % (date, a.at))
+    return 0 if hits else 1
+
+
+def cmd_ok(a):
+    ok, why = clip_ok(a.clip, a.limit_mb)
+    print("ok" if ok else "refused: " + why)
+    return 0 if ok else 2
 
 
 def cmd_prune(a):
@@ -504,8 +617,11 @@ def main(argv=None):
     s = sub.add_parser("status"); s.set_defaults(fn=cmd_status)
     s = sub.add_parser("list"); s.add_argument("--limit", type=int, default=20); s.set_defaults(fn=cmd_list)
     s = sub.add_parser("finish"); s.add_argument("dir"); s.set_defaults(fn=cmd_finish)
-    s = sub.add_parser("cut"); s.add_argument("name"); s.add_argument("--from", dest="frm", required=True); s.add_argument("--to", required=True); s.add_argument("--out"); s.set_defaults(fn=cmd_cut)
+    s = sub.add_parser("cut"); s.add_argument("name"); s.add_argument("--from", dest="frm", required=True); s.add_argument("--to", required=True); s.add_argument("--out"); s.add_argument("--max-mb", type=float, default=9.5); s.set_defaults(fn=cmd_cut)
     s = sub.add_parser("check"); s.add_argument("name"); s.add_argument("--frames", type=int, default=6); s.set_defaults(fn=cmd_check)
+    s = sub.add_parser("approve"); s.add_argument("clip"); s.add_argument("--by", required=True); s.set_defaults(fn=cmd_approve)
+    s = sub.add_parser("find"); s.add_argument("--at", required=True); s.add_argument("--date"); s.set_defaults(fn=cmd_find)
+    s = sub.add_parser("ok"); s.add_argument("clip"); s.add_argument("--limit-mb", type=float, default=10.0); s.set_defaults(fn=cmd_ok)
     s = sub.add_parser("prune"); s.add_argument("--days", type=int, default=7); s.set_defaults(fn=cmd_prune)
     a = ap.parse_args(argv)
     if a.cmd == "start":
