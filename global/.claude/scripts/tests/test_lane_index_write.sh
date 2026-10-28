@@ -4,6 +4,8 @@
 # row 364 lost its record. Now every write takes one lock, a rewrite replaces the file atomically, and a rewrite that has fewer rows than
 # the file it replaces is refused and logged. A fake HOME holds the index: nothing here touches a live lane.
 set -euo pipefail
+# The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
+export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-index.XXXXXX")"
