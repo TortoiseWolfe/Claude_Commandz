@@ -143,6 +143,18 @@ class Parts(unittest.TestCase):
         self.assertEqual(len(groups["jobs"]), 1)
         self.assertEqual(groups["other"], [])
 
+    def test_the_tower_shows_its_own_next_session_line_or_labels_nx01s(self):
+        def tower_page(body, machine="NCC-74656"):
+            return hd.render(hd.build_sections(roadmap_body=body, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text="",
+                                               git_log="", tidy_text=TIDY, budget="b", now=NOW, machine=machine), NOW, machine, 100000)
+        own = ROADMAP.replace("---", "### Next session should (NCC-74656)\n\nFinish the tower fixes.\n\n---", 1)
+        self.assertIn("Next session should (NCC-74656): Finish the tower fixes.", tower_page(own))
+        self.assertNotIn("Read the reports and merge lane-a.", tower_page(own))
+        self.assertIn("Next session should (NX-01's line): Read the reports and merge lane-a.", tower_page(ROADMAP))
+        nx = tower_page(own, "NX-01")  # NX-01 keeps its own line unlabeled and does not show the tower's
+        self.assertIn("Next session should: Read the reports and merge lane-a.", nx)
+        self.assertNotIn("Finish the tower fixes.", nx)
+
     def test_a_machine_other_than_nx01_lists_every_open_peer_line_under_its_group(self):
         lines = ["- [ ] 2026-10-27 13:%02d | [NX-01>NCC-74656] Note number %d | detail | r-%d" % (i, i, i) for i in range(9)]
         text = "\n".join(lines) + "\n"

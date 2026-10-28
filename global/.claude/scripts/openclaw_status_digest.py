@@ -316,7 +316,7 @@ def _basename(m):
 
 
 def parse_roadmap(body):
-    """-> dict(arcs=[{head, open_items:[title], done:int}], next_session:str, next3:[str])."""
+    """-> dict(arcs=[{head, open_items:[title], done:int}], next_session:str, next3:[str], next_session_by:{machine: str})."""
     lines = body.splitlines()
     arcs, next3 = [], []
     i, n = 0, len(lines)
@@ -351,7 +351,11 @@ def parse_roadmap(body):
     m = re.search(r"^### Next session should\s*\n+(.+?)(?:\n\s*\n|\Z)", body, re.M | re.S)
     if m:
         ns = m.group(1).replace("\n", " ")
-    return {"arcs": arcs, "next_session": ns, "next3": next3}
+    # A machine's own line (28 Oct 2026): "### Next session should (NCC-74656)" holds what that machine's next session starts with.
+    by_machine = {}
+    for mm in re.finditer(r"^### Next session should \(([\w.-]+)\)[ \t]*\n+(.+?)(?:\n\s*\n|\Z)", body, re.M | re.S):
+        by_machine[mm.group(1)] = mm.group(2).replace("\n", " ")
+    return {"arcs": arcs, "next_session": ns, "next3": next3, "next_session_by": by_machine}
 
 
 def _item_title(text):

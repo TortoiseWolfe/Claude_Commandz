@@ -10,7 +10,7 @@ should") and, optionally, a short note. Everything else is done here, by script:
         ticked, tidy counts), the drift check and the stamp. Saves the issue's updatedAt (READ_AT) to
         ~/.claude/state/session-prime/ so the post can tell if anyone edited the issue meanwhile.
 
-  session_prime_facts.py --post [--arc F] [--next3 F] [--next-should F] [--note F] [--session ID] [--dry-run]
+  session_prime_facts.py --post [--arc F] [--next3 F] [--next-should F] [--next-should-machine F] [--note F] [--session ID] [--dry-run]
         Replace those fields in the body, refresh the roadmap-stamp line, and (unless --dry-run) check
         updatedAt still equals READ_AT, write the body, append the session-end comment (heading, facts,
         the note, the next-session line), seed the drift cache and run the drift check.
@@ -19,8 +19,9 @@ should") and, optionally, a short note. Everything else is done here, by script:
 A field file holds the whole replacement block, including its wrapper: a <details> block whose
 <summary> starts "Arc N" or "Next 3 sessions", or a "### Active arc" / "### Next 3 sessions queued"
 section. --next-should holds just the paragraphs (the heading is kept). A field that cannot be found
-in the body is an error, never a guess. Lanes, inbox and tidy facts appear only for the private
-workspace hub: a public repo's comment must never carry lane reports or client lines.
+in the body is an error, never a guess. --next-should-machine holds this machine's own line, written under
+"### Next session should (MACHINE)" (replaced, or added after the roadmap's own section); any machine may write
+its own, none may write NX-01's. Lanes, inbox and tidy facts appear only for the private workspace hub: a public repo's comment must never carry lane reports or client lines.
 """
 
 import argparse
@@ -80,9 +81,31 @@ def _section_span(lines, heading_rx):
     return None
 
 
+NEXT_RX = r"###\s+Next session should\s*$"  # the roadmap's own line (NX-01's); "### Next session should (NCC-74656)" is a machine's line
+
+
 def _check_new(new):
     if new.count("<details") != new.count("</details>"):
         raise Fail("the replacement block has unbalanced <details> tags")
+
+
+def replace_next_machine(body, machine, new):
+    """Put a machine's own next-session line into the body: replace its "### Next session should (MACHINE)" section, or add one right
+    after the roadmap's own "### Next session should" section. Nothing else in the body moves."""
+    if not re.fullmatch(r"[\w.-]+", machine or ""):
+        raise Fail("machine name %r cannot be used in a heading" % machine)
+    if machine == "NX-01":
+        raise Fail("NX-01's next-session line is the roadmap's own: use --next-should")
+    lines = body.split("\n")
+    block = ["### Next session should (%s)" % machine, ""] + new.strip("\n").split("\n") + [""]
+    span = _section_span(lines, r"###\s+Next session should \(%s\)\s*$" % re.escape(machine))
+    if span:
+        s, e = span
+        return "\n".join(lines[:s] + block + lines[e:])
+    main = _section_span(lines, NEXT_RX)
+    if not main:
+        raise Fail('no "### Next session should" section in the body to put the machine line after')
+    return "\n".join(lines[:main[1]] + block + lines[main[1]:])
 
 
 def replace_field(body, field, new):
@@ -91,7 +114,7 @@ def replace_field(body, field, new):
     new = new.strip("\n")
     first = new.split("\n", 1)[0]
     if field == "next-should":
-        span = _section_span(lines, r"###\s+Next session should\b")
+        span = _section_span(lines, NEXT_RX)
         if not span:
             raise Fail('no "### Next session should" section in the body')
         s, e = span
@@ -130,7 +153,7 @@ def body_problems(body):
     probs = []
     for field, find, name in (("arc", lambda: _details_span(lines, r"<summary><b>Arc \d+\b"), "an Arc <details> block"),
                               ("next3", lambda: _details_span(lines, r"<summary><b>Next 3 sessions"), 'a "Next 3 sessions" <details> block'),
-                              ("next-should", lambda: _section_span(lines, r"###\s+Next session should\b"), 'a "### Next session should" section')):
+                              ("next-should", lambda: _section_span(lines, NEXT_RX), 'a "### Next session should" section')):
         try:
             span = find()
             if not span:
@@ -275,7 +298,7 @@ def comment_facts(f):
     return "\n".join(out).rstrip("\n")
 
 
-def render_comment(f, now, machine, where, session, note, next_should):
+def render_comment(f, now, machine, where, session, note, next_should, next_machine=""):
     ses = f", session {session}" if session else ""
     head = f"## Session ended {now.strftime('%Y-%m-%d %-I:%M %p %Z')} ({machine}, {where}{ses})"
     parts = [head, "", comment_facts(f) or "_Nothing shipped, opened or closed since the last comment._"]
@@ -283,6 +306,8 @@ def render_comment(f, now, machine, where, session, note, next_should):
         parts += ["", note.strip()]
     if next_should and next_should.strip():
         parts += ["", "**Next session should:** " + next_should.strip().split("\n\n")[0].replace("\n", " ")]
+    if next_machine and next_machine.strip():
+        parts += ["", "**Next session should (%s):** " % machine + next_machine.strip().split("\n\n")[0].replace("\n", " ")]
     return "\n".join(parts).rstrip("\n") + "\n"
 
 
@@ -431,7 +456,7 @@ def unattended_guard(ap, a):
         if getattr(a, k) != ap.get_default(k):
             raise Fail("an unattended lane may not set --%s" % k.replace("_", "-"), 2)
     hand = os.environ.get("AFA_LANE_HAND", "")
-    for k in ("arc", "next3", "next_should", "note"):
+    for k in ("arc", "next3", "next_should", "next_should_machine", "note"):
         p = getattr(a, k)
         if p is None:
             continue
@@ -451,6 +476,7 @@ def main(argv=None):
     ap.add_argument("--arc")
     ap.add_argument("--next3")
     ap.add_argument("--next-should")
+    ap.add_argument("--next-should-machine", help="file: this machine's own next-session line (any machine; the tower writes this one)")
     ap.add_argument("--note", help="file: extra comment sections (Roadmap changes, Watch)")
     ap.add_argument("--session", default=os.environ.get("CLAUDE_SESSION_ID", ""))
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
@@ -477,6 +503,7 @@ def run(a):
     where = str(Path(a.dir).resolve()).replace(str(HOME), "~")
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fields = {k: _fieldfile(getattr(a, k.replace("-", "_"))) for k in ("arc", "next3", "next-should")}
+    next_machine = _fieldfile(a.next_should_machine)
     note = _fieldfile(a.note)
 
     if not a.post:
@@ -511,6 +538,12 @@ def run(a):
                    "edit only your own lines by hand and post a note without the three fields")
     body = g["body"]
     changed = []
+    if next_machine.strip():
+        if g["repo"] != HUB_REPO:
+            raise Fail("--next-should-machine belongs to the hub roadmap only")
+        before = len(body)
+        body = replace_next_machine(body, g["machine"], next_machine)
+        changed.append("next-should (%s) (%+d bytes)" % (g["machine"], len(body) - before))
     for k, text in fields.items():
         if text:
             before = len(body)
@@ -519,7 +552,7 @@ def run(a):
     if changed and not (0.5 < len(body) / max(len(g["body"]), 1) < 2):
         raise Fail("the edited body changed size by more than half; refusing (a wrong span?)")
     body = refresh_stamp(body, g["tip_sha"], g["branch"], generated, g["num"])
-    comment = render_comment(f, now, g["machine"], where, a.session, note, fields["next-should"])
+    comment = render_comment(f, now, g["machine"], where, a.session, note, fields["next-should"], next_machine)
 
     if a.dry_run:
         print(f"DRY RUN for {g['repo']}#{g['num']}: nothing is posted or written.")
