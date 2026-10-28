@@ -16,6 +16,10 @@ REPOS=(
   "TortoiseWolfe/Eduity:$HOME/actions-runner-eduity"
   "TortoiseWolfe/ada-stair-generator:$HOME/actions-runner-ada-stair-generator"
 )
+# The runner's name is per machine, so one machine can never re-register (--replace) another's: NX-01 keeps the name its runners already
+# have; any other machine uses its own name from ~/.config/afa/machine, and only starts a runner whose folder exists on it.
+machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || echo unknown)
+if [ "$machine" = NX-01 ]; then runner_name=workstation-wsl2; else runner_name="$(printf '%s' "$machine" | tr 'A-Z_' 'a-z-')-wsl2"; fi
 state="$HOME/.claude/state/he-runner"
 mkdir -p "$state"
 log() { echo "$(date -u +%FT%TZ) $*" >> "$state/watch.log"; }
@@ -44,19 +48,20 @@ for pair in "${REPOS[@]}"; do
   fi
 
   if [ $check = 1 ]; then
-    online=$(timeout 30 gh api "repos/$repo/actions/runners" --jq '.runners[]|select(.name=="workstation-wsl2")|.status' 2>/dev/null)
+    online=$(timeout 30 gh api "repos/$repo/actions/runners" --jq '.runners[]|select(.name=="'"$runner_name"'")|.status' 2>/dev/null)
     if listener_up "$dir" && [ "$online" = online ]; then echo "$short: up"; else echo "$short: down"; rc=1; fi
     continue
   fi
 
   listener_up "$dir" && continue
+  if [ ! -d "$dir" ] && [ "$machine" != NX-01 ]; then log "$short: no runner folder on $machine; not this machine's runner"; continue; fi
   cd "$dir" || { log "$short: no runner directory $dir"; rc=1; continue; }
   if tail -5 runner-stdout.log 2>/dev/null | grep -q "registration has been deleted"; then
     # GitHub drops a runner that stayed offline for about 30 days. Register it again under the same name and label.
     log "$short: registration deleted by GitHub; re-registering"
     ./config.sh remove --local >/dev/null 2>&1
     tok=$(timeout 30 gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token 2>/dev/null)
-    if [ -z "$tok" ] || ! ./config.sh --unattended --url "https://github.com/$repo" --token "$tok" --name workstation-wsl2 --labels workstation --replace >/dev/null 2>&1; then
+    if [ -z "$tok" ] || ! ./config.sh --unattended --url "https://github.com/$repo" --token "$tok" --name "$runner_name" --labels workstation --replace >/dev/null 2>&1; then
       log "$short: re-register failed"; echo "re-register failed" > "$alert"; rc=1; continue
     fi
   fi
