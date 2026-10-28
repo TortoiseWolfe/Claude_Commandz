@@ -706,6 +706,14 @@ assert_exit 0 "$LAST_STATUS" '--send exits 0 once the words are in the transcrip
 assert_contains "$LAST_OUTPUT" 'confirmed in its transcript' '--send says it found the words in the transcript'
 rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
 
+# The transcript decides: a screen the checks cannot read (text still looks typed, no spinner) does not turn a delivered message into a
+# failure (28 Oct 2026: two recycles reported FAILED on the tower with the re-prime message already in the lane's transcript).
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"Hub: the screen is unreadable but this landed"}}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-typed" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'Hub: the screen is unreadable but this landed'
+assert_exit 0 "$LAST_STATUS" '--send exits 0 when the transcript holds the words even though the screen looks unchanged'
+assert_contains "$LAST_OUTPUT" 'confirmed in its transcript (the screen check could not tell)' 'the wording says the screen could not tell'
+rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+
 # A message typed while the lane is mid-turn is not a "user" turn in its transcript until the turn ends: Claude Code logs it at once as a
 # queue-operation "enqueue", then an attachment "queued_command" (seen in real lane transcripts, 21 Oct). --send used to print
 # NOT IN ITS TRANSCRIPT for every message that landed on a working lane.
