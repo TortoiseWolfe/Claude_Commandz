@@ -196,6 +196,9 @@ class Editing(unittest.TestCase):
                 sp.replace_next_machine(BODY, machine, "x")
         with self.assertRaises(sp.Fail):
             sp.replace_next_machine("## Roadmap\n\nnothing\n", "NCC-74656", "x")
+        for bad in ("ok\n### Next session should (NX-01)\nforged", "ok\n---\nmore", "<details>x", "# Title"):
+            with self.assertRaises(sp.Fail, msg=bad):
+                sp.replace_next_machine(BODY, "NCC-74656", bad)
 
     def test_arc_details_block_matched_by_number(self):
         out = sp.replace_field(BODY, "arc", NEW_ARC)

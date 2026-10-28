@@ -354,7 +354,8 @@ def parse_roadmap(body):
     # A machine's own line (28 Oct 2026): "### Next session should (NCC-74656)" holds what that machine's next session starts with.
     by_machine = {}
     for mm in re.finditer(r"^### Next session should \(([\w.-]+)\)[ \t]*\n+(.+?)(?:\n\s*\n|\Z)", body, re.M | re.S):
-        by_machine[mm.group(1)] = mm.group(2).replace("\n", " ")
+        if mm.group(1) != "NX-01" and mm.group(1) not in by_machine:  # NX-01's line is the roadmap's own; the first section of a name wins
+            by_machine[mm.group(1)] = mm.group(2).replace("\n", " ")
     return {"arcs": arcs, "next_session": ns, "next3": next3, "next_session_by": by_machine}
 
 
