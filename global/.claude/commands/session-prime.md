@@ -37,6 +37,8 @@ Read only what you need of the current body (`gh issue view <n> --repo <owner>/<
 
 **Workspace hub only:** the facts output ends with the tidy report for THIS machine's `~/repos`. If it prints anything, add or replace one backlog line, "**Tidy ~/repos (<MACHINE>)**", summarising each section with its count. Drop only your own machine's line when the report comes back empty. A tidy line without a machine name was written by NX-01.
 
+**Phase 3 of the token week (Tuesday 6:00 AM Eastern to the Wednesday 12:00 PM reset): nothing waits for the reset.** The hub holds no reserve for after it. In phase 3, never write a "Next session should" line or a "Next 3 sessions" step as "after the reset"; write it as "now", and start it. A lane that hits the limit writes handoff.md and resumes after noon (Jonathan, 28 Oct about 9:20 AM: "the closer we get the the reset, the less we need in reserve until we make sure to use what's left Tuesday night Wensday morning"). The digest's "Budget this week" section says "Phase 3: no reserve; start anything held for after the reset now" when it is phase 3.
+
 A field that cannot be found in the body is an error, not a guess; fix the file. Backlog items stay as they are; edit the body by hand (`gh issue edit`) only for something outside these three fields, and then run step 2 again afterwards so READ_AT is current.
 
 **Workspace hub on NCC-74656 (the tower):** NX-01 owns the hub roadmap's priorities. The script refuses `--arc`, `--next3` and `--next-should` there. Post a note only (its own tower follow-ups, items it finished) and edit just its own lines by hand.

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -250,6 +251,19 @@ class Page(unittest.TestCase):
                     budget="Week resets Wed: used 1%", now=NOW)
         args.update(kw)
         return hd.render(hd.build_sections(**args), NOW, "NX-01", hd.CAP_DEFAULT)
+
+    def test_budget_section_names_the_phase_and_phase_3_holds_no_reserve(self):
+        et = ZoneInfo("America/New_York")
+        def budget_lines(now):
+            secs = dict(hd.build_sections(**{**dict(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX,
+                                                    git_log="", tidy_text=TIDY, budget="Week resets Wed: used 1%"), "now": datetime.fromtimestamp(now.timestamp())}))  # the build uses naive local time
+            return secs["Budget this week"]
+        self.assertEqual(budget_lines(datetime(2026, 10, 28, 9, 0, tzinfo=et))[1],
+                         "Phase 3: no reserve; start anything held for after the reset now")  # Wed 9 AM, before the noon reset
+        self.assertEqual(budget_lines(datetime(2026, 10, 27, 20, 0, tzinfo=et))[1], "Phase 3: no reserve; start anything held for after the reset now")
+        self.assertEqual(budget_lines(datetime(2026, 10, 26, 12, 0, tzinfo=et))[1], "Phase 2 of 3")
+        self.assertEqual(budget_lines(datetime(2026, 10, 24, 12, 0, tzinfo=et))[1], "Phase 1 of 3")
+        self.assertNotIn("no reserve", " ".join(budget_lines(datetime(2026, 10, 28, 13, 0, tzinfo=et))))  # after the noon reset: phase 1 again
 
     def test_page_carries_every_section(self):
         page = self.build()
