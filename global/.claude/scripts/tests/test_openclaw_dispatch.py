@@ -10,6 +10,7 @@ import os
 import random
 import re
 import sys
+from unittest import mock
 import tempfile
 import time
 import unittest
@@ -1255,6 +1256,30 @@ class Sweep(Base):
         self.assertEqual(self.state()["opencode_blocked_until"], NOW + 100 + dp.OPENCODE_BLOCK_SECONDS)
         self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 200)[:2], ("claude", "own repo, OpenCode is out of usage"))
         self.assertEqual(dp.resolve_engine(self.state(), "opencode", NOW + 101 + dp.OPENCODE_BLOCK_SECONDS)[0], "opencode")
+
+    def test_an_engine_not_installed_on_this_machine_is_skipped_to_the_next_one(self):
+        with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": "codex,copilot"}), mock.patch.object(dp.shutil, "which", return_value=None):
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "codex")
+            self.assertIn("agy is not installed on this machine", r[1])
+            self.block(codex_blocked_until=NOW + 10**6)
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "copilot")
+            self.assertIn("agy is not installed", r[1])
+            self.assertIn("Codex is out of usage", r[1])
+
+    def test_with_every_engine_missing_the_lane_goes_to_claude(self):
+        with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": ""}), mock.patch.object(dp.shutil, "which", return_value=None):
+            r = dp.resolve_engine(self.state(), "agy", NOW)
+            self.assertEqual(r[0], "claude")
+            self.assertIn("not installed on this machine", r[1])
+
+    def test_engine_installed_reads_the_list_then_the_path(self):
+        with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": "agy"}), mock.patch.object(dp.shutil, "which", return_value=None):
+            self.assertTrue(dp.engine_installed("agy"))
+            self.assertFalse(dp.engine_installed("codex"))
+        with mock.patch.dict(os.environ, {"AFA_ENGINES_AVAILABLE": ""}), mock.patch.object(dp.shutil, "which", return_value="/usr/bin/codex"):
+            self.assertTrue(dp.engine_installed("codex"))
 
     def test_an_opencode_failure_that_is_not_about_quota_does_not_block_it(self):
         self.opencode_lane_with_log("opencode: model google/gemini-3-flash-preview\nError: the test suite failed")

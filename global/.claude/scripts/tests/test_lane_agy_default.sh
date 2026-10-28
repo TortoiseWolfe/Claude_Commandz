@@ -23,6 +23,9 @@ exit 0
 STUB
 chmod +x "$BIN/tmux" "$BIN/sleep"
 
+# This machine may not have agy; the engine check (tested in test_lane_engine_check.sh) must not hide what these tests are about.
+export AFA_ENGINES_AVAILABLE="*"
+
 checks=0
 fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
 ok() { checks=$((checks + 1)); }

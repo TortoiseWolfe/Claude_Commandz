@@ -1294,18 +1294,32 @@ def resolve_engine(state, engine, now):
     names = [e for e, _ in ENGINE_CHAIN]
     if engine not in names:
         return engine, None, ""
-    skipped = []
+    skipped, missing = [], []
     for e, label in ENGINE_CHAIN[names.index(engine):]:
+        if not engine_installed(e):
+            missing.append(label)
+            continue
         if state.get(e + "_blocked_until", 0) > now:
             skipped.append(label)
             continue
-        return (e, None, "") if not skipped else (e,) + _out_of_usage(skipped)
-    return ("claude",) + _out_of_usage(skipped)
+        return (e, None, "") if not (skipped or missing) else (e,) + _out_of_usage(skipped, missing)
+    return ("claude",) + _out_of_usage(skipped, missing)
 
 
-def _out_of_usage(skipped):
-    who = skipped[0] if len(skipped) == 1 else ", ".join(skipped[:-1]) + " and " + skipped[-1]
-    words = "%s %s out of usage" % (who, "is" if len(skipped) == 1 else "are")
+def engine_installed(e):
+    """True when this machine has the engine's program. AFA_ENGINES_AVAILABLE (a comma list, or *) overrides the PATH lookup, the same
+    switch lane.sh reads; the chain's engines are not all installed on every machine (the tower has no agy or OpenCode)."""
+    listed = [x.strip() for x in os.environ.get("AFA_ENGINES_AVAILABLE", "").split(",")]
+    return "*" in listed or e in listed or shutil.which(e) is not None
+
+
+def _out_of_usage(skipped, missing=()):
+    words = []
+    for names, tail in ((skipped, "out of usage"), (missing, "not installed on this machine")):
+        if names:
+            who = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+            words.append("%s %s %s" % (who, "is" if len(names) == 1 else "are", tail))
+    words = "; ".join(words)
     return "own repo, " + words, " (%s)" % words
 
 
