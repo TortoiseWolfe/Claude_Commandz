@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -127,6 +128,44 @@ class Parts(unittest.TestCase):
         self.assertEqual(len(groups["OpenClaw"]), 1)
         self.assertIn("Which sample check is current?", groups["OpenClaw"][0][1])
         self.assertNotIn("Old finished thing", str(groups))
+
+    def test_open_inbox_groups_the_towers_peer_lines(self):
+        text = """- [ ] 2026-10-12 08:00 | [NX-01>NCC-74656] Run the rebuild once | detail | r-1
+- [ ] 2026-10-19 08:00 | [MUSE>NCC-74656] Weekly to-do | detail | r-2
+- [ ] 2026-10-27 13:48 | Waiting on NX-01: How is the stream running? | detail | r-3
+- [ ] 2026-10-27 13:41 | Job: Host the band | detail | r-4
+- [x] 2026-10-16 12:00 | [NX-01>NCC-74656] Done already | detail | r-5
+"""
+        groups, _ = hd.open_inbox(text)
+        self.assertEqual([t for _, t in groups["From NX-01"]], ["Run the rebuild once"])
+        self.assertEqual([t for _, t in groups["From Muse"]], ["Weekly to-do"])
+        self.assertEqual([t for _, t in groups["NX-01"]], ["How is the stream running?"])
+        self.assertEqual(len(groups["jobs"]), 1)
+        self.assertEqual(groups["other"], [])
+
+    def test_a_machine_other_than_nx01_lists_every_open_peer_line_under_its_group(self):
+        lines = ["- [ ] 2026-10-27 13:%02d | [NX-01>NCC-74656] Note number %d | detail | r-%d" % (i, i, i) for i in range(9)]
+        text = "\n".join(lines) + "\n"
+        tower = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=text,
+                                            git_log="", tidy_text=TIDY, budget="b", now=NOW, machine="NCC-74656"), NOW, "NCC-74656", 100000)
+        self.assertIn("From NX-01 (9):", tower)
+        for i in range(9):
+            self.assertIn("Note number %d" % i, tower)
+        main = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=text,
+                                           git_log="", tidy_text=TIDY, budget="b", now=NOW), NOW, "NX-01", 100000)
+        self.assertIn("and 4 more", main)
+
+    def test_default_inbox_is_the_peer_inbox_off_nx01(self):
+        for machine, name in (("NX-01", "hub-inbox.md"), ("NCC-74656", "peer-inbox.md"), ("", "hub-inbox.md")):
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(hd, "HOME", Path(d)), mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HUB_INBOX", None)
+                os.environ.pop("MUSE_INBOX", None)
+                if machine:
+                    (Path(d) / ".config/afa").mkdir(parents=True)
+                    (Path(d) / ".config/afa/machine").write_text(machine + "\n")
+                self.assertEqual(Path(hd.default_inbox()).name, name, machine)
+        with mock.patch.dict(os.environ, {"HUB_INBOX": "/x/own.md"}):
+            self.assertEqual(hd.default_inbox(), "/x/own.md")
 
     def test_open_inbox_keeps_a_client_line_with_two_ids(self):
         line = "- [ ] 2026-10-17 21:09 | Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d 1792119952000\n"
