@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-16"?>
 <!--
-  Windows scheduled task for a machine that only keeps the fleet running (the tower): every 15 minutes it runs
+  Windows scheduled task for a machine that only keeps the fleet running (the tower): every 15 minutes and at sign-in it runs
   openclaw_status_refresh.sh, which on any machine other than NX-01 does the keeper steps only.
   No UserId is written, so Task Scheduler uses the user who registers it, and no password is stored:
   LogonType InteractiveToken runs only while that user is signed in. Automatic sign-in stays off.
@@ -26,6 +26,9 @@
     <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
   </Settings>
   <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
     <TimeTrigger>
       <StartBoundary>2026-10-28T00:00:00</StartBoundary>
       <Repetition>
