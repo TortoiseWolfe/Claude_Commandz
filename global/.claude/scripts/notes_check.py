@@ -243,6 +243,7 @@ def check_notes(processed_path, log):
 #   untagged H-7CH notes (no tag in the subject): same, but only if the ID is in the processed file AND the body is signed H-7CH.
 #   notes from us [CC>MUSE], [NX-01>NCC-74656]: deleted once handled (Label_32, or a later reply with the same topic in
 #                 its subject) or when 3 days old.
+# A subject naming NCC-74656 (any tag, any direction, "Re:" forms) is kept until 3 days old, whatever its labels or replies.
 # Everything else (no fleet tag: his real mail, client drafts) is counted and never touched. Gmail has no Trash for drafts,
 # so each draft's raw text is saved to ~/.claude/state/draft-sweep/YYYY-MM-DD.jsonl BEFORE it is deleted (the undo).
 # ---------------------------------------------------------------------------------------------------------------
@@ -251,6 +252,10 @@ INBOUND_TAGS = ("[MUSE>CC]", "[NCC-74656>NX-01]")
 OUTBOUND_TAGS = ("[CC>MUSE]", "[NX-01>NCC-74656]")
 INBOUND_MIN_AGE = 2 * 3600
 OUTBOUND_MAX_AGE = 3 * 86400
+# Any draft whose subject names the tower is the tower's to act on (28 Oct: [MUSE>NCC-74656] fell into the untagged
+# H-7CH branch, and the tower's poller sets Label_32 to mean "read", not "done"). Kept for 3 days whatever its labels,
+# replies or tag, until a shared tag table lands.
+TOWER_MARK = "NCC-74656"
 SWEEP_DIR = os.path.expanduser("~/.claude/state/draft-sweep")
 _REPLY_RE = re.compile(r"^\s*(re|fwd?|aw)\s*:", re.I)
 
@@ -376,6 +381,8 @@ def decide(rec, processed, now, cache, owner):
     age = now - rec["t"]
     ids = {rec["draft_id"], rec["message_id"]}
     handled = bool(ids & processed) or LABEL_CC_PROCESSED in rec["labels"]
+    if TOWER_MARK in (rec["subject"] or "").upper() and age < OUTBOUND_MAX_AGE:
+        return "keep", label or "[tower note]", "names NCC-74656, under 3 days old (the tower may not have acted on it)"
     if kind is None:
         if ids & processed and age > INBOUND_MIN_AGE and _signed_hatch(rec["draft_id"]):
             kind, label = "inbound", "untagged H-7CH"
