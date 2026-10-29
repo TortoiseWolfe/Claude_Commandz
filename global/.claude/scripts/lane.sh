@@ -1527,16 +1527,29 @@ PY
   }
   # Wait for queued input to run (a lane that is idle runs it at once), and if it is still there after LANE_RECYCLE_QUEUE_SECS press Escape
   # once, which puts it back in the input line (logged as popAll), then clear the line. Returns 1 when something is still queued.
+  # One exception: a lane that stayed idle through the whole wait and whose input line holds no normal-colour text (empty, or only Claude
+  # Code's dim suggestion) has nothing queued, whatever the log replay says. 29 Oct, job-leads-sweep: subagent hand-backs were enqueued as
+  # a task notification and as None but removed under their agent-message text, the replay's first-in-first-out dequeue popped the wrong
+  # entries, the count stuck at 2 and every recycle failed on an idle lane with an empty box. That count is stale: log it and go on.
   drain_queue() {
-    local end=$(( $(date +%s) + ${LANE_RECYCLE_QUEUE_SECS:-120} )) n
+    local end=$(( $(date +%s) + ${LANE_RECYCLE_QUEUE_SECS:-120} )) n idle_all=1 cpane
     while :; do
       n="$(queue_pending)"
       if [ "$n" = 0 ] && lane_idle; then return 0; fi
+      lane_idle || idle_all=0
       [ "$(date +%s)" -lt "$end" ] || break
       sleep 2
     done
     [ "$n" != 0 ] || return 1   # only a busy lane: the caller waits for idle itself
     lane_idle || return 1
+    if [ "$idle_all" = 1 ]; then
+      cpane="$(tmux capture-pane -e -p -t "$SESSION:$name" 2>/dev/null)" || cpane=""
+      if [ -n "$cpane" ] && pane_input_empty "$cpane"; then
+        echo "recycle $name: the transcript replay counts $n queued input(s), but the lane stayed idle for ${LANE_RECYCLE_QUEUE_SECS:-120}s and its input line holds no typed text; treating the count as stale and going on" >&2
+        printf '%s\t%s\tSTALE-QUEUE\treplay counted %s queued, lane idle with an empty input line\n' "$(date -Is)" "$name" "$n" >>"$rlog"
+        return 0
+      fi
+    fi
     tmux send-keys -t "$SESSION:$name" Escape; sleep 1
     tmux send-keys -t "$SESSION:$name" C-u; sleep 1
     [ "$(queue_pending)" = 0 ]
