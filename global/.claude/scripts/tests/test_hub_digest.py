@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 from zoneinfo import ZoneInfo
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -400,7 +400,7 @@ class Page(unittest.TestCase):
         log = "\n".join(f"abc{i:04d} 16 10:00 " + "message " * 40 for i in range(10))
         page = self.build(inbox_text=inbox, git_log=log)
         self.assertLessEqual(len(page.encode()), hd.CAP_DEFAULT)
-        self.assertLess(len(page.encode()), 6144)
+        self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
         self.assertIn("## Lanes running", page)
         self.assertIn("Next session should", page)
 
@@ -582,9 +582,70 @@ class Cli(unittest.TestCase):
             self.assertNotIn("Invented user words stay out of the digest.", page)
             self.assertIn("- mail-x: $41 (fable)", page)
             self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))
-            self.assertLess(len(page.encode()), 6144)
+            self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
             self.assertFalse((d / "state" / "hub-digest.md.tmp").exists())
+
+
+class MailIndexLines(unittest.TestCase):
+    """The "Incoming mail" section: counts by class, and every unhandled person, job and client-alert row (made-up data only)."""
+
+    def write(self, rows):
+        d = fresh_dir(self)
+        path = Path(d) / "mail-index.tsv"
+        head = "id\tthread\tdate\tclass\twho\taddress\tsubject\thandled\n"
+        lines = []
+        for i, (cls, hours_ago, handled) in enumerate(rows):
+            when = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append("\t".join([f"{i + 1:016x}", f"t{i}", when, cls, "who", f"a{i}@example.com", f"Subject {i}", handled]))
+        path.write_text(head + "\n".join(lines) + "\n")
+        return path
+
+    def test_counts_by_class_in_order_and_old_rows_not_counted(self):
+        path = self.write([("person", 1, ""), ("bounce", 2, ""), ("bulk", 3, ""), ("bulk", 4, ""), ("client", 5, ""), ("bulk", 100, "")])
+        lines = hd.mail_index_lines(path)
+        self.assertEqual(lines[0], "Last 2 days: 1 bounce, 1 client, 1 person, 2 bulk")
+
+    def test_unhandled_person_job_and_client_alert_rows_are_listed_clients_and_bounces_are_not(self):
+        path = self.write([("person", 1, ""), ("job", 2, ""), ("client-alert", 3, ""), ("client", 4, ""), ("bounce", 5, ""), ("bulk", 6, "")])
+        text = "\n".join(hd.mail_index_lines(path))
+        for cls in ("person", "job", "client-alert"):
+            self.assertIn(" %s " % cls, text)
+        self.assertNotIn("Subject 3", text.replace("Subject 2", ""))  # the client row (index 3) is not listed
+        self.assertEqual(len([l for l in hd.mail_index_lines(path) if l.startswith("- ")]), 3)
+
+    def test_subjects_are_quoted_so_they_read_as_data(self):
+        path = self.write([("person", 1, "")])
+        row = [l for l in hd.mail_index_lines(path) if l.startswith("- ")][0]
+        self.assertTrue(row.endswith('"Subject 0"'), row)
+
+    def test_handled_rows_are_hidden_and_an_empty_list_says_so(self):
+        path = self.write([("person", 1, "2026-10-29T12:00:00Z"), ("job", 2, "2026-10-29T12:00:00Z")])
+        lines = hd.mail_index_lines(path)
+        self.assertEqual(lines[1], "- no person, job or client-alert mail waiting")
+
+    def test_old_unhandled_rows_are_still_listed_newest_first(self):
+        path = self.write([("job", 200, ""), ("person", 100, "")])
+        rows = [l for l in hd.mail_index_lines(path) if l.startswith("- ")]
+        self.assertIn("person", rows[0])
+        self.assertIn("job", rows[1])
+
+    def test_more_than_the_shown_limit_ends_with_and_n_more(self):
+        n = hd.MAIL_ROWS_SHOWN + 3
+        path = self.write([("person", i + 1, "") for i in range(n)])
+        lines = hd.mail_index_lines(path)
+        self.assertEqual(len([l for l in lines if l.startswith("- ") and "more unhandled" not in l]), hd.MAIL_ROWS_SHOWN)
+        self.assertEqual(lines[-1], "- and 3 more unhandled (mail_index.py list)")
+
+    def test_missing_file_gives_none(self):
+        self.assertIsNone(hd.mail_index_lines(Path(fresh_dir(self)) / "nope.tsv"))
+
+    def test_a_bounce_inbox_line_reads_as_an_open_client_line(self):
+        line = "- [ ] 2026-10-29 12:54 | Client alert: BOUNCE gone@example.com | original 1a16ab0165dd16db | 2026-10-28 | 1a18275baa407e7e\n"
+        _, clients = hd.open_inbox(line)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0][1], "Client alert: BOUNCE gone@example.com")
+        self.assertEqual(hd.count_open_client_lines(line), 1)
 
 
 class Wiring(unittest.TestCase):
@@ -616,7 +677,7 @@ class LiveState(unittest.TestCase):
 
     def test_a_page_from_roadmap_shaped_text_is_small_complete_and_clean(self):
         page = self.page()
-        self.assertLess(len(page.encode()), 6144)
+        self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
         for h in hd.PAGE_HEADINGS:
             self.assertIn(h, page)
         self.assertIn("Next session should:", page)
