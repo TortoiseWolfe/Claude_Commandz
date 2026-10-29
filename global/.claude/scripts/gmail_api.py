@@ -16,8 +16,11 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py whoami                    the signed-in address (proves the token works)
   gmail_api.py labels                    label names and ids
   gmail_api.py draft-create --to A [--cc B] [--bcc C] --subject S (--html FILE | --text FILE) [--reply-to MESSAGE_ID]
-                             [--inline CID=FILE ...] [--attach FILE ...]
+                             [--inline CID=FILE ...] [--attach FILE ...] [--replace DRAFT_ID | --allow-second]
       --to/--cc/--bcc take one comma-separated string. --reply-to sets threadId, In-Reply-To and References.
+      --replace DRAFT_ID rewrites that draft in place (same id, same thread): the way to change a draft.
+      A new draft on a thread that already holds one is refused (two copies of one reply sitting in Drafts is how
+      a client got the same card twice); --allow-second adds another on purpose.
       --inline puts an image where the HTML says <img src="cid:CID">; --attach adds an ordinary attachment.
       This is the ONLY route for a draft to anyone but Jonathan: the connector rewrites every link, and
       ~/.claude/hooks/block-outbound.sh refuses connector create_draft/update_draft to anyone else.
@@ -401,19 +404,44 @@ def reply_context(message_id):
 
 # ---------------------------------------------------------------- commands
 
-def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=None, bcc=None, inline=None, attach=None):
+def drafts_on_thread(thread):
+    """Ids of the drafts already on a thread (the list call carries each draft's threadId)."""
+    ids, token = [], None
+    while True:
+        params = {"maxResults": 500}
+        if token:
+            params["pageToken"] = token
+        out = api("GET", "/drafts", params)
+        ids += [d["id"] for d in out.get("drafts", []) if d.get("message", {}).get("threadId") == thread]
+        token = out.get("nextPageToken")
+        if not token:
+            return ids
+
+
+def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=None, bcc=None, inline=None, attach=None,
+                 replace=None, allow_second=False):
+    """replace: id of a draft to rewrite in place (same id, never a second draft).
+    A new draft on a thread that already holds one is refused unless allow_second is set."""
     thread, reply = None, None
     if reply_to:
         thread, reply = reply_context(reply_to)
         if not subject:
             s = reply["subject"]
             subject = s if s.lower().startswith("re:") else "Re: " + s
+    if replace and not thread:
+        thread = api("GET", f"/drafts/{replace}", {"format": "minimal"})["message"].get("threadId")
+    if thread and not replace and not allow_second:
+        have = drafts_on_thread(thread)
+        if have:
+            raise GmailError(f"thread {thread} already has draft {', '.join(have)}: use --replace <id> to change it in place, "
+                             "or --allow-second to add another")
     msg = build_message(to, subject, html_body, text_body, cc, reply, bcc, inline, attach)
     body = {"message": {"raw": b64u_encode(msg.as_bytes())}}
     if thread:
         body["message"]["threadId"] = thread
-    d = api("POST", "/drafts", body=body)
-    return d
+    if replace:
+        return api("PUT", f"/drafts/{replace}", body=body)
+    return api("POST", "/drafts", body=body)
 
 
 def fetch_draft_raw(draft_id):
@@ -558,6 +586,8 @@ def main(argv=None):
     p = sub.add_parser("draft-create")
     p.add_argument("--to", required=True); p.add_argument("--cc"); p.add_argument("--bcc"); p.add_argument("--subject", default="")
     p.add_argument("--html"); p.add_argument("--text"); p.add_argument("--reply-to")
+    grp = p.add_mutually_exclusive_group()
+    grp.add_argument("--replace", metavar="DRAFT_ID"); grp.add_argument("--allow-second", action="store_true")
     p.add_argument("--inline", action="append", default=[], metavar="CID=FILE")
     p.add_argument("--attach", action="append", default=[], metavar="FILE")
     for n in ("draft-fix-links", "draft-delete"):
@@ -589,7 +619,8 @@ def main(argv=None):
                     raise GmailError(f"--inline wants CID=FILE, got {item!r}")
                 inline[cid] = path
             d = draft_create(a.to, a.subject, _read_file(a.html) if a.html else None,
-                             _read_file(a.text) if a.text else None, a.cc, a.reply_to, a.bcc, inline, a.attach)
+                             _read_file(a.text) if a.text else None, a.cc, a.reply_to, a.bcc, inline, a.attach,
+                             a.replace, a.allow_second)
             print(f"draftId: {d['id']}\nmessageId: {d['message']['id']}\nthreadId: {d['message'].get('threadId')}")
         elif a.cmd == "draft-fix-links":
             r = draft_fix_links(a.draft_id)

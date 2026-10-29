@@ -15,7 +15,7 @@ import threading
 import unittest
 import urllib.parse
 import urllib.request
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -255,6 +255,9 @@ class FakeGmail:
             if method == "DELETE":
                 del self.drafts[m[1]]
                 return 204, b""
+        if method == "GET" and path == "/drafts":
+            return 200, json.dumps({"drafts": [{"id": i, "message": {"id": d["message"]["id"], "threadId": d["message"]["threadId"]}}
+                                               for i, d in self.drafts.items()]}).encode()
         if path == "/labels":
             return 200, json.dumps({"labels": [{"id": i, "name": n} for i, n in self.labels.items()]}).encode()
         m = re.fullmatch(r"/messages/(\w+)/modify", path)
@@ -335,6 +338,62 @@ class Commands(Creds):
         self.assertEqual(d["message"]["threadId"], "TH7")
         m = email.message_from_bytes(g.b64u_decode(self.fake.drafts[d["id"]]["message"]["raw"]), policy=email.policy.default)
         self.assertEqual((m["In-Reply-To"], m["References"], m["Subject"]), ("<o1@x>", "<o0@x> <o1@x>", "Re: Hello"))
+
+    def reply_to_orig(self, thread="TH7"):
+        """A fake wrapper that answers the reply lookup for message 'orig' on the given thread."""
+        def with_msg(method, url, headers=None, body=None, timeout=60):
+            if "/messages/orig" in url:
+                return 200, json.dumps({"id": "orig", "threadId": thread, "payload": {"headers": [
+                    {"name": "Message-ID", "value": "<o1@x>"}, {"name": "Subject", "value": "Hello"}]}}).encode()
+            return self.fake(method, url, headers, body, timeout)
+        return mock.patch.object(g, "http_request", with_msg)
+
+    def posts(self):
+        return [c for c in self.fake.log if c[0] == "POST" and c[1] == "/drafts"]
+
+    def test_create_on_a_thread_with_a_draft_is_refused_and_writes_nothing(self):
+        old = self.fake.add(b"Subject: Re: Hello\r\n\r\nold\r\n", thread="TH7")
+        with self.reply_to_orig():
+            with self.assertRaisesRegex(g.GmailError, rf"{old}.*--replace.*--allow-second"):
+                g.draft_create("me@example.com", "A different subject", "<p>new</p>", reply_to="orig")
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(list(self.fake.drafts), [old])
+
+    def test_allow_second_adds_another_draft(self):
+        old = self.fake.add(b"Subject: Re: Hello\r\n\r\nold\r\n", thread="TH7")
+        with self.reply_to_orig():
+            d = g.draft_create("me@example.com", "", "<p>new</p>", reply_to="orig", allow_second=True)
+        self.assertNotEqual(d["id"], old)
+        self.assertEqual(len(self.fake.drafts), 2)
+
+    def test_a_draft_on_another_thread_does_not_block(self):
+        self.fake.add(b"Subject: other\r\n\r\nx\r\n", thread="TH9")
+        with self.reply_to_orig():
+            d = g.draft_create("me@example.com", "", "<p>new</p>", reply_to="orig")
+        self.assertEqual(d["message"]["threadId"], "TH7")
+        self.assertEqual(len(self.fake.drafts), 2)
+
+    def test_replace_rewrites_in_place_and_keeps_the_thread(self):
+        old = self.fake.add(b"Subject: old subject\r\n\r\nold\r\n", thread="TH7")
+        d = g.draft_create("me@example.com", "New subject", "<p>new body</p>", replace=old)
+        self.assertEqual(d["id"], old)
+        self.assertEqual(list(self.fake.drafts), [old])
+        self.assertEqual(self.fake.drafts[old]["message"]["threadId"], "TH7")
+        m = email.message_from_bytes(g.b64u_decode(self.fake.drafts[old]["message"]["raw"]), policy=email.policy.default)
+        self.assertEqual(m["Subject"], "New subject")
+        self.assertIn("new body", m.get_body(("html",)).get_content())
+        self.assertEqual(self.posts(), [])
+
+    def test_replace_with_reply_to_keeps_the_reply_thread_and_is_not_blocked_by_itself(self):
+        old = self.fake.add(b"Subject: Re: Hello\r\n\r\nold\r\n", thread="TH7")
+        with self.reply_to_orig():
+            d = g.draft_create("me@example.com", "", "<p>new</p>", reply_to="orig", replace=old)
+        self.assertEqual((d["id"], d["message"]["threadId"]), (old, "TH7"))
+        self.assertEqual(len(self.fake.drafts), 1)
+
+    def test_cli_replace_and_allow_second_cannot_be_combined(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            g.main(["draft-create", "--to", "a@b.co", "--subject", "S", "--text", __file__, "--replace", "r1", "--allow-second"])
 
     def test_label_unlabel_by_name_and_id(self):
         did = self.fake.add(b"Subject: s\r\nTo: a@b.co\r\n\r\nhi\r\n")
