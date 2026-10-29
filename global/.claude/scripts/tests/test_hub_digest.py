@@ -614,6 +614,11 @@ class MailIndexLines(unittest.TestCase):
         self.assertNotIn("Subject 3", text.replace("Subject 2", ""))  # the client row (index 3) is not listed
         self.assertEqual(len([l for l in hd.mail_index_lines(path) if l.startswith("- ")]), 3)
 
+    def test_subjects_are_quoted_so_they_read_as_data(self):
+        path = self.write([("person", 1, "")])
+        row = [l for l in hd.mail_index_lines(path) if l.startswith("- ")][0]
+        self.assertTrue(row.endswith('"Subject 0"'), row)
+
     def test_handled_rows_are_hidden_and_an_empty_list_says_so(self):
         path = self.write([("person", 1, "2026-10-29T12:00:00Z"), ("job", 2, "2026-10-29T12:00:00Z")])
         lines = hd.mail_index_lines(path)
