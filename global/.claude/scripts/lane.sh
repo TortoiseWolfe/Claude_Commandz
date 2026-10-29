@@ -80,6 +80,11 @@
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
+#   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
+#                                       as 'Bash(ssh:*)' or 'Bash(*deck_write*)'. Added to LANE_TOOLS_OFF in --disallowedTools. The rules are kept
+#                                       one per line in ~/.claude/state/lanes/.deny/<lane folder name>.txt (hub-owned: not inside the lane's own folder, which it
+#                                       may write), so --resume and --restart reuse them; each line is checked again on read. For lanes that
+#                                       read text strangers wrote (the weekly co-op Deck lane), so a planted instruction has no tool to act with.
 #   lane.sh --add-dir <path> ...        at start, --restart or --resume, repeatable: a folder outside the lane's own that it may read and write
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
@@ -224,7 +229,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -259,7 +264,7 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-add_dirs_opt=(); dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0
+add_dirs_opt=(); dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -285,6 +290,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--project-mcp requires a server name, or a comma list of them" >&2; exit 1; }
       project_mcp_opt="$2"; shift 2 ;;
     --project-mcp=*) project_mcp_opt="${1#*=}"; shift ;;
+    --deny)
+      [ $# -ge 2 ] || { echo "--deny requires a permission rule, e.g. --deny 'Bash(ssh:*)'" >&2; exit 1; }
+      deny_opt+=("$2"); shift 2 ;;
+    --deny=*) deny_opt+=("${1#*=}"); shift ;;
     --ask)
       [ $# -ge 2 ] || { echo "--ask requires an ask id (oc-xxxxxxxx)" >&2; exit 1; }
       ask_id="$2"; shift 2 ;;
@@ -375,6 +384,14 @@ if [ -n "$project_mcp_opt" ]; then
   [[ "$project_mcp_opt" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] \
     || { echo "--project-mcp needs server names of letters, digits, _ . - separated by commas, got: $project_mcp_opt" >&2; exit 1; }
   case "$mode" in start|resume) ;; *) echo "--project-mcp only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+fi
+if [ "${#deny_opt[@]}" -gt 0 ]; then
+  case "$mode" in start|resume) ;; *) echo "--deny only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+  [ "$engine" = claude ] || { echo "--deny only applies to Claude lanes (it feeds --disallowedTools), not $engine" >&2; exit 1; }
+  for _dn in "${deny_opt[@]}"; do
+    [[ "$_dn" =~ ^[A-Za-z][A-Za-z0-9_]*(\([^[:space:],]+\))?$ ]] \
+      || { echo "--deny needs a Claude Code permission rule with no spaces or commas, like Bash(ssh:*) or Bash(*deck_write*), got: $_dn" >&2; exit 1; }
+  done
 fi
 [ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
 [ -z "$ask_id" ] || [ "$mode" = start ] || { echo "--ask only applies when starting a lane" >&2; exit 1; }
@@ -839,7 +856,28 @@ print(json.dumps({n: "off" for n in sorted(names - keep)}, separators=(",", ":")
 ' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
 }
 
-claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b]
+# --deny rules live one per line in ~/.claude/state/lanes/.deny/<lane folder name>.txt, outside the lane's own folder (the lane may write
+# there, so a rule file in it could be emptied by the very text it guards against). Each line is checked again on read with the shape --deny
+# demands; a bad line withholds Bash, Write and Edit from the lane (fail closed) and warns. This prints the comma list a start or resume should pass: the rules given now, added to the
+# file's, or just the file's; "-" when there are none. A start (not a dry run) writes the file.
+deny_rules() {  # <lane folder> [write]
+  local f="$HOME/.claude/state/lanes/.deny/$(basename "$1").txt" r; local -a all=()
+  if [ -s "$f" ]; then
+    while IFS= read -r r; do
+      [ -z "$r" ] && continue
+      [[ "$r" =~ ^[A-Za-z][A-Za-z0-9_]*(\([^[:space:],]+\))?$ ]] || { echo "WARNING: $f holds a line that is not a permission rule ($r); starting the lane with Bash, Write and Edit withheld" >&2; printf 'Bash,Write,Edit'; return 0; }
+      all+=("$r")
+    done <"$f"
+  fi
+  for r in ${deny_opt[@]+"${deny_opt[@]}"}; do
+    case " ${all[*]:-} " in *" $r "*) ;; *) all+=("$r") ;; esac
+  done
+  if [ "${#all[@]}" -eq 0 ]; then printf -- '-'; return 0; fi
+  if [ "${2:-}" = write ] && [ "${#deny_opt[@]}" -gt 0 ] && [ "$dry" = 0 ]; then mkdir -p "$(dirname "$f")"; printf '%s\n' "${all[@]}" >"$f"; fi
+  local IFS=,; printf '%s' "${all[*]}"
+}
+
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b] [extra tool rules to deny: a,b or -]
   local json p s r mcp keep
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
@@ -882,7 +920,9 @@ print(",".join(out))
   fi
   json+='}'
   printf -- '--settings %q' "$json"
-  [ -z "$LANE_TOOLS_OFF" ] || printf -- ' --disallowedTools %q' "$LANE_TOOLS_OFF"
+  local off="$LANE_TOOLS_OFF"
+  [ -z "${7:-}" ] || [ "$7" = - ] || off="${off:+$off }${7//,/ }"
+  [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
   [ -f "$LANE_RULES" ] && printf -- ' --append-system-prompt-file %q' "$LANE_RULES"
   return 0
 }
@@ -1655,7 +1695,7 @@ if [ "$mode" = resume ]; then
     index_set "$name" 15 "$ad"
   fi
   adf="$(ad_flags "${ad:--}")"
-  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm")"
+  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm" "$(deny_rules "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" write)")"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $adf$flags"
@@ -1815,7 +1855,7 @@ if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).
   rk="${recycle_at_opt:-$(lane_recycle_k "$prev_rk" "$prompt" "$dir" "$conn")}"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "${project_mcp_opt:--}")"; eff="${eff:--}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "${project_mcp_opt:--}" "$(deny_rules "$hand" write)")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
