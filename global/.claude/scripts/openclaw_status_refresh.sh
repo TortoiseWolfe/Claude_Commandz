@@ -25,6 +25,10 @@ flock -n 9 || exit 0
 # 19 Oct: the bridge went quiet at 5:21 PM and 8:15 PM; see wsl_bridge_watchdog.py.
 timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || echo "openclaw_status_refresh: wsl bridge watchdog reports a problem (see ~/.claude/state/wsl-bridge/heal.log)" >&2
 
+# Recovery record and restarts (fleet-up.sh): when the heartbeat shows the machine was down, write the record and bring back the lanes and long
+# jobs. Idempotent and silent when nothing happened; it reads the machine name itself, so it runs on both machines before the machine switch.
+[ -x "$here/fleet-up.sh" ] && { timeout 150 "$here/fleet-up.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: fleet-up reports a problem" >&2; }
+
 # Recycle any lane past its own line, so recycling never depends on the hub having a watcher armed (26 Oct: between two hub sessions
 # nothing was armed and scout-run-2 went 128K to 163K and compacted on its own). The same decision as lane_watch.sh's poll loop, the same
 # thrash and queued-input guards, silent: it wakes nobody. The recycle itself runs detached (it takes minutes).
