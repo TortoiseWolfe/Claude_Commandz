@@ -38,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lane_handoff_summary import handoff_summary  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
-CAP_DEFAULT = 5800  # the page must stay under 6 KB
+CAP_DEFAULT = 6000  # the page must stay under 6 KB (PAGE_HARD_CAP is the check). 5800 until 29 Oct 2026: the page already sat at 5774,
+                    # so the hub's own-spend line would have pushed the "Waiting on Jonathan" items off the end; this fits it.
 BUDGET_TTL = 3600
 REPORT_WORD = {"yes": "written", "stale": "stale (new input or a job still running; not done)"}
 GIT_DATE = "format:%a %-I:%M %p"  # git log --date value: 12-hour clock
@@ -357,6 +358,44 @@ def phase_note(now):
     return f"Phase {phase} of 3"
 
 
+BUDGET_RESET_RE = re.compile(r"^Week resets \w{3} (\d{4})-(\d\d)-(\d\d) (\d{1,2}):(\d\d) (AM|PM)\b")
+
+
+def weekly_reset_ts(budget):
+    """The reset time the Budget section shows ("Week resets Wed 2026-11-04 12:00 PM EST: ..." from the quality report), as epoch
+    seconds; None when the line has no reset (budget unavailable)."""
+    m = BUDGET_RESET_RE.match(budget or "")
+    if not m:
+        return None
+    year, month, day, hour, minute, half = m.groups()
+    try:
+        from zoneinfo import ZoneInfo
+        from openclaw_dispatch import WEEK_TZ
+        return datetime(int(year), int(month), int(day), int(hour) % 12 + (12 if half == "PM" else 0), int(minute),
+                        tzinfo=ZoneInfo(WEEK_TZ)).timestamp()
+    except Exception:  # noqa: BLE001 - no reset figure is better than a broken digest
+        return None
+
+
+def week_start_ts(budget, now_ts):
+    """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
+    report's); without one it is the dispatcher's rule, the one place the Wednesday 12:00 PM Eastern boundary lives (the same call
+    phase_note makes). None when the dispatcher module can't be read."""
+    try:
+        from openclaw_dispatch import _week_edges
+        reset = _week_edges(now_ts, weekly_reset_ts(budget))[3]
+        return (reset - timedelta(days=7)).timestamp()  # wall-clock: a DST change in the week moves nothing
+    except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
+        return None
+
+
+def lane_spend_command(budget, now_ts):
+    """lane_spend.py --json, asked for the hub's use since the weekly reset whenever the week's start can be worked out."""
+    cmd = [sys.executable, str(Path(__file__).resolve().parent / "lane_spend.py"), "--json"]
+    start = week_start_ts(budget, now_ts)
+    return cmd + (["--week-start", str(int(start))] if start is not None else [])
+
+
 def tidy_summary(text):
     """tidy-report.sh prints '## heading' then item lines; keep the heading and a count."""
     out, head, n = [], None, 0
@@ -382,17 +421,39 @@ def _stamp(now):
 SPEND_TOP = 3
 
 
+def hub_spend_line(hub):
+    """The hub's own spend (lane_spend.py --json "hub"): today, then, when the JSON carries the week (hub.week: the digest asked for it
+    with --week-start), the dollars since the weekly reset and their share of all use, the typed-in sessions and their median context
+    a turn. 29 Oct: the hub was 40% of the week's use and the page showed lanes only. None when the JSON has no hub."""
+    if not isinstance(hub, dict) or "usd" not in hub:
+        return None
+    parts = [f"today ${hub['usd']:.0f}"]
+    wk = hub.get("week")
+    if isinstance(wk, dict):
+        parts.append(f"since the weekly reset ${wk.get('usd', 0):.0f} = {wk.get('share', 0) * 100:.0f}% of all use")
+        if wk.get("sessions"):
+            ctx = f"{wk['sessions']} session{'' if wk['sessions'] == 1 else 's'} typed in"
+            if wk.get("median_context"):
+                ctx += f", median context per turn {wk['median_context'] / 1000:.0f}K"
+                if wk.get("first_context"):
+                    ctx += f" (first turn {wk['first_context'] / 1000:.0f}K)"
+            parts.append(ctx)
+    return "- Hub (started in ~/repos, not a lane): " + "; ".join(parts)
+
+
 def spend_section(spend):
-    """Top lanes by API-equivalent spend today (lane_spend.py --json). 21 Oct: $303 went in one day, $85 of it on one mail lane, unseen.
-    spend: the parsed JSON, a string (why it is unavailable), or None (not measured)."""
-    title = f"Lane spend today (API-equivalent, top {SPEND_TOP}; a lane past $25 wakes the hub)"
+    """The hub's own spend, then the top lanes by API-equivalent spend today (lane_spend.py --json). 21 Oct: $303 went in one day, $85
+    of it on one mail lane, unseen. spend: the parsed JSON, a string (why it is unavailable), or None (not measured)."""
+    title = f"Spend today (API-equivalent; the hub, then top {SPEND_TOP} lanes; a lane past $25 wakes the hub)"
     if isinstance(spend, str):
         return (title, [f"- unavailable: {one_line(spend, 200)}"])
     if not isinstance(spend, dict):
         return (title, ["- not measured"])
     lanes = spend.get("lanes") or []
-    lines = [f"- {l['name']}: ${l['usd']:.0f} ({'+'.join(sorted(l.get('families') or {}, key=lambda k: -l['families'][k]))})"
-             for l in lanes[:SPEND_TOP]]
+    hub_line = hub_spend_line(spend.get("hub"))
+    lines = [hub_line] if hub_line else []
+    lines += [f"- {l['name']}: ${l['usd']:.0f} ({'+'.join(sorted(l.get('families') or {}, key=lambda k: -l['families'][k]))})"
+              for l in lanes[:SPEND_TOP]]
     lines.append(f"- all lanes and the hub together: ${spend.get('total', 0):.0f}")
     return (title, lines)
 
@@ -619,7 +680,7 @@ def main(argv=None):
         except (OSError, ValueError) as exc:
             spend = "could not read the spend file: %s" % type(exc).__name__
     elif not a.roadmap_file:
-        raw = _run([sys.executable, str(Path(__file__).resolve().parent / "lane_spend.py"), "--json"], timeout=90)
+        raw = _run(lane_spend_command(budget, now.timestamp()), timeout=90)
         try:
             spend = json.loads(raw)
         except ValueError:
