@@ -123,6 +123,29 @@ ok 'that drop is logged' 1 "$(grep -c "dropped $id_notid: no thread ID" "$ST/mus
 ok 'a labels field that is not label IDs is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_badlabels")"
 ok 'real label IDs with spaces and a user label pass' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_goodlabels |")"
 
+# A payment row that names a whole domain also catches that domain's marketing. Gmail files marketing under
+# CATEGORY_PROMOTIONS; for kind=payment senders that message is dropped, the real notice still comes out, and a
+# Promotions message from a non-payment client is left alone (a client's mail can be mis-filed).
+id_promo=$(printf '%016x' $(( (now_ms2 << 20) | 71111 )))
+id_notice=$(printf '%016x' $(( (now_ms2 << 20) | 72222 )))
+id_promo_mail=$(printf '%016x' $(( (now_ms2 << 20) | 73333 )))
+id_promo_other=$(printf '%016x' $(( (now_ms2 << 20) | 74444 )))
+printf 'client\trepo_dir\tkind\tgmail_from\nPayroll\t/x\tpayment\tpayco.example.test\nShop\t/x\tmail\tshop.example.test\n' >"$TMP/senders.tsv"
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+cat <<OUT
+MSG $id_promo | news@payco.example.test | PayCo <news@payco.example.test> | Save big this week | Sat, 17 Oct 2026 21:00:00 | CATEGORY_PROMOTIONS,UNREAD,INBOX | $id_promo
+MSG $id_notice | no-reply@payco.example.test | PayCo <no-reply@payco.example.test> | Payroll processed | Sat, 17 Oct 2026 21:00:00 | INBOX,UNREAD | $id_notice
+MSG $id_promo_mail | no-reply@payco.example.test | PayCo <no-reply@payco.example.test> | Another offer | Sat, 17 Oct 2026 21:00:00 | CATEGORY_PROMOTIONS,UNREAD | $id_promo_mail
+MSG $id_promo_other | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Sat, 17 Oct 2026 21:00:00 | CATEGORY_PROMOTIONS,UNREAD,INBOX | $id_promo_other
+OUT
+MOCK
+out=$(check)
+ok 'a Promotions message from a payment sender is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_promo" || true)"
+ok 'a Promotions no-reply message from a payment sender is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_promo_mail" || true)"
+ok 'the payment notice from the same domain still comes out' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_notice |")"
+ok 'a Promotions message from a non-payment client still comes out' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_promo_other |")"
+
 # No model pass: the stub is called as `messages-list <query>` and nothing else, and its IDs come out byte for byte.
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash

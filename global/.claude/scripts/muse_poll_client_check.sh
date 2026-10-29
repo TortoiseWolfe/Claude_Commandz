@@ -7,7 +7,8 @@
 #   NEW <message id> | <From> | <Subject> | <Date>
 # Only mail a client actually sent counts: the check prints each message's labels, and anything labelled
 # DRAFT or SENT (our own drafts and replies, which ride along inside a matched thread) is dropped, as is any
-# line with no labels field (fail closed).
+# line with no labels field (fail closed). For kind "payment" senders, mail Gmail files under Promotions
+# (CATEGORY_PROMOTIONS) is dropped too: a payment row names the whole domain, which also sends marketing.
 # A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # and nothing when there is nothing new. Senders of no-reply@ or noreply@ are skipped UNLESS they match a
@@ -83,8 +84,12 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   [[ -n "$ok" ]] || continue
   # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.
   tag=""
+  pay=""; while IFS= read -r p; do sender_is "$addr" "$p" && { pay=1; break; }; done <<<"$paypats"
+  # A payment row often names a whole domain (Gusto's), and that domain also mails marketing. Gmail files that
+  # under Promotions, so for payment senders a Promotions message is not a payment notice and is dropped (28 Oct:
+  # a promo was queued as client mail).
+  [[ -n "$pay" && "$labels" == *CATEGORY_PROMOTIONS* ]] && continue
   if [[ "$addr" == no-reply@* || "$addr" == noreply@* ]]; then
-    pay=""; while IFS= read -r p; do sender_is "$addr" "$p" && { pay=1; break; }; done <<<"$paypats"
     [[ -n "$pay" ]] || tag=" ALERT"
   fi
   grep -qxF "$id" "$SEEN" && continue
