@@ -113,6 +113,6 @@ case "$LAST_OUT" in *stale3*) fail "--list shows a stale job: $LAST_OUT" ;; *) o
 kill "$victim" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
 
 # The header says the timeout counts run time only and warns about outer timeouts.
-grep -q 'counts RUN time only' "$SCRIPT" && grep -q 'outer timeout shorter than 3600' "$SCRIPT" || fail "the header explains the timeout"; ok
+grep -q 'counts RUN time only' "$SCRIPT" && grep -q 'must not wrap docker-heavy.sh in an outer' "$SCRIPT" || fail "the header explains the timeout"; ok
 
 echo "ok - $checks checks passed"
