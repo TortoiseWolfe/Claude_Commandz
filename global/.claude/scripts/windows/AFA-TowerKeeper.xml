@@ -2,12 +2,13 @@
 <!--
   Windows scheduled task for a machine that only keeps the fleet running (the tower): every 15 minutes and at sign-in it runs
   openclaw_status_refresh.sh, which on any machine other than NX-01 does the keeper steps only.
-  No UserId is written, so Task Scheduler uses the user who registers it, and no password is stored:
-  LogonType InteractiveToken runs only while that user is signed in. Automatic sign-in stays off.
+  No password is stored: LogonType InteractiveToken runs only while the user is signed in. Automatic sign-in stays off.
+  The checked-in file has no UserId. A LogonTrigger without one fires for any user's sign-in, and Windows then refuses to register
+  the task without administrator rights ("Access is denied"), so the install script fills the signed-in user (from whoami.exe)
+  into the LogonTrigger first.
 
-  Install (from WSL, as the signed-in user):
-    iconv -f UTF-8 -t UTF-16 ~/.claude/scripts/windows/AFA-TowerKeeper.xml > /tmp/AFA-TowerKeeper.utf16.xml
-    schtasks.exe /create /tn '\AFA\TowerKeeper' /xml "$(wslpath -w /tmp/AFA-TowerKeeper.utf16.xml)"
+  Install (from WSL, as the signed-in user; nothing to type but this):
+    ~/.claude/scripts/windows/install-tower-keeper.sh          (give it the argument print to see the filled-in XML and register nothing)
   Check that no password is stored:  schtasks.exe /query /tn '\AFA\TowerKeeper' /xml
 -->
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
