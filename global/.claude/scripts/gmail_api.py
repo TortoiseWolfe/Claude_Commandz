@@ -31,6 +31,7 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py draft-delete DRAFT_ID
   gmail_api.py drafts-list [QUERY]
   gmail_api.py messages-list QUERY [--limit N]   (read-only: MSG id | address | From | Subject | Date | labels | threadId)
+  gmail_api.py message-header ID NAME   (read-only: one header's value, empty if absent; no body)
 
 Credentials (mode 600, never printed): ~/.config/afa/gmail/client.json (OAuth Desktop client),
 ~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). AFA_GMAIL_ACCOUNT, if set, is the consent screen's login hint.
@@ -572,6 +573,15 @@ def messages_list(query, limit=100):
     return lines
 
 
+def message_header(message_id, name):
+    """Read-only. The value of one header of one message (metadata format: no body, no snippet), empty if absent."""
+    m = _api_retry("GET", f"/messages/{message_id}", {"format": "metadata", "metadataHeaders": [name]})
+    for x in m.get("payload", {}).get("headers", []):
+        if x["name"].lower() == name.lower():
+            return _one_line(x["value"])
+    return ""
+
+
 def _read_file(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -597,6 +607,7 @@ def main(argv=None):
         p = sub.add_parser(n); p.add_argument("draft_id"); p.add_argument("label")
     p = sub.add_parser("drafts-list"); p.add_argument("query", nargs="?", default=""); p.add_argument("--limit", type=int, default=25)
     p = sub.add_parser("messages-list"); p.add_argument("query"); p.add_argument("--limit", type=int, default=100)
+    p = sub.add_parser("message-header"); p.add_argument("message_id"); p.add_argument("name")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "auth":
@@ -640,6 +651,8 @@ def main(argv=None):
         elif a.cmd == "messages-list":
             for line in messages_list(a.query, a.limit):
                 print(line)
+        elif a.cmd == "message-header":
+            print(message_header(a.message_id, a.name))
     except GmailError as e:
         print(f"gmail_api: {e}", file=sys.stderr)
         return 1

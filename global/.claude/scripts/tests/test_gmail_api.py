@@ -441,6 +441,18 @@ class Commands(Creds):
         self.assertEqual({m for m, _ in self.fake.log}, {"GET"})
         self.assertFalse([c for c in self.fake.log if "send" in c[1].lower()])
 
+    def test_message_header_reads_one_header_only_and_is_read_only(self):
+        self.add_message("1a15559aee5b0b47", "a@example.test")
+        self.fake.messages["1a15559aee5b0b47"]["headers"]["X-Failed-Recipients"] = "gone@example.test"
+        self.assertEqual(g.message_header("1a15559aee5b0b47", "x-failed-recipients"), "gone@example.test")
+        self.assertEqual(g.message_header("1a15559aee5b0b47", "X-Nope"), "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(g.main(["message-header", "1a15559aee5b0b47", "X-Failed-Recipients"]), 0)
+        self.assertEqual(out.getvalue().strip(), "gone@example.test")
+        self.assertNotIn("SECRET BODY TEXT", out.getvalue())
+        self.assertEqual({m for m, _ in self.fake.log}, {"GET"})
+
     def test_messages_list_limit_and_empty(self):
         for i in range(5):
             self.add_message(f"1a15559aee5b0b4{i}", "a@example.test")
