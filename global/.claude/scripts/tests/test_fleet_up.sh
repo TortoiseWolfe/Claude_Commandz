@@ -41,8 +41,8 @@ setup() {  # <machine>
 }
 run() { FLEET_NOW=$NOW bash "$HERE/fleet-up.sh" "$@"; }
 NOW=1793200000
-addlane() {  # <name> [with-handoff]
-  printf '%s\t%s\t%s\t%s\tsubscription\tp\tr\tsid\t1\t-\ton\t-\t-\t-\n' "2026-10-28" "$1" "$HOME/work" sonnet >>"$S/lanes/index.tsv"
+addlane() {  # <name> [with-handoff] [extra folders, colon list: index column 15]
+  printf '%s\t%s\t%s\t%s\tsubscription\tp\tr\tsid\t1\t-\ton\t-\t-\t-\t%s\n' "2026-10-28" "$1" "$HOME/work" sonnet "${3:--}" >>"$S/lanes/index.tsv"
   [ "${2:-}" = handoff ] && { mkdir -p "$S/lanes/$1"; echo "next step" >"$S/lanes/$1/handoff.md"; }
 }
 
@@ -70,7 +70,8 @@ check "no incident, no inbox line" '[ ! -e $S/peer-inbox.md ]'
 
 # 3. a crash: gap, dead lanes, services, record, inbox, idempotence
 setup NCC-74656
-addlane 2026-10-28-alpha handoff; addlane 2026-10-28-beta; addlane 2026-10-28-cli handoff
+mkdir -p "$HOME/stream"
+addlane 2026-10-28-alpha handoff "$HOME/stream"; addlane 2026-10-28-beta; addlane 2026-10-28-cli handoff
 printf '2026-10-28-alpha\n2026-10-28-beta\n2026-10-28-cli\n' >"$S/lanes/live.tsv"
 printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
 printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
@@ -93,6 +94,7 @@ check "record has event 1074 with who and why" 'grep -q "event 1074.*restart or 
 check "record has Windows start and sign-in" 'grep -q "Windows started" "$rec" && grep -q "Signed in" "$rec"'
 check "record says no battery" 'grep -q "Battery or UPS: none" "$rec"'
 check "alpha restarted fresh with --restart" 'grep -q -- "--restart.* 2026-10-28-alpha $HOME/work sonnet" $FAKE_DIR/lane.log'
+check "a restart passes the lane's extra folder (--add-dir)" 'grep -q -- "--restart.*--add-dir $HOME/stream 2026-10-28-alpha" $FAKE_DIR/lane.log'
 check "restart never uses --resume" '! grep -q -- "--resume" $FAKE_DIR/lane.log'
 check "lane with no handoff.md is not restarted" '! grep -q "2026-10-28-beta" $FAKE_DIR/lane.log && grep -q "beta: not restarted, no handoff.md" "$rec"'
 check "a refusal from lane.sh lands in the record" 'grep -q "cli: lane.sh refused" "$rec"'

@@ -228,10 +228,10 @@ back=()   # "time | what" lines, in the order they happened
 note_back() { back+=("$(clock "${FLEET_NOW:-$(date +%s)}") | $1"); }
 
 restart_lane() {  # <name>: start it fresh from its hand-off
-  local name=$1 row dir model billing eff conn recyc ent pmcp hand args out
+  local name=$1 row dir model billing eff conn recyc ent pmcp adirs hand args out ad
   row=$(awk -F'\t' -v n="$name" '$2==n{r=$0} END{if(r)print r}' "$LANES/index.tsv" 2>/dev/null)
   [ -n "$row" ] || { note_back "lane $name: not restarted, no index row"; return; }
-  IFS=$'\t' read -r _ _ dir model billing _ _ _ _ eff conn recyc ent pmcp <<<"$row"
+  IFS=$'\t' read -r _ _ dir model billing _ _ _ _ eff conn recyc ent pmcp adirs <<<"$row"
   hand="$LANES/$name"
   [ -s "$hand/handoff.md" ] || { note_back "lane $name: not restarted, no handoff.md in $hand"; return; }
   case "$billing" in console|subscription) ;; *) note_back "lane $name: not restarted, it ran on engine $billing (start it by hand)"; return ;; esac
@@ -243,6 +243,10 @@ restart_lane() {  # <name>: start it fresh from its hand-off
   [ "${conn:-}" = off ] && args+=(--no-connectors) || args+=(--connectors)
   [ -n "${ent:-}" ] && [ "$ent" != - ] && args+=(--allow-high-tier "$ent")
   [ -n "${pmcp:-}" ] && [ "$pmcp" != - ] && args+=(--project-mcp "$pmcp")
+  if [ -n "${adirs:-}" ] && [ "$adirs" != - ]; then   # extra folders the lane started with (lane.sh --add-dir, index column 15)
+    local -a adl=(); IFS=: read -ra adl <<<"$adirs"
+    for ad in "${adl[@]}"; do [ -d "$ad" ] && args+=(--add-dir "$ad"); done
+  fi
   if [ "$dry" = 1 ]; then echo "would run: $LANE_SH ${args[*]} $name $dir $model $note"; rm -f "$note"; return; fi
   if out=$("$LANE_SH" "${args[@]}" "$name" "$dir" "$model" "$note" 2>&1); then
     note_back "lane $name restarted fresh from its hand-off (model $model)"
