@@ -44,8 +44,8 @@
 # first. Both free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
 # like Codex/Copilot: git, tests and the report are the lane's own. Order for his own-repo code lanes: agy, codex, copilot, opencode, then Claude Sonnet.
 #
-# 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/ or site-model (3D fitting, photo
-# matching, site models) starts or resumes only on fable or opus, each at effort high.
+# 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/, site-model, band-wagon/stage or turnaround (3D fitting, photo
+# matching, site models, Blender character work) starts or resumes only on fable or opus, each at effort high.
 # sonnet, haiku or any other model name is refused, on start, --console, --headless and --resume alike. --allow-low-tier bypasses it.
 #
 # Mail tier (his rule, 21 Oct 7:15 PM: "why are you burning Fable on emails!"; one day of mail lanes on fable and opus was $85 of $303):
@@ -84,6 +84,8 @@
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
+#   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, console
+#                                       --headless), "dead <cmd>" when the pane shows a bare shell or nothing; lane_watch.sh wakes the hub on dead
 #   lane.sh --tier <name>               "<model> TAB <reason>": the model in the lane's row and the --allow-high-tier reason written there ("-" = none;
 #                                       "site-model" for a site-model prompt). lane_watch.sh names a live lane on opus or fable with no reason.
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
@@ -243,7 +245,7 @@ Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they are recycled at their own line (--recycle-at <K>, default by kind of work) and compact in place only as a backstop above it.
 Claude lanes start without the claude.ai connectors, the workspace CLAUDE.md and a set of plugins.
 --connectors keeps connectors; --no-connectors disables them even when the name or prompt would enable them.
-A Claude lane whose prompt names data/sites/ or site-model (3D and photo-match work) runs only on fable or opus;
+A Claude lane whose prompt names data/sites/, site-model, band-wagon/stage or turnaround (3D, photo-match and Blender character work) runs only on fable or opus;
 sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
@@ -312,6 +314,7 @@ while [ $# -gt 0 ]; do
     --ctx) mode=ctx; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
+    --pane) mode=pane; shift ;;
     --tier) mode=tier; shift ;;
     --resume) mode=resume; shift ;;
     *) break ;;
@@ -641,13 +644,15 @@ is_claude_model() {
 }
 
 # 3D fitting, photo matching and site-model work is judgment work, never execution (his rule, 19 Oct: "using the lower
-# models isn't a savings if it's not capable of doing the job"). A prompt that names data/sites/ or site-model runs on
+# models isn't a savings if it's not capable of doing the job"). A prompt that names data/sites/, site-model, band-wagon/stage or turnaround runs on
 # fable or opus only; anything else (sonnet, haiku, an unnamed default) is refused unless --allow-low-tier is passed.
+# What counts as 3D work in a prompt: site models, plus Blender character work (the Band Wagon stage and turnaround sheets, 29 Oct 2026).
+SITE_PROMPT_RE='data/sites/|site-model|band-wagon/stage|turnaround'
 site_tier_ok() {  # <model> <prompt-file>
   [ "$allow_low_tier" = 1 ] && return 0
-  grep -qE 'data/sites/|site-model' -- "$2" 2>/dev/null || return 0
+  grep -qE "$SITE_PROMPT_RE" -- "$2" 2>/dev/null || return 0
   case "${1,,}" in *opus*|*fable*) return 0 ;; esac
-  echo "refusing model ${1:-(none)}: the prompt names data/sites/ or site-model, and 3D fitting, photo matching and site-model work runs only on fable or opus, each at effort high; never Sonnet or Haiku (rule: ~/repos/hub/lane-rules.md, 19 Oct). Pass --allow-low-tier to override." >&2
+  echo "refusing model ${1:-(none)}: the prompt names data/sites/, site-model, band-wagon/stage or turnaround, and 3D fitting, photo matching, Blender character work and site-model work runs only on fable or opus, each at effort high; never Sonnet or Haiku (rule: ~/repos/hub/lane-rules.md, 19 Oct). Pass --allow-low-tier to override." >&2
   return 1
 }
 
@@ -665,7 +670,7 @@ mail_lane() {  # <name> <prompt-file>
 mail_tier_ok() {  # <model> <name> <prompt-file> [verb]
   case "${1,,}" in *opus*|*fable*) ;; *) return 0 ;; esac
   mail_lane "$2" "${3:-}" || return 0
-  grep -qE 'data/sites/|site-model' -- "${3:-/nonexistent}" 2>/dev/null && return 0
+  grep -qE "$SITE_PROMPT_RE" -- "${3:-/nonexistent}" 2>/dev/null && return 0
   if [ -n "$allow_high_reason" ]; then
     if [ "$dry" = 1 ]; then echo "# would log the mail-tier override for $2 ($1) to $LANE_TIER_LOG"
     else
@@ -685,7 +690,7 @@ mail_tier_ok() {  # <model> <name> <prompt-file> [verb]
 # and lane_watch.sh names any live lane on opus or fable with no reason (lane.sh --tier prints "<model> TAB <reason>").
 one_line() { printf '%s' "$1" | tr '\t\n' '  '; }
 is_high_model() { case "${1,,}" in *opus*|*fable*) return 0 ;; *) return 1 ;; esac; }
-site_prompt() { grep -qE 'data/sites/|site-model' -- "${1:-/nonexistent}" 2>/dev/null; }
+site_prompt() { grep -qE "$SITE_PROMPT_RE" -- "${1:-/nonexistent}" 2>/dev/null; }
 high_tier_ok() {  # <model> <name> <prompt-file> [recorded reason]
   is_high_model "$1" || return 0
   [ -z "${4:-}" ] || [ "${4:-}" = - ] || return 0
@@ -754,7 +759,7 @@ lane_connectors() {  # <name> <prompt-file>
 # a cycle must give at least 50K of working room above its priming, which puts the ops default (primes at 57K) 10K higher.
 lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | code
   local t; t="$(head -c 6000 -- "$1" 2>/dev/null | tr 'A-Z' 'a-z')$(tr 'A-Z' 'a-z' <<<"$2")"
-  if command grep -qE 'data/sites|site-model|sketchup|photogrammetry|blender' <<<"$t"; then echo 3d
+  if command grep -qE 'data/sites|site-model|band-wagon/stage|turnaround|sketchup|photogrammetry|blender' <<<"$t"; then echo 3d
   elif [ "${3:--}" = on ] || command grep -qE 'gmail|inbox|email|absorb|\bmail\b' <<<"$t"; then echo mail
   elif command grep -qE 'portainer|traefik|nextcloud|docker compose|deploy|watchdog|cron|systemd|\bops\b' <<<"$t"; then echo ops
   else echo code; fi
@@ -767,6 +772,8 @@ default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
   local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
     ops) k=110 ;;
+    # 3d: the allowed maximum. A fresh 3D Opus lane starts near 45K and its thinking-heavy turns refill 80K in about 15 minutes (29 Oct 2026).
+    3d) k=150 ;;
     *) k=100 ;;
   esac
   if [ "${2:--}" = on ] && [ "$k" -lt "$floor" ]; then k=$floor; fi
@@ -1051,6 +1058,19 @@ if [ "$mode" = status ]; then
   exit 0
 fi
 
+# What a lane's tmux pane is running (empty when the window or pane is gone).
+pane_cmd() { tmux display -p -t "$SESSION:$1" '#{pane_current_command}' 2>/dev/null || true; }
+# True when the pane runs Claude Code: its process shows as claude, node, or a version string such as 2.1.40. A bare shell (bash, zsh, sh)
+# or an empty answer is a dead lane: 28 Oct 2026 a lane killed its own claude with pgrep -f and sat at a bash prompt for 3 hours, while
+# --send and --recycle typed two messages into bash. Headless lanes have no pane; callers skip them, as send_held does.
+pane_is_claude() {  # <name>
+  case "$(pane_cmd "$1")" in
+    claude|node) return 0 ;;
+    [0-9]*.[0-9]*.[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Type <text> into a lane window and confirm it landed (used by --send and --recycle). Returns 0 only when the words are in the lane's transcript.
 send_to() {  # <name> <text...>
   [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; return 1; }
@@ -1066,6 +1086,11 @@ send_to() {  # <name> <text...>
   fi
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
     || { echo "no window named $name in $SESSION" >&2; return 1; }
+  # Liveness gate: type only into a pane that is running Claude (a console --headless lane has an out.log and no pane).
+  if { [ -z "${rep:-}" ] || [ ! -e "$(dirname "$rep")/out.log" ]; } && ! pane_is_claude "$name"; then
+    echo "not sent: $name is not running claude (pane shows $(pane_cmd "$name" | sed 's/^$/nothing/'))" >&2
+    return 1
+  fi
   target="$SESSION:$name"
   took() {  # poll up to ~$1 seconds for: input line empty and a spinner on screen
     local i pane
@@ -1077,21 +1102,36 @@ send_to() {  # <name> <text...>
   }
   # Delivered means the words are in the lane's own transcript, not only that the input line emptied (19 Oct: "I can't have you
   # dropping messages"). The transcript is the session's jsonl under ~/.claude/projects/<dir slug>, plus any written in the last 10 minutes.
+  # Only the lane's OWN transcript counts (the row's id, followed to the live session), and the LAST 120 characters of the text, where the
+  # "(recycle <id>)" marker sits: 28 Oct 2026 two lanes in one folder got recycle requests identical in their first 200 characters, and the
+  # dead lane counted as confirmed on the other's transcript. The one exception is LANE_SEND_NEW_SINCE=<epoch>, set by --recycle for the
+  # re-prime sent after /clear: that session is new, so it is also looked for among transcripts written since then that no lane's row owns.
   confirmed() {  # poll up to ~$1 seconds for a user turn or queued message in the lane's transcript that holds the text sent
-    local i
+    local i sid
     [ -n "${dir:-}" ] || return 2
+    sid="$(follow_session "$name" "$dir" "${id:--}" "${st:-0}")"
     for i in $(seq 1 $(($1 * 2))); do
-      python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")" "${id:--}" "$text" <<'PY' && return 0
-import json, os, sys, time
-proj, sid, want = sys.argv[1], sys.argv[2], " ".join(sys.argv[3].split())[:200]
+      python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")" "${sid:--}" "$text" "${LANE_SEND_NEW_SINCE:-}" "$INDEX" "$name" <<'PY' && return 0
+import json, os, sys
+proj, sid, want, since, index, me = sys.argv[1], sys.argv[2], " ".join(sys.argv[3].split())[-120:], sys.argv[4], sys.argv[5], sys.argv[6]
 try:
     files = [os.path.join(proj, f) for f in os.listdir(proj) if f.endswith(".jsonl")]
 except OSError:
     sys.exit(1)
-# The lane's own transcript plus any written in the last 10 minutes: a /clear or a resume starts a new transcript, and the index
-# row keeps the id the lane started with.
 own = os.path.join(proj, sid + ".jsonl")
-files = [f for f in files if f == own or time.time() - os.path.getmtime(f) < 600]
+keep = [f for f in files if f == own]
+if since.isdigit():
+    claimed = set()
+    try:
+        with open(index, encoding="utf-8", errors="replace") as fh:
+            for row in fh:
+                c = row.rstrip("\n").split("\t")
+                if len(c) > 7 and c[1] != me:
+                    claimed.add(c[7])
+    except OSError:
+        pass
+    keep += [f for f in files if f != own and os.path.getmtime(f) >= int(since) - 2 and os.path.basename(f)[:-6] not in claimed]
+files = keep
 
 def text_of(c):
     if isinstance(c, list):
@@ -1301,6 +1341,17 @@ if [ "$mode" = point ]; then
   exit 0
 fi
 
+# --pane <name>: claude, headless or "dead <cmd>" (lane_watch.sh wakes the hub on dead: the lane's claude process is gone and its pane is a shell).
+if [ "$mode" = pane ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --pane <name>" >&2; exit 1; }
+  row="$(index_row "$1")"
+  [ -n "$row" ] || { echo "?"; exit 0; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
+  if is_headless_billing "${b:-}" || { [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ]; }; then echo headless; exit 0; fi
+  if pane_is_claude "$1"; then echo claude; else echo "dead $(pane_cmd "$1" | sed 's/^$/nothing/')"; fi
+  exit 0
+fi
+
 # --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
 if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
@@ -1380,6 +1431,14 @@ if [ "$mode" = recycle ]; then
   fi
   command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
     || { echo "no window named $name in $SESSION" >&2; exit 1; }
+  # Liveness gate: a pane at a bare shell has no Claude to hand off or clear; typing would land in bash (28 Oct 2026).
+  if ! pane_is_claude "$name"; then
+    pcmd="$(pane_cmd "$name" | sed 's/^$/nothing/')"
+    mkdir -p "$HOME/.claude/state/lanes"
+    printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "claude not running (pane shows $pcmd)" >>"$HOME/.claude/state/lanes/recycle.log"
+    echo "not sent: $name is not running claude (pane shows $pcmd)" >&2
+    exit 1
+  fi
   lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
   mkdir -p "$(dirname "$lockd")"
   if [ -d "$lockd" ] && [ -n "$(find "$lockd" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rmdir "$lockd" 2>/dev/null || true; fi
@@ -1414,14 +1473,15 @@ if [ "$mode" = recycle ]; then
   # Keep the hand-off the lane is about to overwrite as handoff-prev<N>.md (handoff-prev.md counts as 1) and keep only the newest few: the
   # pokeys-site lane left 21 of them (25 Oct) and its fresh sessions read them, which is what filled a 128K line again within minutes.
   rotate_handoff_prev() {
-    local f n max=1 keep="${LANE_HANDOFF_PREV_KEEP:-5}"
+    local f n max=0 keep="${LANE_HANDOFF_PREV_KEEP:-5}"
     if [ -s "$handoff" ]; then
+      # N is the highest number in use plus one (29 Oct 2026: max started at 1 and was reset to 0 when only handoff-prev1.md existed, so
+      # handoff-prev1.md was overwritten on every recycle).
       for f in "$hand"/handoff-prev*.md; do
         [ -e "$f" ] || continue
         n="${f##*/handoff-prev}"; n="${n%.md}"; [ -n "$n" ] || n=1
-        [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$max" ] && max="$n"
+        if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$max" ]; then max="$n"; fi
       done
-      [ -e "$hand/handoff-prev.md" ] || [ "$max" -gt 1 ] || max=0
       cp -p "$handoff" "$hand/handoff-prev$((max + 1)).md" || return 1
     fi
     ls -t "$hand"/handoff-prev*.md 2>/dev/null | tail -n +"$((keep + 1))" | while IFS= read -r f; do rm -f -- "$f"; done
@@ -1500,6 +1560,7 @@ PY
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
   cpane=""
   wait_no_dialog 30 || rfail "a dialog came up before /clear was typed; the lane was NOT cleared"
+  clear_at="$(date +%s)"
   tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5
   wait_no_dialog 0 || { tmux send-keys -t "$SESSION:$name" C-u; rfail "a dialog came up while /clear was typed; no Enter was sent"; }
   tmux send-keys -t "$SESSION:$name" C-m
@@ -1521,7 +1582,7 @@ PY
     fi
   fi
   msg_reprime="$(build_reprime)"   # a --send that arrived while the recycle ran has left hub-pending.md by now
-  send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
+  LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
 
   newid=""
   for _ in $(seq 1 20); do
@@ -1612,7 +1673,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
   home_repos="$(canonical_dir "$HOME/repos" 2>/dev/null || true)"
   [ "$d" != "$home_repos" ] || return 0
   mail_lane "$name" "$pf" && return 0
-  grep -qE 'data/sites/|site-model' -- "$pf" 2>/dev/null && return 0
+  grep -qE "$SITE_PROMPT_RE" -- "$pf" 2>/dev/null && return 0
   ( engine=codex; allow_client=0; dir="$d"; guard_external_engine ) >/dev/null 2>&1 || return 0  # a client repo, or one that cannot be checked
   if [ -n "$claude_because" ]; then
     if [ "$dry" = 1 ]; then echo "# would log the agy-default override for $name ($model) to $LANE_TIER_LOG"
@@ -1734,6 +1795,9 @@ target="$SESSION:$name"
 ad_start="$(ad_merge "${prev_ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"})"
 adsf="$(ad_flags "$ad_start")"
 eff="-"; flags=""; conn="-"; rk=""
+# Claude gets a short fixed message naming the prompt file, never the prompt text: the text would sit on claude's command line, and a lane
+# that ran pgrep -f with words from its own prompt killed itself (28 Oct 2026). The hand-off folder is already an --add-dir.
+lane_msg="Your task is in $lprompt. Read that whole file now and follow it."
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).
@@ -1770,12 +1834,12 @@ if [ "$engine" != claude ]; then
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $adsf$flags \"\$(cat $(printf %q "$lprompt"))\" >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $adsf$flags \"\$(cat $(printf %q "$lprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $adsf$flags $(printf %q "$lane_msg")"
 else
   # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
-  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags \"\$(cat $(printf %q "$lprompt"))\""
+  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
 fi
 t send-keys -t "$target" "$cmd" Enter
 

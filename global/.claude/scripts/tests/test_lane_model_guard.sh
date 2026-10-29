@@ -30,6 +30,13 @@ case "$1" in
   has-session) exit 0 ;;
   list-windows) printf "%s\n" mail-sw plain-sw site-sw nowrite-sw ;;
   capture-pane) cat "$FAKE_ST/pane" ;;
+  display)
+    # pane_is_claude uses: tmux display -p -t "lanes:<name>" '#{pane_current_command}'
+    # args: display -p -t lanes:name '#{pane_current_command}'
+    if [ "${5:-}" = '#{pane_current_command}' ]; then
+      printf 'claude\n'
+    fi
+    ;;
   send-keys)
     if [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
     elif [ "${4:-}" = C-m ] && [ -s "$FAKE_ST/pending" ]; then
@@ -76,6 +83,9 @@ P_CODE="$TMP/code.md"; printf 'Fix the lint errors in the header component.\n' >
 P_EMAILFEATURE="$TMP/emailfeature.md"; printf 'Add an email field to the signup form and validate it.\n' >"$P_EMAILFEATURE"
 P_SITE="$TMP/site.md"; printf 'Fit the photos in data/sites/example-01 and email nobody.\n' >"$P_SITE"
 
+P_BW="$TMP/bw.md"; printf 'Rebuild the character rigs under band-wagon/stage and export the sheets.\n' >"$P_BW"
+P_TURN="$TMP/turn.md"; printf 'Render the turnaround for the drummer in Blender.\n' >"$P_TURN"
+
 # ---- start --------------------------------------------------------------------------------------------------------------------------
 for hi in opus fable claude-fable-5-1 claude-opus-5-5 Opus; do
   lane --dry-run acme-mail "$REPO" "$hi" "$P_CODE"
@@ -112,6 +122,18 @@ lane --dry-run client-work "$REPO" sonnet "$P_CODE"
 assert_exit 0 "$LAST_RC" 'a code prompt on sonnet starts'
 lane --dry-run acme-site-mail "$REPO" opus "$P_SITE"
 assert_exit 0 "$LAST_RC" 'a site-model prompt keeps its own rule (opus allowed)'
+# 29 Oct: Blender character work (band-wagon/stage, turnaround) is 3D work too: fable or opus only, opus needs no extra reason.
+for p3 in "$P_BW" "$P_TURN"; do
+  for lo in sonnet haiku; do
+    lane --dry-run client-work "$REPO" "$lo" "$p3"
+    assert_exit 1 "$LAST_RC" "$lo is refused on a Blender character prompt ($(basename "$p3"))"
+    assert_contains "$LAST_OUT" 'fable or opus' "the refusal names the allowed models ($lo)"
+  done
+  lane --dry-run client-work "$REPO" opus "$p3"
+  assert_exit 0 "$LAST_RC" "opus starts on a Blender character prompt ($(basename "$p3"))"
+  lane --dry-run --allow-low-tier client-work "$REPO" sonnet "$p3"
+  assert_exit 0 "$LAST_RC" '--allow-low-tier still overrides'
+done
 lane --dry-run --engine codex acme-mail "$REPO" sonnet "$P_CODE"
 assert_not_contains "$LAST_OUT" 'refusing mail model' 'the mail tier applies to Claude lanes only'
 
