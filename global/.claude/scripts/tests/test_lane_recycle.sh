@@ -45,6 +45,7 @@ case "$1" in
     # Escape puts queued input back in the input line, which Claude Code logs as popAll (FAKE_QUEUE=stubborn: it does not)
     if [ "${4:-}" = Escape ] && [ -f "$FAKE_ST/queued" ] && [ "${FAKE_QUEUE:-}" != stubborn ]; then
       printf '{"type":"queue-operation","operation":"popAll","content":"queued text"}\n' >>"$FAKE_PROJ/$(cat "$FAKE_ST/cur").jsonl"; rm -f "$FAKE_ST/queued"
+      if [ -f "$FAKE_ST/typed-pane" ]; then rm -f "$FAKE_ST/typed-pane"; printf '%s\n' '⏺ handoff written' '❯ ' >"$FAKE_ST/pane"; fi
     elif [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
     elif [ "${4:-}" = C-m ] && [ -s "$FAKE_ST/pending" ]; then
       python3 -I - "$FAKE_ST" "$FAKE_PROJ" "$(cat "$FAKE_ST/pending")" <<'PY'
@@ -71,8 +72,16 @@ if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
         with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
             f.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "queued text"}) + "\n")
         open(os.path.join(st, "queued"), "w").close()
-        if os.environ["FAKE_QUEUE"] == "run":
+        q = os.environ["FAKE_QUEUE"]
+        if q == "run":
             open(os.path.join(st, "queue-run"), "w").write("5")
+        elif q == "stale":
+            # the log replay counts one queued input but the box shows only Claude Code's dim suggestion (SGR 2)
+            open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\x1b[39m\u276f\u00a0\x1b[2msuggested next step\x1b[0m\n")
+        else:
+            # real typed text sits in the input line
+            open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f queued text\n")
+            open(os.path.join(st, "typed-pane"), "w").close()
     if os.environ.get("FAKE_IDLE_AFTER") == "1":
         open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f \n")
 PY
@@ -281,6 +290,30 @@ assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear while input is q
 grep -q $'\tFAILED\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has a FAILED row for the stuck queue'; ok
 [ -d "$HOME_T/.claude/state/lanes/.recycle-q-lane.lock" ] && fail 'recycle lock left behind after a stuck queue'; ok
 qreset
+
+basepane() { printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"; rm -f "$ST/typed-pane"; }
+basepane  # the stuck and stubborn runs above leave a pane with typed text
+
+# 29 Oct, job-leads-sweep: the log replay said 2 inputs were queued, the lane was idle and its box held only Claude Code's dim suggestion,
+# and every recycle failed. A lane idle through the whole wait with no normal-colour text in the input line has nothing queued: log it, go on.
+qreset
+FAKE_QUEUE=stale LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'an idle lane with only a dim suggestion in its box is recycled although the replay counts one queued input'
+assert_not_contains "$(cat "$ST/keys.log" 2>/dev/null)" Escape 'a stale count is not answered with Escape'
+assert_not_contains "$(cat "$ST/keys.log" 2>/dev/null)" C-u 'a stale count does not clear the input line'
+assert_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" $'q-lane\tSTALE-QUEUE\t' 'recycle.log has a STALE-QUEUE row'
+assert_contains "$LAST_OUT" 'treating the count as stale' 'the stale count is said on stderr'
+mapfile -t sent <"$ST/sent.log"; [ "${#sent[@]}" = 3 ] || fail "a stale count still gives 3 typed messages, got ${#sent[@]}"; ok
+[ "${sent[1]}" = /clear ] || fail "/clear is typed after the stale count, got: ${sent[1]}"; ok
+basepane
+
+# Real typed text in the box is still popped: Escape, then C-u (the stuck run above), and a stubborn one still fails.
+qreset
+FAKE_QUEUE=stuck LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'typed text in the box is still popped'
+assert_contains "$(cat "$ST/keys.log")" Escape 'Escape is still pressed for typed text'
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" STALE-QUEUE 'typed text is not a stale count'
+basepane
 
 # The previous handoff.md is kept as handoff-prev<N>.md before the request (handoff-prev.md counts as 1), newest 5 kept.
 qreset; echo "first handoff" >"$HAND/handoff.md"
@@ -526,5 +559,66 @@ printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"typed 
 assert_eq "$(qp "$qp_t")" 1 '... and a real queued item after it still counts'
 printf '%s\n' '{"type":"queue-operation","operation":"remove","content":"other text"}' >>"$qp_t"
 assert_eq "$(qp "$qp_t")" 1 '... a remove that matches nothing, with no None entry left, changes nothing'
+
+# End to end on a scrubbed copy of the real log (job-leads-sweep, 29 Oct): subagent hand-backs enqueued as task notifications and as None,
+# removed as agent-message text. The replay of that log counts 2 and keeps counting 2. Pairing the removes to their enqueues by agent id was
+# tried and made the count worse (3), because the replay's first-in-first-out dequeue pops the wrong entries, so the count is not trusted
+# when the lane is plainly idle with an empty box.
+fix="$TMP/job-leads-sweep.jsonl"
+cat >"$fix" <<'EOF3'
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:21.032Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 837</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:21.124Z", "content": "<task-notification>\n<task-id>agent02</task-id>\n<summary>scrubbed 370</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:21.141Z", "content": "<task-notification>\n<task-id>agent02</task-id>\n<summary>scrubbed 370</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:33.479Z", "content": "<task-notification>\n<task-id>agent03</task-id>\n<summary>scrubbed 365</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:35.562Z", "content": "<task-notification>\n<task-id>agent04</task-id>\n<summary>scrubbed 369</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:36.737Z"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:36.794Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 837</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:36.824Z", "content": "<task-notification>\n<task-id>agent03</task-id>\n<summary>scrubbed 365</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:36.824Z", "content": "<task-notification>\n<task-id>agent04</task-id>\n<summary>scrubbed 369</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:36.875Z", "content": "<task-notification>\n<task-id>agent05</task-id>\n<summary>scrubbed 366</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:39.343Z", "content": "<task-notification>\n<task-id>agent06</task-id>\n<summary>scrubbed 357</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:48.463Z"}
+{"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-10-29T17:14:48.499Z"}
+{"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-10-29T17:14:48.499Z"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:14:48.503Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 796</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<agent-message from=\"agent01\">\n[Subagent hand-back, scrubbed 6544]\n</agent-message>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 837</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<agent-message from=\"agent01\">\n[Subagent hand-back, scrubbed 4102]\n</agent-message>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 837</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<agent-message from=\"agent01\">\n[Subagent hand-back, scrubbed 3003]\n</agent-message>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:14:55.496Z", "content": "<task-notification>\n<task-id>agent01</task-id>\n<summary>scrubbed 796</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:15:15.676Z", "content": "<task-notification>\n<task-id>agent07</task-id>\n<summary>scrubbed 854</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:15:18.189Z", "content": "<task-notification>\n<task-id>agent07</task-id>\n<summary>scrubbed 854</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:18:44.713Z", "content": "<task-notification>\n<task-id>agent08</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:18:48.779Z", "content": "<task-notification>\n<task-id>agent08</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:20:15.524Z", "content": "<pasted_content>scrubbed hub message</pasted_content>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:20:26.875Z", "content": "<pasted_content>scrubbed hub message</pasted_content>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:22:40.623Z", "content": "<task-notification>\n<task-id>agent09</task-id>\n<summary>scrubbed 878</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:22:40.667Z", "content": "<task-notification>\n<task-id>agent09</task-id>\n<summary>scrubbed 878</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:24:20.232Z", "content": "<task-notification>\n<task-id>agent10</task-id>\n<summary>scrubbed 852</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:24:26.459Z", "content": "<task-notification>\n<task-id>agent10</task-id>\n<summary>scrubbed 852</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:24:39.931Z", "content": "<task-notification>\n<task-id>agent11</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:24:44.375Z", "content": "<task-notification>\n<task-id>agent11</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:24:58.970Z", "content": "<task-notification>\n<task-id>agent12</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:25:07.539Z", "content": "<task-notification>\n<task-id>agent12</task-id>\n<summary>scrubbed 853</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:25:41.326Z"}
+{"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-10-29T17:25:41.352Z"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:25:41.395Z", "content": "<task-notification>\n<task-id>agent13</task-id>\n<summary>scrubbed 805</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-10-29T17:25:47.275Z", "content": "<pasted_content>scrubbed hub message</pasted_content>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:25:48.149Z", "content": "<task-notification>\n<task-id>agent13</task-id>\n<summary>scrubbed 805</summary>\n</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-10-29T17:25:48.149Z", "content": "<pasted_content>scrubbed hub message</pasted_content>"}
+EOF3
+assert_eq "$(qp "$fix")" 2 'the replay of the real log counts 2 queued inputs (documents the stale count)'
+qreset; cat "$fix" >>"$PROJ/old-sess.jsonl"
+printf '%s\n' '⏺ handoff written' '✻ Worked for 1m 9s · done 1:09 PM' $'\x1b[39m❯\xc2\xa0\x1b[2mkeep going on the sweep\x1b[0m' >"$ST/pane"
+LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'the real-log replay count plus an idle lane with a dim suggestion recycles'
+assert_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" $'q-lane\tSTALE-QUEUE\t' 'recycle.log has a STALE-QUEUE row for the real-log replay'
+basepane
+qreset; cat "$fix" >>"$PROJ/old-sess.jsonl"
+FAKE_QUEUE=stubborn LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'the same replay count with typed text in the box still fails'
+assert_contains "$LAST_OUT" 'still queued' 'and says input is still queued'
+basepane
 
 printf 'ok - %s checks passed\n' "$checks"
