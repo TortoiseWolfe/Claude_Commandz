@@ -123,6 +123,18 @@ cd $HOME/repos || exit 1
 # Learning-loop baseline (spec 002): writes last week's record once, then this is a quick no-op. No model runs.
 [[ -f "$S/learning_baseline.py" ]] && timeout 150 python3 "$S/learning_baseline.py" observe >/dev/null 2>>"$LOG"
 
+# The three claude calls below run in a lean folder, not in ~/repos (Jonathan, 29 Oct 2026, token study: 229 headless calls in 20 hours
+# started in ~/repos and each loaded ~/repos/CLAUDE.md, the memory index and the skill list before its first word: 45-61K tokens, 60% of
+# these calls' weekly cost). ~/.claude/state/lean sits outside ~/repos, so none of that loads; hub_lean.py --lean-dir makes it with the
+# same lean project settings the hub has (plugins, Artifact tools and unused connectors off; Gmail stays on) and prints it. Measured
+# first-turn context: 47.8K -> 12.9K (check), 47.6K -> 13.4K (handler), 46.6K -> 12.1K (client queuer), same output each time.
+# --disable-slash-commands drops the skill listing (no pass invokes a skill; the handler reads the agent-notes SKILL.md by path).
+# Everything the prompts name is an absolute path; the rules the workspace CLAUDE.md gave these passes are written into the prompts.
+# If hub_lean.py is missing or fails, the plain folder still works (the lean project settings are just not in it).
+LEAN=$(timeout 30 python3 -I "$S/hub_lean.py" --lean-dir 2>>"$LOG") && [[ -d "$LEAN" ]] || LEAN=${AFA_LEAN_DIR:-$HOME/.claude/state/lean}
+mkdir -p "$LEAN" && cd "$LEAN" || exit 1
+LEANFLAGS=(--disable-slash-commands)
+
 # No Write or Edit in general: print mode denies any path not allowed below, and these keep the repos and this
 # config unwritable even if a global allow rule appears. The one writable file is muse_jev.py's request
 # (~/.local/state/muse-jev/request.json), because a bare `Write` deny would cover it too (tested 2026-10-10).
@@ -134,7 +146,7 @@ mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__clau
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
@@ -147,9 +159,9 @@ if (($(age "$CLIENT_LAST") >= CLIENT_EVERY - 15)); then
   echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
 fi
 if [[ -n "$cnew" ]]; then
-  CALLOW="Read,Bash($S/muse_poll_record.sh:*)"
+  CALLOW="Read,Bash($S/muse_poll_record.sh:*),Bash(python3 $S/gusto_mark_paid.py match:*),mcp__claude_ai_Gmail__get_message"   # Gusto payments, 2026-10-18
   hprompt=$(cat "$S/muse_poll.client-handle.prompt"); hprompt=${hprompt//\{\{HOME\}\}/$HOME}
-  timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 \
+  timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 "${LEANFLAGS[@]}" \
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
 fi
@@ -161,6 +173,6 @@ mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
 Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
-timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 \
+timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"

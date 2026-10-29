@@ -27,9 +27,11 @@ class HubLean(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repos = Path(self.tmp.name)
         self.file = self.repos / ".claude" / "settings.json"
+        self.lean = Path(self.tmp.name) / "lean"
+        self.lean_file = self.lean / ".claude" / "settings.json"
 
     def run_it(self, *args):
-        env = dict(os.environ, AFA_REPOS=str(self.repos))
+        env = dict(os.environ, AFA_REPOS=str(self.repos), AFA_LEAN_DIR=str(self.lean))
         return subprocess.run([sys.executable, "-I", str(SCRIPT), *args], capture_output=True, text=True, env=env)
 
     def written(self):
@@ -110,6 +112,60 @@ class HubLean(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(json.loads(r.stdout)["permissions"]["deny"][0], "Artifact")
         self.assertFalse(self.file.exists())
+
+    # --lean-dir: the folder the unattended headless calls (muse_poll.sh) run in, outside ~/repos so no workspace CLAUDE.md loads.
+
+    def test_lean_dir_prints_the_folder_and_writes_its_settings(self):
+        r = self.run_it("--lean-dir")
+        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, str(self.lean), ""))
+        d = json.loads(self.lean_file.read_text())
+        self.assertEqual(sorted(d), ["autoMemoryEnabled", "deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertIs(d["autoMemoryEnabled"], False)
+        self.assertFalse(any(d["enabledPlugins"].values()))
+        self.assertEqual(d["permissions"]["deny"], ["Artifact", "ArtifactComments", "ArtifactData"])
+        denied = [s["serverName"] for s in d["deniedMcpServers"]]
+        for need in HUB_NEEDS:
+            self.assertNotIn(need, denied, "the poller needs Gmail; Calendar and Drive stay as in the hub")
+        self.assertFalse(self.file.exists(), "the hub's own settings file is not touched")
+
+    def test_lean_dir_default_is_outside_the_workspace(self):
+        env = {k: v for k, v in os.environ.items() if k != "AFA_LEAN_DIR"}
+        with tempfile.TemporaryDirectory() as home:
+            env["HOME"] = home
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT), "--lean-dir"], capture_output=True, text=True, env=env)
+            self.assertEqual(r.stdout.strip(), str(Path(home) / ".claude" / "state" / "lean"))
+            self.assertNotIn(str(Path(home) / "repos"), r.stdout, "a folder under ~/repos would load the workspace CLAUDE.md")
+
+    def test_lean_dir_is_quiet_and_idempotent(self):
+        self.run_it("--lean-dir")
+        before = self.lean_file.stat().st_mtime_ns
+        r = self.run_it("--lean-dir")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.lean_file.stat().st_mtime_ns, before, "a current file is not rewritten")
+
+    def test_lean_dir_repairs_a_stale_file_and_keeps_other_keys(self):
+        self.lean_file.parent.mkdir(parents=True)
+        self.lean_file.write_text(json.dumps({"model": "haiku", "autoMemoryEnabled": True, "enabledPlugins": {"superpowers@claude-plugins-official": True}}))
+        self.run_it("--lean-dir")
+        d = json.loads(self.lean_file.read_text())
+        self.assertEqual(d["model"], "haiku")
+        self.assertIs(d["autoMemoryEnabled"], False)
+        self.assertIs(d["enabledPlugins"]["superpowers@claude-plugins-official"], False)
+
+    def test_lean_dir_with_broken_settings_warns_but_still_prints(self):
+        self.lean_file.parent.mkdir(parents=True)
+        self.lean_file.write_text("{not json")
+        r = self.run_it("--lean-dir")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, str(self.lean)))
+        self.assertIn("not updated", r.stderr)
+        self.assertEqual(self.lean_file.read_text(), "{not json")
+
+    def test_lean_dir_that_cannot_be_made_prints_nothing_and_fails(self):
+        blocker = Path(self.tmp.name) / "blocker"
+        blocker.write_text("a file, not a folder")
+        self.lean = blocker / "lean"
+        r = self.run_it("--lean-dir")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
 
 
 if __name__ == "__main__":
