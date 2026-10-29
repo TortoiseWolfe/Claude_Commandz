@@ -701,5 +701,44 @@ su_again "$TMP/su-out6"
 if grep -q '^step without URL' "$TMP/su-out6" && [ "$(wc -l < "$SEND_LOG")" = 1 ]; then echo "ok   a rewrite that still has no URL is named again"; else echo "FAIL rewrite not re-checked: $(cat "$TMP/su-out6")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-*
 
+# 28 Oct 2026: a lane killed its own claude and sat at a bash prompt for 3 hours; nothing woke the hub. lane.sh --pane says "dead <cmd>" for such a
+# lane and the watcher names it once per death ("dead: <lane> (pane shows <cmd>)"), clears the mark when claude runs again, and skips headless lanes.
+dd_home="$TMP/dd-home"; mkdir -p "$dd_home/.claude/state/lanes" "$TMP/dd-bin"
+dd_lane_sh="$TMP/dd-lane.sh"
+cat > "$dd_lane_sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --pane ] || exit 0
+cat "$DD_DIR/$2" 2>/dev/null
+SH
+chmod +x "$dd_lane_sh"
+printf '#!/usr/bin/env bash\ncase "$1" in list-windows) printf "dd-gone\\ndd-ok\\ndd-head\\n" ;; esac\n' > "$TMP/dd-bin/tmux"; chmod +x "$TMP/dd-bin/tmux"
+mkdir -p "$TMP/dd"; echo 'dead bash' > "$TMP/dd/dd-gone"; echo claude > "$TMP/dd/dd-ok"; echo headless > "$TMP/dd/dd-head"
+dd_run() { HOME="$dd_home" PATH="$TMP/dd-bin:$PATH" DD_DIR="$TMP/dd" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$dd_lane_sh" LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 20 bash "$SCRIPT" --max-min 0 dd-gone dd-ok dd-head 2>&1 || true; }
+out=$(dd_run)
+if printf '%s\n' "$out" | grep -qx 'dead: dd-gone (pane shows bash); restart it fresh from its handoff.md' && ! printf '%s\n' "$out" | grep -q 'dead: dd-ok\|dead: dd-head'; then
+  echo "ok   a lane whose pane is a bare shell wakes the hub; a live and a headless lane do not"
+else echo "FAIL dead lane wake: $out"; failures=$((failures + 1)); fi
+out=$(dd_run)
+if ! printf '%s\n' "$out" | grep -q '^dead:'; then echo "ok   the same death is named once"; else echo "FAIL dead lane named twice: $out"; failures=$((failures + 1)); fi
+echo claude > "$TMP/dd/dd-gone"; dd_run >/dev/null
+echo 'dead zsh' > "$TMP/dd/dd-gone"; out=$(dd_run)
+if printf '%s\n' "$out" | grep -qx 'dead: dd-gone (pane shows zsh); restart it fresh from its handoff.md'; then echo "ok   a lane that runs claude again and dies again is named again"
+else echo "FAIL second death not named: $out"; failures=$((failures + 1)); fi
+
+# A FAILED recycle row written while no watcher ran is reported by the next one: the offset is a file, not the log's size at start.
+of_home="$TMP/of-home"; mkdir -p "$of_home/.claude/state/lanes"
+of_log="$of_home/.claude/state/lanes/recycle.log"; : > "$of_log"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/of-lane.sh"; chmod +x "$TMP/of-lane.sh"
+of_run() { HOME="$of_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/of-lane.sh" LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 20 bash "$SCRIPT" --max-min 0 dd-ok 2>&1 || true; }
+of_run >/dev/null   # first run, no offset file: starts at the end of the log
+printf '2026-10-28T21:00:00-04:00\tof-lane\tFAILED\tthe hand-off request did not reach the lane\n' >> "$of_log"
+out=$(of_run)
+if printf '%s\n' "$out" | grep -q '^recycle failed: of-lane: the hand-off request did not reach the lane'; then echo "ok   a FAILED row written while no watcher ran is reported by the next watcher"
+else echo "FAIL missed FAILED row: $out"; failures=$((failures + 1)); fi
+out=$(of_run)
+if ! printf '%s\n' "$out" | grep -q '^recycle failed:'; then echo "ok   ... and only once"; else echo "FAIL FAILED row reported twice: $out"; failures=$((failures + 1)); fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

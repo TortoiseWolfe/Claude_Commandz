@@ -33,6 +33,13 @@ case "$1" in
   has-session) exit 0 ;;
   list-windows) printf "%s\n" rl-lane sh-lane q-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
   capture-pane) cat "$FAKE_ST/pane" ;;
+  display)
+    # pane_is_claude uses: tmux display -p -t "lanes:<name>" '#{pane_current_command}'
+    # args: display -p -t lanes:name '#{pane_current_command}'
+    if [ "${5:-}" = '#{pane_current_command}' ]; then
+      printf 'claude\n'
+    fi
+    ;;
   send-keys)
     printf '%s\n' "${4:-}" >>"$FAKE_ST/keys.log"
     # Escape puts queued input back in the input line, which Claude Code logs as popAll (FAKE_QUEUE=stubborn: it does not)
@@ -95,6 +102,7 @@ add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
 reset_fake() { rm -f "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+cur_for() { cut -f8 < <(awk -F"\t" -v n="$1" '$2==n' "$INDEX" | tail -1) >"$ST/cur"; }  # the fake lane writes into the transcript its index row names (a send is confirmed only there)
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
 add_row rl-lane subscription old-sess
@@ -169,7 +177,7 @@ lane --ctx rl-lane
 grep -q "recycled" "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no recycled row'; ok
 
 # A lane that never writes handoff.md is NOT cleared.
-reset_fake; rows_before="$(wc -l <"$INDEX")"
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
 FAKE_WRITE_HANDOFF=0 LANE_RECYCLE_WAIT_SECS=2 lane --recycle rl-lane
 assert_exit 1 "$LAST_RC" 'no handoff.md: the recycle fails'
 assert_contains "$LAST_OUT" 'NOT cleared' 'the failure says the lane kept its context'
@@ -179,14 +187,14 @@ grep -q $'\tFAILED\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle
 [ -d "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock" ] && fail 'recycle lock left behind after a failure'; ok
 
 # An old handoff.md from before does not count: it has to change.
-reset_fake; echo "old hand-off" >"$HAND/handoff.md"; touch -d '-1 hour' "$HAND/handoff.md"
+reset_fake; cur_for rl-lane; echo "old hand-off" >"$HAND/handoff.md"; touch -d '-1 hour' "$HAND/handoff.md"
 FAKE_WRITE_HANDOFF=0 LANE_RECYCLE_WAIT_SECS=2 lane --recycle rl-lane
 assert_exit 1 "$LAST_RC" 'a stale handoff.md does not stand in for a new one'
 assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear on a stale handoff.md'
 
 # A lane mid-turn (spinner) is asked at once, not waited for: a long turn would outrun the backstop (21 Oct, one 15-minute turn went 120K to
 # 168K and compacted, while the old recycle waited 300s for an idle that never came). It finishes the step in hand and writes handoff.md.
-reset_fake; printf '%s\n' '⏺ Reading' '✻ Thinking… (12s · esc to interrupt)' '❯ ' >"$ST/pane"
+reset_fake; cur_for rl-lane; printf '%s\n' '⏺ Reading' '✻ Thinking… (12s · esc to interrupt)' '❯ ' >"$ST/pane"
 FAKE_WRITE_HANDOFF=1 FAKE_IDLE_AFTER=1 LANE_RECYCLE_IDLE_SECS=2 lane --recycle rl-lane
 [ "$LAST_RC" = 0 ] || fail "mid-turn recycle failed: $LAST_OUT"; ok
 assert_exit 0 "$LAST_RC" 'a lane in the middle of a turn is recycled without waiting for the turn to end'
@@ -198,7 +206,7 @@ assert_contains "${sent[0]}" 'very next action' 'the request makes the hand-off 
 assert_contains "${sent[0]}" 'ready to recycle' 'the request asks the lane to stop and say ready'
 assert_contains "${sent[0]}" 'recycle line (100K)' "the request names the lane's own line"
 # A dialog on screen holds the request back (typing would answer it) and the lane is left alone.
-reset_fake; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
+reset_fake; cur_for rl-lane; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
 FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_IDLE_SECS=2 lane --recycle rl-lane
 assert_exit 1 "$LAST_RC" 'a lane stuck on a dialog is not recycled'
 assert_contains "$LAST_OUT" 'dialog' 'the failure names the dialog'
@@ -206,7 +214,7 @@ assert_contains "$LAST_OUT" 'dialog' 'the failure names the dialog'
 printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"
 
 # --send (which --recycle uses) looks for a dialog before typing and before each Enter, so its keys never answer a permission prompt.
-reset_fake; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
+reset_fake; cur_for rl-lane; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
 lane --send rl-lane 'hello 1'
 assert_exit 1 "$LAST_RC" '--send to a lane on a dialog is refused'
 assert_contains "$LAST_OUT" 'NOT SENT' 'the refusal says nothing was sent'
@@ -291,6 +299,17 @@ FAKE_WRITE_HANDOFF=1 LANE_HANDOFF_PREV_KEEP=2 lane --recycle q-lane
 assert_exit 0 "$LAST_RC" 'a first recycle with no handoff.md yet'
 [ ! -e "$HAND/handoff-prev4.md" ] || fail 'no handoff-prev made from a handoff.md that did not exist'; ok
 
+# Three recycles in a row: each replaced handoff.md lands in a new number (1, 2, 3), none is overwritten (29 Oct: the max reset to 0 each time).
+qreset
+for n in one two three; do
+  echo "handoff $n" >"$HAND/handoff.md"
+  FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+  assert_exit 0 "$LAST_RC" "recycle with handoff $n"
+  cur_for q-lane
+done
+cat "$HAND"/handoff-prev*.md | tr '\n' ' ' | grep -q 'handoff one .*handoff two ' || fail "handoff one and two both kept: $(ls "$HAND")"; ok
+[ "$(ls "$HAND"/handoff-prev*.md | wc -l)" = 3 ] || fail "three recycles leave three handoff-prev files, got: $(ls "$HAND")"; ok
+
 # The request asks for a handoff a fresh session can use alone, and the re-prime sends it to prompt.md and handoff.md only.
 qreset
 lane --dry-run --recycle q-lane
@@ -336,7 +355,7 @@ lane --recycle-point conn-high; [ "$LAST_OUT" = 160 ] || fail "a connector lane'
 lane --dry-run --recycle conn-high
 assert_contains "$LAST_OUT" 'recycle line 160K' 'the recycle carries a connector lane line above 150 into the new row'
 
-reset_fake; mkdir -p "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock"
+reset_fake; cur_for rl-lane; mkdir -p "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock"
 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
 assert_exit 1 "$LAST_RC" 'a second recycle of the same lane is refused'
 assert_contains "$LAST_OUT" 'already being recycled' 'the refusal names the lock'
