@@ -14,6 +14,9 @@
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
 #   - a watched lane's tmux window disappears
+#   - a watched lane's window is still there but its pane is a bare shell (lane.sh --pane says "dead <cmd>"): the claude process is gone.
+#     Named once per death ("dead: <lane> (pane shows <cmd>); restart it fresh from its handoff.md"); the mark is cleared when the pane runs
+#     claude again. 28 Oct 2026: a lane killed its own claude with pgrep -f, sat at a bash prompt for 3 hours and nothing woke the hub.
 #   - a recycle (see below) failed
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in hub-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
@@ -181,14 +184,36 @@ recycle_pass() {
 }
 
 # New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
-recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
+# The offset lives in a file ($recycle_dir/.recycle-log-seen), so a FAILED row written while no watcher was armed is still reported by the next
+# one. 28 Oct 2026: a watcher started after the row and began at the log's end, and the failure was never named. No file (first run): start at the end.
+recycle_log_seen_file="$recycle_dir/.recycle-log-seen"
+recycle_log_seen=$(cat "$recycle_log_seen_file" 2>/dev/null || true)
+[[ "$recycle_log_seen" =~ ^[0-9]+$ ]] || recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
 # Sets recycle_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
 recycle_failures() {
   local size; recycle_fail_out=''
   size=$(stat -c %s "$recycle_log" 2>/dev/null) || return 0
-  [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; return 0; }
+  [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null; return 0; }
   recycle_fail_out=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log" | command grep -a $'\tFAILED\t' | awk -F'\t' '{print $2 ": " $4}')
   recycle_log_seen=$size
+  printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null
+}
+
+# Dead-pane alarm. dead_check <lane> (no subshell: it sets hit and other) names a lane whose window is open but whose pane is not running claude
+# (lane.sh --pane says "dead <cmd>"), once per death: the mark file .dead-<lane> holds the command shown and is cleared when the pane runs claude
+# again. A headless lane, or a lane.sh that cannot say, is never named.
+dead_check() {
+  local l=$1 st cmd mark="$recycle_dir/.dead-$1"
+  st=$("$lane_sh" --pane "$l" 2>/dev/null)
+  case "$st" in
+    "dead "*)
+      [ -e "$mark" ] && return 0
+      cmd=${st#dead }
+      printf '%s' "$cmd" > "$mark"
+      echo "dead: $l (pane shows ${cmd:-nothing}); restart it fresh from its handoff.md"
+      hit=1; other=1 ;;
+    claude) rm -f "$mark" ;;
+  esac
 }
 
 # Spend alarm. spend_check sets spend_out (one "<lane>\t<usd>\t<models>" per lane that has newly passed the limit today). It asks the ledger at
@@ -390,6 +415,7 @@ check_bridge
 check_outbox
 check_undelivered
 check_open_questions
+printf '%s' "$recycle_log_seen" > "$recycle_log_seen_file" 2>/dev/null || true   # first run: the offset starts here
 end=$(( $(date +%s) + max * 60 ))
 while :; do
   check_bridge
@@ -416,6 +442,7 @@ while :; do
       if printf '%s\n' "$pane" | dialog_waiting; then
         echo "waiting on a dialog: $l"; hit=1; other=1
       fi
+      dead_check "$l"
       high_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then

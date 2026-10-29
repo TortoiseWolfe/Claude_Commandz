@@ -41,6 +41,7 @@ printf '%s\0' "$@" >>"$TMUX_CALLS"
 case "$1" in
   has-session) [ "${TMUX_HAS_SESSION:-0}" = 1 ] ;;
   list-windows) for window in ${TMUX_WINDOWS:-}; do printf '%s\n' "$window"; done ;;
+  display) [ "${5:-}" = '#{pane_current_command}' ] && printf '%s\n' "${TMUX_PANE_CMD:-claude}" ;;
   capture-pane)
     if [ -n "${TMUX_PANE_FILE:-}" ]; then
       # Like real tmux: colour escapes only come out when -e is passed.
@@ -136,7 +137,8 @@ assert_contains "$HELP_OUTPUT" '--allow-client' 'help documents the client overr
 run_lane default-lane "$REPO" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'default Claude lane starts'
 assert_contains "$LAST_COMMAND" 'claude --model sonnet' 'default command uses Claude'
-assert_contains "$LAST_COMMAND" '$(cat ' 'default command reads the prompt file'
+assert_contains "$LAST_COMMAND" 'Read\ that\ whole\ file\ now' 'default command names the prompt file'
+assert_not_contains "$LAST_COMMAND" '$(cat ' 'default command does not put the prompt text on the command line'
 assert_contains "$LAST_COMMAND" '--add-dir' 'Claude lane start gets its hand-off folder as a working folder'
 assert_contains "$LAST_COMMAND" 'default-lane' 'Claude lane --add-dir names the hand-off folder'
 assert_not_contains "$LAST_COMMAND" 'touch injected' 'default prompt is not interpolated into the shell command'
@@ -573,7 +575,7 @@ run_lane rk-ops "$REPO" sonnet "$OPS_PROMPT"
 [ "$(rk_of rk-ops)" = 110 ] || fail "an ops lane (primes at 57K) defaults to 110K, got: $(rk_of rk-ops)"; checks=$((checks + 1))
 SITE_PROMPT="$TMP/site-prompt.md"; echo 'Fit the photos for data/sites/carbarns and write the SketchUp geometry' >"$SITE_PROMPT"
 run_lane --allow-low-tier rk-site "$REPO" opus "$SITE_PROMPT"
-[ "$(rk_of rk-site)" = 100 ] || fail "a site-model lane defaults to 100K, got: $(rk_of rk-site)"; checks=$((checks + 1))
+[ "$(rk_of rk-site)" = 150 ] || fail "a site-model lane defaults to 150K (3D work refills fast), got: $(rk_of rk-site)"; checks=$((checks + 1))
 [ "$(awk -F'\t' '$2=="rk-site"{c=$13} END{print c}' "$INDEX")" = 'site-model prompt (fable or opus only)' ] || fail 'a site-model start records why it may be on opus or fable'; checks=$((checks + 1))
 for bad in 30 151 abc ''; do
   run_lane --recycle-at "$bad" rk-bad "$REPO" sonnet "$PROMPT"
@@ -701,6 +703,8 @@ assert_contains "$LAST_OUTPUT" 'the input line emptied' 'dim carried over from a
 # Delivered is the words in the lane's transcript: a user turn there holding the text sent makes --send exit 0.
 SLUG="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$REPO")"; mkdir -p "$HOME_TEST/.claude/projects/$SLUG"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"Jonathan says (from his OpenClaw chat): it does show the  porch columns"}}' >"$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
+# Delivered is looked for only in the lane's OWN transcript: point the lane's last index row at it.
+awk -F'\t' -v OFS='\t' '{r[NR]=$0; if ($2=="default-lane") last=NR} END{for (i=1;i<=NR;i++) { if (i==last) { split(r[i], f, "\t"); f[8]="live"; line=f[1]; for (j=2;j<=9;j++) line=line OFS f[j]; print line } else print r[i] }}' "$INDEX" >"$TMP/index.new" && mv "$TMP/index.new" "$INDEX"
 LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=default-lane run_lane --send default-lane 'Jonathan says (from his OpenClaw chat): it does show the porch columns'
 assert_exit 0 "$LAST_STATUS" '--send exits 0 once the words are in the transcript'
 assert_contains "$LAST_OUTPUT" 'confirmed in its transcript' '--send says it found the words in the transcript'
@@ -736,6 +740,8 @@ rm -f "$HOME_TEST/.claude/projects/$SLUG/live.jsonl"
 printf '%s\tstale-id-lane\t%s\tsonnet\tsubscription\t%s\t%s\told-sess\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$PROMPT" "$TMP/stale-id.md" >>"$HOME_TEST/.claude/state/lanes/index.tsv"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"You are a lane"}}' >"$HOME_TEST/.claude/projects/$SLUG/old-sess.jsonl"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"Hub: after the clear, carry on"}}' >"$HOME_TEST/.claude/projects/$SLUG/new-sess.jsonl"
+# The session hook records the lane's live session (new-sess); follow_session turns the row's old id into it.
+mkdir -p "$HOME_TEST/.claude/state/lanes/sessions"; printf 'new-sess\t%s\t-\n' "$(date +%s)" >"$HOME_TEST/.claude/state/lanes/sessions/stale-id-lane"
 LANE_SEND_CONFIRM_SECS=1 TMUX_PANE_FILE="$TMP/pane-dim" TMUX_HAS_SESSION=1 TMUX_WINDOWS=stale-id-lane run_lane --send stale-id-lane 'Hub: after the clear, carry on'
 assert_exit 0 "$LAST_STATUS" '--send finds the words in the lane new transcript when the index id is the old one'
 rm -f "$HOME_TEST/.claude/projects/$SLUG/old-sess.jsonl" "$HOME_TEST/.claude/projects/$SLUG/new-sess.jsonl"

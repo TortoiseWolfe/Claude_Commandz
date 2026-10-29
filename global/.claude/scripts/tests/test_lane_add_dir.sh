@@ -46,7 +46,7 @@ c="$(last_cmd)"
 has "$c" "--add-dir $(printf %q "$STREAM") --add-dir $OTHER " "both folders go to claude, each before a flag"
 has "$c" "$LANES/$(date +%F)-bw" "the hand-off folder is still added"
 [ "$(ad_of bw)" = "$STREAM:$OTHER" ] || fail "column 15 holds both folders, got $(ad_of bw)"; ok
-case "$c" in *'"$(cat '*) ok ;; *) fail "the prompt is still the last argument: $c" ;; esac
+case "$c" in *'follow'*'it.'*) ok ;; *) fail "the fixed message naming the prompt file is still the last argument: $c" ;; esac
 
 # 2. No option: nothing extra, column 15 is "-".
 lane plain "$WORK" sonnet "$TMP/p1.md"
