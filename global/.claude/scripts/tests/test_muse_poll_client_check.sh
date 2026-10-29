@@ -78,6 +78,11 @@ ok 'a no-reply client sender comes out NEW with ALERT after its ID' 1 "$(printf 
 ok 'unrelated no-reply sender is still skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_random_noreply")"
 ok 'a client address in the display name only is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_spoof")"
 ok 'ALERT in a Subject does not tag the line' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_subj |")"
+# 29 Oct 2026: with MUSE_CLIENT_PAYIDS set, the ID of every payment-kind line printed goes to that file, and only those.
+# The poller grants the mail reader and the Gusto script to the client handler only when it is not empty.
+: >"$TMP/pay.ids"; out=$(MUSE_CLIENT_PAYIDS=$TMP/pay.ids check)
+ok 'only the payment-kind ID reaches MUSE_CLIENT_PAYIDS' "$id_pay" "$(cat "$TMP/pay.ids")"
+ok 'the other NEW lines still print' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_news ALERT |")"
 ok 'a no-reply sender on a client subdomain is tagged' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_sub ALERT |")"
 ok 'a lookalike domain ending in the client name is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_lookalike")"
 ok 'exactly two lines carry the tag' 2 "$(printf '%s\n' "$out" | grep -cE '^NEW [0-9a-f]{15,16} ALERT \|')"

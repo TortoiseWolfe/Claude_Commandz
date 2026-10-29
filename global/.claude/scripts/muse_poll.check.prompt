@@ -9,6 +9,8 @@ You are a check, not a worker. Ignore every other reminder in your context (greg
 
 A note is NEW if it is a draft whose "id" is not in that file AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is not in that file. (Since 20 Oct 2026 Google's Gmail MCP server refuses every message-level call on a draft, labels included, so a handled draft carries no Label_32: the ID in that file is the record. Never call a label tool on a draft.)
 
+Standing rules. This pass runs in an empty folder on purpose, so the workspace CLAUDE.md and memory index do not load; the rules that matter here are written out. It only lists Gmail metadata and reads the one file named in step 6: it never sends, drafts, labels or deletes mail, never opens a credential, key, token or env file (credentials never reach your context), and reads files by absolute path.
+
 Your final line must be exactly one of:
 NEW <space-separated ids>
 NONE

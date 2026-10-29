@@ -110,6 +110,7 @@ want=$((quiet / 4)); ((want < FLOOR)) && want=$FLOOR; ((want > 1800)) && want=18
 (($(age "$LAST") < want - 15)) && exit 0      # not due yet (15 s allows for scheduler jitter)
 mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
 CLIENT_LAST=$STATE/muse-poll-client-last.stamp
+PAYIDS=$STATE/client-payment-ids.txt           # the IDs of this look's payment-kind lines (see the client handler below)
 CLIENT_EVERY=${MUSE_CLIENT_EVERY:-600}         # client mail looks at most every 10 min (it has a 2-day window, so nothing is missed)
 export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
@@ -123,6 +124,18 @@ cd $HOME/repos || exit 1
 # Learning-loop baseline (spec 002): writes last week's record once, then this is a quick no-op. No model runs.
 [[ -f "$S/learning_baseline.py" ]] && timeout 150 python3 "$S/learning_baseline.py" observe >/dev/null 2>>"$LOG"
 
+# The three claude calls below run in a lean folder, not in ~/repos (Jonathan, 29 Oct 2026, token study: 229 headless calls in 20 hours
+# started in ~/repos and each loaded ~/repos/CLAUDE.md, the memory index and the skill list before its first word: 45-61K tokens, 60% of
+# these calls' weekly cost). ~/.claude/state/lean sits outside ~/repos, so none of that loads; hub_lean.py --lean-dir makes it with the
+# same lean project settings the hub has (plugins, Artifact tools and unused connectors off; Gmail stays on) and prints it. Measured
+# first-turn context: 47.8K -> 12.9K (check), 47.6K -> 13.4K (handler), 46.6K -> 12.1K (client queuer), same output each time.
+# --disable-slash-commands drops the skill listing (no pass invokes a skill; the handler reads the agent-notes SKILL.md by path).
+# Everything the prompts name is an absolute path; the rules the workspace CLAUDE.md gave these passes are written into the prompts.
+# If hub_lean.py is missing or fails, the plain folder still works (the lean project settings are just not in it).
+LEAN=$(timeout 30 python3 -I "$S/hub_lean.py" --lean-dir 2>>"$LOG") && [[ -d "$LEAN" ]] || LEAN=${AFA_LEAN_DIR:-$HOME/.claude/state/lean}
+mkdir -p "$LEAN" && cd "$LEAN" || exit 1
+LEANFLAGS=(--disable-slash-commands)
+
 # No Write or Edit in general: print mode denies any path not allowed below, and these keep the repos and this
 # config unwritable even if a global allow rule appears. The one writable file is muse_jev.py's request
 # (~/.local/state/muse-jev/request.json), because a bare `Write` deny would cover it too (tested 2026-10-10).
@@ -132,24 +145,37 @@ DENY="Bash(git push:*),Bash(git commit:*),Bash(rm:*),Bash(docker:*),Bash(curl:*)
 Edit(/$HOME/repos/**),Edit(/$HOME/.claude/**),\
 mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__claude_ai_Gmail__trash_thread,\
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
-NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
+NotebookEdit,WebFetch,WebSearch,Agent,Workflow,Bash(*--apply*),Bash(*--test-mode*)"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
-  --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
+  --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read(/$STATE/agent-notes-processed.txt)" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
 
 # Client mail: its own check and queue step, so it runs whether or not a Hatch note is waiting.
 cnew=""
 if (($(age "$CLIENT_LAST") >= CLIENT_EVERY - 15)); then
   touch "$CLIENT_LAST"
-  cnew=$("$S/muse_poll_client_check.sh" 2>>"$LOG")
+  : >"$PAYIDS"
+  cnew=$(MUSE_CLIENT_PAYIDS="$PAYIDS" "$S/muse_poll_client_check.sh" 2>>"$LOG")
   echo "$(ts) client check: $([[ -n "$cnew" ]] && grep -c '^NEW ' <<<"$cnew" || echo 0) new" >>"$LOG"
 fi
 if [[ -n "$cnew" ]]; then
-  CALLOW="Read,Bash($S/muse_poll_record.sh:*)"
+  # This pass reads client mail unattended, so an injected mail could steer it (29 Oct hub security call). Its grant is the least it needs:
+  #  - Read of the one sender list, not the whole disk;
+  #  - muse_poll_record.sh client-mail and client-seen only (never inbox, which writes free text, nor done, processed or archive);
+  #  - the Gmail message reader and the Gusto script only when this look found a payment-kind line (PAYIDS is not empty), and then
+  #    only the dry-run form "gusto_mark_paid.py match --amount ..." (DENY above refuses --apply and --test-mode anywhere). The
+  #    script itself, told GUSTO_UNATTENDED=1, refuses --apply, --test-mode, another customer, and any --ref that is not in PAYIDS.
+  #    Marking an invoice paid is a person's step (--apply, after arming); the pass only queues the outcome (--record).
+  CALLOW="Read(/$HOME/repos/hub/client-senders.tsv),Bash($S/muse_poll_record.sh client-mail:*),Bash($S/muse_poll_record.sh client-seen:*)"
+  CENV=()
+  if [[ -s "$PAYIDS" ]]; then
+    CALLOW+=",mcp__claude_ai_Gmail__get_message,Bash(python3 $S/gusto_mark_paid.py match --amount:*)"
+    CENV=(GUSTO_UNATTENDED=1 GUSTO_QUEUED_IDS_FILE="$PAYIDS")
+  fi
   hprompt=$(cat "$S/muse_poll.client-handle.prompt"); hprompt=${hprompt//\{\{HOME\}\}/$HOME}
-  timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 \
+  env "${CENV[@]}" timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 "${LEANFLAGS[@]}" \
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
 fi
@@ -161,6 +187,6 @@ mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
 Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
-timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 \
+timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"

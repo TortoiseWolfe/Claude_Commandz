@@ -15,6 +15,13 @@ Other keys already in the file are kept; the three above are managed.
   hub_lean.py --print     show the managed settings
   hub_lean.py --install   write them if the file differs (silent when already current)
   hub_lean.py --check     exit 1 when the file is missing or stale
+  hub_lean.py --lean-dir  print the lean folder for unattended headless calls (see below), making it and its settings first
+
+The lean folder (default ~/.claude/state/lean, AFA_LEAN_DIR overrides) is where the unattended `claude -p` calls run
+(muse_poll.sh). It sits outside ~/repos, so neither ~/repos/CLAUDE.md nor that folder's memory index loads: together about
+15K tokens that each call used to pay at start-up (29 Oct 2026 token study: 229 headless calls in 20 hours, 45-61K each; 13K after).
+Its settings file carries the same three managed keys as the hub's, so plugins, Artifact tools and unused connectors stay off
+there too, plus autoMemoryEnabled false. --lean-dir writes it only when it differs, so a call site can run it every time.
 """
 
 import argparse
@@ -59,6 +66,17 @@ def target():
     return Path(os.environ.get("AFA_REPOS") or Path.home() / "repos") / ".claude" / "settings.json"
 
 
+def lean_dir():
+    return Path(os.environ.get("AFA_LEAN_DIR") or Path.home() / ".claude" / "state" / "lean")
+
+
+def lean_merged(existing):
+    """The hub's managed keys plus autoMemoryEnabled false, laid over whatever the lean folder's file already holds."""
+    out = merged(existing)
+    out["autoMemoryEnabled"] = False
+    return out
+
+
 def merged(existing):
     """Existing settings with the managed keys applied: plugins merged by name, deny entries added, denied servers replaced."""
     want = managed()
@@ -83,13 +101,52 @@ def load(path):
     return data
 
 
+def write_atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".settings.", suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def lean_dir_main():
+    """Print the lean folder. Its settings file is brought up to date first; a failure there is a warning, never a stop,
+    because a call in a bare lean folder is still far cheaper than one in ~/repos."""
+    d = lean_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print("hub_lean: cannot make %s: %s" % (d, e), file=sys.stderr)
+        return 1
+    path = d / ".claude" / "settings.json"
+    try:
+        try:
+            existing = json.loads(path.read_text())
+            if not isinstance(existing, dict):
+                raise ValueError("not a JSON object")
+        except FileNotFoundError:
+            existing = {}
+        want = lean_merged(existing)
+        if existing != want:
+            write_atomic(path, want)
+    except (OSError, ValueError) as e:
+        print("hub_lean: lean settings in %s not updated: %s" % (path, e), file=sys.stderr)
+    print(d)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--print", action="store_true", dest="show")
     g.add_argument("--install", action="store_true")
     g.add_argument("--check", action="store_true")
+    g.add_argument("--lean-dir", action="store_true", dest="lean")
     a = ap.parse_args()
+    if a.lean:
+        return lean_dir_main()
     if a.show:
         print(json.dumps(managed(), indent=2))
         return 0
@@ -101,13 +158,7 @@ def main():
     if a.check:
         print("hub_lean: %s is missing or stale; run hub_lean.py --install" % path, file=sys.stderr)
         return 1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".settings.", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        json.dump(want, f, indent=2)
-        f.write("\n")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
+    write_atomic(path, want)
     print("hub_lean: wrote %s" % path)
     return 0
 
