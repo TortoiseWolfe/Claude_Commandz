@@ -15,7 +15,7 @@
 # client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
 # kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_GMAIL (an executable that stands in for gmail_api.py: called as `<it> messages-list <query>`),
-# MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d).
+# MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d), MUSE_CLIENT_PAYIDS (a file that gets the ID of every payment-kind line printed).
 set -u
 S=$HOME/.claude/scripts
 TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
@@ -96,5 +96,9 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
   # From, Subject and Date pass through as printed (between the address and the labels), for the reader only.
   mid=${rest#*|}; mid=${mid%|*}; mid=${mid%|*}
+  # MUSE_CLIENT_PAYIDS (muse_poll.sh sets it): a file that collects the IDs of the payment-kind lines printed below, one per line.
+  # The poller grants the Gmail message reader and the Gusto script to the handler only when it holds an ID, and the Gusto script
+  # refuses any --ref that is not in it (29 Oct hub security call: an injected mail must not steer an unattended pass).
+  [[ -n "$pay" && -n "${MUSE_CLIENT_PAYIDS:-}" ]] && printf '%s\n' "$id" >>"$MUSE_CLIENT_PAYIDS"
   printf 'NEW %s%s | %s |%s\n' "$id" "$tag" "$addr" "$mid"
 done
