@@ -144,6 +144,8 @@ assert_contains "$LAST_OUT" "Read $HAND/prompt.md, then $HAND/handoff.md" 'the r
 # A real recycle: hand-off request, handoff.md, /clear, re-prime, in that order; the index row follows the new session.
 # 23 Oct: a session in the lane's folder that is not the lane's (the hub's own) was born meanwhile; the row must not take it.
 reset_fake; rows_before="$(wc -l <"$INDEX")"
+# The lane was started with two extra folders (lane.sh --add-dir, index column 15): the recycle's new row keeps them.
+sed -i '/\trl-lane\t/ s/$/\t-\t-\t-\t\/x\/a:\/x\/b/' "$INDEX"
 usage_rec 250000 >"$PROJ/hub-decoy.jsonl"
 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
 assert_exit 0 "$LAST_RC" '--recycle exits 0'
@@ -158,6 +160,7 @@ case "${sent[2]}" in *"Read $HAND/prompt.md, then $HAND/handoff.md"*) ok ;; *) f
 last="$(tail -1 "$INDEX")"
 IFS=$'\t' read -r _d iname _dir _m _b iprompt irep isid _st _eff _conn <<<"$last"
 [ "$iname" = rl-lane ] && [ "$isid" = new-sess-1 ] || fail "index row names the new session: $last"; ok
+[ "$(cut -f15 <<<"$last")" = "/x/a:/x/b" ] || fail "the recycle's new row keeps the extra folders (column 15): $last"; ok
 rm -f "$PROJ/hub-decoy.jsonl"
 [ "$iprompt" = "$HAND/prompt.md" ] && [ "$irep" = "$HAND/report.md" ] || fail "index row keeps prompt and report: $last"; ok
 lane --ctx rl-lane

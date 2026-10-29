@@ -117,9 +117,9 @@ lane --tier --project-mcp playwright
 # A real start records the choice in column 14 of the index row; a lane without it records "-".
 lane --claude-because "needs Docker" --project-mcp playwright mcp-row "$WITH" sonnet "$P"
 [ "$LAST_RC" = 0 ] || fail "real start with --project-mcp failed: $LAST_OUT"; ok
-[ "$(awk -F'\t' '$2=="mcp-row"{print NF" "$14}' "$LANES/index.tsv")" = "14 playwright" ] || fail "the index row has 14 columns, 14th = playwright; row: $(grep mcp-row "$LANES/index.tsv")"; ok
+[ "$(awk -F'\t' '$2=="mcp-row"{print NF" "$14}' "$LANES/index.tsv")" = "15 playwright" ] || fail "the index row has 15 columns (the 15th holds the extra folders), 14th = playwright; row: $(grep mcp-row "$LANES/index.tsv")"; ok
 lane --claude-because "needs Docker" mcp-none "$WITH" sonnet "$P"
-[ "$(awk -F'\t' '$2=="mcp-none"{print NF" "$14}' "$LANES/index.tsv")" = "14 -" ] || fail "a lane without --project-mcp records - in column 14"; ok
+[ "$(awk -F'\t' '$2=="mcp-none"{print NF" "$14}' "$LANES/index.tsv")" = "15 -" ] || fail "a lane without --project-mcp records - in column 14"; ok
 lane --status
 assert_contains "$LAST_OUT" 'project-mcp playwright' '--status shows the servers a lane keeps on'
 case "$(printf '%s\n' "$LAST_OUT" | grep '^mcp-none')" in *project-mcp*) fail "--status shows no project-mcp for a lane without it" ;; *) ok ;; esac
