@@ -20,23 +20,23 @@ setup() {  # <machine> -> $H (home), $S (scripts dir), $CALLS
   for f in wsl_bridge_watchdog.py hub_inbox_archive.py hub_digest.py notes_check.py hours.py openclaw_dispatch.py openclaw_reconcile.py openclaw_status_digest.py; do
     printf 'import sys\nopen(%s, "a").write("%s\\n")\nsys.exit(0)\n' "'$CALLS'" "$f" >"$S/$f"
   done
-  for f in lane_watch.sh he_runner_watch.sh; do
+  for f in lane_watch.sh he_runner_watch.sh fleet-up.sh; do
     printf '#!/usr/bin/env bash\necho %s >>"%s"\n' "$f" "$CALLS" >"$S/$f"; chmod +x "$S/$f"
   done
   printf '#!/usr/bin/env bash\necho wsl.exe >>"%s"\ncat >/dev/null\n' "$CALLS" >"$H/bin/wsl.exe"; chmod +x "$H/bin/wsl.exe"
 }
 run_refresh() { HOME="$H" PATH="$H/bin:$PATH" bash "$S/openclaw_status_refresh.sh" >/dev/null 2>&1 || true; }
 
-# 1. Another machine runs only the keeper steps: bridge probe, lane recycle, inbox archive, hub digest.
+# 1. Another machine runs only the keeper steps: bridge probe, recovery check (fleet-up.sh), lane recycle, inbox archive, hub digest.
 setup NCC-TEST
 run_refresh
 got="$(sort "$CALLS" | tr '\n' ' ')"
-[ "$got" = "hub_digest.py hub_inbox_archive.py lane_watch.sh wsl_bridge_watchdog.py " ] || fail "a keeper machine runs only the keeper steps (ran: $got)"; ok
+[ "$got" = "fleet-up.sh hub_digest.py hub_inbox_archive.py lane_watch.sh wsl_bridge_watchdog.py " ] || fail "a keeper machine runs only the keeper steps (ran: $got)"; ok
 
 # 2. NX-01 runs the rest too.
 setup NX-01
 run_refresh
-for want in he_runner_watch.sh notes_check.py openclaw_dispatch.py openclaw_reconcile.py hub_digest.py lane_watch.sh; do
+for want in fleet-up.sh he_runner_watch.sh notes_check.py openclaw_dispatch.py openclaw_reconcile.py hub_digest.py lane_watch.sh; do
   grep -qx "$want" "$CALLS" || fail "NX-01 runs $want (ran: $(tr '\n' ' ' <"$CALLS"))"
 done; ok
 
