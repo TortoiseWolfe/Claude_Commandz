@@ -364,10 +364,31 @@ class Page(unittest.TestCase):
                            {"name": "c-lane", "usd": 20.0, "families": {"sonnet": 20.0}},
                            {"name": "d-lane", "usd": 5.0, "families": {"sonnet": 5.0}}], "other": 1.0, "total": 118.0}
         page = self.build(spend=spend)
-        for needle in ["## Lane spend today (API-equivalent, top 3", "- acme-mail: $62 (fable+opus)", "- b-lane: $30 (opus)",
+        for needle in ["## Spend today (API-equivalent; the hub, then top 3 lanes", "- acme-mail: $62 (fable+opus)", "- b-lane: $30 (opus)",
                        "- c-lane: $20 (sonnet)", "all lanes and the hub together: $118"]:
             self.assertIn(needle, page)
         self.assertNotIn("d-lane", page)
+        self.assertNotIn("- Hub (", page)   # a spend answer with no hub in it adds no hub line
+
+    def test_spend_section_puts_the_hubs_own_spend_above_the_lanes_with_its_share_and_context(self):
+        spend = {"lanes": [{"name": "acme-mail", "usd": 62.48, "families": {"opus": 62.48}}], "other": 1.0, "total": 400.0,
+                 "hub": {"usd": 23.6, "families": {"opus": 23.6},
+                         "week": {"since": 1793203200, "usd": 163.8, "total": 432.75, "share": 0.3786, "sessions": 13,
+                                  "median_context": 168754, "first_context": 60976}}}
+        lines = hd.spend_section(spend)[1]
+        self.assertEqual(lines[0], "- Hub (started in ~/repos, not a lane): today $24; since the weekly reset $164 = 38% of all use; "
+                                   "13 sessions typed in, median context per turn 169K (first turn 61K)")
+        self.assertEqual(lines[1:], ["- acme-mail: $62 (opus)", "- all lanes and the hub together: $400"])
+        self.assertIn("a lane past $25 wakes the hub", hd.spend_section(spend)[0])
+
+    def test_hub_spend_line_degrades_to_what_the_json_carries(self):
+        self.assertEqual(hd.hub_spend_line({"usd": 4.0, "week": None}), "- Hub (started in ~/repos, not a lane): today $4")
+        quiet = {"usd": 0, "week": {"usd": 5.0, "share": 0.0116, "sessions": 0, "median_context": None, "first_context": None}}
+        self.assertEqual(hd.hub_spend_line(quiet), "- Hub (started in ~/repos, not a lane): today $0; since the weekly reset $5 = 1% of all use")
+        no_first = {"usd": 1, "week": {"usd": 2, "share": 0.5, "sessions": 1, "median_context": 90000, "first_context": None}}
+        self.assertTrue(hd.hub_spend_line(no_first).endswith("1 session typed in, median context per turn 90K"))
+        self.assertIsNone(hd.hub_spend_line(None))
+        self.assertIsNone(hd.hub_spend_line({"lanes": []}))
 
     def test_spend_section_says_so_when_it_could_not_be_measured(self):
         self.assertIn("- not measured", self.build())
@@ -432,6 +453,49 @@ class Page(unittest.TestCase):
         self.assertNotIn(secret, page)
         self.assertNotIn("ghp_", page)
         self.assertNotIn("/reset/", page)
+
+
+class WeekStart(unittest.TestCase):
+    """The hub's share is counted from the weekly reset, which the page reads where its Budget section does: the quality report's line."""
+    EST = ZoneInfo("America/New_York")
+    BUDGET = "Week resets Wed 2026-11-04 12:00 PM EST: used 16.1%, burn 18.7% per day, projected 133.2% (24 h rate)"
+
+    def test_the_reset_is_read_from_the_budget_line(self):
+        self.assertEqual(hd.weekly_reset_ts(self.BUDGET), datetime(2026, 11, 4, 12, 0, tzinfo=self.EST).timestamp())
+        self.assertEqual(hd.weekly_reset_ts("Week resets Thu 2026-11-05 1:30 AM EST: used 1%"),
+                         datetime(2026, 11, 5, 1, 30, tzinfo=self.EST).timestamp())
+        self.assertEqual(hd.weekly_reset_ts("Week resets Wed 2026-10-28 12:00 AM EDT: used 1%"),
+                         datetime(2026, 10, 28, 0, 0, tzinfo=self.EST).timestamp())
+
+    def test_no_reset_in_the_line_is_none(self):
+        for line in ("budget report unavailable", "This week: used 4%", "", None):
+            self.assertIsNone(hd.weekly_reset_ts(line))
+
+    def test_the_week_began_seven_days_before_that_reset(self):
+        now = datetime(2026, 10, 29, 8, 0, tzinfo=self.EST).timestamp()
+        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 10, 28, 12, 0, tzinfo=self.EST).timestamp())
+
+    def test_with_no_budget_line_the_dispatchers_wednesday_noon_rule_gives_the_same_start(self):
+        for now in (datetime(2026, 10, 29, 8, 0, tzinfo=self.EST), datetime(2026, 10, 28, 11, 59, tzinfo=self.EST),
+                    datetime(2026, 10, 28, 12, 1, tzinfo=self.EST)):
+            start = hd.week_start_ts("budget report unavailable", now.timestamp())
+            self.assertEqual(datetime.fromtimestamp(start, self.EST).strftime("%a %H:%M"), "Wed 12:00", now)
+            self.assertLessEqual(start, now.timestamp())
+            self.assertGreater(start + 7 * 86400, now.timestamp())
+
+    def test_a_reset_already_past_is_ignored_for_the_rule(self):
+        # a stale cached budget line from last week must not move the start back a week
+        now = datetime(2026, 11, 5, 9, 0, tzinfo=self.EST).timestamp()
+        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 12, 0, tzinfo=self.EST).timestamp())
+
+    def test_lane_spend_is_asked_for_the_week_only_when_the_start_is_known(self):
+        now = datetime(2026, 10, 29, 8, 0, tzinfo=self.EST).timestamp()
+        cmd = hd.lane_spend_command(self.BUDGET, now)
+        self.assertEqual(cmd[-2:], ["--week-start", str(int(datetime(2026, 10, 28, 12, 0, tzinfo=self.EST).timestamp()))])
+        self.assertEqual(Path(cmd[1]).name, "lane_spend.py")
+        self.assertIn("--json", cmd)
+        with mock.patch.object(hd, "week_start_ts", return_value=None):
+            self.assertEqual(hd.lane_spend_command(self.BUDGET, now)[-1], "--json")
 
 
 class PublishBudget(unittest.TestCase):
