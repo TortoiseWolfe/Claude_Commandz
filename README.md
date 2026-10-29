@@ -130,6 +130,16 @@ Claude lanes start lean, because a lane re-reads everything it starts with on ev
 
 3D fitting, photo matching and site-model work runs only on `fable` or `opus` (each at effort high). When a Claude lane's prompt file contains `data/sites/` or `site-model`, lane.sh refuses `sonnet`, `haiku` or any other model on start, `--console`, `--headless` and `--resume`, and names the rule in `~/repos/hub/lane-rules.md`. `--allow-low-tier` overrides it. Jonathan's rule of 19 Oct 2026: a cheap model on work it can't do is no saving.
 
+### Where is this lane?
+
+`global/.claude/scripts/lane_brief.py` answers "where is this lane and does it need me?" in one call, in place of `lane.sh --status`, a `tmux capture-pane`, a read of `report.md` and `lane.sh --recycle-point`. It is read-only: it sends no keys and writes no file.
+
+```bash
+python3 ~/.claude/scripts/lane_brief.py <lane> [--lines N] [--json]   # exit 2 for a lane that is not in index.tsv
+```
+
+It prints line 1 of `report.md` with the file's time and the same report verdict `lane.sh --status` shows (written, stale, or not yet), the engine and model, the context in K against the lane's recycle line, whether the pane is still running claude (`DEAD (pane shows bash)` when not), whether a dialog is waiting (the lane_watch.sh rule) with the dialog's first lines, and the last N (default 12) screen lines joined with `-J`, so a long line is not cut at the screen width. A grey suggestion in an idle input box is marked `(suggestion, not typed)`. A headless lane (agy, codex, copilot, opencode) has no pane: it prints the tail of `out.log` and the time the engine is blocked until, in Eastern time, from `openclaw-dispatch.json`. `--json` prints the same facts as one object with nothing cut.
+
 ### The hub starts lean too
 
 The hub (`claude` started in `~/repos`) used to carry about 80K tokens before its first reply, against about 47K for a lane. `global/.claude/scripts/hub_lean.py` closes most of that gap with no new flags: it writes a project settings file in `~/repos/.claude/` (untracked, the workspace `.gitignore` is an allowlist) that Claude Code reads whenever a session starts there. The file switches off the plugins in lane.sh's `LANE_PLUGINS_OFF`, withholds the Artifact tools (`LANE_TOOLS_OFF`, via `permissions.deny`) and disconnects every claude.ai connector except Gmail, Google Calendar and Google Drive, the only three the hub called in its 16-19 Oct transcripts. Plugins and tools are read out of lane.sh, so there is one list. The hub keeps its own `CLAUDE.md`, user skills, slash commands and agents.
