@@ -476,8 +476,13 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if not roadmap_body:
         rl.append("- roadmap unavailable (gh failed); run: gh issue view 1 -R " + HUB_REPO)
     # First, not last: the size cap trims a section from its end, and this is the line the prime prompt says to start from.
-    if rm["next_session"]:
-        rl.append("Next session should: " + one_line(rm["next_session"], 380))
+    # This machine's own line when it wrote one; otherwise the roadmap's line, which is NX-01's, and off NX-01 it says so.
+    own = rm.get("next_session_by", {}).get(machine)
+    if own:
+        rl.append("Next session should (%s): %s" % (machine, one_line(own, 380)))
+    elif rm["next_session"]:
+        label = "Next session should" if machine in ("NX-01", "unknown") else "Next session should (NX-01's line)"
+        rl.append(label + ": " + one_line(rm["next_session"], 380))
     arcs = [a for a in rm["arcs"] if a["open"] > 0] or rm["arcs"]
     if arcs:
         a = arcs[0]

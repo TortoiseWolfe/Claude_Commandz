@@ -175,6 +175,31 @@ class Editing(unittest.TestCase):
         self.assertNotIn("Old next-session line", out)
         self.assertIn("## Why this exists", out)
 
+    def test_a_machine_line_is_added_after_the_roadmap_line_and_then_replaced(self):
+        out = sp.replace_next_machine(BODY, "NCC-74656", "Tower line one.\n")
+        self.assertIn("### Next session should\n\nOld next-session line.\n\n### Next session should (NCC-74656)\n\nTower line one.\n\n---", out)
+        again = sp.replace_next_machine(out, "NCC-74656", "Tower line two.")
+        self.assertIn("Tower line two.", again)
+        self.assertNotIn("Tower line one.", again)
+        self.assertEqual(again.count("### Next session should (NCC-74656)"), 1)
+        self.assertIn("Old next-session line.", again)  # NX-01's line is untouched
+        self.assertEqual(sp.body_problems(again), [])  # the three fields still replace themselves unchanged
+
+    def test_the_roadmap_line_is_still_replaced_when_a_machine_line_is_present(self):
+        out = sp.replace_next_machine(BODY, "NCC-74656", "Tower line.")
+        out = sp.replace_field(out, "next-should", "NX-01 new line.")
+        self.assertIn("### Next session should\n\nNX-01 new line.\n\n### Next session should (NCC-74656)\n\nTower line.", out)
+
+    def test_a_machine_line_refuses_nx01_a_bad_name_and_a_body_without_the_roadmap_line(self):
+        for machine in ("NX-01", "bad name", ""):
+            with self.assertRaises(sp.Fail):
+                sp.replace_next_machine(BODY, machine, "x")
+        with self.assertRaises(sp.Fail):
+            sp.replace_next_machine("## Roadmap\n\nnothing\n", "NCC-74656", "x")
+        for bad in ("ok\n### Next session should (NX-01)\nforged", "ok\n---\nmore", "<details>x", "# Title"):
+            with self.assertRaises(sp.Fail, msg=bad):
+                sp.replace_next_machine(BODY, "NCC-74656", bad)
+
     def test_arc_details_block_matched_by_number(self):
         out = sp.replace_field(BODY, "arc", NEW_ARC)
         self.assertIn("through 11/30", out)
@@ -426,6 +451,28 @@ class Cli(unittest.TestCase):
         self.assertFalse(any(c.startswith(("issue edit", "issue comment")) for c in self.calls()))
         self.assertNotIn("seed-cache", (self.d / "hook.log").read_text())  # only the facts run's check
 
+    def test_the_tower_posts_only_its_own_next_session_line(self):
+        t = Path(self.tmp.name)
+        (t / "mine.md").write_text("Finish the tower fixes.\n")
+        self.run_cli(repo=sp.HUB_REPO, machine="NCC-74656")
+        r = self.run_cli("--post", "--next-should-machine", str(t / "mine.md"), repo=sp.HUB_REPO, machine="NCC-74656")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = (self.d / "edited-body.md").read_text()
+        self.assertIn("### Next session should (NCC-74656)\n\nFinish the tower fixes.", body)
+        self.assertIn("Old next-session line.", body)  # NX-01's line is untouched
+        self.assertIn("**Next session should (NCC-74656):** Finish the tower fixes.", (self.d / "comment.md").read_text())
+        # still refused: the tower editing NX-01's own three fields, NX-01 using the machine flag, a public repo
+        self.run_cli(repo=sp.HUB_REPO, machine="NCC-74656")
+        r = self.run_cli("--post", "--next-should", str(t / "mine.md"), repo=sp.HUB_REPO, machine="NCC-74656")
+        self.assertNotEqual(r.returncode, 0)
+        self.run_cli(repo=sp.HUB_REPO)
+        r = self.run_cli("--post", "--next-should-machine", str(t / "mine.md"), repo=sp.HUB_REPO, machine="NX-01")
+        self.assertNotEqual(r.returncode, 0)
+        self.run_cli()
+        r = self.run_cli("--post", "--next-should-machine", str(t / "mine.md"), machine="NCC-74656")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("hub roadmap only", r.stderr)
+
     def test_post_writes_body_comment_and_seeds_the_drift_cache(self):
         self.run_cli()
         r = self.run_cli("--post", *self.fieldfiles())
@@ -496,7 +543,7 @@ class UnattendedGuard(unittest.TestCase):
         ap = argparse.ArgumentParser()
         for flag, default in (("--repo", None), ("--dir", os.getcwd()), ("--machine", None), ("--lanes-dir", "L"), ("--inbox", "I"), ("--inbox-archive", "IA"),
                               ("--state-dir", "S"), ("--drift-hook", "H"), ("--now", None), ("--arc", None), ("--next3", None),
-                              ("--next-should", None), ("--note", None), ("--alert-state", None)):
+                              ("--next-should", None), ("--next-should-machine", None), ("--note", None), ("--alert-state", None)):
             ap.add_argument(flag, default=default)
         return ap, ap.parse_args(list(argv))
 
@@ -527,7 +574,7 @@ class UnattendedGuard(unittest.TestCase):
         Path(outside, "arc.md").write_text("x")
         os.environ["AFA_LANE_HAND"] = hand
         try:
-            for flag in ("--arc", "--next3", "--next-should", "--note"):
+            for flag in ("--arc", "--next3", "--next-should", "--next-should-machine", "--note"):
                 ap, a = self.parse(flag, str(Path(outside, "arc.md")))
                 with self.assertRaises(sp.Fail):
                     sp.unattended_guard(ap, a)
