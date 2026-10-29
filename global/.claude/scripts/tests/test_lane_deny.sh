@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for lane.sh --deny (29 Oct 2026: the weekly co-op Deck lane reads cards that members and anyone with board access wrote, so it starts
 # without Deck writes, ssh and docker). The option repeats, adds its rules to LANE_TOOLS_OFF in --disallowedTools, and is kept one rule per line in
-# deny-tools.txt beside the lane's report so --resume and --restart reuse it. A fake HOME and a fake tmux that logs what is typed hold everything.
+# $LANES/.deny/<lane folder>.txt (outside the lane's own writable folder) so --resume and --restart reuse it; a bad line there fails closed. A fake HOME and a fake tmux that logs what is typed hold everything.
 set -euo pipefail
 export AFA_ENGINES_AVAILABLE="*"
 
@@ -39,14 +39,14 @@ lane --deny 'Bash(*deck_write*)' --deny 'Bash(ssh:*)' dk "$WORK" sonnet "$TMP/p1
 [ "$LAST_RC" = 0 ] || fail "a start with --deny works ($LAST_OUT)"; ok
 c="$(last_cmd)"
 has "$c" "--disallowedTools Artifact\\ ArtifactComments\\ ArtifactData\\ Bash\\(\\*deck_write\\*\\)\\ Bash\\(ssh:\\*\\)" "both rules are added to the withheld tools"
-[ "$(cat "$LANES/$DAY-dk/deny-tools.txt")" = "$(printf 'Bash(*deck_write*)\nBash(ssh:*)')" ] || fail "deny-tools.txt holds one rule per line"; ok
+[ "$(cat "$LANES/.deny/$DAY-dk.txt")" = "$(printf 'Bash(*deck_write*)\nBash(ssh:*)')" ] || fail "the deny file holds one rule per line"; ok
 
 # 2. No option: only the Artifact tools, and no file.
 lane plain "$WORK" sonnet "$TMP/p1.md"
 [ "$LAST_RC" = 0 ] || fail "a plain start works ($LAST_OUT)"; ok
 has "$(last_cmd)" "--disallowedTools Artifact\\ ArtifactComments\\ ArtifactData " "a plain start withholds only the Artifact tools"
 hasnt "$(last_cmd)" "deck_write" "a plain start denies nothing else"
-[ ! -e "$LANES/$DAY-plain/deny-tools.txt" ] || fail "a plain start writes no deny file"; ok
+[ ! -e "$LANES/.deny/$DAY-plain.txt" ] || fail "a plain start writes no deny file"; ok
 
 # 3. --resume (no option given) and --restart reuse the file.
 # a started lane has no session id until Claude records one, so give dk one in index column 8
@@ -57,6 +57,14 @@ has "$(last_cmd)" 'Bash\(\*deck_write\*\)' "a resume keeps the denied rules"
 has "$(last_cmd)" 'Bash\(ssh:\*\)' "a resume keeps every denied rule"
 lane --restart dk "$WORK" sonnet "$TMP/p1.md"
 has "$(last_cmd)" 'Bash\(\*deck_write\*\)' "a restart keeps the denied rules"
+[ ! -e "$LANES/$DAY-dk/deny-tools.txt" ] || fail "no rule file sits in the lane's own folder"; ok
+# a tampered rule file fails closed: a line that is not a rule withholds Bash, Write and Edit
+awk -F'\t' -v OFS='\t' '$2 == "dk" { $8 = "sess-dk" } { print }' "$LANES/index.tsv" >"$TMP/index.new" && mv "$TMP/index.new" "$LANES/index.tsv"
+printf 'Bash(*deck_write*)\nBash(ssh:* ; rm -rf)\n' >"$LANES/.deny/$DAY-dk.txt"
+lane --resume dk
+has "$LAST_OUT" "not a permission rule" "a bad line in the rule file is reported"
+has "$(last_cmd)" 'Bash\ Write\ Edit' "a bad line withholds Bash, Write and Edit"
+printf 'Bash(*deck_write*)\nBash(ssh:*)\n' >"$LANES/.deny/$DAY-dk.txt"
 
 # 4. Bad rules and wrong modes are refused.
 lane --deny 'Bash(git log *)' bad "$WORK" sonnet "$TMP/p1.md"
@@ -71,6 +79,6 @@ lane --deny 'Bash(ssh:*)' --status
 # 5. A dry run shows the rules and writes no file.
 lane --dry-run --deny 'Bash(docker:*)' dry "$WORK" sonnet "$TMP/p1.md"
 has "$LAST_OUT" 'Bash\\\(docker:' "the dry run shows the rule"
-[ ! -e "$LANES/$DAY-dry/deny-tools.txt" ] || fail "a dry run writes no deny file"; ok
+[ ! -e "$LANES/.deny/$DAY-dry.txt" ] || fail "a dry run writes no deny file"; ok
 
 echo "ok: $checks checks"

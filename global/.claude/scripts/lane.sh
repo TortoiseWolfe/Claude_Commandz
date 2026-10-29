@@ -82,7 +82,8 @@
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
 #                                       as 'Bash(ssh:*)' or 'Bash(*deck_write*)'. Added to LANE_TOOLS_OFF in --disallowedTools. The rules are kept
-#                                       one per line in deny-tools.txt beside the lane's report.md, so --resume and --restart reuse them. For lanes that
+#                                       one per line in ~/.claude/state/lanes/.deny/<lane folder name>.txt (hub-owned: not inside the lane's own folder, which it
+#                                       may write), so --resume and --restart reuse them; each line is checked again on read. For lanes that
 #                                       read text strangers wrote (the weekly co-op Deck lane), so a planted instruction has no tool to act with.
 #   lane.sh --add-dir <path> ...        at start, --restart or --resume, repeatable: a folder outside the lane's own that it may read and write
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
@@ -855,16 +856,24 @@ print(json.dumps({n: "off" for n in sorted(names - keep)}, separators=(",", ":")
 ' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
 }
 
-# --deny rules live one per line in deny-tools.txt beside the lane's report.md. This prints the comma list a start or resume should pass:
-# the rules given now, added to the file's, or just the file's; "-" when there are none. A start (not a dry run) writes the file.
+# --deny rules live one per line in ~/.claude/state/lanes/.deny/<lane folder name>.txt, outside the lane's own folder (the lane may write
+# there, so a rule file in it could be emptied by the very text it guards against). Each line is checked again on read with the shape --deny
+# demands; a bad line withholds Bash, Write and Edit from the lane (fail closed) and warns. This prints the comma list a start or resume should pass: the rules given now, added to the
+# file's, or just the file's; "-" when there are none. A start (not a dry run) writes the file.
 deny_rules() {  # <lane folder> [write]
-  local f="$1/deny-tools.txt" r; local -a all=()
-  if [ -s "$f" ]; then while IFS= read -r r; do [ -z "$r" ] || all+=("$r"); done <"$f"; fi
+  local f="$HOME/.claude/state/lanes/.deny/$(basename "$1").txt" r; local -a all=()
+  if [ -s "$f" ]; then
+    while IFS= read -r r; do
+      [ -z "$r" ] && continue
+      [[ "$r" =~ ^[A-Za-z][A-Za-z0-9_]*(\([^[:space:],]+\))?$ ]] || { echo "WARNING: $f holds a line that is not a permission rule ($r); starting the lane with Bash, Write and Edit withheld" >&2; printf 'Bash,Write,Edit'; return 0; }
+      all+=("$r")
+    done <"$f"
+  fi
   for r in ${deny_opt[@]+"${deny_opt[@]}"}; do
     case " ${all[*]:-} " in *" $r "*) ;; *) all+=("$r") ;; esac
   done
   if [ "${#all[@]}" -eq 0 ]; then printf -- '-'; return 0; fi
-  if [ "${2:-}" = write ] && [ "${#deny_opt[@]}" -gt 0 ] && [ "$dry" = 0 ]; then mkdir -p "$1"; printf '%s\n' "${all[@]}" >"$f"; fi
+  if [ "${2:-}" = write ] && [ "${#deny_opt[@]}" -gt 0 ] && [ "$dry" = 0 ]; then mkdir -p "$(dirname "$f")"; printf '%s\n' "${all[@]}" >"$f"; fi
   local IFS=,; printf '%s' "${all[*]}"
 }
 
