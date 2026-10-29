@@ -91,6 +91,27 @@ dh_rc --cancel orphan
 [ "$LAST_RC" = 0 ] || fail "--cancel kills a labelled container with no script running, got $LAST_RC"; ok
 grep -q 'cid-bbb' "$ST/kill.log" || fail "the orphan container was killed"; ok
 
+# A stale job file (left by a SIGKILL) whose pid now belongs to another process is never signalled: --cancel and --list drop the file instead.
+# Case 1: the pid is reused by an unrelated process, start time differs. Case 2: same start time but the process is not docker-heavy.sh
+# (a Codex lane's command line mentions .cache/docker-heavy, so a name match alone is not enough).
+JD="$HOME_T/.cache/docker-heavy/jobs"; mkdir -p "$JD"
+/bin/sleep 300 & victim=$!
+vstart=$(cut -d' ' -f1- "/proc/$victim/stat"); vstart=${vstart##*) }; set -- $vstart; vstart=${20}
+printf '%s\twaiting\theavy\t1\t1\t%s\tdocker x\n' "$victim" 1 >"$JD/stale1.job"
+dh_rc --cancel stale1
+[ "$LAST_RC" = 1 ] || fail "a stale job file with a reused pid matches nothing (exit 1), got $LAST_RC: $LAST_OUT"; ok
+kill -0 "$victim" 2>/dev/null || fail "the unrelated process was killed by --cancel"; ok
+[ ! -e "$JD/stale1.job" ] || fail "the stale job file is removed"; ok
+printf '%s\twaiting\theavy\t1\t1\t%s\tdocker x\n' "$victim" "$vstart" >"$JD/stale2.job"
+dh_rc --cancel stale2
+[ "$LAST_RC" = 1 ] || fail "a job file whose pid runs another program matches nothing, got $LAST_RC: $LAST_OUT"; ok
+kill -0 "$victim" 2>/dev/null || fail "a process with the right start time but another script was killed"; ok
+printf '%s\twaiting\theavy\t1\t1\t%s\tdocker x\n' "$victim" 1 >"$JD/stale3.job"
+dh_rc --list
+[ ! -e "$JD/stale3.job" ] || fail "--list drops a stale job file"; ok
+case "$LAST_OUT" in *stale3*) fail "--list shows a stale job: $LAST_OUT" ;; *) ok ;; esac
+kill "$victim" 2>/dev/null || true; wait "$victim" 2>/dev/null || true
+
 # The header says the timeout counts run time only and warns about outer timeouts.
 grep -q 'counts RUN time only' "$SCRIPT" && grep -q 'outer timeout shorter than 3600' "$SCRIPT" || fail "the header explains the timeout"; ok
 

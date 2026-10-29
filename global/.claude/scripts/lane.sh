@@ -1834,9 +1834,9 @@ if [ "$engine" != claude ]; then
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") $adsf$flags $(printf %q "$lane_msg")"
+  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
 else
   # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
   cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"

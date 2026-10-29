@@ -35,4 +35,13 @@ has "$LAST_OUT" 'Read\\\ that\\\ whole\\\ file\\\ now\\\ and\\\ follow\\\ it.' "
 lane --dry-run --console argv-c "$WORK" sonnet "$P"
 hasnt "$LAST_OUT" "pgrep-trap-canary-word" "--console keeps the prompt text off the command line"
 
+# Both console forms add the hand-off folder as a working folder, or a headless lane could be refused the read of its prompt file.
+lane --dry-run --console --headless argv-h "$WORK" sonnet "$P"
+has "$LAST_OUT" "--add-dir\\ $LANES/$(date +%F)-argv-h\\ " "--console --headless adds the hand-off folder"
+has "$LAST_OUT" "console_worker.sh\\ --inner" "(it is the console worker command)"
+lane --dry-run --console argv-c2 "$WORK" sonnet "$P"
+has "$LAST_OUT" "--add-dir\\ $LANES/$(date +%F)-argv-c2\\ " "--console adds the hand-off folder"
+lane --dry-run argv-i "$WORK" sonnet "$P"
+has "$LAST_OUT" "--add-dir\\ $LANES/$(date +%F)-argv-i\\ " "a plain interactive start still adds it"
+
 echo "ok - $checks checks passed"

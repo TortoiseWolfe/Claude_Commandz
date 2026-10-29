@@ -54,12 +54,18 @@ while [ $# -gt 0 ]; do
 done
 if [ "$LIGHT" = 1 ]; then : "${MEM:=4g}" "${CPUS:=4}"; SLOT=light LOCK="$DIR/light.lock"; else : "${MEM:=12g}" "${CPUS:=8}"; SLOT=heavy LOCK="$DIR/lock"; fi
 
-# job_field <file> <n>: field n of a job file (tab separated: pid, state, slot, since-epoch, waiting-since-epoch, command).
+# job_field <file> <n>: field n of a job file (tab separated: pid, state, slot, since-epoch, waiting-since-epoch, process start time, command).
 job_field() { cut -f"$2" "$1" 2>/dev/null; }
-# job_alive <file>: the job file's pid is a live docker-heavy.sh (the pid is checked against /proc, so a reused pid is not mistaken for it).
+# proc_start <pid>: the process's start time in clock ticks since boot (/proc/PID/stat field 22); the text after the last ")" skips a command name with spaces.
+proc_start() { local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
+# job_alive <file>: the job file's pid is still the docker-heavy.sh that wrote it. A SIGKILL leaves the file behind and the pid can be reused (by a
+# Codex lane, whose command line mentions .cache/docker-heavy), so the pid must have the recorded start time and run this very script by name.
 job_alive() {
-  local pid; pid=$(job_field "$1" 1)
-  [[ "$pid" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q 'docker-heavy'
+  local pid start a0 a1; pid=$(job_field "$1" 1); start=$(job_field "$1" 6)
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$start" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/cmdline" ] || return 1
+  [ "$(proc_start "$pid")" = "$start" ] || return 1
+  { IFS= read -r -d '' a0; IFS= read -r -d '' a1; } < "/proc/$pid/cmdline" || true
+  [ "$(basename -- "$a0")" = docker-heavy.sh ] || [ "$(basename -- "$a1")" = docker-heavy.sh ]
 }
 
 if [ "$ACTION" = list ]; then
@@ -111,7 +117,8 @@ mkdir -p "$JOBS"
 JOB="$JOBS/$TAG.job"
 [ ! -e "$JOB" ] || ! job_alive "$JOB" || { echo "docker-heavy.sh: a job tagged $TAG is already running or waiting" >&2; exit 2; }
 now=$(date +%s)
-printf '%s\twaiting\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$now" "$now" "${*:1:6}" > "$JOB"
+MYSTART=$(proc_start "$$")
+printf '%s\twaiting\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$now" "$now" "$MYSTART" "${*:1:6}" > "$JOB"
 exec 9>>"$LOCK"
 fpid=""
 cleanup() {
@@ -136,7 +143,7 @@ if ! flock -n 9; then
   wait "$fpid" || { echo "docker-heavy.sh: gave up after an hour waiting for the slot" >&2; fpid=""; exit 75; }
   fpid=""
 fi
-printf '%s\trunning\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$(date +%s)" "$now" "${*:1:6}" > "$JOB"
+printf '%s\trunning\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$(date +%s)" "$now" "$MYSTART" "${*:1:6}" > "$JOB"
 printf 'tag %s since %s pid %s in %s: %s\n' "$TAG" "$(date '+%F %H:%M')" "$$" "$PWD" "${*:1:6}" > "$LOCK.holder"
 # in the background and waited on, so a signal to this script runs cleanup at once (bash holds a
 # trap until a foreground child ends); stdin passed on explicitly (a background job gets /dev/null).
