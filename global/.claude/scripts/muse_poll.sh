@@ -191,9 +191,58 @@ if [[ -n "$cnew" ]]; then
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
 fi
-[[ "$check" == NEW* ]] || exit 0
-touch "$ACTIVE"                                # a Hatch note arrived: the exchange is live
 
+# 27-28 Oct on the second machine: Gmail answered "Resource has been exhausted (quota)".
+# The poller had already marked the exchange live (touched $ACTIVE), so it re-checked
+# every minute and found the same note NEW again, forever. Three note ids came up NEW
+# 12 times each in 2.5 hours. This block stops the endless retry: the handler runs only
+# if the processed file grows; after 2 failed handler runs per id we log GAVE-UP, queue
+# a hub-inbox line, and skip that id on later passes.
+# Error from the check pass: empty, or Gmail quota/exhausted. Do not treat as "nothing new".
+# Match without regard to upper or lower case: ERROR, Error, Quota, EXHAUSTED all count.
+shopt -s nocasematch
+if [[ -z "$check" ]] || [[ "$check" =~ error|exhausted|quota ]]; then
+  shopt -u nocasematch
+  echo "$(ts) POLL-ERROR check: $check" >>"$LOG"
+  exit 0
+fi
+shopt -u nocasematch
+
+# A quiet check answers NONE: nothing to do, and the handler must not run.
+[[ "$check" == NEW* ]] || exit 0
+
+# The check prints "NEW <id> [<id>...]" (see muse_poll.check.prompt). Extract ids.
+ids=()
+if [[ "$check" == NEW* ]]; then
+  for id in ${check#NEW }; do
+    ids+=("$id")
+  done
+fi
+
+# If every id on this check has already failed twice, give up and skip the handler.
+FAIL_FILE="$STATE/muse-poll-failures.tsv"
+gave_up_all=1
+for id in "${ids[@]}"; do
+  count=0
+  if [[ -f "$FAIL_FILE" ]]; then
+    count=$(awk -F'\t' -v i="$id" '$1 == i {print $2; exit}' "$FAIL_FILE")
+    [[ -z "$count" ]] && count=0
+  fi
+  if ((count < 2)); then
+    gave_up_all=0
+    break
+  fi
+done
+if ((gave_up_all == 1 && ${#ids[@]} > 0)); then
+  exit 0
+fi
+
+# Record processed count before handler runs.
+processed_before=0
+PROCESSED_FILE="$STATE/agent-notes-processed.txt"
+[[ -f "$PROCESSED_FILE" ]] && processed_before=$(wc -l < "$PROCESSED_FILE")
+
+# Run the handler (Sonnet). Do NOT touch $ACTIVE before it; only after if the processed file grew.
 ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
@@ -201,4 +250,38 @@ mcp__claude_ai_Gmail__label_message,\
 Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
 timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
-echo "$(ts) handler finished (exit $?)" >>"$LOG"
+handler_exit=$?
+echo "$(ts) handler finished (exit $handler_exit)" >>"$LOG"
+
+processed_after=0
+[[ -f "$PROCESSED_FILE" ]] && processed_after=$(wc -l < "$PROCESSED_FILE")
+
+if ((processed_after > processed_before)); then
+  # Handler recorded at least one note: mark exchange live and clear failures for those ids.
+  touch "$ACTIVE"
+  # Remove any ids that were just processed from the failures file.
+  if [[ -f "$FAIL_FILE" && ${#ids[@]} -gt 0 ]]; then
+    awk -F'\t' -v ids="${ids[*]}" 'BEGIN{split(ids,a," "); for(i in a) skip[a[i]]=1} !($1 in skip)' "$FAIL_FILE" >"$FAIL_FILE.tmp" && mv "$FAIL_FILE.tmp" "$FAIL_FILE"
+  fi
+else
+  # Handler did not grow the processed file: count a failure per id.
+  for id in "${ids[@]}"; do
+    count=0
+    if [[ -f "$FAIL_FILE" ]]; then
+      count=$(awk -F'\t' -v i="$id" '$1 == i {print $2; exit}' "$FAIL_FILE")
+      [[ -z "$count" ]] && count=0
+    fi
+    count=$((count + 1))
+    # Add the id with its new count, or replace its old count.
+    if [[ -f "$FAIL_FILE" ]] && grep -q -P "^\Q$id\E\t" "$FAIL_FILE"; then
+      awk -F'\t' -v i="$id" -v c="$count" 'BEGIN{OFS="\t"} $1 == i {$2=c} {print}' "$FAIL_FILE" >"$FAIL_FILE.tmp" && mv "$FAIL_FILE.tmp" "$FAIL_FILE"
+    else
+      printf '%s\t%d\n' "$id" "$count" >>"$FAIL_FILE"
+    fi
+    # Log and queue the hub-inbox line only on the run where the count first reaches 2.
+    if ((count == 2)); then
+      echo "$(ts) GAVE-UP $id after 2 failed handler runs" >>"$LOG"
+      "$S/muse_poll_record.sh" inbox "Hub: notes poller gave up on $id after 2 failed handler runs; read it by hand"
+    fi
+  done
+fi
