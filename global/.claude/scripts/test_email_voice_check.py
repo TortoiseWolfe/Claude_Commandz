@@ -476,5 +476,45 @@ class FactKeeper(unittest.TestCase):
             self.assertIn('Verdict: FAIL', bad.stdout)
 
 
+class TeamRelaxedRules(unittest.TestCase):
+    """29 Oct pilot: strict email-only rules misfire on ticket text."""
+    def all_cats(self, res):
+        return [c for c, _ in res['matches']] + [c for c, _ in res['house']]
+
+    def check(self, text, recipient='team'):
+        return v.detect_llm_signals(text, strict=True, recipient=recipient)
+
+    def test_reflection_question_is_fine_for_team(self):
+        t = "What did you learn in completing this ticket?\nThe price list is in one place now.\n"
+        self.assertNotIn('question_to_reader', self.all_cats(self.check(t)))
+        self.assertIn('question_to_reader', self.all_cats(self.check(t, 'jonathan')))
+
+    def test_plans_are_fine_for_team(self):
+        t = "I'll add the tests next. This is still open and not yet done; we plan to ship soon.\n"
+        cats = self.all_cats(self.check(t))
+        self.assertNotIn('promises_future_work', cats)
+        self.assertNotIn('open_work', cats)
+        self.assertIn('open_work', self.all_cats(self.check(t, 'jonathan')))
+
+    def test_sender_we_is_fine_for_team(self):
+        t = "We moved the shop onto one price list and our tests pass.\n"
+        self.assertNotIn('sender_we', self.all_cats(self.check(t)))
+        self.assertIn('sender_we', self.all_cats(self.check(t, 'jonathan')))
+
+    def test_other_team_checks_still_run(self):
+        res = self.check("The change is in #274 today.\n")
+        self.assertIn('bare_ref', self.all_cats(res))
+        self.assertIn('jargon', self.all_cats(self.check("The repo moved.\n")))
+
+    def test_closing_lines_may_stay_bare(self):
+        for line in ("Closes #274", "fixes #274", "RESOLVES #274", "- Closes #274", "Closes o/r#274",
+                     "Closes #1, closes #2"):
+            self.assertFalse(v.bare_ref_matches(line + "\n"), line)
+
+    def test_closing_exemption_is_only_for_line_starts(self):
+        self.assertTrue(v.bare_ref_matches("This also closes #274 for us.\n"))
+        self.assertTrue(v.bare_ref_matches("Closes #274\nSee #275 for more.\n"))
+
+
 if __name__ == '__main__':
     unittest.main()
