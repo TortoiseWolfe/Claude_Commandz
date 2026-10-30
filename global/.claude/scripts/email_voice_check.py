@@ -558,13 +558,39 @@ def mask_code(text):
     return _INLINE_CODE.sub(_blank, _FENCE.sub(_blank, text))
 
 
+def mask_quotes(text):
+    """Same text, same length, with blockquoted lines (starting with '>') blanked out."""
+    return '\n'.join(' ' * len(line) if line.lstrip().startswith('>') else line
+                    for line in text.split('\n'))
+
+
+def is_mostly_quoted(text):
+    """True if more than half of non-blank lines (outside code) are blockquoted."""
+    lines = mask_code(text).split('\n')
+    non_blank, quoted = 0, 0
+    for line in lines:
+        if not line.strip():
+            continue
+        non_blank += 1
+        if line.lstrip().startswith('>'):
+            quoted += 1
+    return non_blank > 0 and quoted > (non_blank / 2)
+
+
+def count_skipped(text):
+    """(quoted_lines, code_blocks) skipped under team rules."""
+    quoted = sum(1 for line in text.split('\n') if line.lstrip().startswith('>'))
+    fenced = len(_FENCE.findall(text))
+    return quoted, fenced
+
+
 def _ref_context(text, start, end):
     return ' '.join(text[max(0, start - 20):end + 20].split())
 
 
 def bare_ref_matches(text):
     """Ticket references that are not carried by words. Returns [message]."""
-    masked = _CLOSING_LINE.sub(_blank, mask_code(text))
+    masked = _CLOSING_LINE.sub(_blank, mask_quotes(mask_code(text)))
     out = []
     outside = list(masked)
     for m in _MD_LINK.finditer(masked):
@@ -1125,11 +1151,13 @@ def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explici
     rcpt = (recipient or '').lower()
     if rcpt not in ('greg', 'team'):
         return found
+    if rcpt == 'team' and is_mostly_quoted(text):
+        found.append(('mostly_quoted', "mostly quoted: write the opening in our own words"))
     words = count_body_words(text)
     if rcpt == 'greg' and words > GREG_WORD_LIMIT:
         found.append(('length', f"{words} words, limit {GREG_WORD_LIMIT}"))
     # Team text keeps its commands in code; a literal command is not prose to gloss.
-    jargon = find_unglossed_jargon(mask_code(text) if rcpt == 'team' else text)
+    jargon = find_unglossed_jargon(mask_quotes(mask_code(text)) if rcpt == 'team' else text)
     if jargon:
         found.append(('jargon', ', '.join(f'"{j}"' for j in jargon[:8])
                       + " with no gloss in the same sentence. Keep the term if it is the right one "
@@ -1149,28 +1177,40 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     contraction_ratio, dash_count, verdict (PASS / FLAG / MAJOR FLAG / FAIL).
     """
     matches = []
+    recipient_low = (recipient or '').lower()
+    is_team = recipient_low == 'team'
+    check_text = mask_quotes(mask_code(text)) if is_team else text
+
+    skipped_note = None
+    if is_team:
+        q, c = count_skipped(text)
+        if q or c:
+            parts = []
+            if q: parts.append(f"{q} quoted line{'s' if q != 1 else ''}")
+            if c: parts.append(f"{c} code block{'s' if c != 1 else ''}")
+            skipped_note = f"note: {' and '.join(parts)} not judged (someone else's words)"
 
     for pattern in FORMAL_PHRASES:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
+        for m in re.finditer(pattern, check_text, re.IGNORECASE):
             matches.append(('formal_phrase', m.group()))
     for pattern in EMAIL_TELLS:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
+        for m in re.finditer(pattern, check_text, re.IGNORECASE):
             matches.append(('email_tell', m.group()))
     for pattern in HEDGING_PHRASES:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
+        for m in re.finditer(pattern, check_text, re.IGNORECASE):
             matches.append(('hedging', m.group()))
     for pattern in GENERIC_PRAISE:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
+        for m in re.finditer(pattern, check_text, re.IGNORECASE):
             matches.append(('generic_praise', m.group()))
 
-    expanded, contracted = count_contractions(text)
+    expanded, contracted = count_contractions(check_text)
     contraction_ratio = f"{expanded} expanded / {contracted} contracted"
     if expanded >= 3 and contracted == 0:
         matches.append(('no_contractions', f"{expanded} expanded forms, 0 contractions"))
     elif expanded >= 5 and contracted <= 1:
         matches.append(('few_contractions', f"{expanded} expanded forms, only {contracted} contractions"))
 
-    structural = structural_matches(text)
+    structural = structural_matches(check_text)
     matches.extend(structural)
 
     # Under --recipient team these four email-only rules are off: a ticket is where plans
@@ -1240,9 +1280,10 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
         'body_words': count_body_words(text),
         'recipient': recipient,
         'contraction_ratio': contraction_ratio,
-        'dash_count': count_mid_sentence_dashes(text),
+        'dash_count': count_mid_sentence_dashes(check_text),
         'verdict': verdict,
         'strict': strict,
+        'skipped_note': skipped_note,
     }
 
 
@@ -1373,6 +1414,8 @@ def main():
         print("Mode: STRICT (zero-tolerance self-gate)")
     print(f"Signal count: {result['signal_count']} ({result['structural_count']} structural)")
     print(f"Verdict: {result['verdict']}")
+    if result.get('skipped_note'):
+        print(result['skipped_note'])
     print(f"Contraction ratio: {result['contraction_ratio']}")
     print(f"Mid-sentence dashes: {result['dash_count']}")
     print(f"Body words: {result['body_words']} (recipient: {result['recipient']})")

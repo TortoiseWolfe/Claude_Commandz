@@ -516,5 +516,78 @@ class TeamRelaxedRules(unittest.TestCase):
         self.assertTrue(v.bare_ref_matches("Closes #274\nSee #275 for more.\n"))
 
 
+class TeamQuotes(unittest.TestCase):
+    def test_quoted_praise_word_passes(self):
+        t = "I fixed the backup job.\n> It must be robust.\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertIn('note: 1 quoted line not judged', res['skipped_note'])
+
+    def test_unquoted_praise_word_fails(self):
+        t = "The backup is robust.\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'generic_praise' for c, _ in res['matches']))
+
+    def test_fenced_dashes_pass(self):
+        t = "Here is the prompt:\n```\n- dashes - like - this -\n```\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertIn('note: 1 code block not judged', res['skipped_note'])
+
+    def test_inline_dash_passes(self):
+        t = "Run `git log - oneline` now.\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+
+    def test_ordinary_dashes_fail(self):
+        t = "The site is down - and I am sad - because of dashes - today.\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any('mid-sentence dashes' in m for c, m in res['matches']))
+
+    def test_quoted_bare_ref_passes(self):
+        t = "I checked the notes.\n> see #77 for the old notes\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+
+    def test_unquoted_bare_ref_fails(self):
+        t = "See #77 for the notes.\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'bare_ref' for c, _ in res['house']))
+
+    def test_mostly_quoted_fails(self):
+        t = "Notes:\n> 1\n> 2\n> 3\nJon"
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'mostly_quoted' for c, _ in res['house']))
+
+    def test_skipped_note_only_when_skipped(self):
+        res = v.detect_llm_signals("Plain words.\nJon", recipient='team', strict=True)
+        self.assertIsNone(res['skipped_note'])
+
+    def test_fact_keeper_sees_inside_quote(self):
+        orig = "See > https://example.com/a"
+        new = "See > the page"
+        problems = v.dropped_facts(orig, new)
+        self.assertTrue(any('https://example.com/a' in p for p in problems))
+
+    def test_default_and_greg_still_judge_quotes(self):
+        t = "I fixed it.\n> It is robust.\nJon"
+        # Default (greg)
+        res_greg = v.detect_llm_signals(t, strict=True) # default recipient is greg
+        self.assertEqual(res_greg['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'generic_praise' for c, _ in res_greg['matches']))
+        
+        # Explicit greg
+        res_greg_explicit = v.detect_llm_signals(t, strict=True, recipient='greg')
+        self.assertEqual(res_greg_explicit['verdict'], 'FAIL')
+        
+        # No recipient
+        res_none = v.detect_llm_signals(t, strict=True, recipient=None)
+        self.assertEqual(res_none['verdict'], 'FAIL')
+
+
 if __name__ == '__main__':
     unittest.main()
