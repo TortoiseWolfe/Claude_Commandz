@@ -212,12 +212,14 @@ shopt -u nocasematch
 [[ "$check" == NEW* ]] || exit 0
 
 # The check prints "NEW <id> [<id>...]" (see muse_poll.check.prompt). Extract ids.
+# The ids come from a model that reads mail, so a note could carry shell wildcards or a "|".
+# read -a splits without wildcard expansion, and only the shape of a Gmail draft or message
+# id (letters, digits, dash, underscore, 6 to 40 long) is kept.
 ids=()
-if [[ "$check" == NEW* ]]; then
-  for id in ${check#NEW }; do
-    ids+=("$id")
-  done
-fi
+read -r -a raw_ids <<<"${check#NEW }"
+for id in "${raw_ids[@]}"; do
+  [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && ids+=("$id")
+done
 
 # If every id on this check has already failed twice, give up and skip the handler.
 FAIL_FILE="$STATE/muse-poll-failures.tsv"
@@ -273,7 +275,7 @@ else
     fi
     count=$((count + 1))
     # Add the id with its new count, or replace its old count.
-    if [[ -f "$FAIL_FILE" ]] && grep -q -P "^\Q$id\E\t" "$FAIL_FILE"; then
+    if [[ -f "$FAIL_FILE" ]] && awk -F'\t' -v i="$id" '$1 == i {found=1} END {exit !found}' "$FAIL_FILE"; then
       awk -F'\t' -v i="$id" -v c="$count" 'BEGIN{OFS="\t"} $1 == i {$2=c} {print}' "$FAIL_FILE" >"$FAIL_FILE.tmp" && mv "$FAIL_FILE.tmp" "$FAIL_FILE"
     else
       printf '%s\t%d\n' "$id" "$count" >>"$FAIL_FILE"
