@@ -543,6 +543,12 @@ _TICKET_REF = re.compile(
     r'(?:[\w.-]+/[\w.-]+#\d+|(?<![\w&/])#\d+)(?!\w)', re.IGNORECASE)
 
 
+# GitHub links a pull request to its issue only from a line like "Closes #N", so
+# that syntax is allowed to stay bare.
+_CLOSING_LINE = re.compile(
+    r'(?im)^[ \t]*(?:[-*][ \t]+)?(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[ \t].*$')
+
+
 def _blank(m):
     return re.sub(r'[^\n]', ' ', m.group())
 
@@ -558,7 +564,7 @@ def _ref_context(text, start, end):
 
 def bare_ref_matches(text):
     """Ticket references that are not carried by words. Returns [message]."""
-    masked = mask_code(text)
+    masked = _CLOSING_LINE.sub(_blank, mask_code(text))
     out = []
     outside = list(masked)
     for m in _MD_LINK.finditer(masked):
@@ -1107,7 +1113,9 @@ def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explici
         found.append(('third_person', f'author named in the body: "{selfref[0]}"'))
     # "we" is a hard fail for clients and for an unnamed recipient; the co-op
     # list gets a warning instead (see detect_llm_signals).
-    if not (recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS):
+    # Team text is written by staff in their own voice, so the rule is off there (29 Oct).
+    if not (recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS) \
+            and (recipient or '').lower() != 'team':
         for msg in sender_we_messages(text):
             found.append(('sender_we', msg))
     if html is not None:
@@ -1165,7 +1173,9 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     structural = structural_matches(text)
     matches.extend(structural)
 
-    if strict:
+    # Under --recipient team these four email-only rules are off: a ticket is where plans
+    # live and TechJoy's PR template asks the author reflection questions (29 Oct).
+    if strict and (recipient or '').lower() != 'team':
         for msg in promise_messages(text):
             matches.append(('promises_future_work', msg))
         for msg in open_work_messages(text):
@@ -1323,6 +1333,8 @@ def main():
         print("\nTeam text (--recipient team, 29 Oct 'team text is teaching text'): hard FAIL on [bare_ref] a ticket number")
         print("  (#274, PR #274, owner/repo#274) outside a link, or a link whose text is only the number or has fewer")
         print("  than two words besides it; and [jargon] as for greg (no word limit). Code is exempt.")
+        print("  A line starting Closes/Fixes/Resolves #N (any case) is exempt: GitHub needs that syntax. Under team the")
+        print("  email-only rules are OFF: [question_to_reader], [promises_future_work], [open_work], [sender_we].")
         print("  --keep-facts-from <original>: FAIL, under 'FACTS DROPPED:', when the new text loses a URL, ticket")
         print("  number, code, file path, number with unit, date or time, changes the checkbox counts, or adds an @-mention.")
         print("\nSender \"we\" (every recipient except greg/william/devops, and when no --recipient is given):")
