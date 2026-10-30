@@ -276,6 +276,46 @@ high_check() {
   hit=1; other=1
 }
 
+# Hub context hand-off wake. The hub's transcripts are in ~/.claude/projects/<repo-with-dashes>/*.jsonl.
+# Derive the folder from $HOME/repos the way Claude Code does (slashes to dashes). Wake once per session id
+# using a stamp file $HOME/.claude/state/hub-handoff-woke.<session-id>. Reads AFA_HANDOFF_K (default 150).
+# Calls context-warn.py --size <transcript> to get the token count.
+hub_handoff_check() {
+  local repos_path="${HOME}/repos"
+  local project_folder="${repos_path//\//-}"
+  # The leading dash stays: /home/x/repos becomes -home-x-repos. AFA_HUB_PROJECTS_DIR overrides (tests).
+  local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/${project_folder}}"
+  [ -d "$projects_dir" ] || return 0
+  local newest=""
+  local newest_mtime=0
+  local f
+  for f in "$projects_dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    local m; m=$(stat -c %Y "$f" 2>/dev/null) || continue
+    if (( m > newest_mtime )); then
+      newest_mtime=$m
+      newest=$f
+    fi
+  done
+  [ -n "$newest" ] || return 0
+  local session_id="${newest##*/}"
+  session_id="${session_id%.jsonl}"
+  local stamp_file="${HOME}/.claude/state/hub-handoff-woke.${session_id}"
+  [ -f "$stamp_file" ] && return 0
+  local size
+  size=$(python3 -I "${HOME}/.claude/hooks/context-warn.py" --size "$newest" 2>/dev/null)
+  [[ "$size" =~ ^[0-9]+$ ]] || return 0
+  local handoff_k=${AFA_HANDOFF_K:-150}
+  [[ "$handoff_k" =~ ^[0-9]+$ ]] && (( handoff_k > 0 )) || handoff_k=150
+  if (( size >= handoff_k * 1000 )); then
+    local tokens_k=$(( (size + 500) / 1000 ))
+    mkdir -p "$(dirname "$stamp_file")" 2>/dev/null
+    printf '%s\n' "$(date +%s)" > "$stamp_file"
+    echo "hub context: ${tokens_k}K, past the ${handoff_k}K hand-off line. Write the hand-off, run /session-prime, ask for a fresh terminal."
+    exit 0
+  fi
+}
+
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
 # 10 s cmd.exe probe still fails). Prints its text once per change of the file, nothing otherwise. 19 Oct: the bridge went quiet twice
 # (5:21 PM and 8:15 PM) with nothing to tell the hub.
@@ -415,6 +455,7 @@ check_bridge
 check_outbox
 check_undelivered
 check_open_questions
+hub_handoff_check
 printf '%s' "$recycle_log_seen" > "$recycle_log_seen_file" 2>/dev/null || true   # first run: the offset starts here
 end=$(( $(date +%s) + max * 60 ))
 while :; do
@@ -422,6 +463,7 @@ while :; do
   check_outbox
   check_undelivered
   check_open_questions
+  hub_handoff_check
   refresh_watched
   hit=0; other=0
   for l in "${lanes[@]}"; do

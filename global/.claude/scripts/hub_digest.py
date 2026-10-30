@@ -83,6 +83,89 @@ def one_line(text, limit):
 
 
 # ---------------------------------------------------------------------------------------------
+# Hub session context size (reuses logic from hooks/context-warn.py)
+# ---------------------------------------------------------------------------------------------
+READ_LIMIT = 512 * 1024
+
+
+def latest_context_size(transcript_path):
+    """Return the context size (input + cache_read + cache_creation) of the last non-synthetic
+    assistant message in the transcript, or None if not found."""
+    try:
+        with open(transcript_path, "rb") as transcript:
+            transcript.seek(0, os.SEEK_END)
+            end = transcript.tell()
+            transcript.seek(max(0, end - READ_LIMIT))
+            data = transcript.read(READ_LIMIT)
+    except OSError:
+        return None
+
+    for line in reversed(data.splitlines()):
+        try:
+            entry = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message")
+        if isinstance(message, dict) and message.get("model") == "<synthetic>":
+            continue
+        usage = message.get("usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        fields = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        values = [usage.get(field, 0) for field in fields]
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+            continue
+        return sum(values)
+    return None
+
+
+def find_newest_hub_transcript():
+    """Find the most recently modified hub session transcript in the Claude projects folder.
+    The folder name is derived from $HOME/repos with slashes replaced by dashes.
+    Returns (transcript_path, session_id) or (None, None) if not found."""
+    repos_path = str(HOME / "repos")
+    # Claude Code replaces slashes with dashes in the project folder name; the leading dash stays.
+    # AFA_HUB_PROJECTS_DIR overrides the folder (tests point it at a fixture folder).
+    override = os.environ.get("AFA_HUB_PROJECTS_DIR")
+    if override:
+        projects_dir = Path(override)
+    else:
+        projects_dir = HOME / ".claude" / "projects" / repos_path.replace("/", "-")
+    if not projects_dir.is_dir():
+        return None, None
+    transcripts = list(projects_dir.glob("*.jsonl"))
+    if not transcripts:
+        return None, None
+    # Newest by mtime
+    newest = max(transcripts, key=lambda p: p.stat().st_mtime)
+    session_id = newest.stem
+    return newest, session_id
+
+
+def hub_context_warning():
+    """Return a warning line if the newest hub session is at or over the hand-off threshold,
+    else None. Reads AFA_HANDOFF_K env (default 150, in thousands)."""
+    transcript, session_id = find_newest_hub_transcript()
+    if transcript is None:
+        return None
+    size = latest_context_size(transcript)
+    if size is None:
+        return None
+    try:
+        handoff_k = int(os.environ.get("AFA_HANDOFF_K", "150"))
+    except ValueError:
+        handoff_k = 150  # a bad setting must not stop the page from building
+    if handoff_k <= 0:
+        handoff_k = 150
+    if size >= handoff_k * 1000:
+        tokens_k = (size + 500) // 1000
+        return f"WARNING: the hub session is at {tokens_k}K context, past the {handoff_k}K hand-off line. Write the hand-off and ask for a fresh terminal and /prep."
+    return None
+
+
+# ---------------------------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------------------------
 
@@ -631,7 +714,12 @@ def render(sections, now, machine, cap):
                "Private: stays on this machine, never sent to OpenClaw. A script built it with no model; the sources are "
                "lane.sh, lane reports, the muse inbox, the roadmap issue, git, tidy-report and the budget report. "
                "Read this instead of the roadmap body; open a source only for the item you are working on. "
-               "A lane report does not end its lane: lanes stay open until their context is full.", ""]
+               "A lane report does not end its lane: lanes stay open until their context is full."]
+        # Hub context warning (Change 4): if the newest hub session is at/over 150K, add a line under the title.
+        warn = hub_context_warning()
+        if warn:
+            out.append(warn)
+        out.append("")
         for title, lines in sections:
             out.append(f"## {title}")
             out.extend(lines)

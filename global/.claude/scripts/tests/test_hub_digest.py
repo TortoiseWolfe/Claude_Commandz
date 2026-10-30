@@ -299,6 +299,14 @@ class Scrub(unittest.TestCase):
 
 
 class Page(unittest.TestCase):
+    def setUp(self):
+        # Point the hub-transcript lookup at an empty folder so the live machine's transcripts never reach the page.
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        patcher = mock.patch.dict(os.environ, {"AFA_HUB_PROJECTS_DIR": empty.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def build(self, **kw):
         args = dict(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX,
                     git_log="abc1234 16 10:00 Merge a thing\ndef5678 16 09:00 Another", tidy_text=TIDY,
