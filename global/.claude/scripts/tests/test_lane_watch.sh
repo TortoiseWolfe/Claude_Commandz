@@ -32,6 +32,27 @@ expect_done_time "1:05" "completed turn returns its done time" "$done_pane"
 no_done_pane=$(printf '%s\n' '⏺ Reading files' 'plain text')
 expect_done_time "" "pane with no done line returns empty" "$no_done_pane"
 
+expect_done_line() { # expect_done_line <expected line> <label> <pane text>
+  local want=$1 label=$2 got
+  got=$(printf '%s\n' "$3" | turn_done_line)
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want '$want', got '$got'"; failures=$((failures + 1)); fi
+}
+
+baked='✻ Baked for 7s · done 4:58 PM'
+expect_done_line "$baked" "done line drops the monitor count" "$(printf '%s\n' "$baked · 5 monitors still running")"
+expect_done_line "$baked" "done line is the same with 4 monitors" "$(printf '%s\n' "$baked · 4 monitors still running")"
+expect_done_line "$baked" "done line is the same with 3 shells" "$(printf '%s\n' "$baked · 3 shells still running")"
+expect_done_line "$baked" "done line is the same with no count" "$(printf '%s\n' "$baked")"
+expect_done_line "$baked" "trailing spaces and a box edge are dropped" "$(printf '%s\n' "$baked · 5 monitors still running   │")"
+expect_done_line "$baked" "box edge straight after the time is dropped" "$(printf '%s\n' "$baked   │")"
+crunched='✻ Crunched for 9s · done 4:58 PM'
+if [ "$(printf '%s\n' "$crunched" | turn_done_line)" != "$(printf '%s\n' "$baked" | turn_done_line)" ]; then
+  echo "ok   two turns ending in the same minute differ"
+else echo "FAIL two turns ending in the same minute are equal"; failures=$((failures + 1)); fi
+for v in "$baked · 5 monitors still running" "$baked · 3 shells still running   │" "$crunched" "$baked   │"; do
+  expect_done_time "4:58" "done time is 4:58 for: $v" "$v"
+done
+
 working=$(printf '%s\n' '⏺ Reading lane_watch.sh' '✻ Thinking… (12s · esc to interrupt)' '')
 expect_done_time "" "working pane without a done line returns empty" "$working"
 
