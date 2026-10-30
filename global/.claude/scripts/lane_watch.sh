@@ -58,7 +58,8 @@ dialog_waiting() {
 
 # Return the last completed-turn line visible in this pane.
 turn_done_line() {
-  tail -15 | sed -nE '/· done [0-9]{1,2}:[0-9]{2}/p' | tail -1
+  # Keep only up to the done time: the tail ("· 5 monitors still running", spaces, a box edge) is redrawn as jobs end.
+  tail -15 | sed -nE 's/^(.*· done [0-9]{1,2}:[0-9]{2}( [AP]M)?).*$/\1/p' | tail -1
 }
 
 turn_done_time() {
