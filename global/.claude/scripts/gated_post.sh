@@ -12,6 +12,11 @@
 #
 # The command runs only if the voice check passes. Everything after `--` is the
 # post command, executed unchanged.
+#
+# Extra flags for the voice check go in VOICE_FLAGS. To rewrite team text without
+# losing a fact or adding an @-mention, point it at the original:
+#
+#   VOICE_FLAGS="--keep-facts-from orig.md" gated_post.sh team new.md -- gh issue edit 12 -R owner/repo --body-file new.md
 set -euo pipefail
 
 RECIPIENT="${1:?usage: gated_post.sh <recipient> <body-file> -- <command...>}"
@@ -22,7 +27,7 @@ shift
 
 [ -r "$BODY" ] || { echo "gated_post.sh: cannot read $BODY" >&2; exit 2; }
 
-OUT="$(python3 ~/.claude/scripts/email_voice_check.py --stdin --strict --recipient "$RECIPIENT" < "$BODY" 2>&1)" || true
+OUT="$(python3 ~/.claude/scripts/email_voice_check.py --stdin --strict ${VOICE_FLAGS:-} --recipient "$RECIPIENT" < "$BODY" 2>&1)" || true
 printf '%s\n' "$OUT"
 
 VERDICT="$(printf '%s\n' "$OUT" | awk -F': ' '/^Verdict:/{print $2; exit}')"
