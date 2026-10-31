@@ -240,26 +240,39 @@ def check_notes(processed_path, log):
 #
 # One shared "absorbed" signal (31 Oct): the Gmail label agent-notes/cc-processed (Label_32, searchable as
 # label:agent-notes-cc-processed) on the note's message. The READER applies it (muse_poll_record.sh processed <id>, or
-# this script's own label step below); the AUTHOR's machine deletes the draft once it is on and the draft is over 24 hours
-# old. Hatch cannot label drafts (the connector refuses message calls on them), so Hatch's signal is Trash; a trashed
-# draft is gone from the Drafts list and needs nothing here.
+# this script's own label step below). Hatch cannot label drafts (the connector refuses message calls on them), so Hatch's
+# own signal is Trash; a trashed draft is gone from the Drafts list and needs nothing here.
 #
-# Each machine sweeps only its own: the machine name comes from ~/.config/afa/machine (NX-01 is also "CC", the name the
-# Hatch channel uses). A subject tag [SRC>DST] makes a draft ours to delete in two cases:
-#   DST is us (we are the reader): deleted once the ID is in our processed file (or the message wears Label_32) AND the
-#                 draft is over 2 hours old. [MUSE>CC], [NCC-74656>NX-01] on NX-01; [MUSE>NCC-74656] on the tower.
-#   SRC is us (we are the author): deleted only once ABSORPTION IS VERIFIED (Label_32, or a later reply from the other
-#                 side on the same topic) and the draft is over 24 hours old. Never deleted on age alone: an unabsorbed note
-#                 stays and is counted as "unabsorbed older than 24 h" in the sweep output.
-# Any other fleet tag (another machine's note, Hatch's to the tower) is kept and counted. The label step (apply mode)
-# first gives Label_31 + Label_32 to every draft addressed to us whose ID is in our processed file, so the author sees it.
-# "Re:" forms, the untagged H-7CH branch and the owner-only recipient rule are as before.
+# NX-01 owns the Gmail sweeps (the tower has no Gmail token), so this sweep covers EVERY fleet tag in EVERY direction:
+# [MUSE>CC], [CC>MUSE], [NX-01>NCC-74656], [NCC-74656>NX-01], [NCC-74656>MUSE], [MUSE>NCC-74656] and any new [X>Y] pair
+# between fleet names. Every draft is paged through (no newest-50 cap). The machine name comes from ~/.config/afa/machine
+# (NX-01 is also "CC", the name the Hatch channel uses). For a subject tag [SRC>DST] the READER is DST (SRC in a "Re:" form,
+# which the other side wrote):
+#   READER is us (inbound): deleted once the ID is in our processed file (or the message wears Label_32) AND the draft is
+#                 over 2 hours old.
+#   READER is anyone else (our own outbound note, or another party's note between Hatch and the tower): deleted only once the
+#                 READER'S ABSORPTION IS PROVEN AND the draft is over 24 hours old. Proof is any one of:
+#                   1. Label_32 on the note;
+#                   2. the draft or message ID in the reader's published read record (READER_RECORDS: the tower publishes
+#                      its read record, draft IDs only, to the private hub repo; this machine reads its checkout);
+#                   3. a later message from the reader on the same topic (a tagged note the reader wrote, or a "Re:");
+#                   4. a later done-note from the reader that names the draft ID.
+#                 Never deleted on age alone. A note with no proof stays and is counted as unabsorbed; the count by pair is
+#                 written to draft-sweep-status.json for the hub digest (never shown to the mailbox owner).
+# The label step (apply mode) first gives Label_31 + Label_32 to every draft addressed to us whose ID is in our processed
+# file, so the author sees it. "Re:" forms, the untagged H-7CH branch and the owner-only recipient rule are as before.
 # Everything else (no fleet tag: his real mail, client drafts) is counted and never touched. Gmail has no Trash for drafts,
 # so each draft's raw text is saved to ~/.claude/state/draft-sweep/YYYY-MM-DD.jsonl BEFORE it is deleted (the undo).
 # ---------------------------------------------------------------------------------------------------------------
 
 FLEET_NAMES = {"NX-01", "NCC-74656", "CC", "MUSE"}
 MACHINE_NAMES = {"NX-01": {"NX-01", "CC"}, "NCC-74656": {"NCC-74656"}}
+# A tag name -> the party it belongs to ("CC" is NX-01 on the Hatch channel).
+GROUP = {"NX-01": "NX-01", "CC": "NX-01", "NCC-74656": "NCC-74656", "MUSE": "MUSE"}
+# Published read records, by reader. The tower publishes draft IDs only, after each poll, to the private hub repo; the hub repo
+# checkout on this machine is the copy we read. Hatch (MUSE) keeps no record: its signal is Trash, and a trashed draft is gone.
+READER_RECORDS = {"NCC-74656": os.path.expanduser("~/repos/hub/tower/peer-notes-processed.txt")}
+STATUS_FILE = os.path.expanduser("~/.claude/state/draft-sweep-status.json")
 INBOUND_MIN_AGE = 2 * 3600
 OUTBOUND_MIN_AGE = 24 * 3600
 LABEL_AGENT_NOTES = "Label_31"
@@ -290,19 +303,29 @@ def parties(subject):
     return None
 
 
-def classify(subject, mine=None):
-    """(kind, label) for a fleet subject that is ours, or (None, None). kind: inbound (we are the reader), outbound (we
-    are the author). A "Re:" in front of an outbound tag is the other side's reply, so it is inbound and its label starts
-    with "Re: ". A tag between two other parties is not ours: (None, None)."""
-    mine = my_names() if mine is None else mine
+def route(subject):
+    """(tag, author, reader, reply) for a fleet subject, or None. "Re: [A>B]" is B's reply to A's note, so B wrote it and A reads it."""
     p = parties(subject)
     if not p:
-        return None, None
+        return None
     tag, src, dst, reply = p
-    if dst in mine:
-        return "inbound", tag
-    if src in mine:
-        return ("inbound", "Re: " + tag) if reply else ("outbound", tag)
+    return (tag, dst, src, True) if reply else (tag, src, dst, False)
+
+
+def classify(subject, mine=None):
+    """(kind, label) for a fleet subject that is ours, or (None, None). kind: inbound (we are the reader), outbound (we
+    are the author). A "Re:" in front of a tag is the reply of the tag's DST to its SRC, so the reader is the SRC and the
+    label starts with "Re: ". A tag between two other parties is not ours: (None, None) (the sweep still handles it, as a relay)."""
+    mine = my_names() if mine is None else mine
+    r = route(subject)
+    if not r:
+        return None, None
+    tag, author, reader, reply = r
+    label = ("Re: " + tag) if reply else tag
+    if reader in mine:
+        return "inbound", label
+    if author in mine:
+        return "outbound", label
     return None, None
 
 
@@ -381,42 +404,111 @@ def _signed_hatch(did):
     return False
 
 
-def _has_reply(rec, kind_label, cache, owner):
-    """A later message about the same topic from the other side: a tagged inbound note, or any "Re:" subject."""
-    topic = _topic(rec["subject"], kind_label)
-    if not topic:
-        return None
-    if topic not in cache:
+_META = ["Subject", "From", "To", "Cc", "Bcc", "Date"]
+
+
+def _from_reader(f, rec, reader, owner):
+    """True if message f is a later message the READER wrote (Hatch and the tower write as the mailbox owner, so only the owner's
+    own address counts: a stranger's "Re:" must not retire one of our notes). Tagged: its author is the reader. Untagged: a "Re:"."""
+    if email.utils.parseaddr(f["from"])[1].lower() != owner or not f["t"] > rec["t"]:
+        return False
+    r = route(f["subject"])
+    if r:
+        return GROUP.get(r[1]) == reader
+    return bool(_REPLY_RE.match(f["subject"]))
+
+
+def _search_meta(q, rec, cache):
+    """Metadata of up to 10 messages matching q, other than rec's own message; one search per query per run."""
+    if q not in cache:
         found = []
-        page = gmail_api._api_retry("GET", "/messages", {"q": f'subject:"{topic}"', "maxResults": 10})
+        page = gmail_api._api_retry("GET", "/messages", {"q": q, "maxResults": 10})
         for m in (page.get("messages") or [])[:10]:
             if m.get("id") == rec["message_id"]:
                 continue
-            msg = gmail_api._api_retry("GET", f"/messages/{m['id']}", {
-                "format": "metadata", "metadataHeaders": ["Subject", "From", "To", "Cc", "Bcc", "Date"]})
+            msg = gmail_api._api_retry("GET", f"/messages/{m['id']}", {"format": "metadata", "metadataHeaders": _META})
             found.append(_msg_meta(msg) | {"id": m["id"]})
-        cache[topic] = found
-    for f in cache[topic]:
-        kind, _ = classify(f["subject"])
-        # Only the owner's own mailbox identity counts (Hatch and the tower write as the owner): a stranger's "Re:" with
-        # a matching subject must not retire one of our notes.
-        sender = email.utils.parseaddr(f["from"])[1].lower()
-        if sender == owner and f["t"] > rec["t"] and (kind == "inbound" or (kind is None and _REPLY_RE.match(f["subject"]))):
+        cache[q] = found
+    return cache[q]
+
+
+def _has_reply(rec, label, reader, cache, owner):
+    """A later message about the same topic from the reader: a tagged note the reader wrote, or any "Re:" subject."""
+    topic = _topic(rec["subject"], label)
+    if not topic:
+        return None
+    for f in _search_meta(f'subject:"{topic}"', rec, cache):
+        if _from_reader(f, rec, reader, owner):
             return f["id"]
     return None
 
 
-def decide(rec, processed, now, cache, owner, mine=None):
+_ABSORBED_WORDS = re.compile(r"\b(trash(?:ed)?|archiv(?:ed|e)|delet(?:ed|e)|absorb(?:ed)?|done|handled|processed|cleared|read and)\b", re.I)
+_HOLD_WORDS = re.compile(r"\b(hold(?:s|ing)?|held|keep(?:s|ing)?|kept|waits?|waiting|pending|not yet|on purpose|still open|leave|leaving)\b", re.I)
+
+
+def _naming_lines(msg_id, did):
+    """The text lines of message msg_id that hold the draft ID (full read, plain text parts)."""
+    msg = gmail_api._api_retry("GET", f"/messages/{msg_id}", {"format": "full"})
+    stack, lines = [msg.get("payload") or {}], []
+    while stack:
+        part = stack.pop()
+        stack.extend(part.get("parts") or [])
+        data = (part.get("body") or {}).get("data")
+        if data and part.get("mimeType", "").startswith("text/"):
+            try:
+                text = gmail_api.b64u_decode(data).decode("utf-8", "replace")
+            except Exception:
+                continue
+            lines += [ln for ln in text.splitlines() if did in ln]
+    return lines
+
+
+def _done_note(rec, reader, cache, owner):
+    """A later message from the reader that names this draft's ID as done ("trashed r-123"). Naming an ID is not absorption: a line that
+    says the reader is holding it, or waiting on something, is not proof (Hatch's 5:52 PM note named two it kept on purpose)."""
+    did = rec["draft_id"]
+    if not re.fullmatch(r"r-?\d{6,}", did or ""):
+        return None
+    for f in _search_meta(f'"{did}"', rec, cache):
+        if not _from_reader(f, rec, reader, owner):
+            continue
+        for ln in _naming_lines(f["id"], did):
+            if _ABSORBED_WORDS.search(ln) and not _HOLD_WORDS.search(ln):
+                return f["id"]
+    return None
+
+
+def proof_of_absorption(rec, reader, label, cache, owner, records):
+    """-> text saying how the READER's absorption is proven, or None. Cheapest first; see the sweep section's header."""
+    if LABEL_CC_PROCESSED in rec["labels"]:
+        return "absorbed (carries Label_32)"
+    if {rec["draft_id"], rec["message_id"]} & records.get(reader, set()):
+        return f"absorbed (ID in the {reader} published read record)"
+    reply = _has_reply(rec, label, reader, cache, owner)
+    if reply:
+        return f"answered (reply message {reply})"
+    done = _done_note(rec, reader, cache, owner)
+    if done:
+        return f"done-note names it (message {done})"
+    return None
+
+
+def decide(rec, processed, now, cache, owner, mine=None, records=None):
     """-> (action, category, reason). action: delete | keep | other (not a fleet draft; never touched).
-    A "keep" whose category ends in "[unabsorbed]" is an outbound note of ours over 24 hours old with no verified absorption."""
+    A "keep" whose category ends in "[unabsorbed]" is a note over 24 hours old (ours going out, or another party's) whose reader
+    has not been shown to have absorbed it, or an inbound note of ours that we have not handled."""
     mine = my_names() if mine is None else mine
+    records = records or {}
     kind, label = classify(rec["subject"], mine)
     age = now - rec["t"]
     ids = {rec["draft_id"], rec["message_id"]}
     handled = bool(ids & processed) or LABEL_CC_PROCESSED in rec["labels"]
-    if kind is None and parties(rec["subject"]):
-        tag = parties(rec["subject"])[0]
-        return "keep", tag, "another party's note (not to or from this machine)"
+    r = route(rec["subject"])
+    reader = GROUP.get(r[2]) if r else None
+    if kind is None and r:
+        kind = "relay"  # between two other parties (Hatch and the tower): NX-01 sweeps it once its reader has absorbed it
+        label = ("Re: " if r[3] else "") + r[0]
     if kind is None:
         if ids & processed and age > INBOUND_MIN_AGE and _signed_hatch(rec["draft_id"]):
             kind, label = "inbound", "untagged H-7CH"
@@ -434,12 +526,10 @@ def decide(rec, processed, now, cache, owner, mine=None):
     unabsorbed = label + " [unabsorbed]" if age > OUTBOUND_MIN_AGE else label
     if age <= OUTBOUND_MIN_AGE:
         return "keep", label, "under 24 hours old"
-    if LABEL_CC_PROCESSED in rec["labels"]:
-        return "delete", label, "absorbed (carries Label_32), over 24 hours old"
-    reply = _has_reply(rec, label, cache, owner)
-    if reply:
-        return "delete", label, f"answered (reply message {reply}), over 24 hours old"
-    return "keep", unabsorbed, "absorption not verified (no Label_32, no reply): kept"
+    proof = proof_of_absorption(rec, reader, label, cache, owner, records)
+    if proof:
+        return "delete", label, f"{proof}, over 24 hours old"
+    return "keep", unabsorbed, f"absorption not verified (reader {reader}: no Label_32, no published record entry, no reply, no done-note): kept"
 
 
 def label_absorbed(recs, processed, mine, apply):
@@ -472,7 +562,36 @@ def _archive(did, mid, rec, sweep_dir, now):
         os.fsync(f.fileno())
 
 
-def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, owner=None, mine=None):
+def load_records(paths=None):
+    """{reader party: set of IDs} from the readers' published read records. A missing file is an empty record (their notes then
+    need another proof); it never stops the sweep."""
+    out = {}
+    for reader, path in (READER_RECORDS if paths is None else paths).items():
+        out[reader] = _read_processed(path)
+    return out
+
+
+def write_status(path, now, recs, fleet, records, paths):
+    """draft-sweep-status.json: what the hub digest reads. Fleet notes kept without proof, with their pair and time; no bodies."""
+    unproven = []
+    for r, action, label, reason in fleet:
+        if action == "keep" and reason.startswith(("absorption not verified", "not handled yet")):
+            p = parties(r["subject"])
+            unproven.append({"id": r["draft_id"], "pair": p[0] if p else label, "t": int(r["t"]), "age_h": round((now - r["t"]) / 3600, 1)})
+    doc = {"at": int(now), "drafts": len(recs), "fleet": len(fleet), "unproven": unproven,
+           "records": {k: {"path": paths.get(k, ""), "ids": len(v)} for k, v in records.items()}}
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, owner=None, mine=None, reader_records=None,
+          status_path=None):
     out = out or sys.stdout
     # The mailbox owner is read from the account once per run, never written into this public repo. If the lookup
     # fails the GmailError ends the sweep before anything is listed or deleted.
@@ -484,8 +603,10 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     processed = set().union(*(_read_processed(x) for x in paths))
     recs = [r for r in (_draft_meta(did) for did, _ in _list_all_drafts()) if r]
     cache = {}
+    paths = READER_RECORDS if reader_records is None else reader_records
+    records = load_records(paths)
     labelled = label_absorbed(recs, processed, mine, apply)
-    rows = [(r,) + decide(r, processed, now, cache, owner, mine) for r in recs]
+    rows = [(r,) + decide(r, processed, now, cache, owner, mine, records) for r in recs]
     by_tag = {}
     for r, action, label, reason in rows:
         if action != "other":
@@ -510,6 +631,8 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
             log.write(f"sweep: deleted {r['draft_id']} [{label}] {r['subject']!r}: {reason}")
     mode = "APPLIED" if apply else "DRY RUN"
     unabsorbed = sum(1 for row in fleet if row[1] == "keep" and row[2].endswith("[unabsorbed]"))
+    if apply and status_path:
+        write_status(status_path, now, recs, fleet, records, paths)
     print(f"draft sweep ({mode}): {len(recs)} drafts, {len(fleet)} fleet notes, {others} not fleet notes (never touched)", file=out)
     for label in sorted(by_tag):
         print(f"  {label}: {by_tag[label]['delete'] + by_tag[label]['keep']} (delete {by_tag[label]['delete']}, keep {by_tag[label]['keep']})", file=out)
@@ -519,11 +642,14 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     verb = "deleted" if apply else "would delete"
     print(f"  {verb}: {deleted if apply else len(dels)}", file=out)
     for r, action, label, reason in fleet:
+        if action == "delete":
+            print(f"  {'deleted' if apply else 'would delete'} {r['draft_id']} {label} {r['subject'][:70]!r}: {reason}", file=out)
+    for r, action, label, reason in fleet:
         if action == "keep":
             print(f"  keep {r['draft_id']} {label} {r['subject'][:70]!r}: {reason}", file=out)
     print(f"  not fleet notes remaining: {others}", file=out)
     print(f"  labelled absorbed this pass ({'applied' if apply else 'would label'}): {labelled}", file=out)
-    print(f"  unabsorbed older than 24 h (ours): {unabsorbed}", file=out)
+    print(f"  unabsorbed older than 24 h (every pair): {unabsorbed}", file=out)
     log.write(f"sweep {mode}: {len(recs)} drafts, {len(fleet)} fleet, {len(dels)} to delete, {deleted} deleted, {others} other, "
               f"{labelled} labelled, {unabsorbed} unabsorbed over 24 h")
     return {"drafts": len(recs), "fleet": len(fleet), "deleted": deleted, "would_delete": len(dels), "other": others,
@@ -539,6 +665,9 @@ def main(argv=None):
     parser.add_argument("--sweep", action="store_true",
                         help="Delete handled fleet-note drafts (dry run unless --apply); prints counts, never note bodies")
     parser.add_argument("--apply", action="store_true", help="With --sweep: really delete")
+    parser.add_argument("--reader-record", action="append", default=None, metavar="PARTY=PATH",
+                        help="With --sweep: a reader's published read record (draft IDs, one per line); repeat for several. "
+                             "Default: NCC-74656=~/repos/hub/tower/peer-notes-processed.txt")
     args = parser.parse_args(argv)
     if not args.processed:
         state = os.path.expanduser("~/.claude/state")
@@ -555,7 +684,13 @@ def main(argv=None):
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError:
                     return 0  # another sweep is running
-            sweep(args.processed, log, apply=args.apply)
+            rr = None
+            if args.reader_record:
+                rr = dict(READER_RECORDS)
+                for item in args.reader_record:
+                    party, _, path = item.partition("=")
+                    rr[party] = os.path.expanduser(path)
+            sweep(args.processed, log, apply=args.apply, reader_records=rr, status_path=STATUS_FILE)
             return 0
         check_notes(args.processed[0], log)
         return 0
