@@ -32,6 +32,7 @@ INTERVAL=1200
 # Jonathan is at the keyboard: the notes poller (scripts/muse_poll.sh) keeps running after 22:00 while
 # this is fresh. Its own `claude -p` runs set MUSE_POLL and don't count.
 [ -n "${MUSE_POLL:-}" ] || touch "$HOME/.claude/state/user-active.stamp"
+[ -n "${MUSE_POLL:-}" ] && exit 0   # the poller's own claude runs: no nudge, no stamps
 [ "${PROJ%/}" = "$MUSE_HOME" ] || exit 0
 [ -f "$STATE" ] || exit 0
 now=$(date +%s)

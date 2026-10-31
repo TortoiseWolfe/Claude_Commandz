@@ -53,13 +53,14 @@ class ContextWarnTests(unittest.TestCase):
             contents += "\n"
         self.transcript.write_text(contents, encoding="utf-8")
 
-    def call_hook(self, *, cwd=None, event="PostToolUse", session=None):
+    def call_hook(self, *, cwd=None, event="PostToolUse", session=None, extra_env=None):
         env = os.environ.copy()
         env.update({
             "AFA_HUB_DIR": str(self.hub),
             "AFA_STATE_DIR": str(self.state),
-            "AFA_COMPACT_WINDOW": "400000",
         })
+        env.pop("AFA_HANDOFF_K", None)
+        env.update(extra_env or {})
         payload = {
             "session_id": session or self.session_id,
             "transcript_path": str(self.transcript),
@@ -80,35 +81,50 @@ class ContextWarnTests(unittest.TestCase):
     def warning(self, output):
         return json.loads(output)["hookSpecificOutput"]
 
-    def test_below_50_percent_is_silent(self):
-        self.write_transcript((199_999, 0, 0))
+    def test_below_early_point_is_silent(self):
+        self.write_transcript((129_999, 0, 0))
         self.assertEqual(self.call_hook(), "")
 
-    def test_warns_at_50_percent_only_once_even_at_52(self):
-        self.write_transcript((200_000, 0, 0))
+    def test_early_warning_at_130k_only_once(self):
+        self.write_transcript((130_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
-        self.write_transcript((208_000, 0, 0))
+        self.assertIn("Context is at 130K tokens. Hand-off line is 150K", self.warning(output)["additionalContext"])
+        self.write_transcript((140_000, 0, 0))
         self.assertEqual(self.call_hook(), "")
 
     def test_synthetic_last_entry_uses_prior_usage_without_resetting_stamp(self):
-        self.write_transcript((200_000, 0, 0))
+        self.write_transcript((130_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
-
-        self.write_transcript((200_000, 0, 0), synthetic_last=True)
+        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
+        self.write_transcript((130_000, 0, 0), synthetic_last=True)
         self.assertEqual(self.call_hook(), "")
-        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "50")
+        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "130")
 
-    def test_warns_at_60_percent(self):
-        self.write_transcript((200_000, 0, 40_000))
+    def test_hand_off_warning_at_150k(self):
+        self.write_transcript((100_000, 0, 50_000))
         output = self.call_hook()
-        self.assertIn("Context is at 60%", self.warning(output)["additionalContext"])
+        self.assertIn("past the 150K hand-off line", self.warning(output)["additionalContext"])
 
-    def test_70_percent_warning_is_overdue(self):
-        self.write_transcript((200_000, 80_000, 0))
-        output = self.call_hook()
-        self.assertTrue(self.warning(output)["additionalContext"].startswith("Overdue: "))
+    def test_setting_moves_both_points(self):
+        self.write_transcript((79_999, 0, 0))
+        self.assertEqual(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}), "")
+        self.write_transcript((80_000, 0, 0))
+        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}))["additionalContext"]
+        self.assertIn("Context is at 80K tokens. Hand-off line is 100K", out)
+        self.write_transcript((100_000, 0, 0))
+        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}))["additionalContext"]
+        self.assertIn("past the 100K hand-off line", out)
+
+    def test_bad_setting_falls_back_to_150(self):
+        self.write_transcript((150_000, 0, 0))
+        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "lots"}))["additionalContext"]
+        self.assertIn("past the 150K hand-off line", out)
+
+    def test_size_mode_on_missing_file_exits_1_quietly(self):
+        result = subprocess.run([sys.executable, str(HOOK), "--size", str(self.root / "nope.jsonl")],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_other_cwd_is_silent(self):
         self.write_transcript((300_000, 0, 0))
@@ -122,21 +138,21 @@ class ContextWarnTests(unittest.TestCase):
         self.assertEqual(self.call_hook(), "")
 
     def test_corrupt_last_line_falls_back_to_valid_usage(self):
-        self.write_transcript((200_000, 0, 0), corrupt_last=True)
+        self.write_transcript((130_000, 0, 0), corrupt_last=True)
         output = self.call_hook()
-        self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
+        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
 
-    def test_below_40_percent_resets_warning_stamp(self):
-        self.write_transcript((200_000, 0, 0))
+    def test_below_early_point_resets_warning_stamp(self):
+        self.write_transcript((130_000, 0, 0))
         self.call_hook()
-        self.write_transcript((159_999, 0, 0))
+        self.write_transcript((100_000, 0, 0))
         self.assertEqual(self.call_hook(), "")
-        self.write_transcript((200_000, 0, 0))
+        self.write_transcript((130_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 50%", self.warning(output)["additionalContext"])
+        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
 
     def test_hook_event_name_is_echoed(self):
-        self.write_transcript((200_000, 0, 0))
+        self.write_transcript((150_000, 0, 0))
         output = self.call_hook(event="UserPromptSubmit")
         self.assertEqual(self.warning(output)["hookEventName"], "UserPromptSubmit")
 
