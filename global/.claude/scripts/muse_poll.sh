@@ -239,12 +239,17 @@ if ((gave_up_all == 1 && ${#ids[@]} > 0)); then
   exit 0
 fi
 
+# A note is waiting and we haven't given up: mark the exchange live so we keep polling
+# every minute while the handler works. The failure counter below will stop the hot
+# phase after two failed handler runs per id.
+touch "$ACTIVE"
+
 # Record processed count before handler runs.
 processed_before=0
 PROCESSED_FILE="$STATE/agent-notes-processed.txt"
 [[ -f "$PROCESSED_FILE" ]] && processed_before=$(wc -l < "$PROCESSED_FILE")
 
-# Run the handler (Sonnet). Do NOT touch $ACTIVE before it; only after if the processed file grew.
+# Run the handler (Sonnet).
 ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
@@ -259,8 +264,7 @@ processed_after=0
 [[ -f "$PROCESSED_FILE" ]] && processed_after=$(wc -l < "$PROCESSED_FILE")
 
 if ((processed_after > processed_before)); then
-  # Handler recorded at least one note: mark exchange live and clear failures for those ids.
-  touch "$ACTIVE"
+  # Handler recorded at least one note: clear failures for those ids.
   # Remove any ids that were just processed from the failures file.
   if [[ -f "$FAIL_FILE" && ${#ids[@]} -gt 0 ]]; then
     awk -F'\t' -v ids="${ids[*]}" 'BEGIN{split(ids,a," "); for(i in a) skip[a[i]]=1} !($1 in skip)' "$FAIL_FILE" >"$FAIL_FILE.tmp" && mv "$FAIL_FILE.tmp" "$FAIL_FILE"
