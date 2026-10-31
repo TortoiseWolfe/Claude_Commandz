@@ -279,7 +279,7 @@ high_check() {
 
 # Hub context hand-off wake. The hub's transcripts are in ~/.claude/projects/<repo-with-dashes>/*.jsonl.
 # Derive the folder from $HOME/repos the way Claude Code does (slashes to dashes). Wake once per session id
-# using a stamp file $HOME/.claude/state/hub-handoff-woke.<session-id>. Reads AFA_HANDOFF_K (default 150).
+# using a stamp file $HOME/.claude/state/hub-handoff-woke.<session-id>. Reads AFA_HANDOFF_K (default 100).
 # Calls context-warn.py --size <transcript> to get the token count.
 hub_handoff_check() {
   local repos_path="${HOME}/repos"
@@ -306,8 +306,8 @@ hub_handoff_check() {
   local size
   size=$(python3 -I "${HOME}/.claude/hooks/context-warn.py" --size "$newest" 2>/dev/null)
   [[ "$size" =~ ^[0-9]+$ ]] || return 0
-  local handoff_k=${AFA_HANDOFF_K:-150}
-  [[ "$handoff_k" =~ ^[0-9]+$ ]] && (( handoff_k > 0 )) || handoff_k=150
+  local handoff_k=${AFA_HANDOFF_K:-100}
+  [[ "$handoff_k" =~ ^[0-9]+$ ]] && (( handoff_k > 0 )) || handoff_k=100
   if (( size >= handoff_k * 1000 )); then
     local tokens_k=$(( (size + 500) / 1000 ))
     mkdir -p "$(dirname "$stamp_file")" 2>/dev/null

@@ -82,28 +82,28 @@ class ContextWarnTests(unittest.TestCase):
         return json.loads(output)["hookSpecificOutput"]
 
     def test_below_early_point_is_silent(self):
-        self.write_transcript((129_999, 0, 0))
+        self.write_transcript((79_999, 0, 0))
         self.assertEqual(self.call_hook(), "")
 
-    def test_early_warning_at_130k_only_once(self):
-        self.write_transcript((130_000, 0, 0))
+    def test_early_warning_at_80k_only_once(self):
+        self.write_transcript((80_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 130K tokens. Hand-off line is 150K", self.warning(output)["additionalContext"])
-        self.write_transcript((140_000, 0, 0))
+        self.assertIn("Context is at 80K tokens. Hand-off line is 100K", self.warning(output)["additionalContext"])
+        self.write_transcript((90_000, 0, 0))
         self.assertEqual(self.call_hook(), "")
 
     def test_synthetic_last_entry_uses_prior_usage_without_resetting_stamp(self):
-        self.write_transcript((130_000, 0, 0))
+        self.write_transcript((80_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
-        self.write_transcript((130_000, 0, 0), synthetic_last=True)
+        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
+        self.write_transcript((80_000, 0, 0), synthetic_last=True)
         self.assertEqual(self.call_hook(), "")
-        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "130")
+        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "80")
 
-    def test_hand_off_warning_at_150k(self):
-        self.write_transcript((100_000, 0, 50_000))
+    def test_hand_off_warning_at_100k(self):
+        self.write_transcript((60_000, 0, 40_000))
         output = self.call_hook()
-        self.assertIn("past the 150K hand-off line", self.warning(output)["additionalContext"])
+        self.assertIn("past the 100K hand-off line", self.warning(output)["additionalContext"])
 
     def test_setting_moves_both_points(self):
         self.write_transcript((79_999, 0, 0))
@@ -115,10 +115,10 @@ class ContextWarnTests(unittest.TestCase):
         out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}))["additionalContext"]
         self.assertIn("past the 100K hand-off line", out)
 
-    def test_bad_setting_falls_back_to_150(self):
-        self.write_transcript((150_000, 0, 0))
+    def test_bad_setting_falls_back_to_100(self):
+        self.write_transcript((100_000, 0, 0))
         out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "lots"}))["additionalContext"]
-        self.assertIn("past the 150K hand-off line", out)
+        self.assertIn("past the 100K hand-off line", out)
 
     def test_size_mode_on_missing_file_exits_1_quietly(self):
         result = subprocess.run([sys.executable, str(HOOK), "--size", str(self.root / "nope.jsonl")],
@@ -138,18 +138,18 @@ class ContextWarnTests(unittest.TestCase):
         self.assertEqual(self.call_hook(), "")
 
     def test_corrupt_last_line_falls_back_to_valid_usage(self):
-        self.write_transcript((130_000, 0, 0), corrupt_last=True)
+        self.write_transcript((80_000, 0, 0), corrupt_last=True)
         output = self.call_hook()
-        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
+        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
 
     def test_below_early_point_resets_warning_stamp(self):
-        self.write_transcript((130_000, 0, 0))
+        self.write_transcript((80_000, 0, 0))
         self.call_hook()
-        self.write_transcript((100_000, 0, 0))
+        self.write_transcript((70_000, 0, 0))
         self.assertEqual(self.call_hook(), "")
-        self.write_transcript((130_000, 0, 0))
+        self.write_transcript((80_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 130K", self.warning(output)["additionalContext"])
+        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
 
     def test_hook_event_name_is_echoed(self):
         self.write_transcript((150_000, 0, 0))
