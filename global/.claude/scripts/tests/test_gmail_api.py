@@ -7,6 +7,7 @@ import email.policy
 import hashlib
 import io
 import json
+import time
 import os
 import re
 import stat
@@ -249,7 +250,12 @@ class FakeGmail:
         if m and m[1] in self.drafts:
             d = self.drafts[m[1]]
             if method == "GET":
-                return 200, json.dumps({"id": m[1], "message": d["message"]}).encode()
+                msg = dict(d["message"])
+                if q.get("format") == "metadata":
+                    parsed = email.message_from_bytes(g.b64u_decode(msg["raw"]), policy=email.policy.default)
+                    msg["payload"] = {"headers": [{"name": h, "value": parsed[h]} for h in ("To", "Subject") if parsed[h]]}
+                    msg.pop("raw", None)
+                return 200, json.dumps({"id": m[1], "message": msg}).encode()
             if method == "PUT":
                 return 200, json.dumps(self._store(m[1], data)).encode()
             if method == "DELETE":
@@ -372,6 +378,47 @@ class Commands(Creds):
             d = g.draft_create("me@example.com", "", "<p>new</p>", reply_to="orig")
         self.assertEqual(d["message"]["threadId"], "TH7")
         self.assertEqual(len(self.fake.drafts), 2)
+
+    FLEET_SUBJECT = "[NX-01>NCC-74656] Notes backlog"
+
+    def add_fleet(self, subject=None, to="me@example.com", age_hours=1):
+        raw = f"To: {to}\r\nSubject: {subject or self.FLEET_SUBJECT}\r\n\r\nx\r\n".encode()
+        did = self.fake.add(raw, thread=f"F{self.fake.n}")
+        self.fake.drafts[did]["message"]["internalDate"] = str(int((time.time() - age_hours * 3600) * 1000))
+        return did
+
+    def test_fleet_note_repeating_a_recent_subject_and_to_is_refused(self):
+        old = self.add_fleet()
+        with self.assertRaisesRegex(g.GmailError, rf"{old}.*--allow-duplicate"):
+            g.draft_create("me@example.com", self.FLEET_SUBJECT, "<p>again</p>")
+        self.assertEqual(self.posts(), [])
+
+    def test_fleet_duplicate_is_allowed_with_the_flag_and_when_old_or_different(self):
+        self.add_fleet(age_hours=30)
+        self.add_fleet(to="other@example.com")
+        self.add_fleet(subject="[NX-01>NCC-74656] Something else")
+        d = g.draft_create("me@example.com", self.FLEET_SUBJECT, "<p>new</p>")
+        self.assertIn(d["id"], self.fake.drafts)
+        self.add_fleet()
+        g.draft_create("me@example.com", self.FLEET_SUBJECT, "<p>on purpose</p>", allow_duplicate=True)
+
+    def test_replace_of_the_matching_fleet_draft_is_not_a_duplicate(self):
+        old = self.add_fleet()
+        d = g.draft_create("me@example.com", self.FLEET_SUBJECT, "<p>edited</p>", replace=old)
+        self.assertEqual(d["id"], old)
+
+    def test_non_fleet_subjects_are_never_checked(self):
+        self.add_fleet(subject="Re: Hello")
+        self.add_fleet(subject="[Foo>Bar] x")
+        g.draft_create("me@example.com", "Re: Hello", "<p>a</p>")
+        g.draft_create("me@example.com", "[Foo>Bar] x", "<p>a</p>")
+        self.assertEqual(len(self.posts()), 2)
+
+    def test_is_fleet_subject(self):
+        for s in ("[NX-01>NCC-74656] a", "[MUSE>CC] b", "[CC>MUSE] c", "[NCC-74656>NX-01] d"):
+            self.assertTrue(g.is_fleet_subject(s), s)
+        for s in ("Re: [NX-01>NCC-74656] a", "[Foo>MUSE] b", "Hello", ""):
+            self.assertFalse(g.is_fleet_subject(s), s)
 
     def test_replace_rewrites_in_place_and_keeps_the_thread(self):
         old = self.fake.add(b"Subject: old subject\r\n\r\nold\r\n", thread="TH7")

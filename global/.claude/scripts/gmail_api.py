@@ -17,10 +17,13 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py labels                    label names and ids
   gmail_api.py draft-create --to A [--cc B] [--bcc C] --subject S (--html FILE | --text FILE) [--reply-to MESSAGE_ID]
                              [--inline CID=FILE ...] [--attach FILE ...] [--replace DRAFT_ID | --allow-second]
+                             [--allow-duplicate]
       --to/--cc/--bcc take one comma-separated string. --reply-to sets threadId, In-Reply-To and References.
       --replace DRAFT_ID rewrites that draft in place (same id, same thread): the way to change a draft.
       A new draft on a thread that already holds one is refused (two copies of one reply sitting in Drafts is how
       a client got the same card twice); --allow-second adds another on purpose.
+      A fleet note ([A>B] subject, both ends NX-01, NCC-74656, CC or MUSE) that repeats a subject and To already made
+      in the last 24 hours is refused; --allow-duplicate adds it anyway.
       --inline puts an image where the HTML says <img src="cid:CID">; --attach adds an ordinary attachment.
       This is the ONLY route for a draft to anyone but Jonathan: the connector rewrites every link, and
       ~/.claude/hooks/block-outbound.sh refuses connector create_draft/update_draft to anyone else.
@@ -419,10 +422,45 @@ def drafts_on_thread(thread):
             return ids
 
 
+FLEET_PARTIES = {"NX-01", "NCC-74656", "CC", "MUSE"}
+_FLEET_TAG = re.compile(r"^\s*\[([A-Za-z0-9-]+)>([A-Za-z0-9-]+)\]")
+
+
+def is_fleet_subject(subject):
+    """True for a fleet note subject: [A>B] with both ends among NX-01, NCC-74656, CC, MUSE."""
+    m = _FLEET_TAG.match(subject or "")
+    return bool(m) and m[1].upper() in FLEET_PARTIES and m[2].upper() in FLEET_PARTIES
+
+
+def recent_duplicate_drafts(to, subject, within_hours=24, skip=None, now=None):
+    """Ids of drafts with this exact subject and To that were created in the last within_hours."""
+    now = now if now is not None else time.time()
+    ids, token = [], None
+    while True:
+        params = {"maxResults": 500, "q": f'subject:"{subject}"'}
+        if token:
+            params["pageToken"] = token
+        out = api("GET", "/drafts", params)
+        for d in out.get("drafts", []):
+            if d["id"] == skip:
+                continue
+            m = api("GET", f"/drafts/{d['id']}", {"format": "metadata", "metadataHeaders": ["To", "Subject"]})["message"]
+            h = {x["name"].lower(): x["value"] for x in m.get("payload", {}).get("headers", [])}
+            if h.get("subject", "").strip() != subject.strip() or h.get("to", "").strip().lower() != to.strip().lower():
+                continue
+            made = int(m.get("internalDate", 0)) / 1000 if m.get("internalDate") else now  # no date: treat as just made
+            if now - made < within_hours * 3600:
+                ids.append(d["id"])
+        token = out.get("nextPageToken")
+        if not token:
+            return ids
+
+
 def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=None, bcc=None, inline=None, attach=None,
-                 replace=None, allow_second=False):
+                 replace=None, allow_second=False, allow_duplicate=False):
     """replace: id of a draft to rewrite in place (same id, never a second draft).
-    A new draft on a thread that already holds one is refused unless allow_second is set."""
+    A new draft on a thread that already holds one is refused unless allow_second is set.
+    A fleet note ([A>B] subject) that repeats a subject and To made in the last 24 hours is refused unless allow_duplicate."""
     thread, reply = None, None
     if reply_to:
         thread, reply = reply_context(reply_to)
@@ -436,6 +474,11 @@ def draft_create(to, subject, html_body=None, text_body=None, cc=None, reply_to=
         if have:
             raise GmailError(f"thread {thread} already has draft {', '.join(have)}: use --replace <id> to change it in place, "
                              "or --allow-second to add another")
+    if is_fleet_subject(subject) and not allow_duplicate:
+        dup = recent_duplicate_drafts(to, subject, skip=replace)
+        if dup:
+            raise GmailError(f"fleet note {subject!r} to {to} already has draft {', '.join(dup)} from the last 24 hours: "
+                             "add to that one (--replace <id>), or pass --allow-duplicate")
     msg = build_message(to, subject, html_body, text_body, cc, reply, bcc, inline, attach)
     body = {"message": {"raw": b64u_encode(msg.as_bytes())}}
     if thread:
@@ -549,6 +592,18 @@ def _api_retry(method, path, params=None, tries=4):
             time.sleep(2 ** n * 5)
 
 
+def _api_retry_post(path, body, tries=4):
+    """POST with the same pause-and-retry on Gmail's quota as _api_retry."""
+    for n in range(tries):
+        try:
+            return api("POST", path, body=body)
+        except GmailError as e:
+            busy = " 429 " in str(e) or "Quota exceeded" in str(e) or "rateLimitExceeded" in str(e)
+            if not busy or n == tries - 1:
+                raise
+            time.sleep(2 ** n * 5)
+
+
 def messages_list(query, limit=100):
     """Read-only. One 'MSG id | address | From | Subject | Date | labels | threadId' line per message matching the Gmail
     query, straight from the API (messages.list, then messages.get in metadata format: no body, no snippet), so a
@@ -598,6 +653,7 @@ def main(argv=None):
     p.add_argument("--html"); p.add_argument("--text"); p.add_argument("--reply-to")
     grp = p.add_mutually_exclusive_group()
     grp.add_argument("--replace", metavar="DRAFT_ID"); grp.add_argument("--allow-second", action="store_true")
+    p.add_argument("--allow-duplicate", action="store_true")
     p.add_argument("--inline", action="append", default=[], metavar="CID=FILE")
     p.add_argument("--attach", action="append", default=[], metavar="FILE")
     for n in ("draft-fix-links", "draft-delete"):
@@ -631,7 +687,7 @@ def main(argv=None):
                 inline[cid] = path
             d = draft_create(a.to, a.subject, _read_file(a.html) if a.html else None,
                              _read_file(a.text) if a.text else None, a.cc, a.reply_to, a.bcc, inline, a.attach,
-                             a.replace, a.allow_second)
+                             a.replace, a.allow_second, a.allow_duplicate)
             print(f"draftId: {d['id']}\nmessageId: {d['message']['id']}\nthreadId: {d['message'].get('threadId')}")
         elif a.cmd == "draft-fix-links":
             r = draft_fix_links(a.draft_id)

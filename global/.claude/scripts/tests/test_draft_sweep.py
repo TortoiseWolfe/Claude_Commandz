@@ -34,6 +34,7 @@ class FakeFolder:
         self.mail = {}        # message id -> dict(subject, age_h, labels)
         self.mail_by_topic = {}
         self.deleted = []
+        self.labelled = []
         self.calls = []
         self.fail_raw = False
 
@@ -68,6 +69,10 @@ class FakeFolder:
             if params.get("format") == "raw" and self.fail_raw:
                 raise g.GmailError("Gmail API 500 on GET: boom")
             return {"id": did, "message": self._msg(d, d["mid"], params.get("format"))}
+        if method == "POST" and path.endswith("/modify"):
+            mid = path.split("/")[-2]
+            self.labelled.append((mid, tuple(body["addLabelIds"])))
+            return {"id": mid}
         if method == "DELETE" and path.startswith("/drafts/"):
             did = path.split("/")[-1]
             self.deleted.append(did)
@@ -94,10 +99,13 @@ class SweepBase(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    mine = {"NX-01", "CC"}
+
     def run_sweep(self, apply=False):
         out = io.StringIO()
         with redirect_stdout(out):
-            res = nc.sweep(str(self.processed), self.log, apply=apply, now=NOW, sweep_dir=str(self.sweep_dir), out=out)
+            res = nc.sweep(str(self.processed), self.log, apply=apply, now=NOW, sweep_dir=str(self.sweep_dir), out=out,
+                           mine=self.mine)
         return res, out.getvalue()
 
     def mark(self, *ids):
@@ -117,6 +125,18 @@ class Classify(unittest.TestCase):
     def test_no_tag_and_other_machines_tags_are_not_fleet(self):
         self.assertEqual(nc.classify("Tomorrow Tue 4:00 call"), (None, None))
         self.assertEqual(nc.classify("[MUSE>NCC-74656] not ours"), (None, None))
+        self.assertEqual(nc.classify("[NCC-74656>MUSE] not ours"), (None, None))
+
+    def test_the_tower_reads_its_own_names(self):
+        tower = {"NCC-74656"}
+        self.assertEqual(nc.classify("[MUSE>NCC-74656] hi", tower), ("inbound", "[MUSE>NCC-74656]"))
+        self.assertEqual(nc.classify("[NX-01>NCC-74656] hi", tower), ("inbound", "[NX-01>NCC-74656]"))
+        self.assertEqual(nc.classify("[NCC-74656>MUSE] hi", tower), ("outbound", "[NCC-74656>MUSE]"))
+        self.assertEqual(nc.classify("[MUSE>CC] not the tower's", tower), (None, None))
+
+    def test_machine_file_picks_the_names(self):
+        self.assertEqual(nc.my_names("NX-01"), {"NX-01", "CC"})
+        self.assertEqual(nc.my_names("NCC-74656"), {"NCC-74656"})
 
 
 class Inbound(SweepBase):
@@ -157,7 +177,7 @@ class Inbound(SweepBase):
         res, out = self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
         self.assertIn("not handled yet", out)
-        self.assertIn("never seen by notes_check", out)
+        self.assertEqual(res["unabsorbed_old"], 2)
 
     def test_label_32_counts_as_handled(self):
         self.fake.add("r-1", "[MUSE>CC] labelled", 5, labels=["DRAFT", "Label_32"])
@@ -214,52 +234,27 @@ class Untagged(SweepBase):
         self.assertEqual(self.fake.deleted, [])
 
 
-class TowerNotes(SweepBase):
-    """A subject naming NCC-74656 is kept until 3 days old, whatever its tag, labels or replies (28 Oct)."""
+class Ownership(SweepBase):
+    """Each machine deletes only its own (31 Oct): notes to it once it has read them, notes from it once absorption is
+    verified and 24 hours have passed. Another party's note is kept whatever its labels."""
 
-    SUBJECTS = ["[MUSE>NCC-74656] ask", "[NX-01>NCC-74656] ask", "[NCC-74656>NX-01] reply", "[NCC-74656>MUSE] hi",
-                "Re: [MUSE>NCC-74656] ask", "Re: [NX-01>NCC-74656] ask", "Re: [NCC-74656>NX-01] reply",
-                "Re: [NCC-74656>MUSE] hi", "Fwd: [MUSE>NCC-74656] ask"]
-
-    def test_young_tower_notes_are_kept_even_when_handled(self):
-        for i, subj in enumerate(self.SUBJECTS):
-            did = f"t-{i}"
-            self.fake.add(did, subj, 30, labels=["DRAFT", "Label_32"], body="-- H-7CH")
-            self.mark(*[f"t-{j}" for j in range(len(self.SUBJECTS))])
-        self.run_sweep(apply=True)
+    def test_another_partys_notes_are_kept_even_when_labelled_and_old(self):
+        for i, subj in enumerate(["[MUSE>NCC-74656] ask", "[NCC-74656>MUSE] hi", "Re: [MUSE>NCC-74656] ask"]):
+            self.fake.add(f"t-{i}", subj, 100, labels=["DRAFT", "Label_32"], body="-- H-7CH")
+        self.mark("t-0", "t-1", "t-2")
+        res, out = self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
+        self.assertIn("another party's note", out)
+        self.assertEqual(res["fleet"], 3)
 
-    def test_young_tower_note_with_a_reply_is_kept(self):
-        self.fake.add("t-1", "[NX-01>NCC-74656] ask topic", 10)
-        self.fake.mail["m-reply"] = dict(subject="[NCC-74656>NX-01] ask topic", age_h=5, labels=[])
+    def test_the_tower_deletes_notes_to_it_that_it_has_read(self):
+        self.mine = {"NCC-74656"}
+        self.fake.add("t-1", "[NX-01>NCC-74656] ask", 5)
+        self.fake.add("t-2", "[MUSE>NCC-74656] ask", 5)
+        self.fake.add("t-3", "[NCC-74656>NX-01] its own", 5)
+        self.mark("t-1", "t-2", "t-3")
         self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, [])
-
-    def test_kept_line_names_the_reason(self):
-        self.fake.add("t-1", "[MUSE>NCC-74656] ask", 30, body="-- H-7CH")
-        self.mark("t-1")
-        _, out = self.run_sweep()
-        self.assertIn("names NCC-74656", out)
-
-    def test_just_under_three_days_is_kept(self):
-        self.fake.add("t-1", "[NX-01>NCC-74656] ask", 71, labels=["DRAFT", "Label_32"])
-        self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, [])
-
-    def test_old_tagged_tower_notes_are_handled_as_before(self):
-        self.fake.add("o-out", "[NX-01>NCC-74656] ask", 73)
-        self.fake.add("o-in", "[NCC-74656>NX-01] reply", 73)
-        self.fake.add("o-re", "Re: [NX-01>NCC-74656] ask", 73)
-        self.mark("o-in", "o-re")
-        self.run_sweep(apply=True)
-        self.assertEqual(sorted(self.fake.deleted), ["o-in", "o-out", "o-re"])
-
-    def test_old_untagged_tower_note_follows_the_h7ch_rule(self):
-        self.fake.add("o-1", "[MUSE>NCC-74656] ask", 73, body="-- H-7CH")
-        self.fake.add("o-2", "[MUSE>NCC-74656] other", 73, body="-- H-7CH")
-        self.mark("o-1")
-        self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, ["o-1"])
+        self.assertEqual(sorted(self.fake.deleted), ["t-1", "t-2"])
 
     def test_notes_not_naming_the_tower_are_unaffected(self):
         self.fake.add("n-1", "[MUSE>CC] done thing", 5)
@@ -267,52 +262,128 @@ class TowerNotes(SweepBase):
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, ["n-1"])
 
+    def test_tower_note_to_us_is_deleted_once_read(self):
+        self.fake.add("o-in", "[NCC-74656>NX-01] reply", 5)
+        self.mark("o-in")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["o-in"])
+
+
+class LabelStep(SweepBase):
+    """The reader's half of the shared signal: label what we have read so the author can see it."""
+
+    def test_read_note_to_us_gets_both_labels_before_the_cleanup(self):
+        self.fake.add("r-1", "[MUSE>CC] fresh", 1.0)       # too young to delete, still gets the label
+        self.mark("r-1")
+        res, _ = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.labelled, [("m-r-1", ("Label_31", "Label_32"))])
+        self.assertEqual(res["labelled"], 1)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_dry_run_labels_nothing(self):
+        self.fake.add("r-1", "[MUSE>CC] fresh", 1.0)
+        self.mark("r-1")
+        res, out = self.run_sweep(apply=False)
+        self.assertEqual(self.fake.labelled, [])
+        self.assertEqual(res["labelled"], 1)
+        self.assertIn("would label", out)
+
+    def test_already_labelled_unread_and_not_ours_get_nothing(self):
+        self.fake.add("a", "[MUSE>CC] done", 1.0, labels=["DRAFT", "Label_32"])
+        self.fake.add("b", "[MUSE>CC] unread", 1.0)
+        self.fake.add("c", "[NX-01>NCC-74656] ours", 1.0)
+        self.fake.add("d", "[MUSE>NCC-74656] the tower's", 1.0)
+        self.mark("a", "c", "d")
+        res, _ = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.labelled, [])
+        self.assertEqual(res["labelled"], 0)
+
+    def test_message_id_in_processed_file_also_labels(self):
+        self.fake.add("r-1", "[MUSE>CC] fresh", 1.0, mid="1a2b3c")
+        self.mark("1a2b3c")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.labelled, [("1a2b3c", ("Label_31", "Label_32"))])
+
+    def test_a_processed_file_per_machine_can_be_listed(self):
+        other = self.dir / "peer-processed.txt"
+        other.write_text("t-9\n", encoding="utf-8")
+        self.mine = {"NCC-74656"}
+        self.fake.add("t-9", "[NX-01>NCC-74656] ask", 30)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            nc.sweep([str(self.processed), str(other)], self.log, apply=True, now=NOW, sweep_dir=str(self.sweep_dir),
+                     out=out, mine=self.mine)
+        self.assertEqual(self.fake.deleted, ["t-9"])
+
 
 class Outbound(SweepBase):
-    def test_three_days_old_is_deleted(self):
-        self.fake.add("r-1", "[CC>MUSE] old ask", 73)
-        self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, ["r-1"])
+    """Our own notes leave only once absorption is verified AND 24 hours have passed. Age alone never deletes."""
 
-    def test_young_unanswered_is_kept(self):
-        self.fake.add("r-1", "[CC>MUSE] ask", 10)
+    def test_three_days_old_with_no_absorption_is_kept_and_flagged(self):
+        self.fake.add("r-1", "[CC>MUSE] old ask", 73)
         res, out = self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
-        self.assertIn("waiting for a reply", out)
+        self.assertIn("absorption not verified", out)
+        self.assertEqual(res["unabsorbed_old"], 1)
 
-    def test_picked_up_label_deletes(self):
+    def test_young_note_is_kept_even_when_labelled(self):
         self.fake.add("r-1", "[CC>MUSE] ask", 10, labels=["DRAFT", "Label_32"])
+        res, out = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+        self.assertIn("under 24 hours old", out)
+        self.assertEqual(res["unabsorbed_old"], 0)
+
+    def test_absorbed_label_and_over_24_hours_deletes(self):
+        self.fake.add("r-1", "[CC>MUSE] ask", 30, labels=["DRAFT", "Label_32"])
+        self.fake.add("r-2", "[NX-01>NCC-74656] ask", 30, labels=["DRAFT", "Label_31", "Label_32"])
+        res, _ = self.run_sweep(apply=True)
+        self.assertEqual(sorted(self.fake.deleted), ["r-1", "r-2"])
+        self.assertEqual(res["unabsorbed_old"], 0)
+
+    def test_just_under_24_hours_is_kept(self):
+        self.fake.add("r-1", "[NX-01>NCC-74656] ask", 23.9, labels=["DRAFT", "Label_32"])
         self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, ["r-1"])
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_label_on_a_note_we_only_received_does_not_matter_for_another_partys(self):
+        self.fake.add("r-1", "[NCC-74656>MUSE] hi", 100, labels=["DRAFT", "Label_32"])
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
 
     def test_later_reply_on_the_topic_deletes(self):
-        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
+        self.fake.add("r-1", "[CC>MUSE] Release links", 30)
         self.fake.mail["m-reply"] = dict(subject="Re: [CC>MUSE] Release links", age_h=2, labels=["DRAFT"])
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, ["r-1"])
 
+    def test_reply_on_a_note_under_24_hours_old_keeps_it(self):
+        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
+        self.fake.mail["m-reply"] = dict(subject="Re: [CC>MUSE] Release links", age_h=2, labels=["DRAFT"])
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
     def test_untagged_re_on_the_topic_deletes(self):
-        self.fake.add("r-1", "[CC>MUSE] Fix is up", 10)
+        self.fake.add("r-1", "[CC>MUSE] Fix is up", 30)
         self.fake.mail["m-reply"] = dict(subject="Re: Fix is up", age_h=2, labels=["SENT"])
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, ["r-1"])
 
     def test_reply_from_an_outside_sender_does_not_count(self):
-        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
+        self.fake.add("r-1", "[CC>MUSE] Release links", 30)
         self.fake.mail["m-x"] = dict(subject="Re: [CC>MUSE] Release links", age_h=2, labels=["INBOX"],
                                      sender="Stranger <stranger@example.org>")
         res, out = self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
-        self.assertIn("waiting for a reply", out)
+        self.assertIn("absorption not verified", out)
 
     def test_reply_older_than_our_note_does_not_count(self):
-        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
-        self.fake.mail["m-old"] = dict(subject="Re: [CC>MUSE] Release links", age_h=20, labels=["DRAFT"])
+        self.fake.add("r-1", "[CC>MUSE] Release links", 30)
+        self.fake.mail["m-old"] = dict(subject="Re: [CC>MUSE] Release links", age_h=60, labels=["DRAFT"])
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
 
     def test_a_second_note_of_ours_is_not_a_reply(self):
-        self.fake.add("r-1", "[CC>MUSE] Release links", 10)
+        self.fake.add("r-1", "[CC>MUSE] Release links", 30)
         self.fake.mail["m-ours"] = dict(subject="[CC>MUSE] Release links (again)", age_h=2, labels=["DRAFT"])
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
@@ -322,7 +393,7 @@ class Modes(SweepBase):
     def test_dry_run_deletes_nothing_and_reports_counts_and_oldest(self):
         self.fake.add("r-1", "[MUSE>CC] a", 5)
         self.fake.add("r-2", "[MUSE>CC] b", 50)
-        self.fake.add("r-3", "[CC>MUSE] c", 80)
+        self.fake.add("r-3", "[CC>MUSE] c", 80, labels=["DRAFT", "Label_32"])
         self.fake.add("r-4", "Real draft", 5)
         self.mark("r-1", "r-2")
         res, out = self.run_sweep(apply=False)
