@@ -55,6 +55,10 @@ fresh '6 minutes' '11 minutes'; run env FAKE_OUT='NEW abc123'
 ok 'a note found: look plus handler' 2 "$(count claude)"
 [[ $(( $(date +%s) - $(stat -c %Y "$ST/muse-active.stamp") )) -lt 30 ]] && echo 'PASS: a found note restarts the hot phase' || { echo 'FAIL: active stamp not touched' >&2; exit 1; }
 
+fresh '6 minutes' '11 minutes'; run env FAKE_OUT='NEW *** a|b'
+ok 'a NEW answer with no usable id: look only, no handler' 1 "$(count claude)"
+[[ $(( $(date +%s) - $(stat -c %Y "$ST/muse-active.stamp") )) -ge 30 ]] && echo 'PASS: no usable id leaves the hot phase alone' || { echo 'FAIL: no usable id touched the active stamp' >&2; exit 1; }
+
 fresh '6 minutes'; run env
 ok 'mail index: update and jobs-queue run on a due poll' 1 "$(count 'mailidx update')"
 ok 'mail index: jobs-queue ran too' 1 "$(count 'mailidx jobs-queue')"
