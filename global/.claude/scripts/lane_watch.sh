@@ -29,7 +29,17 @@
 #     prompt counts as a reason). Named once per lane per day with its model and today's spend. 22 Oct: ten lanes ran on Opus all day, only
 #     one was entitled, and the tier was only checked at start. Checked on every poll; a recycle also puts such a lane back on sonnet.
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
-#   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved
+#   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved. While every watched lane is
+#     idle (no spinner, no dialog, no recycle under way) and no "Client mail:" or "Client alert:" line is open in hub-inbox.md, the heartbeat
+#     is stretched to LANE_WATCH_IDLE_MAX_MIN (default 120) minutes; a lane that starts working puts it back to --max-min. 31 Oct: the
+#     tower's 45-minute heartbeat woke the hub at 9:15 AM with nothing new while every lane was idle.
+# What does NOT wake the hub (31 Oct 2026, the tower's note "Hub wakes that do nothing"; a wake after the cache has gone cold costs $1.2 to $1.6):
+#   - a turn that ends within LANE_WATCH_TURN_GRACE (default 300) seconds of a report.md change: the report is the news, the turn end is the
+#     same turn. (PR 175 fixed the pane-redraw repeat; this is the report-then-turn-end double wake.)
+#   - a report whose line 1 starts HOURLY or STATUS: routine status. Lanes are told to keep it in status.md, so line 1 changes only when the hub must act.
+# A report that lands between a wake and the hub's re-arm is still news: each wake that names a report writes .reportseen-<lane> (the stamp the
+# hub was shown) in the lane state folder, and a new watcher starts from it (when it is under LANE_WATCH_SEEN_MAX_SECS, default 1800, old) instead
+# of from the moment it starts.
 # Which lanes are watched: the names given, or, with none, EVERY live lane (the rows of `lane.sh --status` that are not dead and
 # have a tmux window), read again on every poll so a lane started after the watcher began is covered for reports, end of turn and
 # stuck dialogs. (18 Oct: armed with no names it watched nothing, and four reports and a stuck dialog sat unseen for hours.)
@@ -329,6 +339,51 @@ bridge_alert() {
   cat "$bridge_state/alert"
 }
 
+# The stamp the hub was last shown for a lane's report (see the header). seen_stamp_read <lane> prints it when the file is fresh, else nothing.
+seen_max_secs=${LANE_WATCH_SEEN_MAX_SECS:-1800}
+seen_stamp_read() {
+  local f="$recycle_dir/.reportseen-$1" m
+  m=$(stat -c %Y "$f" 2>/dev/null) || return 0
+  [ $(( $(date +%s) - m )) -le "$seen_max_secs" ] || return 0
+  cat "$f" 2>/dev/null
+}
+seen_stamp_write() { mkdir -p "$recycle_dir" 2>/dev/null; printf '%s' "$2" > "$recycle_dir/.reportseen-$1" 2>/dev/null || true; }
+# routine_report <report.md>: 0 when line 1 starts HOURLY or STATUS (status for the record, not a request for the hub).
+routine_report() {
+  case "$(head -n 1 "$1" 2>/dev/null)" in HOURLY*|STATUS*) return 0 ;; esac
+  return 1
+}
+
+# Dead-watcher alarm. A hub watcher is a bash running lane_watch.sh that is not --recycle-once (the same match as hooks/lane-watch-guard.py).
+# LANE_WATCH_PROCLIST, when set, stands in for `pgrep -af lane_watch.sh` (tests).
+watcher_running() {
+  local out
+  if [ -n "${LANE_WATCH_PROCLIST+x}" ]; then out=$LANE_WATCH_PROCLIST; else out=$(pgrep -af 'lane_watch\.sh' 2>/dev/null); fi
+  printf '%s\n' "$out" | sed -E 's/^[0-9]+ //' | command grep -E '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' | command grep -v -- '--recycle-once' | command grep -q .
+}
+# hub_watcher_check <open lane count>: called by the scheduled pass. With no lane open, or a watcher running, it clears its marks. With lanes open
+# and no watcher for LANE_WATCH_DEAD_SECS (default 600, so two passes 15 minutes apart, not the gap while the hub re-arms), it writes ONE "Hub:" line
+# in the hub inbox and sends ONE desktop ping per gap. 30 Oct 7:30 PM: Claude Code's memory reaper killed the tower's watcher and nothing woke the
+# hub for 12 hours while a pull request sat ready to merge.
+hub_watcher_check() {
+  local n=$1 first mark="$recycle_dir/.no-watcher" named="$recycle_dir/.no-watcher-named" now age mins
+  if [ "${n:-0}" -le 0 ] || watcher_running; then rm -f "$mark" "$named"; return 0; fi
+  now=$(date +%s)
+  if [ ! -e "$mark" ]; then printf '%s' "$now" > "$mark"; return 0; fi
+  first=$(cat "$mark" 2>/dev/null); [[ "$first" =~ ^[0-9]+$ ]] || { printf '%s' "$now" > "$mark"; return 0; }
+  age=$(( now - first ))
+  [ "$age" -ge "${LANE_WATCH_DEAD_SECS:-600}" ] || return 0
+  [ ! -e "$named" ] || return 0
+  : > "$named"
+  mins=$(( age / 60 ))
+  "${LANE_WATCH_RECORD:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/muse_poll_record.sh}" inbox "Hub: no lane_watch.sh watcher has been running for ${mins} min while ${n} lane(s) are open, so a report, a stuck dialog or a dead lane will not wake the hub. Arm one (lane_watch.sh, in the background). Named once per gap." >/dev/null 2>&1 || true
+  timeout 30 python3 "${LANE_WATCH_TRAY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/openclaw_tray.py}" notify "Hub watcher is not running" "${n} lane(s) open, no watcher for ${mins} min" >/dev/null 2>&1 || true
+}
+# A client line open in the hub's inbox ("- [ ] <date> | Client mail: ..." or "Client alert:"): the heartbeat is not stretched while one is.
+client_line_open() {
+  command grep -qE '^- \[ \] [^|]*\| Client (mail|alert):' "${HUB_INBOX:-$HOME/.claude/state/hub-inbox.md}" 2>/dev/null
+}
+
 # When sourced (by the test script), stop here with the functions defined.
 # "report stale: ..." when lane.sh --status says the lane's report.md is not its last word (input arrived after it, or a background job is
 # still running), else nothing. 19 Oct: a lane was closed on "report:yes idle" while it was mid-work.
@@ -338,6 +393,8 @@ stale_note() {
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 max=45; check=''; recycle_once=0
+turn_grace=${LANE_WATCH_TURN_GRACE:-300}
+idle_max=${LANE_WATCH_IDLE_MAX_MIN:-120}
 while [ $# -gt 0 ]; do
   case "$1" in
     --recycle-once) recycle_once=1; shift ;;
@@ -353,8 +410,10 @@ declare -A seen seen_turn recycling
 report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
-  local l=$1 f
+  local l=$1 f shown
   seen[$l]=$(stamp "$l")
+  shown=$(seen_stamp_read "$l")   # what the hub was last shown, when that was minutes ago: a report since then is still news
+  [ -z "$shown" ] || seen[$l]=$shown
   if [ "${2:-}" = fresh ] && f=$(report_of "$l") && [ -n "$f" ] && [ "$(stat -c %Y "$f")" -ge "$start_ts" ]; then
     seen[$l]=none   # its report was written before the first poll saw the lane: still news
   fi
@@ -381,10 +440,13 @@ refresh_watched() { # no names given: add the lanes that started since the last 
 # arms a watcher only while a session is open: 26 Oct, between two hub sessions nothing was armed and scout-run-2 went 128K to 163K and
 # compacted on its own.
 if [ "$recycle_once" = 1 ]; then
+  open_n=0
   while read -r l; do
     [ -n "$l" ] || continue
+    open_n=$(( open_n + 1 ))
     recycle_pass "$l" "$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null)" quiet || true
   done < <(live_lanes)
+  hub_watcher_check "$open_n"
   exit 0
 fi
 if [ "$auto" = 1 ]; then
@@ -459,6 +521,18 @@ check_open_questions
 hub_handoff_check
 printf '%s' "$recycle_log_seen" > "$recycle_log_seen_file" 2>/dev/null || true   # first run: the offset starts here
 end=$(( $(date +%s) + max * 60 ))
+stretched=0
+# all_idle: 0 when no watched lane is working, waiting on a dialog or being recycled (the same signs orphan_check reads).
+all_idle() {
+  local l pane
+  for l in "${lanes[@]}"; do
+    recycle_locked "$l" && return 1
+    pane=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null) || return 1
+    printf '%s\n' "$pane" | dialog_waiting && return 1
+    command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 1
+  done
+  return 0
+}
 while :; do
   check_bridge
   check_outbox
@@ -469,7 +543,10 @@ while :; do
   hit=0; other=0
   for l in "${lanes[@]}"; do
     s=$(stamp "$l")
-    if [ "$s" != "${seen[$l]}" ]; then
+    if [ "$s" != "${seen[$l]}" ] && [ "$s" != none ] && routine_report "$(report_of "$l")"; then
+      seen[$l]=$s; seen_stamp_write "$l" "$s"   # HOURLY / STATUS on line 1: routine, wakes nobody
+    elif [ "$s" != "${seen[$l]}" ]; then
+      seen_stamp_write "$l" "$s"
       note=$(stale_note "$l")
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       step_url_check "$l"
@@ -501,8 +578,13 @@ while :; do
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
           seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
         elif [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ]; then
-          done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
-          echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
+          rstamp=$(stamp "$l")
+          if [[ "$rstamp" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - rstamp )) -lt "$turn_grace" ]; then
+            seen_turn[$l]=$done_line   # the turn that wrote the report just ended: the report is the news, not this
+          else
+            done_time=$(printf '%s\n' "$done_line" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}).*/\1/p')
+            echo "idle: $l ended a turn ($done_time) without a new report; it may be asking the hub"; hit=1; other=1
+          fi
         fi
       fi
     fi
@@ -536,6 +618,14 @@ while :; do
     fi
     exit 0
   fi
-  [ "$(date +%s)" -ge "$end" ] && { echo "heartbeat: nothing new in ${max} min"; exit 0; }
+  if [ "$(date +%s)" -ge "$end" ]; then
+    # Stretch the heartbeat while the whole fleet is idle and no client line is open (31 Oct: a 45-minute wake at 9:15 AM with nothing new).
+    if [ "$idle_max" -gt "$max" ] && [ "$(date +%s)" -lt $(( start_ts + idle_max * 60 )) ] && all_idle && ! client_line_open; then
+      stretched=1
+    else
+      if [ "$stretched" = 1 ]; then echo "heartbeat: nothing new in $(( ($(date +%s) - start_ts) / 60 )) min"; else echo "heartbeat: nothing new in ${max} min"; fi
+      exit 0
+    fi
+  fi
   sleep "${LANE_WATCH_POLL:-30}"
 done
