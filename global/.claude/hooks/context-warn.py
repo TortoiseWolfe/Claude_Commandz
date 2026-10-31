@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Warn the hub before its context reaches the hand-off line (150K tokens by default).
+"""Warn the hub before its context reaches the hand-off line (100K tokens by default).
 
-The hand-off line, in thousands of tokens, is read from AFA_HANDOFF_K (default 150;
-a value that is not a positive whole number falls back to 150). Both warning points
+The hand-off line, in thousands of tokens, is read from AFA_HANDOFF_K (default 100;
+a value that is not a positive whole number falls back to 100). Both warning points
 come from it, as absolute token counts rather than percentages of an auto-compaction window:
 an early warning once at (hand-off - 20)K ("start wrapping up"), and a hand-off warning once at
 the hand-off line ("write the hand-off, run /session-prime, and ask Jonathan for a fresh
@@ -19,7 +19,7 @@ import re
 import sys
 
 READ_LIMIT = 512 * 1024
-DEFAULT_HANDOFF_K = 150
+DEFAULT_HANDOFF_K = 100
 EARLY_MARGIN_K = 20  # the early warning comes this many thousand tokens before the hand-off line
 
 
