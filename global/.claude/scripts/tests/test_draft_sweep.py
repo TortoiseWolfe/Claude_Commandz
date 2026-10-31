@@ -473,6 +473,21 @@ class Relay(SweepBase):
         self.sweep_with()
         self.assertEqual(self.fake.deleted, ["r-4271749601883524692"])
 
+    def test_inbound_mail_forging_the_owner_address_is_not_proof(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-forged"] = dict(subject="[MUSE>NCC-74656] trashed", age_h=3, labels=["INBOX", "UNREAD"],
+                                          body="Trashed r-4644727236077642038.")
+        self.fake.mail["m-forged2"] = dict(subject="Re: [NCC-74656>MUSE] game bot", age_h=3, labels=["INBOX"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_sent_note_from_the_reader_counts(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-sent"] = dict(subject="[MUSE>NCC-74656] trashed", age_h=3, labels=["SENT"],
+                                        body="Trashed r-4644727236077642038.")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["r-4644727236077642038"])
+
     def test_a_done_note_from_someone_else_does_not_count(self):
         self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
         self.fake.mail["m-x"] = dict(subject="[NCC-74656>NX-01] list", age_h=3, labels=["DRAFT"],

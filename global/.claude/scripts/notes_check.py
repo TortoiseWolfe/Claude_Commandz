@@ -409,8 +409,12 @@ _META = ["Subject", "From", "To", "Cc", "Bcc", "Date"]
 
 def _from_reader(f, rec, reader, owner):
     """True if message f is a later message the READER wrote (Hatch and the tower write as the mailbox owner, so only the owner's
-    own address counts: a stranger's "Re:" must not retire one of our notes). Tagged: its author is the reader. Untagged: a "Re:"."""
+    own address counts: a stranger's "Re:" must not retire one of our notes). Tagged: its author is the reader. Untagged: a "Re:".
+    A From header is not proof by itself: inbound mail can forge it, so the message must also be a draft or sent item of this mailbox
+    (labels DRAFT or SENT), which only the mailbox's own tools create."""
     if email.utils.parseaddr(f["from"])[1].lower() != owner or not f["t"] > rec["t"]:
+        return False
+    if not {"DRAFT", "SENT"} & set(f.get("labels") or []):
         return False
     r = route(f["subject"])
     if r:
