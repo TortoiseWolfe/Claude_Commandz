@@ -146,7 +146,7 @@ def find_newest_hub_transcript():
 
 def hub_context_warning():
     """Return a warning line if the newest hub session is at or over the hand-off threshold,
-    else None. Reads AFA_HANDOFF_K env (default 150, in thousands; Jonathan 30 Oct: hand off at 150K)."""
+    else None. Reads AFA_HANDOFF_K env (default 330, in thousands: the last tenth before auto-compact at 367K; Jonathan 31 Oct: "still too soon, fifty seven percent left" at 157K)."""
     transcript, session_id = find_newest_hub_transcript()
     if transcript is None:
         return None
@@ -154,11 +154,11 @@ def hub_context_warning():
     if size is None:
         return None
     try:
-        handoff_k = int(os.environ.get("AFA_HANDOFF_K", "150"))
+        handoff_k = int(os.environ.get("AFA_HANDOFF_K", "330"))
     except ValueError:
-        handoff_k = 150  # a bad setting must not stop the page from building
+        handoff_k = 330  # a bad setting must not stop the page from building
     if handoff_k <= 0:
-        handoff_k = 150
+        handoff_k = 330
     if size >= handoff_k * 1000:
         tokens_k = (size + 500) // 1000
         return f"WARNING: the hub session is at {tokens_k}K context, past the {handoff_k}K hand-off line. Write the hand-off and ask for a fresh terminal and /prep."
@@ -715,7 +715,7 @@ def render(sections, now, machine, cap):
                "lane.sh, lane reports, the muse inbox, the roadmap issue, git, tidy-report and the budget report. "
                "Read this instead of the roadmap body; open a source only for the item you are working on. "
                "A lane report does not end its lane: lanes stay open until their context is full."]
-        # Hub context warning (Change 4): if the newest hub session is at/over the hand-off line (150K by default), add a line under the title.
+        # Hub context warning (Change 4): if the newest hub session is at/over the hand-off line (330K by default), add a line under the title.
         warn = hub_context_warning()
         if warn:
             out.append(warn)
