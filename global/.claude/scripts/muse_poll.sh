@@ -221,6 +221,13 @@ for id in "${raw_ids[@]}"; do
   [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && ids+=("$id")
 done
 
+# A "NEW" answer with no usable id gives the failure counter nothing to count, so it could keep
+# the hot phase and the handler running every minute forever. Log it and stop here instead.
+if ((${#ids[@]} == 0)); then
+  echo "$(ts) POLL-ERROR no usable note id: ${check:0:120}" >>"$LOG"
+  exit 0
+fi
+
 # If every id on this check has already failed twice, give up and skip the handler.
 FAIL_FILE="$STATE/muse-poll-failures.tsv"
 gave_up_all=1
