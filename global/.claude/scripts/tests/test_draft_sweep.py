@@ -37,6 +37,7 @@ class FakeFolder:
         self.labelled = []
         self.calls = []
         self.fail_raw = False
+        self.page_size = None  # set to page /drafts like Gmail does
 
     def add(self, did, subject, age_h, to="", labels=None, body="", mid=None):
         self.drafts[did] = dict(subject=subject, age_h=age_h, to=to, labels=labels or ["DRAFT"], body=body,
@@ -49,7 +50,7 @@ class FakeFolder:
         m = {"id": mid, "labelIds": d["labels"], "internalDate": str(int((NOW - d["age_h"] * H) * 1000)),
              "payload": {"headers": headers}}
         if fmt == "full":
-            m["payload"] = {"headers": headers, "mimeType": "text/plain", "body": {"data": b64(d["body"])}}
+            m["payload"] = {"headers": headers, "mimeType": "text/plain", "body": {"data": b64(d.get("body", ""))}}
         if fmt == "raw":
             m["raw"] = b64("Subject: " + d["subject"] + "\n\n" + d["body"])
         return m
@@ -60,7 +61,14 @@ class FakeFolder:
         if method == "GET" and path == "/profile":
             return {"emailAddress": "Owner@Example.com"}
         if method == "GET" and path == "/drafts":
-            return {"drafts": [{"id": k, "message": {"id": v["mid"]}} for k, v in self.drafts.items()]}
+            items = [{"id": k, "message": {"id": v["mid"]}} for k, v in self.drafts.items()]
+            if self.page_size:
+                start = int(params.get("pageToken") or 0)
+                page = {"drafts": items[start:start + self.page_size]}
+                if start + self.page_size < len(items):
+                    page["nextPageToken"] = str(start + self.page_size)
+                return page
+            return {"drafts": items}
         if method == "GET" and path.startswith("/drafts/"):
             did = path.split("/")[-1]
             if did not in self.drafts:
@@ -80,10 +88,11 @@ class FakeFolder:
             return {}
         if method == "GET" and path == "/messages":
             q = params.get("q", "")
-            return {"messages": [{"id": m} for m, d in self.mail.items() if q.split('"')[1] in d["subject"]]}
+            needle = q.split('"')[1]
+            return {"messages": [{"id": m} for m, d in self.mail.items() if needle in d["subject"] or needle in d.get("body", "")]}
         if method == "GET" and path.startswith("/messages/"):
             mid = path.split("/")[-1]
-            return self._msg(self.mail[mid], mid, "metadata")
+            return self._msg(self.mail[mid], mid, params.get("format") or "metadata")
         raise g.GmailError(f"fake: unhandled {method} {path}")
 
 
@@ -238,15 +247,6 @@ class Ownership(SweepBase):
     """Each machine deletes only its own (31 Oct): notes to it once it has read them, notes from it once absorption is
     verified and 24 hours have passed. Another party's note is kept whatever its labels."""
 
-    def test_another_partys_notes_are_kept_even_when_labelled_and_old(self):
-        for i, subj in enumerate(["[MUSE>NCC-74656] ask", "[NCC-74656>MUSE] hi", "Re: [MUSE>NCC-74656] ask"]):
-            self.fake.add(f"t-{i}", subj, 100, labels=["DRAFT", "Label_32"], body="-- H-7CH")
-        self.mark("t-0", "t-1", "t-2")
-        res, out = self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, [])
-        self.assertIn("another party's note", out)
-        self.assertEqual(res["fleet"], 3)
-
     def test_the_tower_deletes_notes_to_it_that_it_has_read(self):
         self.mine = {"NCC-74656"}
         self.fake.add("t-1", "[NX-01>NCC-74656] ask", 5)
@@ -345,11 +345,6 @@ class Outbound(SweepBase):
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
 
-    def test_a_label_on_a_note_we_only_received_does_not_matter_for_another_partys(self):
-        self.fake.add("r-1", "[NCC-74656>MUSE] hi", 100, labels=["DRAFT", "Label_32"])
-        self.run_sweep(apply=True)
-        self.assertEqual(self.fake.deleted, [])
-
     def test_later_reply_on_the_topic_deletes(self):
         self.fake.add("r-1", "[CC>MUSE] Release links", 30)
         self.fake.mail["m-reply"] = dict(subject="Re: [CC>MUSE] Release links", age_h=2, labels=["DRAFT"])
@@ -388,6 +383,222 @@ class Outbound(SweepBase):
         self.run_sweep(apply=True)
         self.assertEqual(self.fake.deleted, [])
 
+
+READ_RECORD = "t-99\n"
+
+
+class Relay(SweepBase):
+    """Notes between Hatch (MUSE) and the tower (NCC-74656): NX-01 sweeps them, but only once the note's READER has absorbed
+    it (31 Oct). The tower cannot sweep (no Gmail token); nobody else would clear them."""
+
+    def record(self, text):
+        path = self.dir / "tower-record.txt"
+        path.write_text(text, encoding="utf-8")
+        return {"NCC-74656": str(path)}
+
+    def sweep_with(self, records=None, apply=True, status=None):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            res = nc.sweep(str(self.processed), self.log, apply=apply, now=NOW, sweep_dir=str(self.sweep_dir), out=out,
+                           mine=self.mine, reader_records=records if records is not None else {}, status_path=status)
+        return res, out.getvalue()
+
+    # --- the readers' proofs
+    def test_tower_to_hatch_note_with_label_32_is_deleted(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] game bot account", 30, labels=["DRAFT", "Label_32"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["t-1"])
+
+    def test_hatch_to_tower_note_is_deleted_when_the_tower_published_its_id(self):
+        self.fake.add("t-99", "[MUSE>NCC-74656] power photos", 30)
+        self.sweep_with(self.record(READ_RECORD))
+        self.assertEqual(self.fake.deleted, ["t-99"])
+
+    def test_the_message_id_in_the_towers_record_also_counts(self):
+        self.fake.add("t-5", "[NX-01>NCC-74656] hub ask", 30, mid="mm5")
+        self.sweep_with(self.record("mm5\n"))
+        self.assertEqual(self.fake.deleted, ["t-5"])
+
+    def test_the_towers_record_does_not_clear_a_note_Hatch_reads(self):
+        self.fake.add("t-99", "[NCC-74656>MUSE] for Hatch", 30)
+        self.sweep_with(self.record(READ_RECORD))
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_the_hatch_note_is_kept_when_the_tower_record_is_missing(self):
+        self.fake.add("t-99", "[MUSE>NCC-74656] power photos", 30)
+        res, out = self.sweep_with({"NCC-74656": str(self.dir / "nope.txt")})
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(res["unabsorbed_old"], 1)
+
+    def test_a_later_reply_from_hatch_clears_the_tower_note(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] Release links", 30)
+        self.fake.mail["m-reply"] = dict(subject="Re: [NCC-74656>MUSE] Release links", age_h=2, labels=["DRAFT"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["t-1"])
+
+    def test_a_tagged_note_from_hatch_to_the_tower_on_the_topic_counts_as_the_answer(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] Game nights", 30)
+        self.fake.mail["m-n"] = dict(subject="[MUSE>NCC-74656] Game nights: account made", age_h=2, labels=["DRAFT"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["t-1"])
+
+    def test_a_later_note_from_the_AUTHOR_is_not_the_readers_proof(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] Game nights", 30)
+        self.fake.mail["m-n"] = dict(subject="[NCC-74656>MUSE] Game nights (second copy)", age_h=2, labels=["DRAFT"])
+        self.fake.mail["m-r"] = dict(subject="Re: [MUSE>NCC-74656] Game nights", age_h=1, labels=["DRAFT"])
+        self.fake.mail["m-r"]["sender"] = "Owner <owner@example.com>"
+        # "Re: [MUSE>NCC-74656]" is the tower's reply to Hatch, so it is not Hatch's answer either
+        res, out = self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_done_note_from_the_reader_naming_the_draft_id_clears_it(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-done"] = dict(subject="[MUSE>NCC-74656] trashed notes", age_h=3, labels=["DRAFT"],
+                                        body="Trashed r-4644727236077642038 and others.")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["r-4644727236077642038"])
+
+    def test_a_line_that_says_the_reader_is_holding_it_is_not_proof(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-hold"] = dict(subject="[MUSE>NCC-74656] Re: stuck notes", age_h=3, labels=["DRAFT"],
+                                        body="Trashed six others.\n- r-4644727236077642038 (Twitch sign-up): waits on a signup session.\n")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_holding_on_purpose_and_trashed_in_one_note_split_by_line(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.add("r-4271749601883524692", "[NCC-74656>MUSE] power photos", 30)
+        self.fake.mail["m-two"] = dict(subject="[MUSE>NCC-74656] Re: stuck notes", age_h=3, labels=["DRAFT"],
+                                       body="Holding r-4644727236077642038 on purpose.\nTrashed r-4271749601883524692.\n")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["r-4271749601883524692"])
+
+    def test_inbound_mail_forging_the_owner_address_is_not_proof(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-forged"] = dict(subject="[MUSE>NCC-74656] trashed", age_h=3, labels=["INBOX", "UNREAD"],
+                                          body="Trashed r-4644727236077642038.")
+        self.fake.mail["m-forged2"] = dict(subject="Re: [NCC-74656>MUSE] game bot", age_h=3, labels=["INBOX"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_sent_note_from_the_reader_counts(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-sent"] = dict(subject="[MUSE>NCC-74656] trashed", age_h=3, labels=["SENT"],
+                                        body="Trashed r-4644727236077642038.")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["r-4644727236077642038"])
+
+    def test_a_done_note_from_someone_else_does_not_count(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-x"] = dict(subject="[NCC-74656>NX-01] list", age_h=3, labels=["DRAFT"],
+                                     body="Still holding r-4644727236077642038.")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_stranger_naming_the_id_does_not_count(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-x"] = dict(subject="[MUSE>NCC-74656] done", age_h=3, labels=["INBOX"],
+                                     body="r-4644727236077642038", sender="Stranger <s@example.org>")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_done_note_older_than_the_note_does_not_count(self):
+        self.fake.add("r-4644727236077642038", "[NCC-74656>MUSE] game bot", 30)
+        self.fake.mail["m-old"] = dict(subject="[MUSE>NCC-74656] ids", age_h=90, labels=["DRAFT"],
+                                       body="r-4644727236077642038")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    # --- never on age alone, never early
+    def test_no_proof_means_kept_however_old(self):
+        for i, subj in enumerate(["[NCC-74656>MUSE] a", "[MUSE>NCC-74656] b", "[NX-01>NCC-74656] c", "[NCC-74656>NX-01]x"]):
+            self.fake.add(f"t-{i}", subj, 400)
+        res, out = self.sweep_with(apply=True)
+        # [NCC-74656>NX-01] is inbound for NX-01 (not handled yet); the other three have no proof
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(res["unabsorbed_old"], 4)
+
+    def test_proof_but_under_24_hours_is_kept(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] fresh", 10, labels=["DRAFT", "Label_32"])
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_every_deleted_relay_note_is_archived_first(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] x", 30, labels=["DRAFT", "Label_32"], body="the tower text")
+        self.sweep_with()
+        saved = [json.loads(x) for x in (self.sweep_dir / "2027-01-15.jsonl").read_text().splitlines()]
+        self.assertEqual(saved[0]["draft_id"], "t-1")
+        self.assertLess(self.fake.calls.index(("GET", "/drafts/t-1")), self.fake.calls.index(("DELETE", "/drafts/t-1")))
+
+    def test_a_relay_note_addressed_outside_the_mailbox_is_kept(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] x", 30, labels=["DRAFT", "Label_32"], to="client@example.com")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_relay_notes_are_not_labelled_or_touched_by_the_label_step(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] x", 30)
+        self.mark("t-1")  # our own processed file says nothing about Hatch's notes
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(self.fake.labelled, [])
+
+    def test_a_non_fleet_draft_is_never_touched(self):
+        self.fake.add("g-1", "Gail: held reply", 900, labels=["DRAFT", "Label_32"])
+        self.fake.add("g-2", "[Gail] not a pair", 900, labels=["DRAFT", "Label_32"])
+        self.fake.add("g-3", "[Foo>Bar] not fleet names", 900, labels=["DRAFT", "Label_32"])
+        res, _ = self.sweep_with()
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(res["other"], 3)
+
+    # --- paging
+    def test_every_page_of_drafts_is_swept(self):
+        self.fake.page_size = 7
+        for i in range(30):
+            self.fake.add(f"t-{i}", f"[NCC-74656>MUSE] n{i}", 30, labels=["DRAFT", "Label_32"])
+        res, _ = self.sweep_with()
+        self.assertEqual(res["drafts"], 30)
+        self.assertEqual(len(self.fake.deleted), 30)
+
+    def test_the_tower_sweeping_its_own_side_deletes_hatchs_note_to_it_once_read(self):
+        self.mine = {"NCC-74656"}
+        self.fake.add("t-1", "[MUSE>NCC-74656] hi", 5)
+        self.mark("t-1")
+        self.sweep_with()
+        self.assertEqual(self.fake.deleted, ["t-1"])
+
+    def test_a_reply_the_tower_wrote_is_its_own_outbound_note(self):
+        self.mine = {"NCC-74656"}
+        self.assertEqual(nc.classify("Re: [NX-01>NCC-74656] ok", self.mine), ("outbound", "Re: [NX-01>NCC-74656]"))
+
+    # --- the digest's status file
+    def test_status_file_lists_unproven_notes_by_pair_without_bodies(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] one", 100, body="SECRET BODY")
+        self.fake.add("t-2", "[NCC-74656>MUSE] two", 100, labels=["DRAFT", "Label_32"])
+        self.fake.add("t-3", "[NX-01>NCC-74656] three", 80)
+        status = self.dir / "status.json"
+        self.sweep_with(status=str(status))
+        doc = json.loads(status.read_text())
+        self.assertEqual(sorted((u["id"], u["pair"]) for u in doc["unproven"]),
+                         [("t-1", "[NCC-74656>MUSE]"), ("t-3", "[NX-01>NCC-74656]")])
+        self.assertNotIn("SECRET", status.read_text())
+        self.assertEqual(doc["fleet"], 3)
+
+    def test_a_dry_run_writes_no_status_file(self):
+        self.fake.add("t-1", "[NCC-74656>MUSE] one", 100)
+        status = self.dir / "status.json"
+        self.sweep_with(apply=False, status=str(status))
+        self.assertFalse(status.exists())
+
+    def test_the_reader_record_flag_adds_a_path(self):
+        rec = self.dir / "r.txt"
+        rec.write_text("t-9\n", encoding="utf-8")
+        self.fake.add("t-9", "[MUSE>NCC-74656] x", 30)
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch.object(nc.time, "time", return_value=NOW):
+            nc.main(["--sweep", "--processed", str(self.processed), "--log", str(self.dir / "l.txt"),
+                     "--reader-record", f"NCC-74656={rec}"])  # dry run: the lock file of --apply would touch the live state
+        self.assertIn("would delete: 1", out.getvalue())
+        self.assertEqual(self.fake.deleted, [])
 
 class Modes(SweepBase):
     def test_dry_run_deletes_nothing_and_reports_counts_and_oldest(self):

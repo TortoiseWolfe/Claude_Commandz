@@ -1,6 +1,7 @@
 """hub_digest.py: the hub's status page stays small and private, and carries what /prep needs.
 Fixtures are invented; nothing here reads this machine's live state (hub_digest.py checks that itself on every live build)."""
 
+import json
 import os
 import re
 import subprocess
@@ -296,6 +297,54 @@ class Scrub(unittest.TestCase):
     def test_ordinary_status_text_passes_through(self):
         t = "PR #341 merged (c0ffee1), 12 tests pass, see ~/repos/hub/scripts/tidy-report.sh"
         self.assertEqual(hd.scrub(t), t)
+
+
+class DraftsLine(unittest.TestCase):
+    def status(self, doc):
+        d = fresh_dir(self)
+        f = Path(d) / "status.json"
+        f.write_text(json.dumps(doc))
+        return str(f)
+
+    NOW_TS = 1793500000  # Sat 31 Oct 2026, about 11:06 PM Eastern
+
+    def doc(self, unproven, at=None):
+        return {"at": at or self.NOW_TS - 600, "drafts": 50, "fleet": 46, "unproven": unproven}
+
+    def lines(self, doc):
+        return hd.drafts_lines(self.status(doc), datetime.fromtimestamp(self.NOW_TS))
+
+    def test_old_unproven_notes_become_one_line_by_pair(self):
+        day = 86400
+        un = [dict(id="a", pair="[NCC-74656>MUSE]", t=self.NOW_TS - 4 * day), dict(id="b", pair="[NCC-74656>MUSE]", t=self.NOW_TS - 5 * day),
+              dict(id="c", pair="[MUSE>NCC-74656]", t=self.NOW_TS - 3.5 * day), dict(id="d", pair="[NX-01>NCC-74656]", t=self.NOW_TS - 1 * day)]
+        out = self.lines(self.doc(un))
+        self.assertEqual(len(out), 1)
+        self.assertIn("3 fleet notes over 3 days with no absorbed proof", out[0])
+        self.assertIn("[NCC-74656>MUSE] 2, [MUSE>NCC-74656] 1", out[0])
+        self.assertRegex(out[0], r"oldest \w{3} \d+ \w{3} \d+:\d\d (AM|PM)")
+
+    def test_nothing_old_means_no_line(self):
+        self.assertEqual(self.lines(self.doc([dict(id="a", pair="[X>Y]", t=self.NOW_TS - 3600)])), [])
+
+    def test_a_stale_status_file_says_so(self):
+        out = self.lines(self.doc([], at=self.NOW_TS - 7 * 3600))
+        self.assertEqual(len(out), 1)
+        self.assertIn("the sweep status is stale", out[0])
+
+    def test_missing_or_broken_file_is_silent(self):
+        self.assertEqual(hd.drafts_lines("/nonexistent/status.json"), [])
+        f = Path(fresh_dir(self)) / "bad.json"
+        f.write_text("{not json")
+        self.assertEqual(hd.drafts_lines(str(f)), [])
+
+    def test_the_line_reaches_the_page_and_the_page_stays_under_the_cap(self):
+        secs = hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX, git_log="",
+                                 tidy_text=TIDY, budget="Week resets Wed: used 1%", now=NOW,
+                                 drafts=["Drafts: 3 fleet notes over 3 days with no absorbed proof (oldest Tue 27 Oct 1:39 PM), by pair: [A>B] 3"])
+        page = hd.render(secs, NOW, "NX-01", hd.CAP_DEFAULT)
+        self.assertIn("Drafts: 3 fleet notes", page)
+        self.assertLessEqual(len(page.encode()), hd.PAGE_HARD_CAP)
 
 
 class Page(unittest.TestCase):
