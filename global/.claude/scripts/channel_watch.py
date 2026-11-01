@@ -6,6 +6,7 @@ Private client and self-identification settings stay outside this public backup.
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,9 @@ import unicodedata
 
 
 MESSAGE_ID = re.compile(r"^(?:talk|deck):[A-Za-z0-9_-]+:[0-9]+$")
-TAG = re.compile(r"@TurtleWolfe|@Jon\b|\bJonathan\b|\bJon's\b", re.IGNORECASE)
+TAG = re.compile(r"\b@?TurtleWolfe\b|@Jon\b|\bJonathan\b|\bJon's\b", re.IGNORECASE)
+TALK_ROOMS_PATH = "/ocs/v2.php/apps/spreed/api/v4/room?format=json"
+NOTIFICATIONS_PATH = "/ocs/v2.php/apps/notifications/api/v2/notifications?format=json"
 
 
 def expanded_env_path(name, default):
@@ -77,6 +80,102 @@ def load_cache(raw_dir):
                     "group": path.name,
                 })
     return messages
+
+
+def ocs_data(response):
+    if hasattr(response, "raise_for_status"):
+        response.raise_for_status()
+    if hasattr(response, "json"):
+        response = response.json()
+    if isinstance(response, dict) and isinstance(response.get("ocs"), dict):
+        response = response["ocs"].get("data")
+    elif isinstance(response, dict) and "data" in response:
+        response = response["data"]
+    if isinstance(response, dict):
+        for key in ("rooms", "notifications"):
+            if isinstance(response.get(key), list):
+                return response[key]
+    if not isinstance(response, list):
+        raise ValueError("unexpected Nextcloud response")
+    return response
+
+
+def load_puller_module(puller):
+    spec = importlib.util.spec_from_file_location("channel_pull_module", puller)
+    if spec is None or spec.loader is None:
+        raise ImportError("unable to load channel puller")
+    sys.path.insert(0, str(puller.parent))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def cheap_look(puller_path, watched, notified):
+    puller = load_puller_module(puller_path)
+    base, user, password = puller.load_creds()
+    client = puller.NC(base, user, password)
+    rooms = ocs_data(client.get(TALK_ROOMS_PATH))
+    notifications = ocs_data(client.get(NOTIFICATIONS_PATH))
+
+    highest_by_token = {}
+    for ident in watched:
+        parts = ident.split(":")
+        if len(parts) == 3 and parts[0] == "talk" and parts[2].isdecimal():
+            highest_by_token[parts[1]] = max(int(parts[2]), highest_by_token.get(parts[1], 0))
+
+    changed_room = False
+    for room in rooms:
+        if not isinstance(room, dict):
+            raise ValueError("unexpected room response")
+        token = room.get("token")
+        if not isinstance(token, str) or "lastMessage" not in room:
+            raise ValueError("unexpected room response")
+        last_message = room["lastMessage"]
+        if last_message is None:
+            continue
+        if not isinstance(last_message, dict):
+            raise ValueError("unexpected room response")
+        message_id = last_message.get("id")
+        if message_id is not None and int(message_id) > highest_by_token.get(token, 0):
+            changed_room = True
+
+    new_notifications = []
+    for item in notifications:
+        if not isinstance(item, dict):
+            raise ValueError("unexpected notification response")
+        if item.get("app") not in {"spreed", "deck"}:
+            continue
+        if item.get("id") is None:
+            raise ValueError("notification has no id")
+        if str(item["id"]) not in notified:
+            new_notifications.append(item)
+    return changed_room, new_notifications
+
+
+def notification_text(value):
+    if isinstance(value, dict):
+        return " ".join(notification_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(notification_text(item) for item in value)
+    return str(value) if value is not None else ""
+
+
+def deck_notification_tag(notification):
+    subject = safe_text(notification.get("subject") or "")
+    searchable = " ".join(
+        notification_text(notification.get(key))
+        for key in ("subject", "subjectRich", "subjectRichParameters", "message", "messageRichParameters")
+    )
+    assigned_to_self = (
+        re.search(r"\bassign(?:ed|ment)?\b", searchable, re.IGNORECASE)
+        and re.search(r"\b(?:you|your)\b", searchable, re.IGNORECASE)
+    )
+    if not TAG.search(searchable) and not assigned_to_self:
+        return None
+    raw_id = str(notification.get("id", ""))
+    if not raw_id or not re.fullmatch(r"[A-Za-z0-9_-]+", raw_id):
+        return None
+    return f"deck-notif:{raw_id}", f'TAG deck: "{subject[:150]}"'
 
 
 def sender_local(sender):
@@ -172,15 +271,6 @@ def main():
     state = expanded_env_path("STATE", "~/.claude/state")
     record = expanded_env_path("MUSE_RECORD", str(Path(__file__).with_name("muse_poll_record.sh")))
 
-    try:
-        subprocess.run(["python3", str(puller), "--since-days", "3", "--only", "talk,deck"],
-                       timeout=180, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        print("channel watch: puller timed out after 180 seconds; diffing cache", file=sys.stderr)
-    except (OSError, subprocess.CalledProcessError):
-        print("channel watch: puller failed; diffing cache", file=sys.stderr)
-
-    messages = load_cache(raw_dir)
     watched_path = state / "client-talk-watched.txt"
     watched_exists = watched_path.exists()
     watched = set()
@@ -191,25 +281,76 @@ def main():
             print("channel watch: unable to read watched state", file=sys.stderr)
             return 1
 
-    if not watched_exists and not (args.dry_run and since is not None):
-        if args.dry_run:
-            print(f"would seed {len({message['id'] for message in messages})}")
-        else:
-            state.mkdir(parents=True, exist_ok=True)
-            watched_path.write_text("".join(f"{ident}\n" for ident in dict.fromkeys(
-                message["id"] for message in messages)), encoding="utf-8")
-            print(f"seeded {len({message['id'] for message in messages})}")
-        return 0
+    notified_path = state / "client-talk-notified.txt"
+    notified = set()
+    if notified_path.exists():
+        try:
+            notified = set(notified_path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            print("channel watch: unable to read notification state", file=sys.stderr)
+            return 1
 
-    candidates = [message for message in messages
-                  if (since is not None and args.dry_run and
-                      message_date(message["date"]) is not None and
-                      message_date(message["date"]).date() >= since)
-                  or (message["id"] not in watched and (since is None or not args.dry_run))]
+    try:
+        changed_room, new_notifications = cheap_look(puller, watched, notified)
+        pull_kinds = set()
+        if changed_room or any(item["app"] == "spreed" for item in new_notifications):
+            pull_kinds.add("talk")
+        if any(item["app"] == "deck" for item in new_notifications):
+            pull_kinds.add("deck")
+        if not pull_kinds:
+            return 0
+    except Exception:
+        print("channel watch: cheap look failed; falling back to full pull", file=sys.stderr)
+        new_notifications = []
+        pull_kinds = {"talk", "deck"}
+
+    only = ",".join(kind for kind in ("talk", "deck") if kind in pull_kinds)
+    try:
+        subprocess.run(["python3", str(puller), "--since-days", "3", "--only", only],
+                       timeout=180, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        print("channel watch: puller timed out after 180 seconds; diffing cache", file=sys.stderr)
+    except (OSError, subprocess.CalledProcessError):
+        print("channel watch: puller failed; diffing cache", file=sys.stderr)
+
+    messages = load_cache(raw_dir)
+    seed_only = not watched_exists and not (args.dry_run and since is not None)
+
+    candidates = [] if seed_only else [
+        message for message in messages
+        if (since is not None and args.dry_run and
+            message_date(message["date"]) is not None and
+            message_date(message["date"]).date() >= since)
+        or (message["id"] not in watched and (since is None or not args.dry_run))
+    ]
     lines, tags, eligible, items = make_lines(candidates, since, self_address, client)
+    notification_tags = []
+    for notification in new_notifications:
+        if notification.get("app") != "deck":
+            continue
+        tagged = deck_notification_tag(notification)
+        if tagged:
+            ident, detail = tagged
+            notification_tags.append(tagged)
+            items.append((detail, ident))
+            lines.append(inbox_line(detail, ident, dt.datetime.now().strftime("%Y-%m-%d %H:%M"), client))
     if args.dry_run:
         for line in lines:
             print(line)
+        if seed_only:
+            print(f"would seed {len({message['id'] for message in messages})}")
+        return 0
+
+    if seed_only and not notification_tags:
+        state.mkdir(parents=True, exist_ok=True)
+        watched_path.write_text("".join(f"{ident}\n" for ident in dict.fromkeys(
+            message["id"] for message in messages)), encoding="utf-8")
+        if new_notifications:
+            with notified_path.open("a", encoding="utf-8") as notified_file:
+                for ident in dict.fromkeys(str(item["id"]) for item in new_notifications
+                                           if item.get("id") is not None):
+                    notified_file.write(f"{ident}\n")
+        print(f"seeded {len({message['id'] for message in messages})}")
         return 0
 
     state.mkdir(parents=True, exist_ok=True)
@@ -221,20 +362,33 @@ def main():
             print("channel watch: unable to queue a client-talk line", file=sys.stderr)
             return 1
 
-    if tags:
+    all_tags = [*tags, *notification_tags]
+    if all_tags:
         wake = state / "client-tag.wake"
         try:
             wake.write_text(f"{dt.datetime.now().astimezone().isoformat(timespec='seconds')}\n" +
-                            "".join(f"{ident}\n" for ident, _ in tags), encoding="utf-8")
+                            "".join(f"{ident}\n" for ident, _ in all_tags), encoding="utf-8")
         except OSError:
             print("channel watch: unable to write the client-tag wake file", file=sys.stderr)
             return 1
+
+    if new_notifications:
+        with notified_path.open("a", encoding="utf-8") as notified_file:
+            for ident in dict.fromkeys(str(item["id"]) for item in new_notifications
+                                       if item.get("id") is not None):
+                notified_file.write(f"{ident}\n")
+
+    if seed_only:
+        watched_path.write_text("".join(f"{ident}\n" for ident in dict.fromkeys(
+            message["id"] for message in messages)), encoding="utf-8")
+        print(f"seeded {len({message['id'] for message in messages})}")
+        return 0
 
     processed_ids = list(dict.fromkeys(message["id"] for message in messages if message["id"] not in watched))
     with watched_path.open("a", encoding="utf-8") as watched_file:
         for ident in processed_ids:
             watched_file.write(f"{ident}\n")
-    print(f"client talk count: {len(eligible)} new, {len(tags)} tags")
+    print(f"client talk count: {len(eligible)} new, {len(all_tags)} tags")
     return 0
 
 
