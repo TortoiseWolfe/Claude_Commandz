@@ -14,6 +14,12 @@ Audit a draft client email against AI-voice tells before it goes into a Gmail dr
 /email-voice-check path/to/draft.txt   # a file
 ```
 
+For a Talk post or Deck comment, use the chat profile:
+
+```bash
+printf '%s' "$BODY" | python3 ~/.claude/scripts/email_voice_check.py --stdin --chat --strict
+```
+
 ARGUMENTS: $ARGUMENTS
 
 ---
@@ -38,6 +44,8 @@ printf '%s' "$BODY" | python3 ~/.claude/scripts/email_voice_check.py --stdin --s
 # Greg or devops list: add --recipient greg --html body.html (the HTML you will stage) to gate the 17 Oct format
 ```
 Capture: signal count, structural count, verdict (PASS / FLAG / MAJOR FLAG / FAIL), contraction ratio, mid-sentence dash count, and the per-match list.
+
+For chat, `--chat` turns off email-only jargon glosses, acronym expansion, reply quoting, HTML format checks, the 350-word limit, and questions-to-the-reader. It keeps promises and open-work checks under `--strict`, and adds hard chat checks for messages over 60 words, machine-like data, glosses, and document-style formatting. A short numbered choice list of up to three lines is allowed. Label-colon openers and narration phrases are checked in every profile.
 
 ### Step 3 — report + fix
 Show the verdict and every match. For each, apply a concrete rewrite. A **structural** hit (em-dash overuse, closing tricolon, stacked appositives, even contraction spread) means the prose reads AI even if the words look fine — fix the *structure*, not just the word.

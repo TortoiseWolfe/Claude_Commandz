@@ -9,6 +9,7 @@ Actions:
     append   --card N --text LINE              add a line to the end of the description
     move     --card N --stack "Stack title"    move the card to the end of another stack
     create   --stack "Stack title" --title T [--description D] [--assign UID ...]
+    comment  --card N --text MESSAGE           add a comment after a strict chat voice check
 
 Credentials come from <PREFIX>_URL, <PREFIX>_USER and <PREFIX>_PASS in the env file, read inside
 this process by deck_board.py's loader. They are never printed or put on a command line.
@@ -20,6 +21,7 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -67,6 +69,19 @@ def save(c, board, stack_id, cd, **changes):
     return call(c, "PUT", f"/boards/{board}/stacks/{stack_id}/cards/{cd['id']}", body)
 
 
+def require_chat_voice(text):
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_voice_check.py")
+    result = subprocess.run(
+        [sys.executable, checker, "--stdin", "--chat", "--strict"],
+        input=text, capture_output=True, text=True, check=False)
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode:
+        sys.exit("deck_write: comment failed the chat voice check; no request was made")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--env", required=True)
@@ -90,13 +105,22 @@ def main(argv=None):
     p.add_argument("--title", required=True)
     p.add_argument("--description", default="")
     p.add_argument("--assign", action="append", default=[])
+    p = sub.add_parser("comment")
+    p.add_argument("--card", type=int, required=True)
+    p.add_argument("--text", required=True)
     a = ap.parse_args(argv)
+    if a.action == "comment":
+        require_chat_voice(a.text)
     c = read_env(a.env, a.prefix)
     b = a.board
 
     if a.action == "show":
         s, cd = find_card(c, b, a.card)
         print(f"#{cd['id']} {cd['title']} [{s['title']}]\n---\n{cd.get('description') or ''}")
+    elif a.action == "comment":
+        find_card(c, b, a.card)
+        call(c, "POST", f"/cards/{a.card}/comments", {"message": a.text})
+        print(f"commented on #{a.card}")
     elif a.action in ("replace", "append"):
         s, cd = find_card(c, b, a.card)
         desc = cd.get("description") or ""
