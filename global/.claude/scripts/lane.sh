@@ -468,6 +468,9 @@ ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded on
   IFS=: read -ra have <<<"${1:--}"; shift
   for p in "${have[@]}" "$@"; do
     { [ -z "$p" ] || [ "$p" = - ]; } && continue
+    # A recorded folder can be gone by the next start (a worktree removed after its merge); the engines refuse a missing --add-dir, so
+    # drop it here and the index row is rewritten without it (1 Nov 2026: job-replies round 2 died at start on round 1's removed worktree).
+    [ -d "$p" ] || { echo "lane.sh: dropping extra folder that no longer exists: $p" >&2; continue; }
     dup=0; for q in "${all[@]}"; do [ "$q" = "$p" ] && dup=1; done
     [ "$dup" = 1 ] || all+=("$p")
   done
@@ -479,7 +482,11 @@ ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded on
 ad_flags() {  # <colon list>
   local -a l=(); local p out=""
   IFS=: read -ra l <<<"${1:--}"
-  for p in "${l[@]}"; do { [ -z "$p" ] || [ "$p" = - ]; } || out+="--add-dir $(printf %q "$p") "; done
+  for p in "${l[@]}"; do
+    { [ -z "$p" ] || [ "$p" = - ]; } && continue
+    [ -d "$p" ] || { echo "lane.sh: skipping extra folder that no longer exists: $p" >&2; continue; }  # same reason as in ad_merge
+    out+="--add-dir $(printf %q "$p") "
+  done
   printf '%s' "$out"
 }
 # Latest index row for a lane name (tab-separated line), or nothing.
