@@ -10,9 +10,11 @@ HOOK = os.path.join(os.path.dirname(__file__), "..", "..", "hooks", "secret-guar
 # Rule E reads real env files; point it at an empty tree so these tests never touch this machine's.
 _KS_TMP = tempfile.TemporaryDirectory()
 os.environ["KNOWN_SECRETS_REPOS"] = os.path.join(_KS_TMP.name, "repos")
+os.environ["KNOWN_SECRETS_DIR"] = os.path.join(_KS_TMP.name, "secrets")
 os.environ["KNOWN_SECRETS_IGNORE"] = os.path.join(_KS_TMP.name, "ignore.txt")
 os.environ["KNOWN_SECRETS_CACHE"] = os.path.join(_KS_TMP.name, "cache.json")
 os.makedirs(os.environ["KNOWN_SECRETS_REPOS"])
+os.makedirs(os.environ["KNOWN_SECRETS_DIR"])
 spec = importlib.util.spec_from_file_location("secret_guard", HOOK)
 sg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sg)
@@ -211,6 +213,33 @@ class Process(unittest.TestCase):
             self.assertNotIn("not json", content)
 
 
+class ProcessListings(Base):
+    def test_blocks_process_command_listings_and_names_the_helper(self):
+        for cmd in [
+            "ps aux", "ps -ef", "ps -f", "ps -eo pid,args", "ps -o pid,cmd",
+            "ps -o pid,command", "echo ok && pgrep -a name", "pgrep -af name",
+            "top -c", "cat /proc/*/cmdline", "head /proc/123/cmdline",
+            "grep -n cmdline /proc/self/cmdline", "python3 -c \"open('/proc/self/cmdline').read()\"",
+            "echo $(ps -ef)", "time ps -ef", "time -f %e ps -ef",
+            "env -u PAGER ps -ef", "sudo -u nobody ps -ef",
+            "timeout --signal TERM 5 ps -ef", "nice -n 5 ps -ef",
+        ]:
+            result = self.blocked(cmd, "P")
+            self.assertIn("ps_redacted.sh", result[1])
+
+    def test_allows_mentions_outside_command_position(self):
+        for cmd in [
+            'git grep "ps -eo pid,args"',
+            "echo pgrep -a",
+            'grep -n "pgrep -af" file',
+            "git commit -m 'the ps -ef listing is fixed'",
+            "ps -eo pid,comm",
+            "pgrep -f name",
+            "top",
+        ]:
+            self.allowed(cmd)
+
+
 class RuleE(unittest.TestCase):
     """A file holding a real env-file secret value is never read to the screen, whatever its name."""
     PW = "Pq7" * 6
@@ -222,18 +251,24 @@ class RuleE(unittest.TestCase):
         os.makedirs(repos)
         with open(os.path.join(repos, "." + "env"), "w") as fh:
             fh.write("ADMIN_PASSWORD=%s\nPORT=3000\n" % self.PW)
+        self.secrets_dir = os.environ["KNOWN_SECRETS_DIR"]
+        self.process_secret = "aB3dE5fG7hJ9kL2mN4pQ6rS8"
+        with open(os.path.join(self.secrets_dir, "process.key"), "w") as fh:
+            fh.write(self.process_secret + "\n")
         self.note = os.path.join(self.tmp.name, "note.md")
         with open(self.note, "w") as fh:
-            fh.write("- URL: https://example.org\n- Login: jon / %s\n" % self.PW)
+            fh.write("- URL: https://example.org\n- Login: jon / %s\n- Process: %s\n" %
+                     (self.PW, self.process_secret))
         self.clean = os.path.join(self.tmp.name, "clean.md")
         with open(self.clean, "w") as fh:
             fh.write("PORT=3000\n")
-        self.saved = (sg.KS_REPOS, sg.KS_CACHE, sg._ks_values)
+        self.saved = (sg.KS_REPOS, sg.KS_SECRETS_DIR, sg.KS_CACHE, sg._ks_values)
         sg.KS_REPOS, sg.KS_CACHE, sg._ks_values = (os.path.join(self.tmp.name, "repos"),
                                                    os.path.join(self.tmp.name, "cache.json"), None)
+        sg.KS_SECRETS_DIR = self.secrets_dir
 
     def tearDown(self):
-        sg.KS_REPOS, sg.KS_CACHE, sg._ks_values = self.saved
+        sg.KS_REPOS, sg.KS_SECRETS_DIR, sg.KS_CACHE, sg._ks_values = self.saved
 
     def ev(self, tool, cwd=None, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti, "cwd": cwd or self.tmp.name})
@@ -247,6 +282,8 @@ class RuleE(unittest.TestCase):
             self.assertEqual(r[0], "E", cmd)
             self.assertNotIn(self.PW, r[1])
             self.assertIn("app/." + "env ADMIN_PASSWORD", r[1])
+        self.assertEqual(self.ev("Bash", command="cat " + self.note)[0], "E")
+        self.assertNotIn(self.process_secret, self.ev("Bash", command="cat " + self.note)[1])
         self.assertEqual(self.ev("Read", file_path=self.note)[0], "E")
         self.assertEqual(self.ev("Grep", pattern="Login", path=self.note, output_mode="content")[0], "E")
 

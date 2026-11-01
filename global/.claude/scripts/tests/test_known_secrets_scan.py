@@ -26,12 +26,23 @@ class Scan(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repos = os.path.join(self.tmp.name, "repos")
+        self.secrets = os.path.join(self.tmp.name, "secrets")
+        os.makedirs(self.secrets)
+        self.old_secrets_dir = os.environ.get("KNOWN_SECRETS_DIR")
+        os.environ["KNOWN_SECRETS_DIR"] = self.secrets
+        self.addCleanup(self._restore_secrets_dir)
         self.write("app/" + ENV, "ADMIN_PASSWORD=%s\nPORT=3000\nAPP_CLIENT_ID=%s\n"
                    "OPS_HOOK=https://discord.com/api/webhooks/42/%s\n"
                    "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/x\n"
                    "TEST_USER_PASSWORD=%s\n" % (PW, "c" * 20, HOOK_TOK, FIXTURE))
         self.ignore = self.write("ignore.txt", "app/%s TEST_USER_PASSWORD  # committed fixture\n" % ENV)
         self.out = os.path.join(self.tmp.name, "out")
+
+    def _restore_secrets_dir(self):
+        if self.old_secrets_dir is None:
+            os.environ.pop("KNOWN_SECRETS_DIR", None)
+        else:
+            os.environ["KNOWN_SECRETS_DIR"] = self.old_secrets_dir
 
     def write(self, rel, text):
         p = os.path.join(self.tmp.name, "repos", rel) if not rel.startswith("ignore") else os.path.join(self.tmp.name, rel)
@@ -48,7 +59,8 @@ class Scan(unittest.TestCase):
         return p
 
     def run_cli(self, *paths):
-        return subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--ignore", self.ignore, *paths],
+        return subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--secrets-dir", self.secrets,
+                               "--ignore", self.ignore, *paths],
                               capture_output=True, text=True)
 
     def test_finds_bare_password_and_webhook_token_without_printing_them(self):
@@ -188,6 +200,33 @@ class Scan(unittest.TestCase):
         self.assertNotIn(FIXTURE, found)
         self.assertNotIn("c" * 20, found)
         self.assertFalse(any("localhost" in v for v in found))
+
+    def test_collects_secret_files_and_skips_short_json_values(self):
+        plain = "A1b2C3d4" + "E5f6G7h8" + "J9k0L1m2"
+        assigned = "N3p4Q5r6" + "S7t8U9v0" + "W1x2Y3z4"
+        structured = "K8m2P6r4" + "T9v1X3z5" + "B7d0F2h6"
+        with open(os.path.join(self.secrets, "stream.key"), "w") as fh:
+            fh.write(plain + "\n")
+        with open(os.path.join(self.secrets, "service.conf"), "w") as fh:
+            fh.write("API_TOKEN=%s\nUSERNAME=Jonathan\n" % assigned)
+        with open(os.path.join(self.secrets, "service.json"), "w") as fh:
+            json.dump({"credentials": {"token": structured, "username": "Jonathan"},
+                       "enabled": "true"}, fh)
+        found = ks.collect(self.repos, ks.load_ignore(self.ignore), secrets_dir=self.secrets)
+        for value in (plain, assigned, structured):
+            self.assertIn(value, found)
+        for value in ("Jonathan", "true"):
+            self.assertNotIn(value, found)
+
+    def test_cli_secrets_directory_override_finds_values_without_printing_them(self):
+        value = "Q2w4E6r8" + "T0y1U3i5" + "O7p9A2s4"
+        with open(os.path.join(self.secrets, "one-line.key"), "w") as fh:
+            fh.write(value + "\n")
+        self.put("log.txt", "a command carried " + value)
+        result = self.run_cli(self.out)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("secrets/one-line.key one-line.key:", result.stdout)
+        self.assertNotIn(value, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

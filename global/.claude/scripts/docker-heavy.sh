@@ -60,18 +60,18 @@ done
 if [ "$LIGHT" = 1 ]; then : "${MEM:=4g}" "${CPUS:=4}"; SLOT=light LOCK="$DIR/light.lock"; else : "${MEM:=12g}" "${CPUS:=8}"; SLOT=heavy LOCK="$DIR/lock"; fi
 
 # job_field <file> <n>: field n of a job file (tab separated: pid, state, slot, since-epoch, waiting-since-epoch, process start time, command,
-# queue ticket in nanoseconds; a file written before 29 Oct 2026 has no ticket and counts as waiting-since * 1e9).
+# queue ticket in nanoseconds, identity-file descriptor; a file without the descriptor is stale.
 job_field() { cut -f"$2" "$1" 2>/dev/null; }
 # proc_start <pid>: the process's start time in clock ticks since boot (/proc/PID/stat field 22); the text after the last ")" skips a command name with spaces.
 proc_start() { local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
-# job_alive <file>: the job file's pid is still the docker-heavy.sh that wrote it. A SIGKILL leaves the file behind and the pid can be reused (by a
-# Codex lane, whose command line mentions .cache/docker-heavy), so the pid must have the recorded start time and run this very script by name.
+# job_alive <file>: the job file's pid still holds the unique identity file open. A SIGKILL leaves the file behind and the pid can be reused;
+# the recorded start time and open file descriptor distinguish this job without reading a process command line.
 job_alive() {
-  local pid start a0 a1; pid=$(job_field "$1" 1); start=$(job_field "$1" 6)
-  [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$start" =~ ^[0-9]+$ ]] && [ -r "/proc/$pid/cmdline" ] || return 1
+  local pid start identity_fd held; pid=$(job_field "$1" 1); start=$(job_field "$1" 6); identity_fd=$(job_field "$1" 9)
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$start" =~ ^[0-9]+$ ]] && [[ "$identity_fd" =~ ^[0-9]+$ ]] || return 1
   [ "$(proc_start "$pid")" = "$start" ] || return 1
-  { IFS= read -r -d '' a0; IFS= read -r -d '' a1; } < "/proc/$pid/cmdline" || true
-  [ "$(basename -- "$a0")" = docker-heavy.sh ] || [ "$(basename -- "$a1")" = docker-heavy.sh ]
+  held=$(readlink "/proc/$pid/fd/$identity_fd" 2>/dev/null) || return 1
+  [ "$held" = "$1.alive" ]
 }
 # ticket_of <file>: the job's place in the queue (nanoseconds since the epoch).
 ticket_of() {
@@ -128,12 +128,14 @@ fi
 mkdir -p "$JOBS"
 JOB="$JOBS/$TAG.job"
 [ ! -e "$JOB" ] || ! job_alive "$JOB" || { echo "docker-heavy.sh: a job tagged $TAG is already running or waiting" >&2; exit 2; }
+ALIVE_FILE="$(cd "$(dirname "$JOB")" && pwd -P)/$(basename "$JOB").alive"
+exec {ALIVE_FD}>"$ALIVE_FILE"
 WAIT_LIMIT="${DOCKER_HEAVY_WAIT:-3600}"
 [[ "$WAIT_LIMIT" =~ ^[0-9]+$ ]] || { echo "docker-heavy.sh: DOCKER_HEAVY_WAIT must be a number of seconds" >&2; exit 2; }
 now=$(date +%s)
 TICKET=$(date +%s%N)
 MYSTART=$(proc_start "$$")
-printf '%s\twaiting\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$now" "$now" "$MYSTART" "${*:1:6}" "$TICKET" > "$JOB"
+printf '%s\twaiting\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$now" "$now" "$MYSTART" "${*:1:6}" "$TICKET" "$ALIVE_FD" > "$JOB"
 exec 9>>"$LOCK"
 fpid=""
 cleanup() {
@@ -145,7 +147,7 @@ cleanup() {
   fi
   # the holder file is ours only once we hold the slot (a waiting job must not remove the holder's)
   [ "$(job_field "$JOB" 2)" != running ] || rm -f "$LOCK.holder"
-  rm -f "$JOB"
+  rm -f "$JOB" "$ALIVE_FILE"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -193,7 +195,7 @@ while :; do
     exit 75
   fi
 done
-printf '%s\trunning\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$(date +%s)" "$now" "$MYSTART" "${*:1:6}" "$TICKET" > "$JOB"
+printf '%s\trunning\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$(date +%s)" "$now" "$MYSTART" "${*:1:6}" "$TICKET" "$ALIVE_FD" > "$JOB"
 printf 'tag %s since %s pid %s in %s: %s\n' "$TAG" "$(date '+%F %H:%M')" "$$" "$PWD" "${*:1:6}" > "$LOCK.holder"
 # in the background and waited on, so a signal to this script runs cleanup at once (bash holds a
 # trap until a foreground child ends); stdin passed on explicitly (a background job gets /dev/null).

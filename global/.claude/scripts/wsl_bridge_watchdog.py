@@ -33,6 +33,8 @@ import sys
 import time
 from datetime import datetime
 
+from redact_process import redact_text
+
 ORDER = 7  # 2**7 pages = 512 KB, the vmbus ring allocation
 MIN_BLOCKS = int(os.environ.get("WSL_BRIDGE_MIN_BLOCKS", "200"))  # order-7 equivalents (100 MB). Healthy ~3500, failing 0.
 COMPACT_ONLY_MIN_FREE_KB = 2 * 1024 * 1024
@@ -322,7 +324,8 @@ def describe_churn(snapshot=snapshot_io, lane=lane_of, secs=2):
         return ""
     pid, rate = hit
     who = lane(pid)
-    return "pid %d %dMB/s%s %s" % (pid, rate, " (lane %s)" % who if who else "", proc_cmd(pid)[:110])
+    command = redact_text(proc_cmd(pid))[:110]
+    return "pid %d %dMB/s%s %s" % (pid, rate, " (lane %s)" % who if who else "", command)
 
 
 def check_disk(sd, t, dry_run, statvfs, tmp_dir):

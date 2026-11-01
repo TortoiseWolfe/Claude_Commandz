@@ -24,6 +24,8 @@ class Scrub(unittest.TestCase):
                      "SMTP_PASSWORD='%s'\nPORT=3000\n" % (PW, HOOK_TOK, QUOTED))
         self.logs = os.path.join(self.tmp.name, "logs")
         os.makedirs(self.logs)
+        self.secrets = os.path.join(self.tmp.name, "secrets")
+        os.makedirs(self.secrets)
 
     def log(self, name, records, age=600):
         p = os.path.join(self.logs, name)
@@ -35,7 +37,8 @@ class Scrub(unittest.TestCase):
         return p
 
     def run_cli(self, *extra):
-        return subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--ignore", "/nonexistent",
+        return subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--secrets-dir", self.secrets,
+                               "--ignore", "/nonexistent",
                                "--scratch", self.tmp.name, *extra, self.logs], capture_output=True, text=True)
 
     def test_scrubs_raw_and_json_escaped_values_and_keeps_json_valid(self):
@@ -68,6 +71,18 @@ class Scrub(unittest.TestCase):
         self.assertIn(PW, open(recent).read())
         self.assertNotIn(PW, open(old).read())
         self.assertEqual([f for f in os.listdir(self.tmp.name) if f.startswith(".scrub-patterns-")], [])
+
+    def test_scrubs_secret_values_from_the_overridden_secrets_directory(self):
+        value = "K1m3P5r7" + "T9v2X4z6" + "B8d0F2h5"
+        with open(os.path.join(self.secrets, "stream.key"), "w") as fh:
+            fh.write(value + "\n")
+        path = self.log("process.jsonl", [{"out": "ffmpeg rtmp://host/app/" + value}])
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = open(path).read()
+        self.assertNotIn(value, text)
+        self.assertIn("<redacted:stream.key>", text)
+        self.assertNotIn(value, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -106,11 +106,10 @@ class MuseJevTests(unittest.TestCase):
         Path(classes).write_text(json.dumps({"repos": {"muse-notes": "own"}}))
         self.assertTrue(self.run_it(self.good).startswith("__MUSE_JEV=send"))
 
-    def test_the_live_class_list_lets_notes_through(self):
-        live = os.path.expanduser("~/.config/panel/classes.json")
-        if not os.path.exists(live):
-            self.skipTest("no live classes.json on this machine")
-        with mock.patch.object(jp, "CLASSES_PATH", live):
+    def test_a_configured_class_list_lets_notes_through(self):
+        classes = os.path.join(self.tmp, "configured-classes.json")
+        Path(classes).write_text(json.dumps({"repos": {"muse-notes": "own"}}))
+        with mock.patch.object(jp, "CLASSES_PATH", classes):
             self.assertTrue(self.run_it(self.good).startswith("__MUSE_JEV=send"))
 
     def test_no_key_queues(self):
