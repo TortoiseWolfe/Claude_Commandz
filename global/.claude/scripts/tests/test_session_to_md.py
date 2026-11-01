@@ -27,6 +27,15 @@ def record(kind, timestamp, content, **extra):
     return row
 
 
+def queue_operation(operation, timestamp, content):
+    return {
+        "type": "queue-operation",
+        "operation": operation,
+        "timestamp": timestamp,
+        "content": content,
+    }
+
+
 def write_jsonl(path, records):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
@@ -64,6 +73,37 @@ class SessionToMarkdown(unittest.TestCase):
         self.assertIn("- Session: `fixture-session`", rendered)
         self.assertIn("- Folder: `demo`", rendered)
         self.assertIn("- Branch: `fixture-branch`", rendered)
+
+    def test_enqueued_prompt_matching_user_record_is_rendered_once_at_user_time(self):
+        source = write_jsonl(self.source, [
+            queue_operation("enqueue", "2025-01-02T13:14:00Z", "Same invented prompt"),
+            queue_operation("dequeue", "2025-01-02T13:15:00Z", "Same invented prompt"),
+            record("user", "2025-01-02T13:16:00Z", "Same invented prompt"),
+        ])
+        with mock.patch.dict(os.environ, {"TZ": "UTC"}):
+            time.tzset()
+            try:
+                rendered = session_log.render_markdown(source, session_log.read_records(source))
+            finally:
+                time.tzset()
+        self.assertEqual(rendered.count("Same invented prompt"), 1)
+        self.assertEqual(rendered.count("— Prompt 1"), 1)
+        self.assertIn("## 1:16 PM — Prompt 1", rendered)
+        self.assertNotIn("Queued, not sent", rendered)
+        self.assertNotIn("unknown — Prompt", rendered)
+
+    def test_unmatched_enqueue_is_listed_once_with_its_numeric_timestamp(self):
+        source = write_jsonl(self.source, [
+            queue_operation("enqueue", "1735823700000", "Unsent invented prompt"),
+        ])
+        with mock.patch.dict(os.environ, {"TZ": "UTC"}):
+            time.tzset()
+            try:
+                rendered = session_log.render_markdown(source, session_log.read_records(source))
+            finally:
+                time.tzset()
+        self.assertEqual(rendered.count("Unsent invented prompt"), 1)
+        self.assertIn("## 1:15 PM — Queued, not sent", rendered)
 
     def test_tool_targets_are_one_line_and_replies_are_trimmed_without_tool_output(self):
         large_reply = "R" * 510
