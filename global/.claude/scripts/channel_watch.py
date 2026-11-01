@@ -83,6 +83,12 @@ def load_cache(raw_dir):
 
 
 def ocs_data(response):
+    if isinstance(response, tuple):
+        if len(response) != 3:
+            raise ValueError("unexpected Nextcloud response")
+        status, _headers, response = response
+        if status != 200:
+            raise ValueError(f"Nextcloud returned HTTP status {status}")
     if hasattr(response, "raise_for_status"):
         response.raise_for_status()
     if hasattr(response, "json"):
@@ -98,6 +104,24 @@ def ocs_data(response):
     if not isinstance(response, list):
         raise ValueError("unexpected Nextcloud response")
     return response
+
+
+def safe_exception_message(error):
+    message = str(error)
+    message = re.sub(r"(?i)(https?://)[^\s/@]+@", r"\1[redacted]@", message)
+    message = re.sub(r"(?i)\bheaders?['\"]?\s*[:=]\s*.*", "headers=[redacted]", message)
+    message = re.sub(
+        r"(?i)\b(?:authorization|proxy-authorization)\s*[:=]\s*[^;\n]*",
+        "authorization=[redacted]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(password|passwd|token|access[_-]?token|api[_-]?key|credential(?:s)?)"
+        r"\s*[:=]\s*['\"]?[^'\"\s,;}\]]+",
+        r"\1=[redacted]",
+        message,
+    )
+    return message
 
 
 def load_puller_module(puller):
@@ -299,8 +323,13 @@ def main():
             pull_kinds.add("deck")
         if not pull_kinds:
             return 0
-    except Exception:
-        print("channel watch: cheap look failed; falling back to full pull", file=sys.stderr)
+    except Exception as error:
+        detail = safe_exception_message(error)
+        print(
+            f"channel watch: cheap look failed ({type(error).__name__}: {detail}); "
+            "falling back to full pull",
+            file=sys.stderr,
+        )
         new_notifications = []
         pull_kinds = {"talk", "deck"}
 
