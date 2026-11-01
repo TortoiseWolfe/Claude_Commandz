@@ -74,12 +74,13 @@ GREP_QUIET = re.compile(r"(?<!\S)(?:-[a-zA-Z]*[clq]|-[a-zA-Z]*L[a-zA-Z]*|--count
 HINT = ("Inspect it with: python3 ~/.claude/scripts/redact_view.py <file>. Never put secrets inline "
         "in commands; read them from a file or env var inside a script.")
 
-# Rule E: a file that holds a REAL secret value (one of the values in the env files under ~/repos)
+# Rule E: a file that holds a REAL secret value (from env files or ~/.config/afa/secrets)
 # is never read to the screen, whatever its name. The name-based rules miss a password pasted into
 # a note, and redact_view only masks values under secret-looking keys, so a password in a note's
 # plain text gets through both. The env-file list is cached for an hour because walking ~/repos
 # takes about a second; the values themselves are read fresh on each check.
 KS_REPOS = os.environ.get("KNOWN_SECRETS_REPOS") or os.path.expanduser("~/repos")
+KS_SECRETS_DIR = os.environ.get("KNOWN_SECRETS_DIR") or os.path.expanduser("~/.config/afa/secrets")
 KS_IGNORE = os.environ.get("KNOWN_SECRETS_IGNORE") or os.path.expanduser("~/.config/known-secrets/ignore.txt")
 KS_CACHE = os.environ.get("KNOWN_SECRETS_CACHE") or os.path.expanduser("~/.claude/state/known-secrets-envfiles.json")
 KS_TTL, KS_MAX = 3600, 5 * 1024 * 1024
@@ -115,7 +116,7 @@ def known_secrets():
             os.replace(KS_CACHE + ".tmp", KS_CACHE)
         except OSError:
             pass
-    found = ks.collect(KS_REPOS, ks.load_ignore(KS_IGNORE), files=files)
+    found = ks.collect(KS_REPOS, ks.load_ignore(KS_IGNORE), files=files, secrets_dir=KS_SECRETS_DIR)
     _ks_values = [(n, "%s %s" % meta) for n, meta in ks.needles_for(found)]   # every written form
     return _ks_values
 
@@ -243,6 +244,195 @@ def blank_quotes(seg):
                   else " " * len(m.group(0)), seg)
 
 
+PROC_CMDLINE = re.compile(r"/proc/(?:[^/\s]+/)+cmdline(?:\b|$)")
+PROCESS_HELPER = os.path.expanduser("~/.claude/scripts/ps_redacted.sh")
+
+
+def _process_segments(text):
+    """Shell command segments, including command substitutions, with quoted separators ignored."""
+    segments, current = [], []
+    quote = None
+    escaped = False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if escaped:
+            current.append(c)
+            escaped = False
+        elif c == "\\" and quote != "'":
+            current.append(c)
+            escaped = True
+        elif quote:
+            if c == quote:
+                quote = None
+            current.append(c)
+            if c == "$" and quote == '"' and text[i + 1:i + 2] == "(":
+                segments.append("".join(current[:-1]))
+                current = []
+                end = _subshell_end(text, i + 1)
+                segments.extend(_process_segments(text[i + 2:end]))
+                i = end
+        elif c in "\"'":
+            quote = c
+            current.append(c)
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            segments.append("".join(current))
+            current = []
+            end = _subshell_end(text, i + 1)
+            segments.extend(_process_segments(text[i + 2:end]))
+            i = end
+        elif c in ";&|\n":
+            segments.append("".join(current))
+            current = []
+        else:
+            current.append(c)
+        i += 1
+    segments.append("".join(current))
+    return segments
+
+
+def _subshell_end(text, opening):
+    depth, quote, escaped = 1, None, False
+    i = opening + 1
+    while i < len(text):
+        c = text[i]
+        if escaped:
+            escaped = False
+        elif c == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(text)
+
+
+def _process_command(segment):
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    i = 0
+    wrappers = {"sudo", "command", "exec", "env", "nice", "nohup", "stdbuf", "timeout", "time"}
+    while i < len(tokens):
+        word = tokens[i]
+        base = os.path.basename(word)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+            i += 1
+            continue
+        if base not in wrappers:
+            break
+        i += 1
+        if base == "env":
+            while i < len(tokens) and tokens[i].startswith("-"):
+                option = tokens[i]
+                i += 1
+                if option in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"} and i < len(tokens):
+                    i += 1
+            if i < len(tokens) and tokens[i] == "--":
+                i += 1
+        elif base == "sudo":
+            while i < len(tokens) and tokens[i].startswith("-"):
+                option = tokens[i]
+                i += 1
+                if option in {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+                              "-C", "--close-from", "-D", "--chdir", "-R", "--chroot",
+                              "-T", "--command-timeout"} and i < len(tokens):
+                    i += 1
+        elif base == "timeout":
+            while i < len(tokens):
+                option = tokens[i]
+                if option in {"-s", "--signal", "-k", "--kill-after"} and i + 1 < len(tokens):
+                    i += 2
+                elif option.startswith("-") or re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", option):
+                    i += 1
+                else:
+                    break
+        elif base == "nice":
+            if i < len(tokens) and tokens[i] in {"-n", "--adjustment"}:
+                i += 1
+                if i < len(tokens):
+                    i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 1
+        elif base == "time":
+            while i < len(tokens):
+                option = tokens[i]
+                if option in {"-f", "--format", "-o", "--output"} and i + 1 < len(tokens):
+                    i += 2
+                elif option.startswith("-"):
+                    i += 1
+                else:
+                    break
+        else:
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 1
+    return tokens, i
+
+
+def _lists_process_args(tokens, i):
+    if i >= len(tokens):
+        return False
+    name = os.path.basename(tokens[i])
+    args = tokens[i + 1:]
+    if name in {"bash", "sh", "dash"}:
+        for j, arg in enumerate(args[:-1]):
+            if arg == "-c" or (arg.startswith("-") and "c" in arg[1:]):
+                return bool(_process_listing(args[j + 1]))
+    if name == "ps":
+        for j, arg in enumerate(args):
+            if arg in {"aux", "au", "ax", "-aux"} or re.fullmatch(r"-[A-Za-z]*[fF][A-Za-z]*", arg):
+                return True
+            if arg == "--format" and j + 1 < len(args):
+                columns = args[j + 1]
+            elif arg.startswith("--format="):
+                columns = arg.split("=", 1)[1]
+            elif arg == "-o" and j + 1 < len(args):
+                columns = args[j + 1]
+            elif re.match(r"^-[A-Za-z]*o", arg):
+                columns = arg[arg.index("o") + 1:]
+                if not columns and j + 1 < len(args):
+                    columns = args[j + 1]
+            else:
+                continue
+            if re.search(r"(?:^|,)\s*(?:args?|cmd|command)(?:\s*=|,|$)", columns, re.I):
+                return True
+    elif name == "pgrep":
+        if any(arg == "--all" or arg == "--list-full" or
+               (arg.startswith("-") and not arg.startswith("--") and "a" in arg[1:])
+               for arg in args):
+            return True
+    elif name == "top" and any(arg in {"-c", "--command"} for arg in args):
+        return True
+
+    paths = [arg for arg in tokens[i + 1:] if PROC_CMDLINE.search(arg)]
+    if paths:
+        if name in {"grep", "rg"}:
+            positional = [arg for arg in args if not arg.startswith("-")]
+            return any(PROC_CMDLINE.search(arg) for arg in positional[1:])
+        if name in {"echo", "printf", "git", "find", "ls", "stat", "test"}:
+            return False
+        return True
+    return False
+
+
+def _process_listing(segment):
+    tokens, i = _process_command(segment)
+    return _lists_process_args(tokens, i)
+
+
+def process_listing_in(cmd):
+    return any(_process_listing(segment) for segment in _process_segments(cmd))
+
+
 def prints_sensitive(cmd):
     if "redact_view.py" in cmd:
         return None
@@ -273,6 +463,9 @@ def evaluate(payload):
     tool, ti = payload.get("tool_name"), payload.get("tool_input") or {}
     if tool == "Bash" and isinstance(ti.get("command"), str):
         cmd = ti["command"]
+        if process_listing_in(cmd):
+            return "P", ("secret-guard: this would print process command lines. Use the redacting helper "
+                         "%s instead." % PROCESS_HELPER)
         s = find_secret(cmd)
         if s:
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "

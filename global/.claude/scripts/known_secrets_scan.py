@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Fail if any real secret from this machine's env files appears in the given files or folders.
 
-usage: known_secrets_scan.py [--strict] [--repos DIR] [--ignore FILE] PATH...
+usage: known_secrets_scan.py [--strict] [--repos DIR] [--secrets-dir DIR] [--ignore FILE] PATH...
 
 gitleaks finds secrets by shape, so a bare password or a prefix-less token gets past it. This check
-compares against the actual values instead: it reads every env file under --repos (default
-~/repos), keeps the values that are secrets, and looks for each one under PATH in every form it is
-likely to be written in: raw, JSON-escaped, URL-encoded and base64.
+compares against the actual values instead: it reads every env file under --repos (default ~/repos)
+and secret-looking values in files directly under --secrets-dir (default ~/.config/afa/secrets).
+Secret-folder files may be plain one-line keys, KEY=value files or JSON; their string values are
+kept only when they pass the existing length and entropy test. Values stay in memory, and the
+scanner looks for each one under PATH in every form it is likely to be written in: raw,
+JSON-escaped, URL-encoded and base64.
 
 Collection fails closed, because a value it doesn't collect is a value no check will ever see:
   - env files by any common name: .env, .env.*, .env-*, *.env, .envrc, .secrets.env;
@@ -207,10 +210,11 @@ def secret_parts(key, val):
     return out
 
 
-def collect(root, ignore, files=None):
+def collect(root, ignore, files=None, secrets_dir=None):
     """value -> (env file relative to root, KEY). Values themselves never leave this function's callers.
     An ignored (file, KEY) pair ignores its VALUE everywhere: published fixtures recur in other env files.
-    `files` lets a caller pass a cached env-file list instead of walking root (the walk takes ~1 s)."""
+    `files` lets a caller pass a cached env-file list instead of walking root (the walk takes ~1 s).
+    Secret-folder values are retained only when `looks_secret` accepts their length and entropy."""
     pairs = list(_pairs(root, files))
     ignored = {val for rel, key, val in pairs if (rel, key) in ignore}
     found = {}
@@ -220,7 +224,53 @@ def collect(root, ignore, files=None):
         for s in secret_parts(key, val):
             if s not in ignored:
                 found.setdefault(s, (rel, key))
+    secrets_dir = secrets_dir or os.environ.get("KNOWN_SECRETS_DIR") or os.path.expanduser("~/.config/afa/secrets")
+    for path, key, value in _secret_file_values(secrets_dir):
+        if looks_secret(value):
+            found.setdefault(value, ("secrets/" + os.path.basename(path), key))
     return found
+
+
+def _secret_file_values(secrets_dir):
+    """Yield plausible secret strings from the top-level files in the local secrets folder."""
+    try:
+        with os.scandir(secrets_dir) as scan:
+            entries = list(scan)
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            text = _read(entry.path)
+        except OSError:
+            continue
+        key = os.path.basename(entry.name)
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, (dict, list)):
+            def strings(value, name):
+                if isinstance(value, dict):
+                    for child_key, child in value.items():
+                        yield from strings(child, str(child_key))
+                elif isinstance(value, list):
+                    for child in value:
+                        yield from strings(child, name)
+                elif isinstance(value, str):
+                    yield name, value.strip()
+            yield from ((entry.path, name, value) for name, value in strings(data, key))
+            continue
+
+        assignments = list(env_values(text))
+        if assignments:
+            for name, value in assignments:
+                yield entry.path, name, value.strip().strip("'\"")
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) == 1:
+            yield entry.path, key, lines[0].strip("'\"")
 
 
 def forms(value):
@@ -286,14 +336,16 @@ def load_ignore(path):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Fail if a real env-file secret appears under PATH.")
+    ap = argparse.ArgumentParser(description="Fail if a collected secret appears under PATH.")
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--repos", default=os.path.expanduser("~/repos"))
+    ap.add_argument("--secrets-dir", default=os.environ.get("KNOWN_SECRETS_DIR") or
+                    os.path.expanduser("~/.config/afa/secrets"))
     ap.add_argument("--ignore", default=os.path.expanduser("~/.config/known-secrets/ignore.txt"))
     ap.add_argument("--strict", action="store_true",
                     help="for push checks: walk every folder, and treat an unreadable file as a finding")
     a = ap.parse_args(argv)
-    secrets = collect(a.repos, load_ignore(a.ignore))
+    secrets = collect(a.repos, load_ignore(a.ignore), secrets_dir=a.secrets_dir)
     if not secrets:
         print("known-secrets: no secret values found under %s; nothing to check against" % a.repos, file=sys.stderr)
         return 2

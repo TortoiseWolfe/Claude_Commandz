@@ -224,6 +224,13 @@ class BareKey(Fixture):
         self.assertNotIn(STREAM[5:], out)
         self.assertIn("rtmp://live.twitch.tv/app/", out)
 
+    def test_stream_urls_and_bare_key_arguments_are_masked(self):
+        key = "aB3dE5f" + "G7hJ9kL" + "2mN4pQ6" + "rS8"
+        out = rv.scrub("ffmpeg rtmps://live.twitch.tv/app/" + key + " key=" + key + " --key=" + key)
+        self.assertNotIn(key, out)
+        self.assertEqual(out.count("<redacted:"), 3)
+        self.assertIn("rtmps://live.twitch.tv/app/", out)
+
 
 if __name__ == "__main__":
     unittest.main()

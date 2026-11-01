@@ -4,6 +4,7 @@ a heal that fails or a probe that fails wakes the hub (alert file), and nothing 
 import io
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -233,6 +234,23 @@ class Watchdog(unittest.TestCase):
         with mock.patch.object(wd, "proc_cmd", return_value="bfs -S dfs / -iname *x*"), mock.patch.object(wd.time, "sleep"):
             got = wd.describe_churn(lambda: next(snaps), lambda pid: "greg-drafts-check", secs=2)
         self.assertEqual(got, "pid 7 300MB/s (lane greg-drafts-check) bfs -S dfs / -iname *x*")
+
+    def test_describe_churn_redacts_known_secret_before_logging(self):
+        value = "A1b2C3d4" + "E5f6G7h8" + "J9k0L1m2"
+        with tempfile.TemporaryDirectory() as d:
+            repos, secrets = os.path.join(d, "repos"), os.path.join(d, "secrets")
+            os.makedirs(repos)
+            os.makedirs(secrets)
+            with open(os.path.join(secrets, "stream.key"), "w") as fh:
+                fh.write(value + "\n")
+            env = {"KNOWN_SECRETS_REPOS": repos, "KNOWN_SECRETS_DIR": secrets,
+                   "KNOWN_SECRETS_IGNORE": os.path.join(d, "ignore")}
+            snaps = iter([{7: 0}, {7: 600 * 1048576}])
+            with mock.patch.dict(os.environ, env), mock.patch.object(wd, "proc_cmd", return_value="ffmpeg " + value), \
+                    mock.patch.object(wd.time, "sleep"):
+                got = wd.describe_churn(lambda: next(snaps), lambda pid: "", secs=2)
+        self.assertNotIn(value, got)
+        self.assertIn("<redacted:stream.key>", got)
 
     def test_describe_churn_is_empty_when_nothing_reads_much(self):
         snaps = iter([{7: 0}, {7: 1048576}])

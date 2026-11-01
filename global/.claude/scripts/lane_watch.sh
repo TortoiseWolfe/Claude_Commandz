@@ -355,10 +355,14 @@ routine_report() {
 }
 
 # Dead-watcher alarm. A hub watcher is a bash running lane_watch.sh that is not --recycle-once (the same match as hooks/lane-watch-guard.py).
-# LANE_WATCH_PROCLIST, when set, stands in for `pgrep -af lane_watch.sh` (tests).
+# LANE_WATCH_PROCLIST, when set, stands in for the redacted `pgrep -af lane_watch.sh` output (tests).
 watcher_running() {
   local out
-  if [ -n "${LANE_WATCH_PROCLIST+x}" ]; then out=$LANE_WATCH_PROCLIST; else out=$(pgrep -af 'lane_watch\.sh' 2>/dev/null); fi
+  if [ -n "${LANE_WATCH_PROCLIST+x}" ]; then
+    out=$LANE_WATCH_PROCLIST
+  else
+    out=$("$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/ps_redacted.sh" pgrep -af 'lane_watch\.sh' 2>/dev/null) || out=
+  fi
   printf '%s\n' "$out" | sed -E 's/^[0-9]+ //' | command grep -E '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' | command grep -v -- '--recycle-once' | command grep -q .
 }
 # hub_watcher_check <open lane count>: called by the scheduled pass. With no lane open, or a watcher running, it clears its marks. With lanes open

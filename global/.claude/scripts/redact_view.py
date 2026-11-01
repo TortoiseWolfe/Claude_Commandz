@@ -38,9 +38,12 @@ URL_SECRETS = [
     re.compile(r"(?P<pre>\bhttps?://[^\s/'\"<>]+(?:/[^\s/'\"<>]+?)*?/webhooks?/)(?P<secret>[^\s'\"<>]+)", re.I),
     # hooks.<service>/<kind>/... (Slack, Zapier)
     re.compile(r"(?P<pre>\bhttps?://hooks\.[^\s/'\"<>]+/[^\s/'\"<>]+/)(?P<secret>[^\s'\"<>]+)", re.I),
+    # RTMP stream URLs carry the stream key as their final path segment.
+    re.compile(r"(?P<pre>\brtmps?://[^\s/'\"<>]+/[^/?#\s'\"<>]+/)(?P<secret>[^/?#\s'\"<>]+)", re.I),
 ]
 VAL = r"""(?:"[^"]*"|'[^']*'|[^\s"';&|,\]})]+)"""
 ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<val>" + VAL + ")", re.I)
+BARE_KEY_ASSIGN = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>(?:--)?(?:[A-Za-z0-9_.-]+[_-])?key)=(?P<val>" + VAL + ")", re.I)
 FLAGWORD = r"--?(?:password|passwd|pass|pwd|token|api-?key|secret|auth-token|access-token|client-secret)"
 FLAG_SP = re.compile(r"(?<![\w-])(?P<flag>" + FLAGWORD + r"|-p)(?P<sp>\s+)(?P<val>" + VAL + ")", re.I)
 FLAG_ONLY = re.compile(r"^(?:" + FLAGWORD + r"|-p)$", re.I)
@@ -83,7 +86,14 @@ def scrub(s):
             return m.group(0)
         return m.group("flag") + m.group("sp") + red(len(unquote(m.group("val"))))
 
-    return FLAG_SP.sub(f, ASSIGN.sub(a, s))
+    s = FLAG_SP.sub(f, ASSIGN.sub(a, s))
+
+    def key_assignment(m):
+        if not is_literal(m.group("val")):
+            return m.group(0)
+        return m.group("name") + "=" + red(len(unquote(m.group("val"))))
+
+    return BARE_KEY_ASSIGN.sub(key_assignment, s)
 
 
 def secret_key(k):
