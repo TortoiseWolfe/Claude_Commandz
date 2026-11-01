@@ -104,4 +104,18 @@ FAKE_WINDOWS="bw plain" lane --status
 has "$LAST_OUT" "add-dirs:$STREAM:$OTHER:$TMP/third" "--status shows the extra folders"
 [ "$(grep -c 'add-dirs:' <<<"$LAST_OUT")" = 1 ] || fail "only the lane with folders shows add-dirs"; ok
 
+# 8. A recorded folder that is gone by the next start is dropped, not passed on: the engines refuse a missing --add-dir and the lane dies
+#    at start (1 Nov 2026, job-replies round 2 on round 1's removed worktree).
+rmdir "$TMP/third"
+lane --restart bw "$WORK" sonnet "$TMP/p2.md"
+[ "$LAST_RC" = 0 ] || fail "--restart with a removed folder still works ($LAST_OUT)"; ok
+hasnt "$(last_cmd)" "$TMP/third" "a removed folder is not passed on a restart"
+has "$(last_cmd)" "--add-dir $(printf %q "$STREAM") " "the folders that still exist are passed"
+[ "$(ad_of bw)" = "$STREAM:$OTHER" ] || fail "the index drops the removed folder, got $(ad_of bw)"; ok
+has "$LAST_OUT" "no longer exists: $TMP/third" "the restart says which folder it dropped"
+rmdir "$OTHER"
+lane --resume res
+[ "$LAST_RC" = 0 ] || fail "--resume with a removed folder still works ($LAST_OUT)"; ok
+hasnt "$(last_cmd)" "--add-dir $OTHER " "a removed folder is not passed on a resume"
+
 printf 'ok: %s checks\n' "$checks"
