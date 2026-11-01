@@ -22,16 +22,25 @@
 #   muse_poll_record.sh archive [<days>]      -> moves done lines (with their indented notes) not touched for more
 #                                                than <days> (default 7) to hub-inbox-archive/YYYY-MM.md
 #
-# The board is ~/.claude/state/hub-inbox.md (it was muse-inbox.md until 21 Oct 2026; that name is now a symlink).
-# HUB_INBOX overrides the path, and the older MUSE_INBOX still works. Every line begins with the owner of the next
-# move: Waiting on Hatch, Waiting on tower, Job, Client mail, Client alert, Client talk, Question or Hub. Every writer takes
+# The board is ~/.claude/state/hub-inbox.md on NX-01 (it was muse-inbox.md until 21 Oct 2026; that name is now a symlink) and
+# peer-inbox.md on any other machine. HUB_INBOX overrides the path, and the older MUSE_INBOX still works. Every line begins with the owner
+# of the next move: Waiting on Hatch, Waiting on tower, Waiting on NX-01, Waiting on NCC-74656, Job, Client mail, Client alert, Client talk, Question or Hub. Every writer takes
 # hub-inbox.lock (flock) beside the board, so the archive run and the appends never interleave.
 set -euo pipefail
 STATE=${MUSE_STATE:-$HOME/.claude/state}
-INBOX=${HUB_INBOX:-${MUSE_INBOX:-$STATE/hub-inbox.md}}
+# Which board: HUB_INBOX or MUSE_INBOX when set. Otherwise NX-01 (and a machine with no machine file) keeps hub-inbox.md, and every other
+# machine writes peer-inbox.md, the file its own hub_digest.py and lane_watch.sh read (1 Nov: the tower's "inbox" lines went to hub-inbox.md
+# while its digest read peer-inbox.md). MUSE_STATE, the tests' hook for a scratch folder, keeps hub-inbox.md so a test never depends on the
+# machine it runs on.
+BOARD=hub-inbox.md
+if [[ -z "${MUSE_STATE:-}" ]]; then
+  machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || true)
+  [[ -z "$machine" || "$machine" == "NX-01" ]] || BOARD=peer-inbox.md
+fi
+INBOX=${HUB_INBOX:-${MUSE_INBOX:-$STATE/$BOARD}}
 [[ -e "$INBOX" ]] && INBOX=$(readlink -f "$INBOX")   # sed -i on the old symlink name would replace the link with a file
 LOCK=$(dirname "$INBOX")/hub-inbox.lock
-CANON_RE='^(Waiting on Hatch|Waiting on tower|Job|Client mail|Client alert|Client talk|Question|Hub):'
+CANON_RE='^(Waiting on Hatch|Waiting on tower|Waiting on NX-01|Waiting on NCC-74656|Job|Client mail|Client alert|Client talk|Question|Hub):'
 lock() { mkdir -p "$(dirname "$LOCK")"; exec 9>>"$LOCK"; flock -w 60 9 || { echo "hub-inbox is locked by another writer" >&2; exit 1; }; }
 case "${1:-}" in
   processed)
@@ -53,7 +62,7 @@ case "${1:-}" in
     line="${2:?text}"
     line="${line//$'\n'/ }"
     if ! [[ "$line" =~ $CANON_RE ]]; then
-      echo "unknown prefix: start the line with Waiting on Hatch:, Waiting on tower:, Job:, Client mail:, Client alert:, Client talk:, Question: or Hub: (the owner of the next move)" >&2
+      echo "unknown prefix: start the line with Waiting on Hatch:, Waiting on tower:, Waiting on NX-01:, Waiting on NCC-74656:, Job:, Client mail:, Client alert:, Client talk:, Question: or Hub: (the owner of the next move)" >&2
       exit 1
     fi
     lock

@@ -171,6 +171,35 @@ class Parts(unittest.TestCase):
                                            git_log="", tidy_text=TIDY, budget="b", now=NOW), NOW, "NX-01", 100000)
         self.assertIn("and 4 more", main)
 
+    def test_notes_with_no_owner_prefix_get_their_own_section_newest_first_ending_with_the_note_id(self):
+        # 1 Nov: the poller queued the tower's notes under their own subject ("Title | detail | id"), the digest listed only the oldest
+        # 15 of an owner group, and twelve notes sat unseen for hours.
+        text = """- [ ] 2026-11-01 13:24 | VisionQuest Ep 1 reaction beta: UI/UX fleet pass | Hatch wants an answer on what the tower takes on and when | r-6382461712
+- [ ] 2026-11-01 13:49 | [NX-01>NCC-74656] Re: Ship list + KDG diagnosis | Answer Hatch: ship list | r-8097198463615243553
+- [ ] 2026-10-31 09:05 | Tutorials re-render paced go (2 notes from NX-01) | """ + "long detail " * 30 + """| r-1234567890
+- [ ] 2026-11-01 07:55 | Waiting on NX-01: run the parity script | reply note | r-8097198463615243553
+- [ ] 2026-11-01 08:00 | A note with no id at all | just words
+- [x] 2026-11-01 08:30 | Ticked note | already handled | r-99999999
+- [ ] 2026-11-01 08:31 | Job reply: Example Co | interview | r-77777777
+"""
+        groups, _ = hd.open_inbox(text)
+        self.assertEqual([t for _, t in groups["From NX-01"]], ["Re: Ship list + KDG diagnosis"])  # an owner group keeps its line
+        self.assertEqual(len(groups["NX-01"]), 1)
+        for machine in ("NCC-74656", "NX-01"):
+            page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=text,
+                                               git_log="", tidy_text=TIDY, budget="b", now=NOW, machine=machine), NOW, machine, 100000)
+            sec = page.split("## Notes waiting for this hub")[1].split("\n## ")[0]
+            rows = [l for l in sec.splitlines() if l.startswith("- ")]
+            self.assertIn("(3, newest first)", sec.splitlines()[0])
+            self.assertEqual(len(rows), 3, sec)  # the owner-prefixed, ticked and job-reply lines are not in it
+            self.assertTrue(rows[0].startswith("- 11-01 1:24 PM VisionQuest Ep 1"), rows[0])
+            self.assertTrue(rows[0].endswith("| r-6382461712"), rows[0])
+            self.assertIn("A note with no id at all | just words", rows[1])
+            self.assertTrue(rows[2].endswith("| r-1234567890"), rows[2])
+            self.assertLessEqual(len(rows[2]) - 2, hd.NOTE_LIMIT + 6)  # trimmed (the 12-hour clock adds a few characters), id kept
+            self.assertNotIn("Ticked note", page)
+            self.assertNotIn("Other (", page)
+
     def test_default_inbox_is_the_peer_inbox_off_nx01(self):
         for machine, name in (("NX-01", "hub-inbox.md"), ("NCC-74656", "peer-inbox.md"), ("", "hub-inbox.md")):
             with tempfile.TemporaryDirectory() as d, mock.patch.object(hd, "HOME", Path(d)), mock.patch.dict(os.environ, {}, clear=False):
@@ -381,7 +410,7 @@ class Page(unittest.TestCase):
         page = self.build()
         for needle in ["Hub status, built", "NX-01", "never sent to OpenClaw", "alpha-lane: working, report not yet",
                        "beta-lane: idle, report written", "2 older lanes have ended", "Waiting on Hatch (2)",
-                       "Waiting on the tower (1)", "Waiting on Jonathan (1)", "Jobs (2)", "Other (1)",
+                       "Waiting on the tower (1)", "Waiting on Jonathan (1)", "Jobs (2)", "Notes waiting for this hub (1, newest first)",
                        "Client mail: Example Brewing", "1a2b3c4d5e6f7a8e", "Active arc: Arc 1: Launch season",
                        "Next 3: ship the page", "Session +1 (hub)", "Next session should: Read the reports and merge lane-a.",
                        "abc1234", "Worktrees to move or remove: 2", "Week resets Wed: used 1%"]:

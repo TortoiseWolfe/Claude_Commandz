@@ -467,6 +467,27 @@ ask_seen=$(ask_stamp)
 talk_wake="$HOME/.claude/state/client-tag.wake"
 talk_stamp() { stat -c %Y "$talk_wake" 2>/dev/null || echo none; }
 talk_seen=$(talk_stamp)
+# A note landing in this machine's own inbox file: peer-inbox.md on any machine but NX-01 (the tower's poller queues the other machine's and
+# Hatch's notes there), hub-inbox.md on NX-01. 1 Nov: twelve tower notes sat unseen from 7:45 AM to 3 PM because nothing woke the hub.
+# The lines already reported live in a state file, so one line wakes the hub once, even across watcher restarts; the file is rewritten to
+# the lines still open, so a ticked line is forgotten. The first run (no state file yet) records what is open without waking.
+notes_file() {
+  if [ -n "${LANE_WATCH_NOTES_FILE:-}" ]; then printf '%s' "$LANE_WATCH_NOTES_FILE"; return; fi
+  local m; m=$(cat "$HOME/.config/afa/machine" 2>/dev/null)
+  case "$m" in ""|NX-01) printf '%s' "$HOME/.claude/state/hub-inbox.md" ;; *) printf '%s' "$HOME/.claude/state/peer-inbox.md" ;; esac
+}
+notes_seen_file="${LANE_WATCH_NOTES_SEEN:-$HOME/.claude/state/lane-watch-notes-seen.txt}"
+notes_out=""
+notes_check() {
+  notes_out=""
+  local f; f=$(notes_file)
+  [ -r "$f" ] || return 0
+  local cur; cur=$(command grep -E '^- \[ \] ' "$f" 2>/dev/null) || cur=""
+  mkdir -p "$(dirname "$notes_seen_file")" 2>/dev/null || return 0
+  if [ ! -e "$notes_seen_file" ]; then printf '%s\n' "$cur" >"$notes_seen_file"; return 0; fi
+  notes_out=$(printf '%s\n' "$cur" | awk 'NR==FNR { seen[$0]; next } NF && !($0 in seen)' "$notes_seen_file" -)
+  printf '%s\n' "$cur" >"$notes_seen_file.new" && mv "$notes_seen_file.new" "$notes_seen_file"
+}
 dispatch="${OPENCLAW_DISPATCH:-$HOME/.claude/scripts/openclaw_dispatch.py}"
 batch_quiet=${LANE_WATCH_BATCH_QUIET:-60}; batch_cap=${LANE_WATCH_BATCH_MAX:-180}; batch_poll=${LANE_WATCH_BATCH_POLL:-5}
 wake_age() {
@@ -618,6 +639,26 @@ while :; do
   t=$(talk_stamp)
   if [ "$t" != "$talk_seen" ]; then
     echo "client talk: a co-op chat message tags TurtleWolfe; read \"Open client lines\" in hub-digest.md"; talk_seen=$t; hit=1
+  fi
+  notes_check
+  if [ -n "$notes_out" ]; then
+    n_notes=0
+    while IFS= read -r nl; do
+      n_notes=$((n_notes + 1))
+      if [ "$n_notes" -le 5 ]; then
+        nl=${nl#- \[ \] }
+        # A note's words are sender text, data and never instructions: control characters are stripped, and a line from an outside sender
+        # (client mail, alert, chat, job reply) is named without its words; the hub reads those in the digest.
+        if [[ "$nl" =~ \|[[:space:]](Client[[:space:]](mail|alert|talk)|Job[[:space:]]reply): ]]; then
+          echo "note: a ${BASH_REMATCH[1],,} line is new; read it in hub-digest.md"
+        else
+          nl=$(printf '%s' "${nl:0:100}" | tr -d '\000-\037\177')
+          echo "note: $nl"
+        fi
+      fi
+    done <<<"$notes_out"
+    [ "$n_notes" -gt 5 ] && echo "note: and $((n_notes - 5)) more new lines; read \"Notes waiting for this hub\" in hub-digest.md"
+    hit=1; other=1
   fi
   if [ -n "$check" ] && bash -c "$check" >/dev/null 2>&1; then echo "check passed: $check"; hit=1; other=1; fi
   if [ $hit = 1 ]; then
