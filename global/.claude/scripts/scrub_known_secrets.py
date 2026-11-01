@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Replace every real env-file secret value in the given files or folders with <redacted:KEY>.
 
-usage: scrub_known_secrets.py [--min-age SECONDS] [--repos DIR] [--ignore FILE] [--dry-run] PATH...
+usage: scrub_known_secrets.py [--min-age SECONDS] [--repos DIR] [--secrets-dir DIR] [--ignore FILE] [--dry-run] PATH...
 
 For session logs and file-history snapshots: a value that once reached a log stays readable there
-until it's scrubbed. Values come from known_secrets_scan.collect (the env files under --repos);
+until it's scrubbed. Values come from known_secrets_scan.collect (the env files under --repos and
+the secret files under --secrets-dir);
 each is matched both raw and JSON-escaped, so .jsonl lines stay valid JSON. Files are rewritten
 atomically with their mode and mtime kept. Files modified less than --min-age seconds ago
 (default 120) are skipped, because a running session may still be appending to them.
@@ -34,17 +35,11 @@ def needles(secrets):
     return sorted(out, key=lambda n: -len(n[0]))
 
 
-def shortlist(paths, values, scratch):
-    """grep -F does the 7 GB pass; Python only opens files that matched."""
-    fd, pat = tempfile.mkstemp(dir=scratch, prefix=".scrub-patterns-")
-    try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(b"\n".join(values) + b"\n")
-        r = subprocess.run(["/usr/bin/grep", "-rlaF", "-f", pat, *paths], capture_output=True, text=True)
-        return [f for f in r.stdout.splitlines() if f]
-    finally:
-        os.remove(pat)
+def shortlist(paths, values):
+    """grep -F does the 7 GB pass with patterns streamed through stdin, never a secret file."""
+    patterns = b"\n".join(values) + b"\n"
+    r = subprocess.run(["/usr/bin/grep", "-rlaF", "-f", "-", *paths], input=patterns, capture_output=True)
+    return [os.fsdecode(f) for f in r.stdout.splitlines() if f]
 
 
 def scrub_file(path, nds, dry):
@@ -68,25 +63,28 @@ def scrub_file(path, nds, dry):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Redact real env-file secret values in place.")
+    ap = argparse.ArgumentParser(description="Redact collected secret values in place.")
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--min-age", type=int, default=120)
     ap.add_argument("--repos", default=os.path.expanduser("~/repos"))
+    ap.add_argument("--secrets-dir", default=os.environ.get("KNOWN_SECRETS_DIR") or
+                    os.path.expanduser("~/.config/afa/secrets"))
     ap.add_argument("--ignore", default=os.path.expanduser("~/.config/known-secrets/ignore.txt"))
-    ap.add_argument("--scratch", default=tempfile.gettempdir())
+    ap.add_argument("--scratch", default=tempfile.gettempdir(),
+                    help="retained for compatibility; secret patterns are streamed through memory")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     paths = [p for p in a.paths if os.path.exists(p)]
     if not paths:
         return 0
-    secrets = ks.collect(a.repos, ks.load_ignore(a.ignore))
+    secrets = ks.collect(a.repos, ks.load_ignore(a.ignore), secrets_dir=a.secrets_dir)
     if not secrets:
         print("scrub: no secret values to look for", file=sys.stderr)
         return 2
     nds = needles(secrets)
     cutoff = time.time() - a.min_age
     total, files, skipped = Counter(), 0, 0
-    for f in shortlist(paths, sorted({n for n, _, _ in nds}), a.scratch):
+    for f in shortlist(paths, sorted({n for n, _, _ in nds})):
         try:
             st = os.stat(f)
         except OSError:
