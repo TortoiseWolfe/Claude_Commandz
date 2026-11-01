@@ -315,9 +315,137 @@ JARGON_TERMS = [
 # A gloss is any of these appearing in the same sentence — the writer explaining
 # the term rather than assuming it.
 GLOSS_MARKERS = re.compile(
-    r'\b(that is|which is|which means|meaning|in other words|i\.e\.|'
-    r'the thing that|basically|put simply|a kind of|what that means)\b',
+    r'\b(that is|which is|which means|meaning|in other words|the thing that|'
+    r'basically|put simply|a kind of|what that means)\b|(?<!\w)i\.e\.(?!\w)',
     re.IGNORECASE)
+
+NARRATION_PHRASES = [
+    r'\bone thing you should know\b',
+    r'\bbefore anything else\b',
+    r'\bi ruled out\b',
+    r'\bwhat matters is\b',
+    r'\bhonest caveats\b',
+    r'\bshort answer\b',
+    r'\bshort version\b',
+]
+LABEL_COLON_OPENER = re.compile(
+    r"(?im)(?:^|[.!?]\s+)\s*(?!(?:here|there)\s+(?:is|are)\b)"
+    r"([A-Za-z0-9][A-Za-z0-9'’/-]{0,15}(?:\s+[A-Za-z0-9][A-Za-z0-9'’/-]{0,15}){0,4}):(?=\s|$)")
+
+_CHAT_WEEKDAY = r'(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)'
+_CHAT_MONTH = (
+    r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|'
+    r'Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)')
+_CHAT_TIME = (
+    r'(?:(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?m\.?|p\.?m\.?))?|'
+    r'(?:0?[1-9]|1[0-2])\s*(?:a\.?m\.?|p\.?m\.?))')
+_CHAT_DATE_TIME = re.compile(
+    rf'\b(?:{_CHAT_WEEKDAY}\s*,?\s+)?(?:{_CHAT_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?|'
+    rf'\d{{1,2}}(?:st|nd|rd|th)?\s+{_CHAT_MONTH})(?:,?\s+\d{{4}})?'
+    rf'[^.\n]{{0,30}}?\b(?:at\s+)?{_CHAT_TIME}\b',
+    re.IGNORECASE)
+_CHAT_CLOCK_TIME = re.compile(
+    rf'(?<!\d){_CHAT_TIME}(?![\w])',
+    re.IGNORECASE)
+_CHAT_VERSION = re.compile(
+    r'(?<![\w.])v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?(?![\w.])',
+    re.IGNORECASE)
+_CHAT_SNAKE_CASE = re.compile(r'\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*\b')
+_CHAT_IMAGE = re.compile(
+    r'\b(?=[A-Za-z0-9._/-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._/-]*:'
+    r'[A-Za-z0-9][A-Za-z0-9_.-]*\b')
+_CHAT_CONTAINER_NAME = re.compile(r'\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)+-\d+\b')
+_CHAT_IPV4 = re.compile(
+    r'(?<![\d.])(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)'
+    r'(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?![\d.])')
+_CHAT_HASH = re.compile(r'(?<![A-Za-z0-9])[A-Fa-f0-9]{7,}(?![A-Za-z0-9])')
+_CHAT_BARE_REF = re.compile(r'#\d+\b')
+_CHAT_URL = re.compile(r'\b(?:https?://|www\.)\S+', re.IGNORECASE)
+_CHAT_MARKDOWN_LINK = re.compile(r'\[[^\]]+\]\([^)]+\)')
+_CHAT_BOLD = re.compile(r'(?:\*\*|__)(?=\S).+?(?:\*\*|__)')
+_CHAT_HEADING = re.compile(r'^\s{0,3}#{1,6}\s+\S', re.MULTILINE)
+_CHAT_TABLE = re.compile(
+    r'^\s*\|.+\|\s*$|^\s*[-:]+(?:\s*\|\s*[-:]+)+\s*$',
+    re.MULTILINE)
+_CHAT_BULLET = re.compile(r'^\s*[-*+]\s+\S', re.MULTILINE)
+_CHAT_NUMBERED = re.compile(r'^\s*\d+[.)]\s+\S.*$', re.MULTILINE)
+_CHAT_DEFINITION = re.compile(
+    r'\((?:\s*(?:a|an|the|one)\s+\w[^)]{2,100}|[^)]{0,80}\b(?:means|is|are|refers? to|stands for)\b[^)]{2,80})\)',
+    re.IGNORECASE)
+
+
+def label_colon_matches(text):
+    return [m.group(1).strip() for m in LABEL_COLON_OPENER.finditer(text)]
+
+
+def chat_data_dump_matches(text):
+    """Return machine-like details in chat, excluding complete URLs and linked refs."""
+    body = text.strip()
+    body = _CHAT_MARKDOWN_LINK.sub(' ', body)
+    body = _CHAT_URL.sub(' ', body)
+    dated = list(_CHAT_DATE_TIME.finditer(body))
+    for match in reversed(dated):
+        body = body[:match.start()] + (' ' * (match.end() - match.start())) + body[match.end():]
+    ips = list(_CHAT_IPV4.finditer(body))
+    hashes = list(_CHAT_HASH.finditer(body))
+    for match in sorted(ips + hashes, key=lambda item: item.start(), reverse=True):
+        body = body[:match.start()] + (' ' * (match.end() - match.start())) + body[match.end():]
+    images = list(_CHAT_IMAGE.finditer(body))
+    for match in reversed(images):
+        body = body[:match.start()] + (' ' * (match.end() - match.start())) + body[match.end():]
+    containers = list(_CHAT_CONTAINER_NAME.finditer(body))
+    snakes = [
+        match for match in _CHAT_SNAKE_CASE.finditer(body)
+        if not any(match.start() < container.end() and container.start() < match.end()
+                   for container in containers)
+    ]
+
+    details = ['weekday/month date with time'] * len(dated)
+    details.extend(['clock time'] * len(_CHAT_CLOCK_TIME.findall(body)))
+    details.extend(['version'] * len(_CHAT_VERSION.findall(body)))
+    details.extend(['identifier'] * len(snakes))
+    details.extend(['image or container name'] * len(images))
+    details.extend(['container name'] * len(containers))
+    details.extend(['IP address'] * len(ips))
+    details.extend(['hash'] * len(hashes))
+    details.extend(['ticket reference'] * len(_CHAT_BARE_REF.findall(body)))
+    if ips or hashes or len(details) >= 2:
+        return [("data_dump", f"{len(details)} machine-like detail(s): {', '.join(details)}")]
+    return []
+
+
+def chat_structure_matches(text):
+    body = text.strip()
+    numbered = _CHAT_NUMBERED.findall(body)
+    allowed_choices = len(numbered) <= 3 and all(len(line.split()) <= 12 for line in numbered)
+    reasons = []
+    if _CHAT_HEADING.search(body):
+        reasons.append("heading")
+    if _CHAT_TABLE.search(body):
+        reasons.append("table")
+    if _CHAT_BOLD.search(body):
+        reasons.append("bold")
+    if _CHAT_BULLET.search(body):
+        reasons.append("bullet")
+    if not allowed_choices:
+        reasons.append("numbered list")
+    if re.search(r'[–—]', body):
+        reasons.append("dash")
+    if label_colon_matches(body):
+        reasons.append("label-colon opener")
+    return [('chat_structure', ', '.join(reasons))] if reasons else []
+
+
+def chat_rule_matches(text):
+    findings = []
+    words = len(text.split())
+    if words > 60:
+        findings.append(('chat_length', f"{words} body words, limit 60"))
+    findings.extend(chat_data_dump_matches(text))
+    if GLOSS_MARKERS.search(text) or _CHAT_DEFINITION.search(text):
+        findings.append(('gloss', "gloss marker or parenthetical definition"))
+    findings.extend(chat_structure_matches(text))
+    return findings
 
 
 def strip_quoted_and_signature(text):
@@ -836,7 +964,7 @@ def sender_we_messages(text):
 PROMISE_PHRASES = [
     r"\bI(?:'|\u2019)ll\b",
     r"\bI will\b",
-    r"\bI can(?!(?:'|\u2019)t|not)\b",
+    r"(?<!if )\bI can(?!(?:'|\u2019)t|not)(?!\s+(?:hear|see|feel|understand|remember|recognize|read)\b)",
     r"\bI could\b",
     r"\bI(?:'|\u2019)d be happy to\b",
     r"\bhappy to\b",
@@ -875,8 +1003,9 @@ def _prose_sentences(text):
         if HIS_OWN_LINE.match(line) or QUESTION_LABEL.match(line):
             continue
         prose = QUOTED_SPAN.sub(' ', line)
-        for sentence in re.findall(r'[^.!?\n]+[.!?]?', prose):
-            yield sentence, line
+        for sentence in re.split(r'(?<=[.!?])\s+', prose):
+            if sentence.strip():
+                yield sentence, line
 
 
 def promises_future_work(text):
@@ -1339,7 +1468,8 @@ def link_matches(html):
     return found
 
 
-def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explicit=True, html=None):
+def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explicit=True,
+                       html=None, chat=False):
     """
     Hard failures for a named recipient. Returns [(category, message)].
     Empty for recipients with no house limit (William, and anyone unlisted).
@@ -1351,39 +1481,40 @@ def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explici
     # "we" is a hard fail for clients and for an unnamed recipient; the co-op
     # list gets a warning instead (see detect_llm_signals).
     # Team text is written by staff in their own voice, so the rule is off there (29 Oct).
-    if not (recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS) \
+    if not chat and not (recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS) \
             and (recipient or '').lower() != 'team':
         for msg in sender_we_messages(text):
             found.append(('sender_we', msg))
     if html is not None:
-        if (recipient or '').lower() in FORMAT_RECIPIENTS:
+        if not chat and (recipient or '').lower() in FORMAT_RECIPIENTS:
             found.extend(format_matches(html))
-        found.extend(link_matches(html))
+        if not chat:
+            found.extend(link_matches(html))
     rcpt = (recipient or '').lower()
     if rcpt not in ('greg', 'team'):
         return found
     if rcpt == 'team' and is_mostly_quoted(text):
         found.append(('mostly_quoted', "mostly quoted: write the opening in our own words"))
     words = count_body_words(text)
-    if rcpt == 'greg' and words > GREG_WORD_LIMIT:
+    if not chat and rcpt == 'greg' and words > GREG_WORD_LIMIT:
         found.append(('length', f"{words} words, limit {GREG_WORD_LIMIT}"))
     # Team text keeps its commands in code; a literal command is not prose to gloss.
-    jargon = find_unglossed_jargon(mask_quotes(mask_code(text)) if rcpt == 'team' else text)
+    jargon = [] if chat else find_unglossed_jargon(mask_quotes(mask_code(text)) if rcpt == 'team' else text)
     if jargon:
         found.append(('jargon', ', '.join(f'"{j}"' for j in jargon[:8])
                       + " with no gloss in the same sentence. Keep the term if it is the right one "
                         "and explain it in that sentence (e.g. \"..., which means ...\"). "
                         "Never swap a correct technical term for a vaguer word."))
-    if rcpt == 'greg' and is_reply and not has_quoted_points(text):
+    if not chat and rcpt == 'greg' and is_reply and not has_quoted_points(text):
         found.append(('no_quoting', "a reply with no '>' quoted points to answer under"))
     return found
 
 
 def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
                        recipient_explicit=True, only_they_know=False, html=None,
-                       access_proof=None):
+                       access_proof=None, chat=False):
     """
-    Analyze an email body for AI-ish voice.
+    Analyze an email or chat body for AI-ish voice.
 
     Returns dict: signal_count, structural_count, matches [(category, match)],
     contraction_ratio, dash_count, verdict (PASS / FLAG / MAJOR FLAG / FAIL).
@@ -1414,6 +1545,11 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     for pattern in GENERIC_PRAISE:
         for m in re.finditer(pattern, check_text, re.IGNORECASE):
             matches.append(('generic_praise', m.group()))
+    for label in label_colon_matches(check_text):
+        matches.append(('label_colon_opener', label))
+    for pattern in NARRATION_PHRASES:
+        for m in re.finditer(pattern, check_text, re.IGNORECASE):
+            matches.append(('narration', m.group()))
 
     expanded, contracted = count_contractions(check_text)
     contraction_ratio = f"{expanded} expanded / {contracted} contracted"
@@ -1427,12 +1563,12 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
 
     # Under --recipient team these four email-only rules are off: a ticket is where plans
     # live and TechJoy's PR template asks the author reflection questions (29 Oct).
-    if strict and (recipient or '').lower() != 'team':
+    if strict and (chat or (recipient or '').lower() != 'team'):
         for msg in promise_messages(text):
             matches.append(('promises_future_work', msg))
         for msg in open_work_messages(text):
             matches.append(('open_work', msg))
-        if not only_they_know:
+        if not only_they_know and not chat:
             for msg in question_messages(text):
                 matches.append(('question_to_reader', msg))
 
@@ -1460,23 +1596,31 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     # a hard FAIL, above every other verdict, because these are the three things
     # the recipient has objected to in his own words.
     house = house_rule_matches(text, recipient=recipient, is_reply=is_reply,
-                               recipient_explicit=recipient_explicit, html=html)
+                               recipient_explicit=recipient_explicit, html=html, chat=chat)
     warnings = []
-    if html is None and (recipient or '').lower() in FORMAT_RECIPIENTS:
+    if not chat and html is None and (recipient or '').lower() in FORMAT_RECIPIENTS:
         unchecked = ('mail to Greg or the devops list: the HTML format '
                      '(real <h2>, <ul>, bold addresses) was NOT checked. Pass the HTML body with --html <file>')
         if strict:
             house = list(house) + [('format_unchecked', unchecked)]
         else:
             warnings.append(('format_unchecked', unchecked))
-    if recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS:
+    if chat:
+        warnings += [('sender_we', m) for m in sender_we_messages(text)]
+        chat_findings = chat_rule_matches(text)
+        if strict:
+            house.extend(chat_findings)
+        else:
+            warnings.extend(chat_findings)
+    elif recipient_explicit and (recipient or '').lower() in CO_OP_RECIPIENTS:
         warnings += [('sender_we', m) for m in sender_we_messages(text)]
     # An unexplained acronym warns; under --strict it is a hard FAIL (27 Oct rule).
-    acr = [('acronym', m) for m in acronym_messages(text)]
-    if strict:
-        house = list(house) + acr
-    else:
-        warnings += acr
+    if not chat:
+        acr = [('acronym', m) for m in acronym_messages(text)]
+        if strict:
+            house = list(house) + acr
+        else:
+            warnings += acr
     # Asking the reader for access (31 Oct): hard FAIL under --strict without proof; else a warning.
     access_note = None
     if (recipient or '').lower() != 'team':
@@ -1510,8 +1654,9 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
         'matches': matches,
         'house': house,
         'warnings': warnings,
-        'body_words': count_body_words(text),
+        'body_words': len(text.split()) if chat else count_body_words(text),
         'recipient': recipient,
+        'chat': chat,
         'contraction_ratio': contraction_ratio,
         'dash_count': count_mid_sentence_dashes(check_text),
         'verdict': verdict,
@@ -1524,6 +1669,7 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
 def main():
     args = sys.argv[1:]
     strict = "--strict" in args
+    chat = "--chat" in args
     is_reply = "--reply" in args
     only_they_know = "--only-they-know" in args
     # A value starting with '--' is a flag, never a recipient. Without this,
@@ -1579,7 +1725,7 @@ def main():
             print(f"ERROR: --keep-facts-from file not found: {facts_path}")
             sys.exit(2)
         facts_original = fp.read_text()
-    skip = {"--strict", "--reply", "--only-they-know", "--recipient", recipient, "--html",
+    skip = {"--strict", "--chat", "--reply", "--only-they-know", "--recipient", recipient, "--html",
             "--keep-facts-from", "--access-proof"}
     if access_proof is not None:
         skip.add(access_proof)
@@ -1591,13 +1737,14 @@ def main():
 
     if not args:
         print("Usage: python3 email_voice_check.py <text_file> [--strict]")
-        print("       python3 email_voice_check.py --stdin [--strict] [--recipient greg|devops --html <body.html>]")
+        print("       python3 email_voice_check.py --stdin [--strict] [--chat] [--recipient greg|devops --html <body.html>]")
         print("\nScreens a client-email body for AI-ish voice (lexical + structural).")
         print("\nVerdicts (default):")
         print("  PASS       (0-2 signals, 0 structural)")
         print("  FLAG       (3-4 signals, OR any 1-2 structural tells)")
         print("  MAJOR FLAG (5+ signals, OR 3+ structural tells)")
         print("\n--strict: zero-tolerance self-gate — ANY signal = FAIL. Use before sending.")
+        print("--chat: apply plain-chat voice rules instead of recipient-specific email rules.")
         print("--recipient <name>: house rules apply to 'greg' (default). Others exempt.")
         print("--reply: this is a reply, so it must quote the recipient's points with '>'.")
         print("\nHouse rules for greg (each is a hard FAIL, not a flag):")
@@ -1616,10 +1763,14 @@ def main():
         print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
         print("  Say how far it got instead (for example, \"It's prepared but not running: <what proves it>\").")
         print("  Warns by default; fails under --strict.")
-        print("\nAcronyms (every recipient): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
+        print("\nAcronyms (email profiles): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
         print("  e.g. CSS (Cascading Style Sheets, the code that controls how a page looks), or spelled out first:")
         print("  Cascading Style Sheets (CSS). Warns by default, hard FAIL under --strict. Skipped: URLs, addresses,")
         print("  code, '>' lines, [CC>MUSE] tags, and a short allow list (AM PM OK US ID ET ...).")
+        print("\nChat profile (--chat): email-only jargon glosses, acronyms, reply quoting, HTML formats, the Greg word")
+        print("  limit and reader questions are off. [sender_we] is a warning only. Under --strict, chat_length (>60")
+        print("  body words), data_dump (two machine-like details, or any IP/hash), glosses and chat_structure fail.")
+        print("  Promises and open_work remain strict checks; up to three short numbered choice lines are allowed.")
         print("\nTeam text (--recipient team, 29 Oct 'team text is teaching text'): hard FAIL on [bare_ref] a ticket number")
         print("  (#274, PR #274, owner/repo#274) outside a link, or a link whose text is only the number or has fewer")
         print("  than two words besides it; and [jargon] as for greg (no word limit). Code is exempt.")
@@ -1659,7 +1810,7 @@ def main():
     result = detect_llm_signals(text, strict=strict, recipient=recipient, is_reply=is_reply,
                                recipient_explicit=recipient_explicit,
                                only_they_know=only_they_know, html=html,
-                               access_proof=access_proof)
+                               access_proof=access_proof, chat=chat)
     dropped = dropped_facts(facts_original, text) if facts_original is not None else []
     if dropped:
         result['verdict'] = "FAIL"
@@ -1667,6 +1818,8 @@ def main():
     print("\n=== Email Voice Check ===")
     if strict:
         print("Mode: STRICT (zero-tolerance self-gate)")
+    if chat:
+        print("Profile: CHAT")
     print(f"Signal count: {result['signal_count']} ({result['structural_count']} structural)")
     print(f"Verdict: {result['verdict']}")
     if result.get('skipped_note'):
@@ -1678,7 +1831,9 @@ def main():
     print(f"Body words: {result['body_words']} (recipient: {result['recipient']})")
 
     if result['house']:
-        print("\nHOUSE RULE FAILURES (these are why the recipient complained):")
+        heading = "\nHARD FAILURES:" if chat else \
+            "\nHOUSE RULE FAILURES (these are why the recipient complained):"
+        print(heading)
         for category, message in result['house']:
             print(f"  [{category}] {message}")
 

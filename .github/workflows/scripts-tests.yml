@@ -1,6 +1,6 @@
 name: scripts tests
 
-# Runs the hub scripts' test suite (global/.claude/scripts/tests) on every push to main and every pull request.
+# Runs the hub scripts' test suite on every push to main and every pull request.
 # Tests run with an empty HOME, so none of them can read or write a developer's live ~/.claude.
 on:
   push:
@@ -30,10 +30,13 @@ jobs:
           # GitHub's default shell has no pipefail, so without this a failing pytest piped into tee left the job green.
           set -o pipefail
           export HOME="$(mktemp -d)"
-          python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
+          python3 -m pytest tests test_email_voice_check.py -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
+          summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/pytest.out" | tail -n 1)"
+          if [ -z "$summary" ]; then echo "::error::pytest summary missing"; exit 1; fi
+          echo "Pytest summary: $summary; $skips skipped"
 
   shell:
     runs-on: ubuntu-latest

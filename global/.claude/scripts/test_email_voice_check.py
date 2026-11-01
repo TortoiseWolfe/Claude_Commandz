@@ -47,7 +47,7 @@ GREG_REPLY = """> 1. Is the staging site back up?
 Yes, it came back at 9am and I checked the login.
 > 2. Did the backup run?
 Yes. The last copy is from last night, 2.1 GB.
-No answer needed: the cert renewed on its own.
+The cert renewed on its own, so there is no answer needed.
 Jon"""
 
 
@@ -90,6 +90,10 @@ class PromisesFutureWork(unittest.TestCase):
 
     def test_cant_is_not_an_offer(self):
         self.assertEqual(v.promises_future_work("I can't reach the server.\nJon"), [])
+
+    def test_present_ability_and_conditional_are_not_offers(self):
+        for text in ("I can hear you.", "If I can catch up, that helps."):
+            self.assertFalse(v.promises_future_work(text), text)
 
     def test_greg_reply_passes_strict(self):
         res = v.detect_llm_signals(GREG_REPLY, strict=True, recipient='greg', is_reply=True, html=GOOD_SHAPE)
@@ -789,6 +793,163 @@ class AccessAsk(unittest.TestCase):
     def test_team_text_exempt(self):
         res = v.detect_llm_signals("Please add me to the repo as a collaborator.", strict=True, recipient='team')
         self.assertFalse(any(c == 'access_ask' for c, _ in res['house'] + res['warnings']))
+
+
+class ChatVoice(unittest.TestCase):
+    PASSING_CHAT = (
+        "hey, did the link open? i found it in the notes, the page looked fine on my end.",
+        "yeah, that makes sense, the old page was gone when i checked, so i left the live one alone.",
+        "sorry, just seeing this.. maybe the timing was off, did you mean the other page?",
+        "i saw that too, the first version felt a little long, but the last line gets the point across.",
+        "thanks, that helps, i had the same question when i read it, the second option seems clearer.",
+    )
+
+    def check(self, text, **kwargs):
+        return v.detect_llm_signals(text, strict=True, chat=True, **kwargs)
+
+    def house_categories(self, result):
+        return [category for category, _ in result['house']]
+
+    def test_plain_chat_examples_pass(self):
+        for text in self.PASSING_CHAT:
+            words = len(text.split())
+            self.assertGreaterEqual(words, 10, text)
+            self.assertLessEqual(words, 25, text)
+            self.assertEqual(self.check(text)['verdict'], 'PASS', text)
+
+    def test_chat_length_over_60_fails(self):
+        result = self.check("plain words stay here " * 16)
+        self.assertIn('chat_length', self.house_categories(result))
+        self.assertEqual(result['verdict'], 'FAIL')
+
+    def test_data_dump_threshold_and_urls(self):
+        result = self.check("the note had version 8.4.27 and status_name in it.")
+        self.assertIn('data_dump', self.house_categories(result))
+        self.assertEqual(v.chat_data_dump_matches(
+            "the page is here https://example.test/a#123 and tag 1.2.3"), [])
+        self.assertEqual(v.chat_data_dump_matches(
+            "Tuesday 27 October at 10:04 PM"), [])
+        dated = v.chat_data_dump_matches(
+            "Tuesday 27 October at 10:04 PM, the page was ready with status_name.")
+        self.assertIn('weekday/month date with time', dated[0][1])
+        self.assertNotIn('clock time', dated[0][1])
+
+    def test_ip_or_hash_fails_alone(self):
+        for text in ("the host replied from 192.0.2.1",
+                     "the build id was 1a2b3c4d"):
+            result = self.check(text)
+            self.assertIn('data_dump', self.house_categories(result), text)
+            self.assertEqual(result['verdict'], 'FAIL', text)
+
+    def test_machine_detail_patterns(self):
+        samples = (
+            ("the release was 8.4.27, the note was short", "version"),
+            ("i saw status_name in the note, it looked odd", "identifier"),
+            ("nginx:latest was in the note, nothing else changed", "image or container name"),
+            ("sample-web-1 was in the note, nothing else changed", "container name"),
+            ("the note mentioned sample-project#123, nothing else changed", "ticket reference"),
+            ("the call was at 9:15 PM, then i left", "clock time"),
+        )
+        for text, detail in samples:
+            with self.subTest(detail=detail):
+                result = self.check(text + " and value 8.4.27")
+                self.assertIn('data_dump', self.house_categories(result), text)
+
+    def test_gloss_markers_and_parenthetical_definitions_fail(self):
+        for text in ("the container, meaning one running copy, is down.",
+                     "the page, i.e. the separate copy, is ready.",
+                     "the page is ready (one running copy of the app)."):
+            result = self.check(text)
+            self.assertIn('gloss', self.house_categories(result), text)
+
+    def test_each_chat_structure_rule_fails(self):
+        for text in ("# Update\nit is ready.",
+                     "Name | state\n--- | ---\nsite | ready",
+                     "**it is ready**",
+                     "**x**",
+                     "__y__",
+                     "- it is ready",
+                     "it is ready — all good",
+                     "Status: it is ready",
+                     "2 Oct: the page was up"):
+            with self.subTest(text=text):
+                result = self.check(text)
+                self.assertIn('chat_structure', self.house_categories(result), text)
+
+    def test_short_numbered_choices_are_allowed(self):
+        text = "1. keep this one\n2. use the other one"
+        self.assertEqual(self.check(text)['verdict'], 'PASS')
+
+    def test_more_than_three_numbered_choices_fail(self):
+        text = "1. keep this\n2. use that\n3. wait a bit\n4. try again"
+        self.assertIn('chat_structure', self.house_categories(self.check(text)))
+
+    def test_email_specific_rules_are_disabled_for_chat(self):
+        cases = (
+            ("the container is down.", {}),
+            ("the API is fine.", {}),
+            ("yes, that sounds good.", {"is_reply": True}),
+            ("the note is ready.", {"html": "<p>Heading</p><p>- one</p><p>- two</p>"}),
+            (("plain words stay here " * 18), {}),
+            ("what do you think?", {}),
+        )
+        for text, options in cases:
+            with self.subTest(text=text[:35]):
+                result = self.check(text, **options)
+                self.assertNotIn('jargon', self.house_categories(result))
+                self.assertNotIn('acronym', self.house_categories(result))
+                self.assertNotIn('no_quoting', self.house_categories(result))
+                self.assertNotIn('format_unchecked', self.house_categories(result))
+                self.assertNotIn('format_bullets', self.house_categories(result))
+                self.assertNotIn('format_markdown', self.house_categories(result))
+                self.assertNotIn('length', self.house_categories(result))
+        self.assertIn('chat_length', self.house_categories(self.check("plain words stay here " * 18)))
+
+    def test_sender_we_is_warning_only(self):
+        result = self.check("we left it there, it looks fine.")
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertTrue(any(c == 'sender_we' for c, _ in result['warnings']))
+        self.assertNotIn('sender_we', self.house_categories(result))
+
+    def test_promises_and_open_work_remain_strict(self):
+        for recipient in ('greg', 'team'):
+            for text, category in (("I'll check that after lunch.", "promises_future_work"),
+                                   ("it is still open.", "open_work")):
+                result = self.check(text, recipient=recipient)
+                self.assertIn(category, [c for c, _ in result['matches']], text)
+                self.assertEqual(result['verdict'], 'FAIL', text)
+
+    def test_label_colon_and_narration_are_signals_in_every_profile(self):
+        for chat in (False, True):
+            with self.subTest(chat=chat):
+                label = v.detect_llm_signals(
+                    "What the logs prove: the page is up.", chat=chat, strict=True, recipient='reader')
+                self.assertTrue(any(c == 'label_colon_opener' for c, _ in label['matches']))
+                self.assertEqual(label['verdict'], 'FAIL')
+                narration = v.detect_llm_signals(
+                    "Short version, the page is up.", chat=chat, strict=True, recipient='reader')
+                self.assertTrue(any(c == 'narration' for c, _ in narration['matches']))
+                self.assertEqual(narration['verdict'], 'FAIL')
+
+    def test_all_narration_phrases_are_signals(self):
+        examples = (
+            "one thing you should know is the page is up.",
+            "before anything else, the page is up.",
+            "I ruled out the other page, this one is up.",
+            "what matters is the page is up.",
+            "honest caveats, the page is up.",
+            "short answer, the page is up.",
+            "short version, the page is up.",
+        )
+        for text in examples:
+            with self.subTest(text=text):
+                result = v.detect_llm_signals(text, recipient='reader')
+                self.assertTrue(any(c == 'narration' for c, _ in result['matches']))
+
+    def test_chat_specific_failures_are_advisory_without_strict(self):
+        result = v.detect_llm_signals("it is ready — no extra detail.", chat=True)
+        self.assertFalse(any(c == 'chat_structure' for c, _ in result['house']))
+        self.assertTrue(any(c == 'chat_structure' for c, _ in result['warnings']))
 
 
 if __name__ == '__main__':
