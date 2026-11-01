@@ -1122,6 +1122,15 @@ _ADDRESS = re.compile(r'(?:https?://|www\.)[^\s<>")]+|'
                       re.IGNORECASE)
 
 
+# A ticket named in words ("cd-nextcloud issue 18", "PR 24", "Deck card 16", "#312", "owner/repo#12") can be a
+# link, so outside an anchor it fails like a bare address (Jonathan, 1 Nov 2026, on a Greg draft that passed:
+# "anything that can be a clickable link should be ... cd-nextcloud issue 18 and Chattanooga-Digital issue 312").
+_TICKET_WORDS = re.compile(
+    r'(?i)\b(?:issues?|PRs?|pull\s+requests?|tickets?|(?:deck\s+)?cards?)\s+#?\d+\b'
+    r'|\b[\w.-]+/[\w.-]+#\d+\b'
+    r'|(?<![\w&/#])#\d+\b')
+
+
 def format_matches(html):
     """Old plain-text shape in the HTML of a co-op letter. Returns [(category, message)]."""
     lines, headings = letter_lines(html)
@@ -1149,11 +1158,12 @@ def link_matches(html):
     An address or URL in the letter must sit in an <a href="https://..."> wrapped in <b> or
     <strong>. Returns [(category, message)]. The quoted part never counts."""
     lines, _ = letter_lines(html)
-    bare, plain_anchors, bad_href = [], [], []
+    bare, plain_anchors, bad_href, refs = [], [], [], []
     for ln in lines:
         for text, in_a, _ in ln['segs']:
             if not in_a:
                 bare.extend(_ADDRESS.findall(text))
+                refs.extend(m.group() for m in _TICKET_WORDS.finditer(text))
         for a in ln.get('anchors', []):
             label = (a['text'].strip() or a['href'])[:60]
             if not re.match(r'(?i)^https?://\S+', a['href']):
@@ -1165,6 +1175,10 @@ def link_matches(html):
     if bare:
         found.append(('format_links', f'{len(bare)} address(es) or URL(s) not a link, e.g. "{bare[0][:60]}" '
                       '-> make each a clickable link in bold: <b><a href="https://...">text</a></b>'))
+    if refs:
+        found.append(('format_links', f'{len(refs)} ticket reference(s) not a link, e.g. "{refs[0][:60]}" '
+                      '-> link each one in bold to its page: <b><a href="https://github.com/OWNER/REPO/issues/N">'
+                      'repo issue N</a></b>'))
     if plain_anchors:
         found.append(('format_links', f'{len(plain_anchors)} link(s) not bold, e.g. "{plain_anchors[0]}" '
                       '-> wrap each link in <b> (or <strong>)'))
