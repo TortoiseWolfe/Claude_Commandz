@@ -945,6 +945,52 @@ def question_messages(text):
             for q in reader_questions(text)]
 
 
+# ── ASKS THE READER FOR ACCESS ────────────────────────────────────────────────
+#
+# Standing rule (Jonathan, 31 Oct 2026): never ask a client for access until our own
+# records and a live check prove we lack it. A mail lane drafted a reply asking Gail to
+# add us as a Viewer on her Google Analytics; we had held that access since her 15 Oct
+# call, and the lane had checked only one route. Any sentence that asks the reader for
+# access, an invite, a sign-in or a password is flagged. Under --strict it is a hard FAIL
+# unless the caller passes --access-proof "<the access record and the live check>".
+# Without --strict it only warns. Off for --recipient team (tickets, not client mail).
+ACCESS_ASK_PATTERNS = [
+    r"\badd\s+(?:me|us|jonathan|\S+@\S+)\s+(?:as|to)\b",
+    r"\badd\s+(?:me|us)\b",
+    r"\bas\s+(?:a\s+|an\s+)?(?:viewer|read-only|editor|administrator|admin|collaborator)\b",
+    r"\binvite\s+(?:me|us|jonathan)\b",
+    r"\b(?:give|grant|get|provide)\s+(?:me|us)\b(?:\s+\w+){0,3}\s+(?:access|login|password|credentials)\b",
+    r"\bgrant\b(?:\s+\w+){0,2}\s+access\b",
+    r"\bshare\b(?:\s+\w+){0,2}\s+access\b",
+    r"\b(?:sign-?in|log-?in|login)\s+for\b",
+    r"\badmin(?:istrator)?\s+access\b",
+    r"\bsend\s+(?:me|us)\s+(?:\w+\s+){0,2}(?:password|login|credentials)\b",
+    r"\b(?:I|we)\s+(?:need|want|would\s+like)(?:\s+to\s+get)?\s+(?:\w+\s+)?access\b",
+]
+ACCESS_PROOF_MIN = 20
+
+
+def access_ask_hits(text):
+    """Prose sentences that ask the reader for access. Returns [sentence]."""
+    hits = []
+    for sentence, _ in _prose_sentences(text):
+        if any(re.search(p, sentence, re.IGNORECASE) for p in ACCESS_ASK_PATTERNS):
+            hits.append(sentence.strip()[:120])
+    return hits
+
+
+def access_ask_messages(text):
+    return [f'"{sent}" -> asks the reader for access. Read the client repo\'s access record '
+            f'(Harmonic Egg: docs/access-inventory.md), the call decisions and hub-ask.py, and '
+            f'try the access live. Then rerun with --access-proof "<the record and the live '
+            f'check that show we lack it>", or cut the ask' for sent in access_ask_hits(text)]
+
+
+def access_proof_ok(proof):
+    return proof is not None and len(proof.strip()) >= ACCESS_PROOF_MIN
+
+
+
 # ── CO-OP MAIL FORMAT (HTML) ──────────────────────────────────────────────────
 #
 # Since 17 Oct 2026 mail to Greg and the devops list is a letter first, with real
@@ -1169,7 +1215,8 @@ def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explici
 
 
 def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
-                       recipient_explicit=True, only_they_know=False, html=None):
+                       recipient_explicit=True, only_they_know=False, html=None,
+                       access_proof=None):
     """
     Analyze an email body for AI-ish voice.
 
@@ -1265,6 +1312,16 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
         house = list(house) + acr
     else:
         warnings += acr
+    # Asking the reader for access (31 Oct): hard FAIL under --strict without proof; else a warning.
+    access_note = None
+    if (recipient or '').lower() != 'team':
+        asks = access_ask_messages(text)
+        if asks and strict and access_proof_ok(access_proof):
+            access_note = f'access ask(s) allowed on proof: {access_proof.strip()}'
+        elif asks and strict:
+            house = list(house) + [('access_ask', m) for m in asks]
+        else:
+            warnings += [('access_ask', m) for m in asks]
     # Team text is teaching text (29 Oct): a ticket number is never bare. Hard FAIL.
     if (recipient or '').lower() == 'team':
         house = list(house) + [('bare_ref', m) for m in bare_ref_matches(text)]
@@ -1284,6 +1341,7 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
         'verdict': verdict,
         'strict': strict,
         'skipped_note': skipped_note,
+        'access_note': access_note,
     }
 
 
@@ -1322,6 +1380,14 @@ def main():
             print(f"ERROR: --html file not found: {html_path}")
             sys.exit(2)
         html = hp.read_text()
+    access_proof = None
+    for i, a in enumerate(args):
+        if a == '--access-proof':
+            if i + 1 < len(args) and not args[i + 1].startswith('--'):
+                access_proof = args[i + 1]
+            else:
+                print('ERROR: --access-proof needs text naming the access record and the live check.')
+                sys.exit(2)
     facts_path = None
     for i, a in enumerate(args):
         if a == '--keep-facts-from':
@@ -1338,7 +1404,9 @@ def main():
             sys.exit(2)
         facts_original = fp.read_text()
     skip = {"--strict", "--reply", "--only-they-know", "--recipient", recipient, "--html",
-            "--keep-facts-from"}
+            "--keep-facts-from", "--access-proof"}
+    if access_proof is not None:
+        skip.add(access_proof)
     if html_path is not None:
         skip.add(html_path)
     if facts_path is not None:
@@ -1389,6 +1457,11 @@ def main():
         print("  [open_work] still open / not yet / next up / we plan / on my list. Do the work first, then")
         print("  report it done; never trim the line. [question_to_reader] any prose question to the reader:")
         print("  research and decide it ourselves; add --only-they-know once only the reader can answer.")
+        print("\nAsks the reader for access (every recipient except team):")
+        print("  [access_ask] a sentence asking for access: add <address> as a Viewer, invite me, give me access,")
+        print("  grant/share access, sign-in/login for, admin access, add me to, send me the password. Warns by")
+        print("  default; under --strict a hard FAIL naming each sentence unless --access-proof \"<the access")
+        print("  record and the live check that show we lack it>\" is given (20+ characters).")
         print("\nExit codes: 0 = PASS. Non-zero for FLAG, MAJOR FLAG and FAIL alike,")
         print("so `check && post` is safe. Previously a FLAG exited 0.")
         sys.exit(1)
@@ -1404,7 +1477,8 @@ def main():
 
     result = detect_llm_signals(text, strict=strict, recipient=recipient, is_reply=is_reply,
                                recipient_explicit=recipient_explicit,
-                               only_they_know=only_they_know, html=html)
+                               only_they_know=only_they_know, html=html,
+                               access_proof=access_proof)
     dropped = dropped_facts(facts_original, text) if facts_original is not None else []
     if dropped:
         result['verdict'] = "FAIL"
@@ -1416,6 +1490,8 @@ def main():
     print(f"Verdict: {result['verdict']}")
     if result.get('skipped_note'):
         print(result['skipped_note'])
+    if result.get('access_note'):
+        print(result['access_note'])
     print(f"Contraction ratio: {result['contraction_ratio']}")
     print(f"Mid-sentence dashes: {result['dash_count']}")
     print(f"Body words: {result['body_words']} (recipient: {result['recipient']})")
