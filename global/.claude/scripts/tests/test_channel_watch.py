@@ -308,6 +308,38 @@ class ChannelWatch(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "talk"]])
 
+    def test_room_without_last_message_detects_an_unwatched_read_message(self):
+        self.state.mkdir(parents=True)
+        (self.state / "client-talk-watched.txt").write_text("talk:room_test:5\n")
+        self.write_responses(rooms=[{
+            "token": "room_test", "lastReadMessage": 6, "unreadMessages": 0,
+        }])
+        result = self.run_watch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "talk"]])
+
+    def test_room_without_last_message_stays_quiet_when_markers_are_watched(self):
+        self.state.mkdir(parents=True)
+        (self.state / "client-talk-watched.txt").write_text("talk:room_test:5\ntalk:room_test:6\n")
+        self.write_responses(rooms=[{
+            "token": "room_test", "lastReadMessage": 6, "unreadMessages": 0,
+        }])
+        result = self.run_watch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.pull_args(), [])
+
+    def test_room_without_last_message_detects_unwatched_unread_messages(self):
+        self.state.mkdir(parents=True)
+        (self.state / "client-talk-watched.txt").write_text(
+            "talk:room_test:3\ntalk:room_test:4\n"
+        )
+        self.write_responses(rooms=[{
+            "token": "room_test", "lastReadMessage": 3, "unreadMessages": 2,
+        }])
+        result = self.run_watch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "talk"]])
+
     def test_new_deck_notification_pulls_deck_and_queues_tag_line(self):
         self.state.mkdir(parents=True)
         (self.state / "client-talk-watched.txt").write_text("")
@@ -323,6 +355,29 @@ class ChannelWatch(unittest.TestCase):
         self.assertIn("deck-notif:101", board)
         self.assertIn("deck-notif:101", (self.state / "client-tag.wake").read_text())
         self.assertEqual((self.state / "client-talk-notified.txt").read_text(), "101\n")
+
+    def test_notification_without_id_triggers_its_app_pull(self):
+        self.state.mkdir(parents=True)
+        (self.state / "client-talk-watched.txt").write_text("")
+        self.write_responses(notifications=[{
+            "app": "deck", "subject": "Synthetic card notification",
+        }])
+        result = self.run_watch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "deck"]])
+
+    def test_notification_id_alias_is_deduplicated_and_queued(self):
+        self.state.mkdir(parents=True)
+        (self.state / "client-talk-watched.txt").write_text("")
+        self.write_responses(notifications=[{
+            "notification_id": 103, "app": "deck",
+            "subject": "TurtleWolfe was mentioned on Synthetic card",
+        }])
+        result = self.run_watch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "deck"]])
+        self.assertIn("deck-notif:103", (self.state / "hub-inbox.md").read_text())
+        self.assertEqual((self.state / "client-talk-notified.txt").read_text(), "103\n")
 
     def test_deck_assignment_notification_for_self_queues_tag_line(self):
         self.state.mkdir(parents=True)
