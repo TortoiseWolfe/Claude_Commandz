@@ -17,6 +17,8 @@
 #      private hub/client-senders.tsv (metadata only; IDs in client-mail-seen.txt are dropped), and a Sonnet
 #      pass queues one "Client mail:" or "Client alert:" line per client in hub-inbox.md through
 #      muse_poll_record.sh (which never queues an ID twice). /prep then starts an absorb lane for each.
+#      Co-op Talk/Deck uses channel_watch.py on the same cadence; tags wake the hub, but chat text never
+#      reaches a model unattended.
 #   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note, or a [NCC-74656>NX-01] note from
 #      Claude Code on the second tower (2026-10-10), that nobody has handled?
 #   2. Only if so, a Sonnet pass HANDLES it per the agent-notes skill:
@@ -191,6 +193,15 @@ if [[ -n "$cnew" ]]; then
   env "${CENV[@]}" timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 "${LEANFLAGS[@]}" \
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
+fi
+
+# Co-op chat is metadata-only at the hub boundary: channel_watch.py queues quoted lines, never a model pass.
+TALK_LAST=$STATE/muse-poll-talk-last.stamp
+if (($(age "$TALK_LAST") >= CLIENT_EVERY - 15)); then
+  touch "$TALK_LAST"
+  talk_rc=0
+  timeout 200 python3 "$S/channel_watch.py" >>"$LOG" 2>&1 || talk_rc=$?
+  echo "$(ts) client talk: watcher exit $talk_rc" >>"$LOG"
 fi
 
 # 27-28 Oct on the second machine: Gmail answered "Resource has been exhausted (quota)".
