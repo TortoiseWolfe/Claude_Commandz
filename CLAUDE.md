@@ -65,6 +65,7 @@ cp ~/.claude/scripts/panel_review.py ~/.claude/scripts/panel_gate.py ~/.claude/s
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
 cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh ~/.claude/scripts/he_runner_watch.sh global/.claude/scripts/
 cp ~/.claude/scripts/hub_digest.py ~/.claude/scripts/session_prime_facts.py global/.claude/scripts/
+cp ~/.claude/scripts/session_to_md.py global/.claude/scripts/   # authored here; tests in tests/test_session_to_md.py. Edit the repo copy, then install: cp global/.claude/scripts/session_to_md.py ~/.claude/scripts/
 cp ~/.claude/scripts/hub_inbox_archive.py global/.claude/scripts/   # authored here; tests in tests/test_hub_inbox.py. The board is ~/.claude/state/hub-inbox.md (muse-inbox.md is a symlink until ~28 Oct 2026)
 cp ~/.claude/scripts/hub_lean.py global/.claude/scripts/
 cp ~/.claude/scripts/graphify_hook_portable.py global/.claude/scripts/   # authored here (makes a repo's graphify hooks portable across machines); tests in tests/test_graphify_hook_portable.py
