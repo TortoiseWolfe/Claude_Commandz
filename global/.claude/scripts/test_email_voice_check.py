@@ -290,6 +290,79 @@ class CoopHtmlFormat(unittest.TestCase):
         self.assertFalse([c for c, _ in res['house'] if c == 'format_unchecked'])
 
 
+class RecordClaimsAndFlatAnswers(unittest.TestCase):
+    def check(self, text, html=None, strict=False):
+        return v.detect_llm_signals(text, recipient='reader', strict=strict, html=html)
+
+    def test_record_claim_without_link_warns_and_strict_fails(self):
+        body = '<blockquote class="gmail_quote"><p>Who decided?</p></blockquote><p>I recorded it.</p>'
+        text = 'I recorded it.'
+        warning = self.check(text, html=body)
+        self.assertTrue(any(c == 'record_claim' and 'link' in m for c, m in warning['warnings']))
+        strict = self.check(text, html=body, strict=True)
+        self.assertEqual(strict['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'record_claim' for c, _ in strict['house']))
+
+    def test_record_claim_passes_with_link_in_same_paragraph(self):
+        body = ('<blockquote><p>Who decided?</p></blockquote>'
+                '<p>I recorded it in <a href="https://example.test/notes">the notes</a>.</p>')
+        res = self.check('I recorded it in the notes.', html=body, strict=True)
+        self.assertFalse(any(c == 'record_claim' for c, _ in res['house']))
+
+    def test_record_claim_needs_link_in_same_paragraph_or_list_item(self):
+        separate_paragraphs = ('<p>I logged it.</p>'
+                               '<p><a href="https://example.test/notes">The notes</a></p>')
+        res = self.check('I logged it.', html=separate_paragraphs, strict=True)
+        self.assertTrue(any(c == 'record_claim' for c, _ in res['house']))
+
+        same_list_item = ('<ul><li><p>I logged it.</p>'
+                          '<p><a href="https://example.test/notes">The notes</a></p></li></ul>')
+        res = self.check('I logged it.', html=same_list_item, strict=True)
+        self.assertFalse(any(c == 'record_claim' for c, _ in res['house']))
+
+        same_paragraph = ('<p>I logged it.<br/>'
+                          '<a href="https://example.test/notes">The notes</a></p>')
+        res = self.check('I logged it.', html=same_paragraph, strict=True)
+        self.assertFalse(any(c == 'record_claim' for c, _ in res['house']))
+
+    def test_plain_text_record_claims_warn_with_url_instruction(self):
+        for sentence in ("I've recorded it.", "I noted it.", "I wrote it up.", "It's on the list.",
+                         "I filed it.", "I logged it.", "I tracked it.", "I tracked in the task list.",
+                         "I put the task on a list."):
+            res = self.check(sentence)
+            messages = [m for c, m in res['warnings'] if c == 'record_claim']
+            self.assertTrue(messages and 'add the URL' in messages[0], sentence)
+            strict = self.check(sentence, strict=True)
+            self.assertTrue(any(c == 'record_claim' for c, _ in strict['house']), sentence)
+
+    def test_recorded_call_and_video_are_not_record_claims(self):
+        for text in ("The recorded call and recorded video are in the folder.",
+                     "I recorded a video of the demo."):
+            self.assertFalse(v.record_claim_messages(text), text)
+            self.assertFalse(v.record_claim_messages(text, html='<p>%s</p>' % text), text)
+            self.assertFalse(any(c == 'record_claim' for c, _ in self.check(text, strict=True)['house']), text)
+
+    def test_bare_answer_after_quote_warns_and_strict_fails(self):
+        for answer in ("No.", "Yes.", "Nope.", "Yep."):
+            html = ('<blockquote class="gmail_quote"><p>Is the work ready?</p></blockquote>'
+                    '<p>%s The next step is clear.</p>' % answer)
+            warning = self.check("I checked the work.", html=html)
+            self.assertTrue(any(c == 'flat_answer' for c, _ in warning['warnings']), answer)
+            strict = self.check("I checked the work.", html=html, strict=True)
+            self.assertEqual(strict['verdict'], 'FAIL', answer)
+            self.assertTrue(any(c == 'flat_answer' for c, _ in strict['house']), answer)
+
+    def test_not_a_flat_answer(self):
+        for answer in ("No problem.", "No, it is still being prepared.",
+                       "Yes, the setup is ready.", "Not yet. It is prepared but not running."):
+            html = ('<blockquote><p>Is the work ready?</p></blockquote><p>%s</p>' % answer)
+            res = self.check("I checked the work.", html=html, strict=True)
+            self.assertFalse(any(c == 'flat_answer' for c, _ in res['house']), answer)
+
+    def test_flat_answer_requires_a_preceding_blockquote(self):
+        res = self.check("I checked the work.", html='<p>No.</p>', strict=True)
+        self.assertFalse(any(c == 'flat_answer' for c, _ in res['house']))
+
 
 class ThirdPersonSelf(unittest.TestCase):
     def test_name_in_prose_fails(self):
