@@ -138,4 +138,26 @@ awk -F'\t' -v OFS='\t' '$2=="mcp-row"{NF=13} {print}' "$LANES/index.tsv" >"$TMP/
 lane --dry-run --resume mcp-row
 [ "$LAST_RC" = 0 ] && [ "$(enabled_of)" = '"none"' ] || fail "a 13-column row resumes with no project servers on; rc $LAST_RC, $(enabled_of)"; ok
 
+# Restart: the stored column 14 carries over when --restart reuses the previous folder.
+lane --claude-because "needs Docker" --project-mcp playwright mcp-restart "$WITH" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "start with --project-mcp for restart test failed: $LAST_OUT"; ok
+[ "$(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv")" = playwright ] || fail "original row has playwright in column 14"; ok
+# Same-day restart without --project-mcp keeps the servers.
+lane --restart mcp-restart "$WITH" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "restart without --project-mcp failed: $LAST_OUT"; ok
+[ "$(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)" = playwright ] || fail "restart keeps project-mcp from column 14; got: $(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)"; ok
+# Restart with a new --project-mcp replaces it.
+lane --restart --project-mcp files mcp-restart "$WITH" sonnet "$P"
+[ "$(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)" = files ] || fail "restart with --project-mcp replaces it; got: $(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)"; ok
+# Next-day restart (--restart flag) reuses the folder and keeps the servers.
+OLD_DIR="$LANES/2026-01-01-mcp-restart"
+mkdir -p "$OLD_DIR"
+cp "$LANES/$(date +%F)-mcp-restart/prompt.md" "$OLD_DIR/prompt.md"
+touch "$OLD_DIR/report.md"
+sed -i '$d' "$LANES/index.tsv"
+printf '2026-01-01\tmcp-restart\t%s\tsonnet\tsubscription\t%s\t%s\tsession-old\t-\thigh\toff\t100\t-\tfiles\n' "$WITH" "$OLD_DIR/prompt.md" "$OLD_DIR/report.md" >>"$LANES/index.tsv"
+lane --restart mcp-restart "$WITH" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "next-day --restart failed: $LAST_OUT"; ok
+[ "$(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)" = files ] || fail "next-day --restart keeps project-mcp; got: $(awk -F'\t' '$2=="mcp-restart"{print $14}' "$LANES/index.tsv" | tail -1)"; ok
+
 printf 'ok: %d checks\n' "$checks"
