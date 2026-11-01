@@ -1780,14 +1780,14 @@ agy_default_ok "$name" "$dir" "$model" "$prompt" || exit 1
 # restart header. --restart is the explicit restart of the same lane: it reuses the previous row's folder (when that folder still exists), so
 # prompt.md, handoff.md and report.md stay together, and it keeps the lane's last recycle line (28 Oct 2026: a next-day restart split
 # bandwagon-live across two folders, and a restart reset 120K to 100K so the lane recycled two minutes later).
-prev_row="$(index_row "$name")"; prev_rk=; prev_ad=-
+prev_row="$(index_row "$name")"; prev_rk=; prev_ad=-; prev_pm=-; prev_dir=
 hand="$HOME/.claude/state/lanes/$(date +%F)-$name"
 if [ -n "$prev_row" ]; then
-  prev_rep="$(cut -f7 <<<"$prev_row")"; prev_dir=
+  prev_rep="$(cut -f7 <<<"$prev_row")"
   [ -n "$prev_rep" ] && prev_dir="$(dirname "$prev_rep")"
   if [ "$restart_opt" = 1 ] && [ -n "$prev_dir" ] && [ -d "$prev_dir" ]; then hand="$prev_dir"; fi
-  # The recycle line carries over only when this start lands in the previous row's folder (--restart, or a same-day start).
-  [ "$hand" = "$prev_dir" ] && { prev_rk="$(cut -f12 <<<"$prev_row")"; prev_ad="$(cut -f15 <<<"$prev_row")"; }
+  # The recycle line and project-mcp carry over only when this start lands in the previous row's folder (--restart, or a same-day start).
+  [ "$hand" = "$prev_dir" ] && { prev_rk="$(cut -f12 <<<"$prev_row")"; prev_ad="$(cut -f15 <<<"$prev_row")"; prev_pm="$(cut -f14 <<<"$prev_row")"; }
 fi
 hprompt="$hand/prompt.md"
 report="$hand/report.md"
@@ -1854,6 +1854,14 @@ target="$SESSION:$name"
 # Extra folders: the previous row's (same folder only, like the recycle line) plus any --add-dir given now.
 ad_start="$(ad_merge "${prev_ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"})"
 adsf="$(ad_flags "$ad_start")"
+# Project MCP servers: --project-mcp wins; on a restart (same folder) the previous row's value carries over.
+if [ -n "$project_mcp_opt" ]; then
+  pm_start="$project_mcp_opt"
+elif [ "$hand" = "$prev_dir" ] && [ "${prev_pm:--}" != - ]; then
+  pm_start="$prev_pm"
+else
+  pm_start=-
+fi
 eff="-"; flags=""; conn="-"; rk=""
 # Claude gets a short fixed message naming the prompt file, never the prompt text: the text would sit on claude's command line, and a lane
 # that ran pgrep -f with words from its own prompt killed itself (28 Oct 2026). The hand-off folder is already an --add-dir.
@@ -1862,7 +1870,7 @@ if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).
   rk="${recycle_at_opt:-$(lane_recycle_k "$prev_rk" "$prompt" "$dir" "$conn")}"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "${project_mcp_opt:--}" "$(deny_rules "$hand" write)")"; eff="${eff:--}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm_start" "$(deny_rules "$hand" write)")"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"
@@ -1970,7 +1978,7 @@ if [ "$dry" = 0 ]; then
   else lane_billing=subscription; fi
   lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
-    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" "${project_mcp_opt:--}" "$ad_start")"
+    "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" "$pm_start" "$ad_start")"
 else
   echo "# would append a row to $INDEX"
 fi
