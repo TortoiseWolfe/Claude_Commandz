@@ -12,6 +12,9 @@ from tmpdirs import fresh_dir
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
+sys.path.insert(0, str(SCRIPTS))
+import channel_watch
+
 WATCH = SCRIPTS / "channel_watch.py"
 RECORD = SCRIPTS / "muse_poll_record.sh"
 MUSE_POLL = SCRIPTS / "muse_poll.sh"
@@ -33,7 +36,9 @@ class NC:
             raise RuntimeError("synthetic network failure")
         with open(os.environ["FAKE_RESPONSES"], encoding="utf-8") as source:
             responses = json.load(source)
-        return responses[path]
+        return int(os.environ.get("FAKE_NC_STATUS", "200")), {
+            "Content-Type": "application/json"
+        }, responses[path]
 
 if __name__ == "__main__":
     with open(os.environ["FAKE_PULLS"], "a", encoding="utf-8") as log:
@@ -262,6 +267,39 @@ class ChannelWatch(unittest.TestCase):
         ])
         self.assertEqual(self.pull_args(), [])
 
+    def test_ocs_data_accepts_status_tuple_and_returns_rooms(self):
+        rooms = [{"token": "room_test", "lastMessage": {"id": 7}}]
+        response = (
+            200,
+            {"Content-Type": "application/json"},
+            {"ocs": {"data": {"rooms": rooms}}},
+        )
+        self.assertEqual(channel_watch.ocs_data(response), rooms)
+
+    def test_ocs_data_rejects_non_200_status(self):
+        response = (503, {"Content-Type": "application/json"}, {"ocs": {"data": []}})
+        with self.assertRaisesRegex(ValueError, "HTTP status 503"):
+            channel_watch.ocs_data(response)
+
+    def test_non_200_status_is_reported_before_falling_back(self):
+        result = self.run_watch(FAKE_NC_STATUS=503)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "channel watch: cheap look failed (ValueError: Nextcloud returned HTTP status 503); "
+            "falling back to full pull",
+            result.stderr,
+        )
+        self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "talk,deck"]])
+
+    def test_error_diagnostics_redact_credentials_and_headers(self):
+        error = RuntimeError(
+            "request https://synthetic-user:synthetic-password@example.test "
+            "headers={'Authorization': 'Bearer synthetic-auth'} password=synthetic-password"
+        )
+        message = channel_watch.safe_exception_message(error)
+        for secret in ("synthetic-user", "synthetic-password", "synthetic-auth"):
+            self.assertNotIn(secret, message)
+
     def test_changed_room_pulls_talk_only(self):
         self.state.mkdir(parents=True)
         (self.state / "client-talk-watched.txt").write_text("talk:room_test:5\n")
@@ -311,7 +349,11 @@ class ChannelWatch(unittest.TestCase):
     def test_cheap_look_error_falls_back_to_full_pull(self):
         result = self.run_watch(FAKE_NC_RAISE=1)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cheap look failed; falling back to full pull", result.stderr)
+        self.assertIn(
+            "channel watch: cheap look failed (RuntimeError: synthetic network failure); "
+            "falling back to full pull",
+            result.stderr,
+        )
         self.assertEqual(self.pull_args(), [["--since-days", "3", "--only", "talk,deck"]])
 
     def test_talk_poll_interval_is_1800_seconds(self):
