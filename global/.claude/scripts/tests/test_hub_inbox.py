@@ -76,9 +76,9 @@ class Board(unittest.TestCase):
         self.assertEqual(self.board.read_text(), before)
 
     def test_every_canonical_prefix_is_accepted(self):
-        for p in ("Waiting on Hatch", "Waiting on tower", "Job", "Client mail", "Client alert", "Question", "Hub"):
+        for p in ("Waiting on Hatch", "Waiting on tower", "Job", "Client mail", "Client alert", "Client talk", "Question", "Hub"):
             self.assertEqual(run(["inbox", p + ": x | y | z"], self.st).returncode, 0, p)
-        self.assertEqual(self.board.read_text().count("\n"), BOARD.count("\n") + 7)
+        self.assertEqual(self.board.read_text().count("\n"), BOARD.count("\n") + 8)
 
     def test_done_through_the_old_name_keeps_the_symlink(self):
         r = run(["done", "r-1234567890"], self.st, HUB_INBOX=str(self.link))
@@ -131,6 +131,19 @@ class Board(unittest.TestCase):
     def test_client_mail_dedupes_against_the_board(self):
         r = run(["client-mail", "Client mail", "Example Brewing", "1a2b3c4d5e6f7a8d"], self.st)
         self.assertEqual(r.stdout.strip(), "queued 0")
+
+    def test_client_talk_rejects_bad_ids_and_client_seen_ticks_talk_lines(self):
+        bad = run(["client-talk", "Synthetic co-op", "TAG sender, room: \"hello\"", "not-an-id"], self.st)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("bad id", bad.stderr)
+        ident = "talk:room_test:1142"
+        queued = run(["client-talk", "Synthetic co-op", "TAG greg, Example Ops: \"hello\"", ident], self.st)
+        self.assertEqual(queued.returncode, 0, queued.stderr)
+        self.assertIn(f"| Client talk: Synthetic co-op | TAG greg, Example Ops: \"hello\" | {ident}", self.board.read_text())
+        seen = run(["client-seen", ident], self.st)
+        self.assertEqual(seen.returncode, 0, seen.stderr)
+        self.assertTrue(any(line.startswith("- [x] ") and ident in line for line in self.board.read_text().splitlines()))
+        self.assertIn(ident, (self.st / "client-mail-seen.txt").read_text())
 
 
 class Archive(unittest.TestCase):

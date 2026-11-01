@@ -30,7 +30,7 @@
 #     one was entitled, and the tier was only checked at start. Checked on every poll; a recycle also puts such a lane back on sonnet.
 #   - --check 'cmd' exits 0 (an outside condition, e.g. a VOD now returns 404)
 #   - --max-min minutes pass (default 45): exits with "heartbeat", so the hub reports even when nothing moved. While every watched lane is
-#     idle (no spinner, no dialog, no recycle under way) and no "Client mail:" or "Client alert:" line is open in hub-inbox.md, the heartbeat
+#     idle (no spinner, no dialog, no recycle under way) and no client line is open in hub-inbox.md, the heartbeat
 #     is stretched to LANE_WATCH_IDLE_MAX_MIN (default 120) minutes; a lane that starts working puts it back to --max-min. 31 Oct: the
 #     tower's 45-minute heartbeat woke the hub at 9:15 AM with nothing new while every lane was idle.
 # What does NOT wake the hub (31 Oct 2026, the tower's note "Hub wakes that do nothing"; a wake after the cache has gone cold costs $1.2 to $1.6):
@@ -383,9 +383,9 @@ hub_watcher_check() {
   "${LANE_WATCH_RECORD:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/muse_poll_record.sh}" inbox "Hub: no lane_watch.sh watcher has been running for ${mins} min while ${n} lane(s) are open, so a report, a stuck dialog or a dead lane will not wake the hub. Arm one (lane_watch.sh, in the background). Named once per gap." >/dev/null 2>&1 || true
   timeout 30 python3 "${LANE_WATCH_TRAY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/openclaw_tray.py}" notify "Hub watcher is not running" "${n} lane(s) open, no watcher for ${mins} min" >/dev/null 2>&1 || true
 }
-# A client line open in the hub's inbox ("- [ ] <date> | Client mail: ..." or "Client alert:"): the heartbeat is not stretched while one is.
+# A client line open in the hub's inbox: the heartbeat is not stretched while one is.
 client_line_open() {
-  command grep -qE '^- \[ \] [^|]*\| Client (mail|alert):' "${HUB_INBOX:-$HOME/.claude/state/hub-inbox.md}" 2>/dev/null
+  command grep -qE '^- \[ \] [^|]*\| Client (mail|alert|talk):' "${HUB_INBOX:-$HOME/.claude/state/hub-inbox.md}" 2>/dev/null
 }
 
 # When sourced (by the test script), stop here with the functions defined.
@@ -464,6 +464,9 @@ fi
 ask_wake="$HOME/.claude/state/openclaw-ask.wake"
 ask_stamp() { stat -c %Y "$ask_wake" 2>/dev/null || echo none; }
 ask_seen=$(ask_stamp)
+talk_wake="$HOME/.claude/state/client-tag.wake"
+talk_stamp() { stat -c %Y "$talk_wake" 2>/dev/null || echo none; }
+talk_seen=$(talk_stamp)
 dispatch="${OPENCLAW_DISPATCH:-$HOME/.claude/scripts/openclaw_dispatch.py}"
 batch_quiet=${LANE_WATCH_BATCH_QUIET:-60}; batch_cap=${LANE_WATCH_BATCH_MAX:-180}; batch_poll=${LANE_WATCH_BATCH_POLL:-5}
 wake_age() {
@@ -611,6 +614,10 @@ while :; do
   a=$(ask_stamp)
   if [ "$a" != "$ask_seen" ]; then
     echo "ask: a new 'Jonathan via OpenClaw:' line is in hub-inbox.md ($(head -c 60 "$ask_wake" 2>/dev/null))"; ask_seen=$a; hit=1
+  fi
+  t=$(talk_stamp)
+  if [ "$t" != "$talk_seen" ]; then
+    echo "client talk: a co-op chat message tags TurtleWolfe; read \"Open client lines\" in hub-digest.md"; talk_seen=$t; hit=1
   fi
   if [ -n "$check" ] && bash -c "$check" >/dev/null 2>&1; then echo "check passed: $check"; hit=1; other=1; fi
   if [ $hit = 1 ]; then
