@@ -23,7 +23,7 @@ MOCK
 echo mock >"$H/.claude/scripts/muse_poll.check.prompt"; echo mock >"$H/.claude/scripts/muse_poll.handle.prompt"
 chmod +x "$H/.local/bin/claude" "$H/.claude/scripts/muse_poll_client_check.sh"
 
-run() { : >"$CALLS"; HOME=$H "$@" "$SCRIPT" >/dev/null 2>&1 || true; }
+run() { : >"$CALLS"; HOME=$H MUSE_POLL_LOCK=$TMP/poll.lock "$@" "$SCRIPT" >/dev/null 2>&1 || true; }
 count() { grep -c "^$1" "$CALLS" || true; }
 ok() { [[ "$2" == "$3" ]] && printf 'PASS: %s\n' "$1" || { printf 'FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2; exit 1; }; }
 fresh() {   # ACTIVE a minute old (hot phase); LAST $1 old; CLIENT_LAST $2 old (or absent)
@@ -54,6 +54,22 @@ ok 'client look 11 min ago: runs' 1 "$(count client)"
 fresh '6 minutes' '11 minutes'; run env FAKE_OUT='NEW abc123'
 ok 'a note found: look plus handler' 2 "$(count claude)"
 [[ $(( $(date +%s) - $(stat -c %Y "$ST/muse-active.stamp") )) -lt 30 ]] && echo 'PASS: a found note restarts the hot phase' || { echo 'FAIL: active stamp not touched' >&2; exit 1; }
+
+fresh '6 minutes' '11 minutes'; printf '%s\tabc123\n' "$(date +%s)" >"$ST/muse-hook-relayed.txt"; run env FAKE_OUT='NEW abc123'
+ok 'a note already relayed by the hook skips the poll handler' 1 "$(count claude)"
+rm -f "$ST/muse-hook-relayed.txt"
+
+fresh '6 minutes' '11 minutes'; printf '%s\tdef456\n' "$(date -d '21 minutes ago' +%s)" >"$ST/muse-hook-relayed.txt"; run env FAKE_OUT='NEW def456'
+ok 'an expired hook relay lets the poll handler take over' 2 "$(count claude)"
+rm -f "$ST/muse-hook-relayed.txt"
+
+fresh '6 minutes' '11 minutes'; date +%s >"$ST/muse-hook-fallback.stamp"; run env FAKE_OUT='NEW ghi789'
+ok 'a hook fallback skips the poll handler during its relay window' 1 "$(count claude)"
+rm -f "$ST/muse-hook-fallback.stamp"
+
+fresh '6 minutes' '11 minutes'; date -d '21 minutes ago' +%s >"$ST/muse-hook-fallback.stamp"; run env FAKE_OUT='NEW jkl012'
+ok 'an expired hook fallback lets the poll handler take over' 2 "$(count claude)"
+rm -f "$ST/muse-hook-fallback.stamp"
 
 fresh '6 minutes' '11 minutes'; run env FAKE_OUT='NEW *** a|b'
 ok 'a NEW answer with no usable id: look only, no handler' 1 "$(count claude)"

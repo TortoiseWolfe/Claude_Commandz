@@ -234,6 +234,43 @@ for id in "${raw_ids[@]}"; do
   [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && ids+=("$id")
 done
 
+now_epoch=$(date +%s) || { echo "$(ts) POLL-ERROR could not read current time" >>"$LOG"; exit 1; }
+# A failed hook check asks the hub session to read notes directly. Avoid sending the same
+# notes through the poll handler during that 20-minute fallback window.
+HOOK_FALLBACK="$STATE/muse-hook-fallback.stamp"
+if [[ -f "$HOOK_FALLBACK" ]]; then
+  fallback_stamp=$(cat "$HOOK_FALLBACK") || { echo "$(ts) POLL-ERROR could not read notes hook fallback stamp" >>"$LOG"; exit 1; }
+  if [[ "$fallback_stamp" =~ ^[0-9]{9,12}$ ]] && ((fallback_stamp <= now_epoch && now_epoch - fallback_stamp < 1200)); then
+    echo "$(ts) poll handler skipped: the notes hook is using its manual fallback" >>"$LOG"
+    exit 0
+  fi
+fi
+
+# A notes hook that ran just before this poll already put these IDs in the hub session.
+# Let that session handle them; if they remain unprocessed, a later poll can take over.
+HOOK_RELAYED="$STATE/muse-hook-relayed.txt"
+if [[ -f "$HOOK_RELAYED" ]]; then
+  declare -A hook_relayed_ids=()
+  while IFS=$'\t' read -r stamp id; do
+    [[ "$stamp" =~ ^[0-9]{9,12}$ && "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || continue
+    if ((stamp <= now_epoch && now_epoch - stamp < 1200)); then
+      hook_relayed_ids["$id"]=1
+    fi
+  done <"$HOOK_RELAYED"
+  unrelayed_ids=()
+  for id in "${ids[@]}"; do
+    if [[ -n "${hook_relayed_ids[$id]:-}" ]]; then
+      echo "$(ts) note $id was already relayed by the notes hook; poll handler skipped" >>"$LOG"
+    else
+      unrelayed_ids+=("$id")
+    fi
+  done
+  ids=("${unrelayed_ids[@]}")
+  if ((${#ids[@]} == 0)); then
+    exit 0
+  fi
+fi
+
 # A "NEW" answer with no usable id gives the failure counter nothing to count, so it could keep
 # the hot phase and the handler running every minute forever. Log it and stop here instead.
 if ((${#ids[@]} == 0)); then
