@@ -162,6 +162,29 @@ else
   echo "FAIL empty question queue: rc=$rc out=$out calls=$(cat "$call_count" 2>/dev/null || echo missing)"; failures=$((failures + 1))
 fi
 
+# A fresh client-tag wake files a hub nudge; client talk also prevents stretching the heartbeat.
+talk_home="$TMP/talk-home"; mkdir -p "$talk_home/.claude/state"
+talk_dispatch="$TMP/talk-dispatch.py"
+cat > "$talk_dispatch" <<'PY'
+import os
+from pathlib import Path
+Path(os.environ["TALK_WAKE"]).write_text("2026-11-01T10:00:00-05:00\ntalk:room_test:1142\n")
+print("none")
+PY
+rc=0; out=$(HOME="$talk_home" OPENCLAW_DISPATCH="$talk_dispatch" TALK_WAKE="$talk_home/.claude/state/client-tag.wake" \
+      bash "$SCRIPT" --max-min 0) || rc=$?
+if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q '^client talk: a co-op chat message tags TurtleWolfe; read "Open client lines"'; then
+  echo "ok   a client-tag wake tells the hub to read open client lines"
+else
+  echo "FAIL client-tag wake: rc=$rc out=$out"; failures=$((failures + 1))
+fi
+printf '%s\n' '- [ ] 2026-11-01 10:00 | Client talk: Synthetic co-op | TAG greg, Ops: "hello" | talk:room_test:1142' > "$talk_home/.claude/state/hub-inbox.md"
+if HOME="$talk_home" HUB_INBOX="$talk_home/.claude/state/hub-inbox.md" client_line_open; then
+  echo "ok   an open client-talk line keeps the heartbeat awake"
+else
+  echo "FAIL client-talk line did not keep heartbeat awake"; failures=$((failures + 1))
+fi
+
 # Change 4: a burst of questions wakes the hub once. The wake file is touched by each question; lane_watch holds until it has been
 # quiet, then prints the whole list in one wake.
 burst_home="$TMP/burst"; mkdir -p "$burst_home/.claude/state"
