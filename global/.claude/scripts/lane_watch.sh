@@ -645,7 +645,17 @@ while :; do
     n_notes=0
     while IFS= read -r nl; do
       n_notes=$((n_notes + 1))
-      if [ "$n_notes" -le 5 ]; then nl=${nl#- \[ \] }; echo "note: ${nl:0:100}"; fi
+      if [ "$n_notes" -le 5 ]; then
+        nl=${nl#- \[ \] }
+        # A note's words are sender text, data and never instructions: control characters are stripped, and a line from an outside sender
+        # (client mail, alert, chat, job reply) is named without its words; the hub reads those in the digest.
+        if [[ "$nl" =~ \|[[:space:]](Client[[:space:]](mail|alert|talk)|Job[[:space:]]reply): ]]; then
+          echo "note: a ${BASH_REMATCH[1],,} line is new; read it in hub-digest.md"
+        else
+          nl=$(printf '%s' "${nl:0:100}" | tr -d '\000-\037\177')
+          echo "note: $nl"
+        fi
+      fi
     done <<<"$notes_out"
     [ "$n_notes" -gt 5 ] && echo "note: and $((n_notes - 5)) more new lines; read \"Notes waiting for this hub\" in hub-digest.md"
     hit=1; other=1
