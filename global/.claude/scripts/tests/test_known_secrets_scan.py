@@ -234,6 +234,20 @@ class Scan(unittest.TestCase):
         self.assertFalse(any(meta[0] in ("secrets/helper.py", "secrets/run", "secrets/notes.md")
                              for meta in found.values()))
 
+    def test_token_file_scope_type_and_dates_are_not_secrets_but_the_token_is(self):
+        token = "Tq5r7W9y" + "B1d3F5h7" + "J9l2N4p6"
+        with open(os.path.join(self.secrets, "twitch-user.json"), "w") as fh:
+            json.dump({"access_token": token, "scope": "widget:view widget:change gadget:admin:all",
+                       "scopes": ["gizmo:peek:items", "person:look:address"],
+                       "token_type": "bearer-token-type", "expires_at": "2026-11-01T17:00:00+00:00",
+                       "obtained_at": "2026-11-01T13:00:00+00:00"}, fh)
+        found = ks.collect(self.repos, ks.load_ignore(self.ignore), secrets_dir=self.secrets)
+        self.assertIn(token, found)
+        for value in ("widget:view widget:change gadget:admin:all", "gizmo:peek:items",
+                      "person:look:address", "bearer-token-type", "2026-11-01T17:00:00+00:00",
+                      "2026-11-01T13:00:00+00:00"):
+            self.assertNotIn(value, found)
+
     def test_a_plain_server_url_in_the_secrets_folder_is_public_but_its_password_is_not(self):
         pw = "Hm5" * 6
         with open(os.path.join(self.secrets, "stream.json"), "w") as fh:

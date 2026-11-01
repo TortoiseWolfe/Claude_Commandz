@@ -243,6 +243,17 @@ CODE_SUFFIXES = {".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".
                  ".md", ".rst", ".pyc"}
 
 
+# Fields a token file carries beside the credential that are not credentials: an OAuth scope list
+# ("chat:read chat:edit"), the token type, and the dates it was issued or expires. Matched by field
+# name only, so no value is ever read or printed. Lowercased, dashes and underscores removed.
+NON_CREDENTIAL_FIELDS = {"scope", "scopes", "tokentype", "expiresin", "expiresat", "expiry", "expires",
+                         "obtainedat", "issuedat", "createdat", "updatedat", "refreshedat", "grantedscopes"}
+
+
+def _non_credential_field(name):
+    return re.sub(r"[-_ ]", "", str(name)).lower() in NON_CREDENTIAL_FIELDS
+
+
 def _is_code(path, text):
     return os.path.splitext(path)[1].lower() in CODE_SUFFIXES or text.startswith("#!")
 
@@ -273,6 +284,8 @@ def _secret_file_values(secrets_dir):
             def strings(value, name):
                 if isinstance(value, dict):
                     for child_key, child in value.items():
+                        if _non_credential_field(child_key):
+                            continue
                         yield from strings(child, str(child_key))
                 elif isinstance(value, list):
                     for child in value:
