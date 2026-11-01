@@ -76,9 +76,9 @@ class Board(unittest.TestCase):
         self.assertEqual(self.board.read_text(), before)
 
     def test_every_canonical_prefix_is_accepted(self):
-        for p in ("Waiting on Hatch", "Waiting on tower", "Job", "Client mail", "Client alert", "Client talk", "Question", "Hub"):
+        for p in ("Waiting on Hatch", "Waiting on tower", "Waiting on NX-01", "Waiting on NCC-74656", "Job", "Client mail", "Client alert", "Client talk", "Question", "Hub"):
             self.assertEqual(run(["inbox", p + ": x | y | z"], self.st).returncode, 0, p)
-        self.assertEqual(self.board.read_text().count("\n"), BOARD.count("\n") + 8)
+        self.assertEqual(self.board.read_text().count("\n"), BOARD.count("\n") + 10)
 
     def test_done_through_the_old_name_keeps_the_symlink(self):
         r = run(["done", "r-1234567890"], self.st, HUB_INBOX=str(self.link))
@@ -353,6 +353,34 @@ class DefaultInboxNameTests(unittest.TestCase):
 
     def test_any_other_machine_reads_its_peer_inbox(self):
         self.assertEqual(self._name_for("NCC-74656"), "peer-inbox.md")
+
+class WhichBoard(unittest.TestCase):
+    """`inbox` writes the file this machine's own digest and watcher read: hub-inbox.md on NX-01, peer-inbox.md on any other machine."""
+
+    def _run_in_home(self, machine, line):
+        home = Path(fresh_dir(self))
+        (home / ".config/afa").mkdir(parents=True)
+        if machine is not None:
+            (home / ".config/afa/machine").write_text(machine + "\n")
+        e = {k: v for k, v in os.environ.items() if k not in ("MUSE_STATE", "HUB_INBOX", "MUSE_INBOX")}
+        e["HOME"] = str(home)
+        r = subprocess.run(["bash", REC, "inbox", line], capture_output=True, text=True, env=e, timeout=60)
+        return home / ".claude/state", r
+
+    def test_the_tower_writes_peer_inbox_and_nx01_hub_inbox(self):
+        for machine, name, other in (("NCC-74656", "peer-inbox.md", "hub-inbox.md"), ("NX-01", "hub-inbox.md", "peer-inbox.md"),
+                                     (None, "hub-inbox.md", "peer-inbox.md")):
+            state, r = self._run_in_home(machine, "Waiting on NX-01: run the parity script | reply note | r-123456")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("Waiting on NX-01: run the parity script", (state / name).read_text(), machine)
+            self.assertFalse((state / other).exists(), machine)
+
+    def test_both_machine_owner_prefixes_are_accepted(self):
+        for p in ("Waiting on NX-01", "Waiting on NCC-74656"):
+            state, r = self._run_in_home("NCC-74656", p + ": x | y | r-123456")
+            self.assertEqual(r.returncode, 0, p)
+            self.assertIn(p + ": x", (state / "peer-inbox.md").read_text())
+
 
 
 if __name__ == "__main__":

@@ -348,12 +348,35 @@ def wait_age_days(day, now):
     return (now - d).days
 
 
+NOTE_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+NOTE_LIMIT = 160
+
+
+def note_text(line):
+    """-> (sortable stamp, display text) for one open inbox line: "MM-DD HH:MM title | detail | id", trimmed to NOTE_LIMIT characters
+    and always ending with the note id when the line has one (the tower's poller ends each note line with its Gmail draft id)."""
+    m = re.match(r"- \[ \] (\d{4}-(\d\d-\d\d) (\d\d:\d\d)) \| (.*)$", line)
+    if not m:
+        raw = OPEN_ANY.match(line)
+        return "0000", one_line(raw.group(2) if raw else line, NOTE_LIMIT)
+    full, md, hm, rest = m.groups()
+    parts = [p.strip() for p in rest.split(" | ") if p.strip()]
+    ident = ""
+    if len(parts) >= 3 and NOTE_ID.match(parts[-1]) and re.search(r"[0-9]", parts[-1]):
+        ident = parts.pop()
+    stamp = f"{md} {hm} "
+    room = NOTE_LIMIT - len(stamp) - (len(ident) + 3 if ident else 0)
+    body = one_line(" | ".join(parts), room)
+    return full, stamp + body + (f" | {ident}" if ident else "")
+
+
 def open_inbox(text):
     """-> (groups {name: [(date, title)]}, client [(date, title, detail, ids)]). Only unticked items.
     The last field takes one or more space-separated IDs. An unticked line the pattern cannot read is
     never dropped: it goes into "other" with its raw text."""
     groups = {g: [] for g, _ in GROUPS}
     groups["other"] = []
+    groups["other_notes"] = []  # (stamp, display text) for each line in "other", trimmed to NOTE_LIMIT and ending with the note id
     clients = []
     for line in text.splitlines():
         m = OPEN_LINE.match(line)
@@ -368,6 +391,7 @@ def open_inbox(text):
                         break
                 else:
                     groups["other"].append((day, text))
+                    groups["other_notes"].append(note_text(line))
             continue
         day, title = m.group(2), m.group(3).strip()
         detail = " | ".join(part.strip() for part in (m.group(4), m.group(5)) if part)
@@ -381,6 +405,7 @@ def open_inbox(text):
                 break
         else:
             groups["other"].append((day, title))
+            groups["other_notes"].append(note_text(line))
     return groups, clients
 
 
@@ -695,10 +720,16 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
         sections.append(("Jr Dev", [f"- {one_line(l, 230)}" for l in internship[:4]]))
     if hours:
         sections.append(("Hours", [f"- {one_line(l, 300)}" for l in hours[:3]]))
+    # Notes with no owner prefix (the poller queues a tower note under its own subject): every one is listed, newest first, ahead of the owner
+    # groups so the size cap, which trims the page from its end, takes the oldest lines last. 1 Nov: twelve sat unseen for hours in a group
+    # that listed the oldest 15 only.
+    notes = sorted((n for n in groups["other_notes"] if not n[1].split(" ", 2)[-1].startswith("Job reply:")), key=lambda n: n[0], reverse=True)
+    if notes:
+        sections.append((f"Notes waiting for this hub ({len(notes)}, newest first)", [f"- {t}" for _, t in notes]))
     il = []
     shown = OWNER_SHOWN["NX-01" if machine == "NX-01" else "other"]
-    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "NX-01", "From NX-01", "From Muse", "jobs", "hub", "other"]:
-        items = groups[g]
+    for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "NX-01", "From NX-01", "From Muse", "jobs", "hub"]:
+        items = groups[g][::-1] if g in ("From NX-01", "From Muse") else groups[g]  # the file is oldest first; a note from the other machine is read newest first
         if not items:
             continue
         waits = g in ("Hatch", "the tower", "Jonathan", "NX-01")
