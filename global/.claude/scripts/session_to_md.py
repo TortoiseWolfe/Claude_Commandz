@@ -92,6 +92,15 @@ def timestamp(record):
     value = record.get("timestamp")
     if not value:
         return None
+    numeric = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    if isinstance(value, str) and re.fullmatch(r"-?\d+(?:\.\d+)?", value.strip()):
+        numeric = float(value)
+    if numeric is not None:
+        seconds = numeric / 1000 if abs(numeric) >= 100_000_000_000 else numeric
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
@@ -182,6 +191,8 @@ def tool_result_record(record):
 
 
 def user_prompt(record, include_all):
+    if str(record.get("type", "")).casefold() == "queue-operation":
+        return None
     message = record.get("message")
     if not isinstance(message, dict) or message.get("role") != "user":
         return None
@@ -206,6 +217,20 @@ def user_prompt(record, include_all):
     if not text.strip():
         return None
     return text
+
+
+def queued_prompt(record):
+    if str(record.get("type", "")).casefold() != "queue-operation":
+        return None
+    if str(record.get("operation", "")).casefold() != "enqueue":
+        return None
+    content = record.get("content")
+    if content is None:
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+    text, _ = text_and_attachments(content)
+    text = clean_internal(text)
+    return text if text.strip() else None
 
 
 def fenced(text, language="text"):
@@ -489,10 +514,19 @@ def render_markdown(source, records, with_subagents=False, include_all=False):
     ]
 
     turns = []
+    queued = []
+    pending_queued = {}
     leading_events = []
     current = None
     for record in records:
         kind = str(record.get("type", "")).casefold()
+        if kind == "queue-operation":
+            prompt = queued_prompt(record)
+            if prompt is not None:
+                entry = {"record": record, "prompt": prompt, "matched": False}
+                queued.append(entry)
+                pending_queued.setdefault(prompt, []).append(entry)
+            continue
         if include_all and (
             is_internal_record(record) or has_internal_content(record) or kind == "attachment"
         ):
@@ -503,6 +537,9 @@ def render_markdown(source, records, with_subagents=False, include_all=False):
             continue
         prompt = user_prompt(record, include_all)
         if prompt is not None:
+            matches = pending_queued.get(prompt)
+            if matches:
+                matches.pop(0)["matched"] = True
             current = {"record": record, "prompt": prompt, "events": []}
             turns.append(current)
             continue
@@ -528,6 +565,15 @@ def render_markdown(source, records, with_subagents=False, include_all=False):
                                    with_subagents=with_subagents))
         if turn["events"]:
             out.append("")
+    for entry in queued:
+        if entry["matched"]:
+            continue
+        out.extend([
+            f"## {local_time(timestamp(entry['record']))} — Queued, not sent",
+            "",
+            fenced(entry["prompt"]),
+            "",
+        ])
     return "\n".join(out).rstrip() + "\n"
 
 
