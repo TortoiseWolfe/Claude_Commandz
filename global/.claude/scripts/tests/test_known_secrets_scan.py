@@ -234,6 +234,14 @@ class Scan(unittest.TestCase):
         self.assertFalse(any(meta[0] in ("secrets/helper.py", "secrets/run", "secrets/notes.md")
                              for meta in found.values()))
 
+    def test_a_plain_server_url_in_the_secrets_folder_is_public_but_its_password_is_not(self):
+        pw = "Hm5" * 6
+        with open(os.path.join(self.secrets, "stream.json"), "w") as fh:
+            json.dump({"server": "rtmp://a.ingest.example.com/live2", "backup": "rtmp://user:%s@b.example.com/app" % pw}, fh)
+        found = ks.collect(self.repos, ks.load_ignore(self.ignore), secrets_dir=self.secrets)
+        self.assertNotIn("rtmp://a.ingest.example.com/live2", found)
+        self.assertIn(pw, found)
+
     def test_cli_secrets_directory_override_finds_values_without_printing_them(self):
         value = "Q2w4E6r8" + "T0y1U3i5" + "O7p9A2s4"
         with open(os.path.join(self.secrets, "one-line.key"), "w") as fh:

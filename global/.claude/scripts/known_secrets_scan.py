@@ -226,8 +226,13 @@ def collect(root, ignore, files=None, secrets_dir=None):
                 found.setdefault(s, (rel, key))
     secrets_dir = secrets_dir or os.environ.get("KNOWN_SECRETS_DIR") or os.path.expanduser("~/.config/afa/secrets")
     for path, key, value in _secret_file_values(secrets_dir):
-        if looks_secret(value):
-            found.setdefault(value, ("secrets/" + os.path.basename(path), key))
+        meta = ("secrets/" + os.path.basename(path), key)
+        if URL_SCHEME.match(value):
+            # A streaming server address (rtmp://host/app) is public; only a URL's credential is secret.
+            for s in secret_parts(key, value):
+                found.setdefault(s, meta)
+        elif looks_secret(value):
+            found.setdefault(value, meta)
     return found
 
 
