@@ -7,18 +7,22 @@ Never labels, edits, or deletes anything in Gmail. Never prints a secret or toke
 
 --sweep is the one exception: it deletes fleet-note DRAFTS that are handled (rules below), so the owner's
 Drafts folder holds the owner's own drafts. Dry run by default; --apply deletes. See sweep().
+--publish-read uploads a processed-ID file to the workspace repository's main branch when it changes.
 """
 
 import argparse
+import base64
 import email.utils
 import fcntl
 import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 try:
     import gmail_api
@@ -251,10 +255,11 @@ def check_notes(processed_path, log):
 #   READER is us (inbound): deleted once the ID is in our processed file (or the message wears Label_32) AND the draft is
 #                 over 2 hours old.
 #   READER is anyone else (our own outbound note, or another party's note between Hatch and the tower): deleted only once the
-#                 READER'S ABSORPTION IS PROVEN AND the draft is over 24 hours old. Proof is any one of:
+#                 READER'S ABSORPTION IS PROVEN and the draft is over 24 hours old, except a published read record
+#                 permits deletion after 2 hours. Proof is any one of:
 #                   1. Label_32 on the note;
-#                   2. the draft or message ID in the reader's published read record (READER_RECORDS: the tower publishes
-#                      its read record, draft IDs only, to the private hub repo; this machine reads its checkout);
+#                   2. the draft or message ID in the reader's published read record (READER_RECORDS: read from origin/main
+#                      in the hub checkout, with a local-file fallback);
 #                   3. a later message from the reader on the same topic (a tagged note the reader wrote, or a "Re:");
 #                   4. a later done-note from the reader that names the draft ID.
 #                 Never deleted on age alone. A note with no proof stays and is counted as unabsorbed; the count by pair is
@@ -269,12 +274,14 @@ FLEET_NAMES = {"NX-01", "NCC-74656", "CC", "MUSE"}
 MACHINE_NAMES = {"NX-01": {"NX-01", "CC"}, "NCC-74656": {"NCC-74656"}}
 # A tag name -> the party it belongs to ("CC" is NX-01 on the Hatch channel).
 GROUP = {"NX-01": "NX-01", "CC": "NX-01", "NCC-74656": "NCC-74656", "MUSE": "MUSE"}
-# Published read records, by reader. The tower publishes draft IDs only, after each poll, to the private hub repo; the hub repo
-# checkout on this machine is the copy we read. Hatch (MUSE) keeps no record: its signal is Trash, and a trashed draft is gone.
+# Published read records, by reader. The tower publishes IDs after each poll; this sweep reads origin/main. Hatch (MUSE) keeps
+# no record: its signal is Trash, and a trashed draft is gone.
 READER_RECORDS = {"NCC-74656": os.path.expanduser("~/repos/hub/tower/peer-notes-processed.txt")}
+READER_RECORD_REPO = os.path.expanduser("~/repos")
 STATUS_FILE = os.path.expanduser("~/.claude/state/draft-sweep-status.json")
 INBOUND_MIN_AGE = 2 * 3600
 OUTBOUND_MIN_AGE = 24 * 3600
+READ_RECORD_ID_RE = re.compile(r"^(?:r-?\d+|[0-9a-fA-F]{16})$")
 LABEL_AGENT_NOTES = "Label_31"
 MACHINE_FILE = os.path.expanduser("~/.config/afa/machine")
 SWEEP_DIR = os.path.expanduser("~/.claude/state/draft-sweep")
@@ -344,6 +351,54 @@ def _read_processed(path):
         with open(path, "r", encoding="utf-8") as f:
             ids = {ln.strip() for ln in f if ln.strip()}
     return ids
+
+
+def _record_ids(text):
+    return {ln.strip() for ln in text.splitlines() if ln.strip()}
+
+
+def _git_record_path(path, repo_root):
+    """Return a path relative to the hub checkout, or None if the local path is outside it."""
+    root = os.path.abspath(os.path.expanduser(repo_root))
+    local = os.path.abspath(os.path.expanduser(path))
+    try:
+        if os.path.commonpath((root, local)) != root:
+            return None
+    except ValueError:
+        return None
+    return os.path.relpath(local, root).replace(os.sep, "/")
+
+
+def _run_git(args):
+    return subprocess.run(
+        ["git", "-C", READER_RECORD_REPO, *args],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+    )
+
+
+def _published_records(paths):
+    """Read records from origin/main once fetched, falling back to each local file."""
+    git_paths = {reader: _git_record_path(path, READER_RECORD_REPO) for reader, path in paths.items()}
+    can_read_main = any(git_paths.values())
+    if can_read_main:
+        try:
+            _run_git(["fetch", "-q", "origin", "main"])
+        except (OSError, subprocess.SubprocessError):
+            can_read_main = False
+
+    records, sources = {}, {}
+    for reader, path in paths.items():
+        if can_read_main and git_paths[reader]:
+            try:
+                result = _run_git(["show", f"origin/main:{git_paths[reader]}"])
+                records[reader] = _record_ids(result.stdout.decode("utf-8"))
+                sources[reader] = "origin/main"
+                continue
+            except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+                pass
+        records[reader] = _read_processed(path)
+        sources[reader] = "local" if os.path.isfile(path) else "local (missing)"
+    return records, sources
 
 
 def _msg_meta(m):
@@ -500,8 +555,8 @@ def proof_of_absorption(rec, reader, label, cache, owner, records):
 
 def decide(rec, processed, now, cache, owner, mine=None, records=None):
     """-> (action, category, reason). action: delete | keep | other (not a fleet draft; never touched).
-    A "keep" whose category ends in "[unabsorbed]" is a note over 24 hours old (ours going out, or another party's) whose reader
-    has not been shown to have absorbed it, or an inbound note of ours that we have not handled."""
+    A "keep" whose category ends in "[unabsorbed]" is a note whose reader has not been shown to have absorbed it,
+    or an inbound note of ours that we have not handled."""
     mine = my_names() if mine is None else mine
     records = records or {}
     kind, label = classify(rec["subject"], mine)
@@ -527,12 +582,17 @@ def decide(rec, processed, now, cache, owner, mine=None, records=None):
         if handled:
             return "delete", label, "handled (ID in processed file or Label_32), over 2 hours old"
         return "keep", (label + " [unabsorbed]" if age > OUTBOUND_MIN_AGE else label), "not handled yet"
-    unabsorbed = label + " [unabsorbed]" if age > OUTBOUND_MIN_AGE else label
+    if age <= INBOUND_MIN_AGE:
+        return "keep", label, "under 2 hours old"
+    read_recorded = bool({rec["draft_id"], rec["message_id"]} & records.get(reader, set()))
+    if read_recorded:
+        return "delete", label, f"absorbed (ID in the {reader} published read record), over 2 hours old"
     if age <= OUTBOUND_MIN_AGE:
         return "keep", label, "under 24 hours old"
     proof = proof_of_absorption(rec, reader, label, cache, owner, records)
     if proof:
         return "delete", label, f"{proof}, over 24 hours old"
+    unabsorbed = label + " [unabsorbed]"
     return "keep", unabsorbed, f"absorption not verified (reader {reader}: no Label_32, no published record entry, no reply, no done-note): kept"
 
 
@@ -567,23 +627,21 @@ def _archive(did, mid, rec, sweep_dir, now):
 
 
 def load_records(paths=None):
-    """{reader party: set of IDs} from the readers' published read records. A missing file is an empty record (their notes then
-    need another proof); it never stops the sweep."""
-    out = {}
-    for reader, path in (READER_RECORDS if paths is None else paths).items():
-        out[reader] = _read_processed(path)
-    return out
+    """{reader party: set of IDs}, preferring origin/main and falling back to local files."""
+    return _published_records(READER_RECORDS if paths is None else paths)
 
 
-def write_status(path, now, recs, fleet, records, paths):
+def write_status(path, now, recs, fleet, records, paths, sources=None):
     """draft-sweep-status.json: what the hub digest reads. Fleet notes kept without proof, with their pair and time; no bodies."""
+    sources = sources or {}
     unproven = []
     for r, action, label, reason in fleet:
         if action == "keep" and reason.startswith(("absorption not verified", "not handled yet")):
             p = parties(r["subject"])
             unproven.append({"id": r["draft_id"], "pair": p[0] if p else label, "t": int(r["t"]), "age_h": round((now - r["t"]) / 3600, 1)})
     doc = {"at": int(now), "drafts": len(recs), "fleet": len(fleet), "unproven": unproven,
-           "records": {k: {"path": paths.get(k, ""), "ids": len(v)} for k, v in records.items()}}
+           "records": {k: {"path": paths.get(k, ""), "source": sources.get(k, "unknown"), "ids": len(v)}
+                       for k, v in records.items()}}
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         tmp = path + ".tmp"
@@ -608,7 +666,7 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     recs = [r for r in (_draft_meta(did) for did, _ in _list_all_drafts()) if r]
     cache = {}
     paths = READER_RECORDS if reader_records is None else reader_records
-    records = load_records(paths)
+    records, record_sources = load_records(paths)
     labelled = label_absorbed(recs, processed, mine, apply)
     rows = [(r,) + decide(r, processed, now, cache, owner, mine, records) for r in recs]
     by_tag = {}
@@ -636,7 +694,7 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     mode = "APPLIED" if apply else "DRY RUN"
     unabsorbed = sum(1 for row in fleet if row[1] == "keep" and row[2].endswith("[unabsorbed]"))
     if apply and status_path:
-        write_status(status_path, now, recs, fleet, records, paths)
+        write_status(status_path, now, recs, fleet, records, paths, record_sources)
     print(f"draft sweep ({mode}): {len(recs)} drafts, {len(fleet)} fleet notes, {others} not fleet notes (never touched)", file=out)
     for label in sorted(by_tag):
         print(f"  {label}: {by_tag[label]['delete'] + by_tag[label]['keep']} (delete {by_tag[label]['delete']}, keep {by_tag[label]['keep']})", file=out)
@@ -660,6 +718,65 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
             "labelled": labelled, "unabsorbed_old": unabsorbed}
 
 
+class PublishReadError(Exception):
+    """A safe-to-display error from validating or publishing a tower read record."""
+
+
+def publish_read(processed_file, repo_path):
+    """Publish an IDs-only record to the workspace repository's main branch when it has changed."""
+    parts = repo_path.split("/")
+    if not repo_path or repo_path.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        raise PublishReadError("repo path must be a relative file path")
+    try:
+        with open(processed_file, "rb") as f:
+            content = f.read()
+        text = content.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise PublishReadError(f"cannot read processed file: {e}") from e
+    lines = text.splitlines()
+    for number, line in enumerate(lines, start=1):
+        if not READ_RECORD_ID_RE.fullmatch(line):
+            raise PublishReadError(f"line {number} is not a draft or message ID")
+
+    encoded_path = quote(repo_path, safe="/")
+    endpoint = f"repos/TortoiseWolfe/workspace/contents/{encoded_path}"
+
+    def gh_api(args):
+        try:
+            result = subprocess.run(["gh", "api", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise PublishReadError(f"gh api could not run: {e}") from e
+        if result.returncode:
+            if b"404" in result.stderr or b"404" in result.stdout:
+                return None
+            raise PublishReadError(f"gh api failed (exit {result.returncode})")
+        return result.stdout
+
+    current = gh_api(["-X", "GET", f"{endpoint}?ref=main"])
+    sha = None
+    if current is not None:
+        try:
+            remote = json.loads(current)
+            remote_content = base64.b64decode("".join((remote["content"] or "").split()))
+            sha = remote["sha"]
+        except (KeyError, TypeError, ValueError) as e:
+            raise PublishReadError("gh api returned an invalid existing file record") from e
+        if remote_content == content:
+            return len(lines), False
+
+    request = [
+        "-X", "PUT", endpoint,
+        "-f", f"message=Tower read record: {len(lines)} ids",
+        "-f", f"content={base64.b64encode(content).decode('ascii')}",
+        "-f", "branch=main",
+    ]
+    if sha:
+        request.extend(["-f", f"sha={sha}"])
+    gh_api(request)
+    return len(lines), True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check for new notes from Hatch and the second tower.")
     parser.add_argument("--processed", action="append", default=None,
@@ -670,9 +787,19 @@ def main(argv=None):
                         help="Delete handled fleet-note drafts (dry run unless --apply); prints counts, never note bodies")
     parser.add_argument("--apply", action="store_true", help="With --sweep: really delete")
     parser.add_argument("--reader-record", action="append", default=None, metavar="PARTY=PATH",
-                        help="With --sweep: a reader's published read record (draft IDs, one per line); repeat for several. "
+                        help="With --sweep: a reader's published read record (draft or message IDs, one per line); repeat for several. "
                              "Default: NCC-74656=~/repos/hub/tower/peer-notes-processed.txt")
+    parser.add_argument("--publish-read", nargs=2, metavar=("PROCESSED_FILE", "REPO_PATH"),
+                        help="Publish an IDs-only read record to the workspace repository's main branch")
     args = parser.parse_args(argv)
+    if args.publish_read:
+        try:
+            count, changed = publish_read(*args.publish_read)
+        except PublishReadError as e:
+            print(f"publish-read: {e}", file=sys.stderr)
+            return 1
+        print(f"read record {'published' if changed else 'unchanged'}: {count} ids")
+        return 0
     if not args.processed:
         state = os.path.expanduser("~/.claude/state")
         args.processed = [os.path.join(state, "agent-notes-processed.txt")] + sorted(glob.glob(os.path.join(state, "peer-*processed*.txt")))
