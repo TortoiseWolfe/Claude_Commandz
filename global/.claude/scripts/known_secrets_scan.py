@@ -226,13 +226,30 @@ def collect(root, ignore, files=None, secrets_dir=None):
                 found.setdefault(s, (rel, key))
     secrets_dir = secrets_dir or os.environ.get("KNOWN_SECRETS_DIR") or os.path.expanduser("~/.config/afa/secrets")
     for path, key, value in _secret_file_values(secrets_dir):
-        if looks_secret(value):
-            found.setdefault(value, ("secrets/" + os.path.basename(path), key))
+        meta = ("secrets/" + os.path.basename(path), key)
+        if URL_SCHEME.match(value):
+            # A streaming server address (rtmp://host/app) is public; only a URL's credential is secret.
+            for s in secret_parts(key, value):
+                found.setdefault(s, meta)
+        elif looks_secret(value):
+            found.setdefault(value, meta)
     return found
 
 
+# Source code and notes that live beside the secrets (a helper script, a readme). Their assignments
+# (`data = json.dumps(...)`) are program text, not secret values; reading them as env lines made the
+# push check flag ordinary words (HERE, data, body) in 30 files on the tower (1 Nov 2026).
+CODE_SUFFIXES = {".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rb", ".pl",
+                 ".md", ".rst", ".pyc"}
+
+
+def _is_code(path, text):
+    return os.path.splitext(path)[1].lower() in CODE_SUFFIXES or text.startswith("#!")
+
+
 def _secret_file_values(secrets_dir):
-    """Yield plausible secret strings from the top-level files in the local secrets folder."""
+    """Yield plausible secret strings from the top-level files in the local secrets folder.
+    Only data files count (plain keys, KEY=value files, JSON): source code is skipped."""
     try:
         with os.scandir(secrets_dir) as scan:
             entries = list(scan)
@@ -244,6 +261,8 @@ def _secret_file_values(secrets_dir):
                 continue
             text = _read(entry.path)
         except OSError:
+            continue
+        if _is_code(entry.path, text):
             continue
         key = os.path.basename(entry.name)
         try:
