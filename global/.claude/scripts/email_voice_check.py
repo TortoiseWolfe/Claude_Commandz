@@ -23,6 +23,8 @@ Structural (the AI skeleton that survives word-scrubbing):
 - Em-dash overuse (3+ mid-sentence dashes — the single loudest email tell)
 
 Strict only: offers of future work ("I could set up", "if you want", "plan to").
+Link checks: recorded-work claims need a link nearby, and a reply cannot open with
+a flat yes or no after a quoted question.
 
 Model-eval-specific checks from the source (model-as-"they" pronoun, inverted
 hedging on model-prediction sentences, cross-answer uniformity for graded batches)
@@ -37,6 +39,7 @@ Usage:
 import re
 import statistics
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -945,6 +948,113 @@ def question_messages(text):
             for q in reader_questions(text)]
 
 
+RECORD_CLAIM_PATTERNS = [
+    r"\b(?:I|we|you|they|he|she|it|this|that)(?:['’](?:ve|s|d))?\s+"
+    r"(?:(?:have|has|had|is|are|was|were)\s+)?"
+    r"(?:recorded|noted|filed|logged|tracked|ticketed)\b",
+    r"\b(?:recorded|noted|filed|logged|tracked|ticketed)\s+"
+    r"(?:it|this|that|these|those|as|in|on|to)\b",
+    r"\b(?:wrote|write|written)\s+(?:it|this|that)\s+up\b",
+    r"\b(?:it|this|that)(?:['’]s)?\s+(?:(?:is|was|has been|had been|went|goes)\s+)?on\s+"
+    r"(?:the|my|our|your)\s+(?:to-?do\s+)?list\b",
+    r"\bput\s+(?:it|this|that|(?:the|a|an|my|our|your)\s+\w+)\s+on\s+"
+    r"(?:the|my|our|your|a|an)\s+"
+    r"(?:to-?do\s+)?list\b",
+]
+
+
+def _record_claim_matches(text):
+    matches = sorted((m for pattern in RECORD_CLAIM_PATTERNS
+                      for m in re.finditer(pattern, text, re.IGNORECASE)),
+                     key=lambda m: (m.start(), -(m.end() - m.start())))
+    unique = []
+    for match in matches:
+        if any(match.start() < prior.end() and match.end() > prior.start() for prior in unique):
+            continue
+        following = text[match.end():]
+        if re.match(r"\s+(?:(?:a|an|the)\s+)?(?:recorded\s+)?"
+                    r"(?:call|video|meeting|audio|screen|session|demo|conversation|interview)\b",
+                    following, re.IGNORECASE):
+            continue
+        unique.append(match)
+    return unique
+
+
+def record_claim_messages(text, html=None):
+    """Recorded-work claims without a link in the same paragraph or list item."""
+    if html is None:
+        phrases = [match.group() for sentence, _ in _prose_sentences(text)
+                   for match in _record_claim_matches(sentence)]
+        return [f'"{phrase}" -> add the URL where this is recorded' for phrase in phrases]
+
+    lines, _ = letter_lines(html)
+    grouped = {}
+    for index, line in enumerate(lines):
+        if line.get('li_id') is not None:
+            key = ('li', line['li_id'])
+        elif line.get('paragraph_id') is not None:
+            key = ('p', line['paragraph_id'])
+        else:
+            key = ('line', index)
+        group = grouped.setdefault(key, {'text': [], 'anchors': []})
+        group['text'].append(line['text'])
+        group['anchors'].extend(line.get('anchors', []))
+    messages = []
+    for group in grouped.values():
+        if any(anchor.get('href') for anchor in group['anchors']):
+            continue
+        paragraph = ' '.join(group['text'])
+        for match in _record_claim_matches(paragraph):
+            messages.append(f'"{match.group()}" -> add a link in the same paragraph or list item '
+                            f'where this is recorded ("{paragraph[:80]}")')
+    return messages
+
+
+class _ReplyParagraph(HTMLParser):
+    """Capture the first paragraph after a blockquote in an HTML email."""
+
+    def __init__(self):
+        super().__init__()
+        self.quote_depth = 0
+        self.after_quote = False
+        self.paragraph_depth = 0
+        self.paragraph_found = False
+        self.text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'blockquote':
+            self.quote_depth += 1
+        elif tag == 'p' and self.after_quote and self.quote_depth == 0 \
+                and not self.paragraph_found and self.paragraph_depth == 0:
+            self.paragraph_depth = 1
+            self.paragraph_found = True
+        elif tag == 'p' and self.paragraph_depth:
+            self.paragraph_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag == 'blockquote' and self.quote_depth:
+            self.quote_depth -= 1
+            if self.quote_depth == 0:
+                self.after_quote = True
+        elif tag == 'p' and self.paragraph_depth:
+            self.paragraph_depth -= 1
+
+    def handle_data(self, data):
+        if self.paragraph_depth:
+            self.text.append(data)
+
+
+def flat_answer_message(html):
+    """Warn when the first reply paragraph starts with a bare yes or no."""
+    parser = _ReplyParagraph()
+    parser.feed(html)
+    paragraph = re.sub(r'\s+', ' ', ''.join(parser.text)).strip()
+    if re.match(r'^(?:no|yes|nope|yep)[.!?](?:\s|$)', paragraph, re.IGNORECASE):
+        return (f'"{paragraph[:80]}" -> say how far it got instead of opening with a flat '
+                'yes or no (for example, "Not yet. It is prepared but not running.")')
+    return None
+
+
 # ── ASKS THE READER FOR ACCESS ────────────────────────────────────────────────
 #
 # Standing rule (Jonathan, 31 Oct 2026): never ask a client for access until our own
@@ -1009,8 +1119,6 @@ def access_proof_ok(proof):
 
 FORMAT_RECIPIENTS = {'greg', 'devops'}
 
-from html.parser import HTMLParser
-
 _BLOCK_TAGS = {'p', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
                'br', 'tr', 'table', 'pre', 'section'}
 _HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
@@ -1025,6 +1133,10 @@ class _MailLines(HTMLParser):
         self.lines = []          # dicts: segs [(text, in_a, in_bold)], in_li
         self.cur = []
         self.cur_li = False
+        self.li_stack = []
+        self.next_li_id = 0
+        self.paragraph_stack = []
+        self.next_paragraph_id = 0
         self.cur_anchors = []    # anchors that start on the current line
         self.open_anchor = None
         self.a = self.bold = self.li = self.quote = self.code = 0
@@ -1035,7 +1147,9 @@ class _MailLines(HTMLParser):
         segs = [(re.sub(r'\s+', ' ', t), a, b) for t, a, b in self.cur]
         segs = [x for x in segs if x[0].strip()]
         if segs or self.cur_anchors:
-            self.lines.append({'segs': segs, 'in_li': self.cur_li, 'anchors': self.cur_anchors})
+            self.lines.append({'segs': segs, 'in_li': self.cur_li, 'li_id': self.li_stack[-1]
+                               if self.li_stack else None, 'paragraph_id': self.paragraph_stack[-1]
+                               if self.paragraph_stack else None, 'anchors': self.cur_anchors})
         self.cur, self.cur_li, self.cur_anchors = [], False, []
 
     def handle_starttag(self, tag, attrs):
@@ -1057,6 +1171,11 @@ class _MailLines(HTMLParser):
             self.code += 1          # a value to type (a DNS target), not a page to open
         elif tag == 'li':
             self.li += 1
+            self.next_li_id += 1
+            self.li_stack.append(self.next_li_id)
+        elif tag == 'p':
+            self.next_paragraph_id += 1
+            self.paragraph_stack.append(self.next_paragraph_id)
         elif tag in _HEADING_TAGS and not self.quote:
             self.headings += 1
 
@@ -1076,6 +1195,11 @@ class _MailLines(HTMLParser):
             self.code = max(0, self.code - 1)
         elif tag == 'li':
             self.li = max(0, self.li - 1)
+            if self.li_stack:
+                self.li_stack.pop()
+        elif tag == 'p':
+            if self.paragraph_stack:
+                self.paragraph_stack.pop()
 
     def handle_data(self, data):
         if self.quote or not data.strip():
@@ -1366,6 +1490,17 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     # Team text is teaching text (29 Oct): a ticket number is never bare. Hard FAIL.
     if (recipient or '').lower() == 'team':
         house = list(house) + [('bare_ref', m) for m in bare_ref_matches(text)]
+    record_claims = record_claim_messages(text, html=html)
+    if strict:
+        house = list(house) + [('record_claim', m) for m in record_claims]
+    else:
+        warnings += [('record_claim', m) for m in record_claims]
+    if html is not None:
+        flat_answer = flat_answer_message(html)
+        if flat_answer and strict:
+            house = list(house) + [('flat_answer', flat_answer)]
+        elif flat_answer:
+            warnings.append(('flat_answer', flat_answer))
     if house:
         verdict = "FAIL"
 
@@ -1476,6 +1611,10 @@ def main():
         print("  [format_headings] 2+ topic titles as plain lines with no <h2>   [format_links] (every recipient) an address or URL not a bold <a href=\"https://...\"> link")
         print("  The quoted part ('>' lines, <blockquote>, below 'On ... wrote:') never counts. Without --html a")
         print("  warning says the format was not checked.")
+        print("\nRecorded-work claims (every recipient): [record_claim] add a URL or HTML link beside anything you say")
+        print("  you recorded, noted, wrote up, filed, logged, tracked or put on a list. Warns by default; fails under --strict.")
+        print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
+        print("  Say how far it got instead. Warns by default; fails under --strict.")
         print("\nAcronyms (every recipient): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
         print("  e.g. CSS (Cascading Style Sheets, the code that controls how a page looks), or spelled out first:")
         print("  Cascading Style Sheets (CSS). Warns by default, hard FAIL under --strict. Skipped: URLs, addresses,")
