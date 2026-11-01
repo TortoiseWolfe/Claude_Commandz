@@ -43,6 +43,8 @@ timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "opencla
 build_digest() { timeout 60 python3 "$here/hub_digest.py" "$@" --out "$state/hub-digest.md" || echo "openclaw_status_refresh: hub-digest build failed" >&2; }
 machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || echo unknown)
 if [ "$machine" != NX-01 ]; then
+  # Merged fixes reach this machine unasked, the way NX-01 gets them from its own folder (tower_claude_refresh.sh runs at most hourly).
+  timeout 600 "$here/tower_claude_refresh.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: tower refresh reports a problem (see ~/.claude/state/tower-refresh.log)" >&2
   build_digest
   exit 0
 fi
