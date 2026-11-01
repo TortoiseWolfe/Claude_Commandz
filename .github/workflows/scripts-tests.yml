@@ -34,6 +34,9 @@ jobs:
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
+          summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/pytest.out" | tail -n 1)"
+          if [ -z "$summary" ]; then echo "::error::pytest summary missing"; exit 1; fi
+          echo "Pytest summary: $summary; $skips skipped"
 
   shell:
     runs-on: ubuntu-latest
