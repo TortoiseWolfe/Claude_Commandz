@@ -114,6 +114,7 @@ mode="${night}quiet $((quiet / 60))m, every $((want / 60))m"
 CLIENT_LAST=$STATE/muse-poll-client-last.stamp
 PAYIDS=$STATE/client-payment-ids.txt           # the IDs of this look's payment-kind lines (see the client handler below)
 CLIENT_EVERY=${MUSE_CLIENT_EVERY:-600}         # client mail looks at most every 10 min (it has a 2-day window, so nothing is missed)
+TALK_EVERY=${MUSE_TALK_EVERY:-1800}            # co-op watcher does a two-request cheap look before pulling
 export MUSE_POLL=1                             # our own claude runs don't count as Jonathan typing
 touch "$LAST"
 queue_weekly_transcripts queue
@@ -197,7 +198,7 @@ fi
 
 # Co-op chat is metadata-only at the hub boundary: channel_watch.py queues quoted lines, never a model pass.
 TALK_LAST=$STATE/muse-poll-talk-last.stamp
-if (($(age "$TALK_LAST") >= CLIENT_EVERY - 15)); then
+if (($(age "$TALK_LAST") >= TALK_EVERY - 15)); then
   touch "$TALK_LAST"
   talk_rc=0
   timeout 200 python3 "$S/channel_watch.py" >>"$LOG" 2>&1 || talk_rc=$?
