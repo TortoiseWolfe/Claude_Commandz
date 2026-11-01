@@ -229,6 +229,44 @@ class CoopHtmlFormat(unittest.TestCase):
         cats, _ = fmt_cats(GOOD_SHAPE + QUOTE_TAIL % OLD_QUOTED, recipient='gail')
         self.assertEqual(cats, [])
 
+    def test_ticket_in_words_fails_for_everyone(self):
+        body = '<p>Pat,</p><p>Both are on the list, as cd-nextcloud issue 18 and PR 24.</p><p>Jon</p>'
+        for r in ('greg', 'gail', 'william'):
+            cats, res = fmt_cats(body, recipient=r)
+            self.assertIn('format_links', cats, r)
+            text = ' '.join(m for _, m in res['house'])
+            self.assertIn('2 ticket reference(s)', text, r)
+            self.assertIn('issue 18', text, r)
+        for ref in ('Deck card 16', '#312', 'owner/repo#12', 'pull request 9'):
+            cats, _ = fmt_cats('<p>Pat,</p><p>See %s today.</p><p>Jon</p>' % ref, recipient='gail')
+            self.assertIn('format_links', cats, ref)
+
+    def test_linked_or_quoted_ticket_passes(self):
+        linked = '<p>Pat,</p><p>See <b><a href="https://github.com/o/r/issues/18">cd-nextcloud issue 18</a></b>.</p><p>Jon</p>'
+        self.assertEqual(fmt_cats(linked, recipient='gail')[0], [])
+        quoted = '<p>Pat,</p><blockquote>is issue 18 done?</blockquote><p>Yes, all of it.</p><p>Jon</p>'
+        self.assertEqual(fmt_cats(quoted, recipient='gail')[0], [])
+        for words in ('three issues', 'page 2 of 3', 'it costs $12'):
+            cats, _ = fmt_cats('<p>Pat,</p><p>There are %s left.</p><p>Jon</p>' % words, recipient='gail')
+            self.assertEqual(cats, [], words)
+
+    def test_many_topics_without_headings_fail(self):
+        pairs = ''.join('<blockquote>point %d?</blockquote><p>Answer %d is here.</p>' % (i, i) for i in range(3))
+        cats, res = fmt_cats('<p>Greg,</p>' + pairs + '<p>Jonathan</p>')
+        self.assertIn('format_headings', cats)
+        self.assertIn('<h2>', ' '.join(m for _, m in res['house']))
+        wall = '<p>Greg,</p>' + ''.join('<p>Paragraph %d says a thing.</p>' % i for i in range(8)) + '<p>Jon</p>'
+        self.assertIn('format_headings', fmt_cats(wall)[0])
+        self.assertNotIn('format_headings', fmt_cats('<p>Greg,</p>' + pairs + '<p>Jonathan</p>', recipient='gail')[0])
+
+    def test_many_topics_with_headings_or_list_pass(self):
+        headed = '<p>Greg,</p>' + ''.join('<h2>Topic %d</h2><blockquote>point %d?</blockquote><p>Answer %d.</p>'
+                                          % (i, i, i) for i in range(3)) + '<p>Jonathan</p>'
+        self.assertEqual(fmt_cats(headed)[0], [])
+        short = '<p>Greg,</p><blockquote>one?</blockquote><p>Yes.</p><blockquote>two?</blockquote><p>No.</p><p>Jon</p>'
+        self.assertEqual(fmt_cats(short)[0], [])
+        self.assertEqual(fmt_cats(GOOD_SHAPE + QUOTE_TAIL % ('<blockquote>a</blockquote>' * 4))[0], [])
+
     def test_plain_text_without_html_is_unchanged(self):
         res = v.detect_llm_signals("Pat,\n- a typed bullet\nJon", recipient='gail')
         self.assertFalse([c for c, _ in res['house'] if c.startswith('format_')])
