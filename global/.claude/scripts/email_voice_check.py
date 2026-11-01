@@ -1029,6 +1029,7 @@ class _MailLines(HTMLParser):
         self.open_anchor = None
         self.a = self.bold = self.li = self.quote = self.code = 0
         self.headings = 0
+        self.quote_at = []       # len(self.lines) where each top-level <blockquote> starts
 
     def _flush(self):
         segs = [(re.sub(r'\s+', ' ', t), a, b) for t, a, b in self.cur]
@@ -1041,6 +1042,8 @@ class _MailLines(HTMLParser):
         if tag in _BLOCK_TAGS:
             self._flush()
         if tag == 'blockquote':
+            if not self.quote:
+                self.quote_at.append(len(self.lines))
             self.quote += 1
         elif tag == 'a':
             self.a += 1
@@ -1122,6 +1125,30 @@ _ADDRESS = re.compile(r'(?:https?://|www\.)[^\s<>")]+|'
                       re.IGNORECASE)
 
 
+# A ticket named in words ("cd-nextcloud issue 18", "PR 24", "Deck card 16", "#312", "owner/repo#12") can be a
+# link, so outside an anchor it fails like a bare address (Jonathan, 1 Nov 2026, on a Greg draft that passed:
+# "anything that can be a clickable link should be ... cd-nextcloud issue 18 and Chattanooga-Digital issue 312").
+_TICKET_WORDS = re.compile(
+    r'(?i)\b(?:issues?|PRs?|pull\s+requests?|tickets?|(?:deck\s+)?cards?)\s+#?\d+\b'
+    r'|\b[\w.-]+/[\w.-]+#\d+\b'
+    r'|(?<![\w&/#])#\d+\b')
+
+
+def quoted_topics(html):
+    """How many of his points the letter quotes (top-level <blockquote> or "&gt;" lines), above "On ... wrote:"."""
+    parser = _MailLines()
+    parser.feed(html)
+    parser.close()
+    parser._flush()
+    cut = len(parser.lines)
+    for i, ln in enumerate(parser.lines):
+        if _ON_WROTE.match(''.join(t for t, _, _ in ln['segs']).strip()):
+            cut = i
+            break
+    gt = sum(1 for ln in parser.lines[:cut] if ''.join(t for t, _, _ in ln['segs']).strip().startswith('>'))
+    return sum(1 for q in parser.quote_at if q < cut) + gt
+
+
 def format_matches(html):
     """Old plain-text shape in the HTML of a co-op letter. Returns [(category, message)]."""
     lines, headings = letter_lines(html)
@@ -1140,6 +1167,15 @@ def format_matches(html):
     if len(titles) >= 2 and not headings:
         found.append(('format_headings', f'{len(titles)} topic sections written as plain lines '
                       f'(e.g. "{titles[0][:50]}") and no <h2> -> give each topic a real <h2> heading'))
+    # A many-topic letter with no headings and no list reads as a wall of text (Jonathan, 1 Nov 2026, on a Greg
+    # reply of seven quoted points and nine paragraphs: "it's the lack of formatting"). His quotes are not headings.
+    topics = quoted_topics(html)
+    has_list = any(l['in_li'] for l in lines)
+    if not headings and not has_list and (topics >= 3 or len(lines) >= 8) \
+            and not any(c == 'format_headings' for c, _ in found):
+        found.append(('format_headings', f'{topics} quoted point(s) and {len(lines)} paragraph(s) with no <h2> heading '
+                      'and no list -> give each topic a real <h2> heading (his quote can sit under it), put any '
+                      'list in <ul><li>, keep every link bold'))
     return found
 
 
@@ -1149,11 +1185,12 @@ def link_matches(html):
     An address or URL in the letter must sit in an <a href="https://..."> wrapped in <b> or
     <strong>. Returns [(category, message)]. The quoted part never counts."""
     lines, _ = letter_lines(html)
-    bare, plain_anchors, bad_href = [], [], []
+    bare, plain_anchors, bad_href, refs = [], [], [], []
     for ln in lines:
         for text, in_a, _ in ln['segs']:
             if not in_a:
                 bare.extend(_ADDRESS.findall(text))
+                refs.extend(m.group() for m in _TICKET_WORDS.finditer(text))
         for a in ln.get('anchors', []):
             label = (a['text'].strip() or a['href'])[:60]
             if not re.match(r'(?i)^https?://\S+', a['href']):
@@ -1165,6 +1202,10 @@ def link_matches(html):
     if bare:
         found.append(('format_links', f'{len(bare)} address(es) or URL(s) not a link, e.g. "{bare[0][:60]}" '
                       '-> make each a clickable link in bold: <b><a href="https://...">text</a></b>'))
+    if refs:
+        found.append(('format_links', f'{len(refs)} ticket reference(s) not a link, e.g. "{refs[0][:60]}" '
+                      '-> link each one in bold to its page: <b><a href="https://github.com/OWNER/REPO/issues/N">'
+                      'repo issue N</a></b>'))
     if plain_anchors:
         found.append(('format_links', f'{len(plain_anchors)} link(s) not bold, e.g. "{plain_anchors[0]}" '
                       '-> wrap each link in <b> (or <strong>)'))
