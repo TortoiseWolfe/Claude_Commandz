@@ -142,18 +142,35 @@ def cheap_look(puller_path, watched, notified):
     notifications = ocs_data(client.get(NOTIFICATIONS_PATH))
 
     highest_by_token = {}
+    watched_by_token = {}
     for ident in watched:
         parts = ident.split(":")
         if len(parts) == 3 and parts[0] == "talk" and parts[2].isdecimal():
-            highest_by_token[parts[1]] = max(int(parts[2]), highest_by_token.get(parts[1], 0))
+            message_id = int(parts[2])
+            highest_by_token[parts[1]] = max(message_id, highest_by_token.get(parts[1], 0))
+            watched_by_token.setdefault(parts[1], set()).add(message_id)
 
     changed_room = False
     for room in rooms:
         if not isinstance(room, dict):
             raise ValueError("unexpected room response")
         token = room.get("token")
-        if not isinstance(token, str) or "lastMessage" not in room:
+        if not isinstance(token, str):
             raise ValueError("unexpected room response")
+        if "lastMessage" not in room:
+            try:
+                last_read_id = int(room["lastReadMessage"])
+                unread_count = int(room["unreadMessages"])
+            except (KeyError, TypeError, ValueError):
+                changed_room = True
+                continue
+            known_unread = sum(
+                message_id > last_read_id for message_id in watched_by_token.get(token, set())
+            )
+            if (last_read_id > highest_by_token.get(token, 0)
+                    or unread_count > known_unread):
+                changed_room = True
+            continue
         last_message = room["lastMessage"]
         if last_message is None:
             continue
@@ -169,9 +186,15 @@ def cheap_look(puller_path, watched, notified):
             raise ValueError("unexpected notification response")
         if item.get("app") not in {"spreed", "deck"}:
             continue
-        if item.get("id") is None:
-            raise ValueError("notification has no id")
-        if str(item["id"]) not in notified:
+        notification_id = item.get("id")
+        if notification_id is None:
+            notification_id = item.get("notification_id")
+        if notification_id is None:
+            new_notifications.append(item)
+            continue
+        if str(notification_id) not in notified:
+            if item.get("id") is None:
+                item = {**item, "id": notification_id}
             new_notifications.append(item)
     return changed_room, new_notifications
 
