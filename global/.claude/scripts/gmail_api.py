@@ -35,6 +35,7 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py drafts-list [QUERY]
   gmail_api.py messages-list QUERY [--limit N]   (read-only: MSG id | address | From | Subject | Date | labels | threadId)
   gmail_api.py message-header ID NAME   (read-only: one header's value, empty if absent; no body)
+  gmail_api.py message-text ID [--max-chars N]   (read-only: plain-text body, at most 20000 characters)
 
 Credentials (mode 600, never printed): ~/.config/afa/gmail/client.json (OAuth Desktop client),
 ~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). AFA_GMAIL_ACCOUNT, if set, is the consent screen's login hint.
@@ -637,6 +638,43 @@ def message_header(message_id, name):
     return ""
 
 
+def message_text(message_id, max_chars=20000):
+    """Read-only body text from Gmail's full message payload; prefer text/plain and fall back to stripped HTML."""
+    if max_chars < 1:
+        raise GmailError("--max-chars must be a positive number")
+    message = _api_retry("GET", f"/messages/{message_id}", {"format": "full"})
+    plain, rich = [], []
+
+    def collect(part):
+        mime_type = part.get("mimeType", "").lower()
+        if mime_type.startswith("multipart/"):
+            for child in part.get("parts", []):
+                collect(child)
+            return
+        if mime_type not in ("text/plain", "text/html") or part.get("filename"):
+            return
+        headers = {h.get("name", "").lower(): h.get("value", "") for h in part.get("headers", [])}
+        disposition = next((v for k, v in headers.items() if k == "content-disposition"), "")
+        if disposition.lower().startswith("attachment"):
+            return
+        encoded = part.get("body", {}).get("data", "")
+        if not encoded:
+            return
+        content_type = headers.get("content-type", "")
+        parsed_header = email.message_from_bytes(f"Content-Type: {content_type}\n\n".encode("utf-8"))
+        charset = parsed_header.get_content_charset() or "utf-8"
+        data = b64u_decode(encoded)
+        try:
+            text = data.decode(charset, errors="replace")
+        except LookupError:
+            text = data.decode("utf-8", errors="replace")
+        (plain if mime_type == "text/plain" else rich).append(text)
+
+    collect(message.get("payload", {}))
+    text = "\n".join(plain) if plain else html_to_text("\n".join(rich)) if rich else ""
+    return text[:max_chars]
+
+
 def _read_file(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -664,6 +702,7 @@ def main(argv=None):
     p = sub.add_parser("drafts-list"); p.add_argument("query", nargs="?", default=""); p.add_argument("--limit", type=int, default=25)
     p = sub.add_parser("messages-list"); p.add_argument("query"); p.add_argument("--limit", type=int, default=100)
     p = sub.add_parser("message-header"); p.add_argument("message_id"); p.add_argument("name")
+    p = sub.add_parser("message-text"); p.add_argument("message_id"); p.add_argument("--max-chars", type=int, default=20000)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "auth":
@@ -709,6 +748,8 @@ def main(argv=None):
                 print(line)
         elif a.cmd == "message-header":
             print(message_header(a.message_id, a.name))
+        elif a.cmd == "message-text":
+            print(message_text(a.message_id, a.max_chars), end="")
     except GmailError as e:
         print(f"gmail_api: {e}", file=sys.stderr)
         return 1
