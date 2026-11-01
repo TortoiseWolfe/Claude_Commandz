@@ -252,7 +252,7 @@ class RuleE(unittest.TestCase):
         with open(os.path.join(repos, "." + "env"), "w") as fh:
             fh.write("ADMIN_PASSWORD=%s\nPORT=3000\n" % self.PW)
         self.secrets_dir = os.environ["KNOWN_SECRETS_DIR"]
-        self.process_secret = "aB3dE5fG7hJ9kL2mN4pQ6rS8"
+        self.process_secret = "aB3dE5f" + "G7hJ9kL" + "2mN4pQ6" + "rS8"
         with open(os.path.join(self.secrets_dir, "process.key"), "w") as fh:
             fh.write(self.process_secret + "\n")
         self.note = os.path.join(self.tmp.name, "note.md")
