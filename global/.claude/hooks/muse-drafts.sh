@@ -53,7 +53,7 @@ PENDING=$(count '^- \[ \]')
 HATCH=$(count '^- \[ \] [^|]*| Waiting on Hatch')
 TOWER=$(count '^- \[ \] [^|]*| Waiting on tower')
 JOBS=$(count '^- \[ \] [^|]*| Job:')
-CLIENTS=$(count '^- \[ \] .*| Client \(mail\|alert\):')
+CLIENTS=$(count '^- \[ \] .*| Client \(mail\|alert\|talk\):')
 QUEUED=""
 if [ "${PENDING:-0}" -gt 0 ]; then
   OTHER=$((PENDING - HATCH - TOWER - JOBS - CLIENTS)); [ "$OTHER" -ge 0 ] || OTHER=0
