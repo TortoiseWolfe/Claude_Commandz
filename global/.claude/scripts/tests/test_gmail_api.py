@@ -225,6 +225,37 @@ class NoSend(unittest.TestCase):
                 g.api("POST", p)
 
 
+class MessageText(unittest.TestCase):
+    def part(self, mime_type, text, content_type=None, filename=""):
+        headers = [{"name": "Content-Type", "value": content_type or mime_type}]
+        return {"mimeType": mime_type, "filename": filename, "headers": headers,
+                "body": {"data": g.b64u_encode(text.encode("utf-8"))}}
+
+    def test_reads_plain_text_from_a_mocked_full_message_without_mutating_mail(self):
+        payload = {"mimeType": "multipart/alternative", "parts": [
+            self.part("text/plain", "Plain body"),
+            self.part("text/html", "<p>HTML body</p>"),
+        ]}
+        with mock.patch.object(g, "_api_retry", return_value={"payload": payload}) as request:
+            self.assertEqual(g.message_text("abc123"), "Plain body")
+        request.assert_called_once_with("GET", "/messages/abc123", {"format": "full"})
+
+    def test_strips_html_when_plain_text_is_absent_and_caps_output(self):
+        payload = {"mimeType": "text/html", **self.part("text/html", "<p>Hello <b>there</b></p>")}
+        with mock.patch.object(g, "_api_retry", return_value={"payload": payload}):
+            self.assertEqual(g.message_text("abc123", 5), "Hello")
+            self.assertEqual(g.message_text("abc123"), "Hello there\n")
+
+    def test_skips_attachments_and_rejects_nonpositive_limits(self):
+        payload = {"mimeType": "multipart/mixed", "parts": [
+            self.part("text/plain", "attached text", filename="body.txt"),
+        ]}
+        with mock.patch.object(g, "_api_retry", return_value={"payload": payload}):
+            self.assertEqual(g.message_text("abc123"), "")
+            with self.assertRaisesRegex(g.GmailError, "--max-chars"):
+                g.message_text("abc123", 0)
+
+
 class FakeGmail:
     """Just enough of users.me for the draft commands."""
 

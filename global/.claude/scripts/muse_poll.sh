@@ -125,15 +125,16 @@ cd $HOME/repos || exit 1
 [[ -f "$S/learning_baseline.py" ]] && timeout 150 python3 "$S/learning_baseline.py" observe >/dev/null 2>>"$LOG"
 
 # Mail index (29 Oct 2026): sorts every incoming message into a class (hub/mail-index/README.md), beside the client check below and
-# without a model. Metadata only; it never sends, labels or deletes. New client, client-alert, job and person rows are logged, and new
-# job rows go to the ScoutJob day lane (mail-jobs.md in scout-run-2's folder) with one hub-inbox line. A failure is logged and never
-# stops the poll. Missing script (the hub repo not pulled yet) = skipped.
+# without a model. It reads metadata, then the replies sweep reads each eligible job body once and discards it after plain-rule sorting;
+# no body is logged or stored. It never sends, labels or deletes. New job rows go to the ScoutJob day lane, and ACTION/REVIEW replies
+# get one hub-inbox line. A failure is logged and never stops the poll. Missing script (the hub repo not pulled yet) = skipped.
 MAILIDX=${MAIL_INDEX_PY:-$HOME/repos/hub/scripts/mail_index.py}
 MAILIDX_LAST=$STATE/muse-poll-mail-index-last.stamp
 if [[ -f "$MAILIDX" ]] && (($(age "$MAILIDX_LAST") >= ${MUSE_MAIL_INDEX_EVERY:-600} - 15)); then
   touch "$MAILIDX_LAST"
   mnew=$(timeout 200 python3 -I "$MAILIDX" update 2>>"$LOG") && [[ -n "$mnew" ]] && sed "s/^/$(ts) mail index: /" <<<"$mnew" >>"$LOG"
   timeout 60 python3 -I "$MAILIDX" jobs-queue >>"$LOG" 2>&1
+  timeout 120 python3 -I "$MAILIDX" replies >>"$LOG" 2>&1
 fi
 
 # The three claude calls below run in a lean folder, not in ~/repos (Jonathan, 29 Oct 2026, token study: 229 headless calls in 20 hours
