@@ -589,5 +589,83 @@ class TeamQuotes(unittest.TestCase):
         self.assertEqual(res_none['verdict'], 'FAIL')
 
 
+class AccessAsk(unittest.TestCase):
+    GAIL = ("Could you add jonpohlner@gmail.com as a Viewer in your Google Analytics so I can "
+            "read the traffic numbers?\nJon")
+    PROOF = "docs/access-inventory.md has no Analytics row; headless load of analytics.google.com shows no property"
+
+    def run_cli(self, body, *extra):
+        import subprocess
+        return subprocess.run([sys.executable, str(Path(v.__file__)), '--stdin', *extra],
+                              input=body, capture_output=True, text=True)
+
+    def test_gail_sentence_fails_strict(self):
+        res = v.detect_llm_signals(self.GAIL, strict=True, recipient='gail')
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'access_ask' for c, _ in res['house']))
+
+    def test_failure_names_the_sentence(self):
+        out = self.run_cli(self.GAIL, '--strict', '--recipient', 'gail')
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('[access_ask]', out.stdout)
+        self.assertIn('add jonpohlner@gmail.com as a Viewer', out.stdout)
+
+    def test_proof_passes(self):
+        res = v.detect_llm_signals(self.GAIL, strict=True, recipient='gail', access_proof=self.PROOF)
+        self.assertFalse(any(c == 'access_ask' for c, _ in res['house']))
+        self.assertIn(self.PROOF, res['access_note'])
+
+    def test_cli_proof_flag_passes_the_gate(self):
+        out = self.run_cli(self.GAIL, '--strict', '--recipient', 'gail', '--access-proof', self.PROOF)
+        self.assertNotIn('[access_ask]', out.stdout)
+        self.assertIn('allowed on proof', out.stdout)
+
+    def test_cli_proof_flag_needs_a_value(self):
+        out = self.run_cli(self.GAIL, '--strict', '--access-proof')
+        self.assertEqual(out.returncode, 2)
+
+    def test_one_word_proof_is_not_proof(self):
+        res = v.detect_llm_signals(self.GAIL, strict=True, recipient='gail', access_proof='checked')
+        self.assertTrue(any(c == 'access_ask' for c, _ in res['house']))
+
+    def test_not_strict_only_warns(self):
+        res = v.detect_llm_signals(self.GAIL, strict=False, recipient='gail')
+        self.assertFalse(any(c == 'access_ask' for c, _ in res['house']))
+        self.assertTrue(any(c == 'access_ask' for c, _ in res['warnings']))
+
+    def test_other_asks_flag(self):
+        for sentence in ("Please invite me to the workspace.",
+                         "Can you give me access to the dashboard?",
+                         "Grant access to the Search Console property.",
+                         "Please share access with me.",
+                         "Send me the password for the shop.",
+                         "I need admin access to fix it.",
+                         "Add me to the Slack channel.",
+                         "I need a sign-in for the vendor portal.",
+                         "Could you make Jon an Editor? Add him as an editor."):
+            self.assertTrue(v.access_ask_hits(sentence + "\nJon"), sentence)
+
+    def test_ordinary_sentences_do_not_flag(self):
+        for sentence in ("You can view the report in the dashboard.",
+                         "Sign in at app.harmonicegg.com/pricing to see the new prices.",
+                         "The PDF viewer shows the invoice.",
+                         "I added the new page to the menu.",
+                         "I shared the report with Greg.",
+                         "Your admin page lists every order.",
+                         "Log in to see your orders.",
+                         "I have access to the analytics already."):
+            self.assertEqual(v.access_ask_hits(sentence + "\nJon"), [], sentence)
+
+    def test_quoted_and_code_are_skipped(self):
+        t = '> Could you add me as a Viewer?\nThanks for the note.\nJon'
+        self.assertEqual(v.access_ask_hits(t), [])
+        t = 'You wrote "invite me" in the form and I read it.\nJon'
+        self.assertEqual(v.access_ask_hits(t), [])
+
+    def test_team_text_exempt(self):
+        res = v.detect_llm_signals("Please add me to the repo as a collaborator.", strict=True, recipient='team')
+        self.assertFalse(any(c == 'access_ask' for c, _ in res['house'] + res['warnings']))
+
+
 if __name__ == '__main__':
     unittest.main()
