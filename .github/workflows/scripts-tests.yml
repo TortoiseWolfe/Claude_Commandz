@@ -30,7 +30,7 @@ jobs:
           # GitHub's default shell has no pipefail, so without this a failing pytest piped into tee left the job green.
           set -o pipefail
           export HOME="$(mktemp -d)"
-          python3 -m pytest tests test_email_voice_check.py -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
+          python3 -m pytest tests test_*.py -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
