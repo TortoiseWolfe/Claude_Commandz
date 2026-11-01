@@ -231,8 +231,20 @@ def collect(root, ignore, files=None, secrets_dir=None):
     return found
 
 
+# Source code and notes that live beside the secrets (a helper script, a readme). Their assignments
+# (`data = json.dumps(...)`) are program text, not secret values; reading them as env lines made the
+# push check flag ordinary words (HERE, data, body) in 30 files on the tower (1 Nov 2026).
+CODE_SUFFIXES = {".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rb", ".pl",
+                 ".md", ".rst", ".pyc"}
+
+
+def _is_code(path, text):
+    return os.path.splitext(path)[1].lower() in CODE_SUFFIXES or text.startswith("#!")
+
+
 def _secret_file_values(secrets_dir):
-    """Yield plausible secret strings from the top-level files in the local secrets folder."""
+    """Yield plausible secret strings from the top-level files in the local secrets folder.
+    Only data files count (plain keys, KEY=value files, JSON): source code is skipped."""
     try:
         with os.scandir(secrets_dir) as scan:
             entries = list(scan)
@@ -244,6 +256,8 @@ def _secret_file_values(secrets_dir):
                 continue
             text = _read(entry.path)
         except OSError:
+            continue
+        if _is_code(entry.path, text):
             continue
         key = os.path.basename(entry.name)
         try:

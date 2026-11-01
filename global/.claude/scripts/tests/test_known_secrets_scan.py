@@ -218,6 +218,22 @@ class Scan(unittest.TestCase):
         for value in ("Jonathan", "true"):
             self.assertNotIn(value, found)
 
+    def test_code_files_in_the_secrets_folder_are_not_read_as_secret_lists(self):
+        # A helper script kept beside the keys has assignments that look like env lines.
+        body = "json.dumps(payload, sort_keys=True).encode('utf-8')"
+        for name, text in (("helper.py", "import json\ndata = %s\nHERE = os.path.dirname(os.path.abspath(__file__))\n" % body),
+                           ("run", "#!/bin/sh\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)/lib/other/path\"\n"),
+                           ("notes.md", "TOKEN_NOTE = " + "Zk3" * 10 + "\n")):
+            with open(os.path.join(self.secrets, name), "w") as fh:
+                fh.write(text)
+        real = "R4t6Y8u0" + "I2o4P6a8" + "S0d2F4g6"
+        with open(os.path.join(self.secrets, "real.key"), "w") as fh:
+            fh.write(real + "\n")
+        found = ks.collect(self.repos, ks.load_ignore(self.ignore), secrets_dir=self.secrets)
+        self.assertIn(real, found)
+        self.assertFalse(any(meta[0] in ("secrets/helper.py", "secrets/run", "secrets/notes.md")
+                             for meta in found.values()))
+
     def test_cli_secrets_directory_override_finds_values_without_printing_them(self):
         value = "Q2w4E6r8" + "T0y1U3i5" + "O7p9A2s4"
         with open(os.path.join(self.secrets, "one-line.key"), "w") as fh:
