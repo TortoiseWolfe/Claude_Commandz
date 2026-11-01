@@ -463,6 +463,9 @@ class TestTokenMath(unittest.TestCase):
         self.assertEqual(u.opus_equiv("claude-haiku-4-5-20251001", 100, 50, 20, 5, 1000), 1 * 175 + 0.1 * 1 * 1000)
         self.assertEqual(u.opus_equiv("claude-opus-5", 0, 0, 0, 0, 0), 0)
 
+    def test_limit_units_ignore_cache_reads(self):
+        self.assertEqual(u.limit_units("claude-sonnet-5-5", 100, 50, 20, 5, 1000), 2 * 175)
+
     def test_family_detection(self):
         fam = u.model_family
         self.assertEqual([fam(m) for m in ("claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001",

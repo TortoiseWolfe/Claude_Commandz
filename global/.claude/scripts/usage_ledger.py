@@ -46,7 +46,9 @@ CACHE_WRITE_MULT = {"5m": 1.25, "1h": 2.0}
 # opus-equivalent weights: (input+output+cache_write) * weight, cache reads at CACHE_READ_WEIGHT of that.
 # fable has no stated weight; 8 = 2x opus, tracking its 2x price. Unknown families weigh like opus.
 WEIGHTS = {"opus": 4, "sonnet": 2, "haiku": 1, "fable": 8, "other": 4}
-CACHE_READ_WEIGHT = 0.1
+CACHE_READ_WEIGHT = 0.1          # API-equivalent figures: the API bills cache reads at 0.1 of input
+# The weekly-limit percentage ignores cache reads (see model_quality_report.py); kept in step with it.
+LIMIT_CACHE_READ_WEIGHT = 0.0
 FAMILIES = ("opus", "sonnet", "haiku", "fable", "other")
 
 def default_author_emails():
@@ -629,6 +631,12 @@ def usd_of(model, i, o, w5, w1, r):
 def opus_equiv(model, i, o, w5, w1, r):
     w = WEIGHTS[model_family(model)]
     return w * (i + o + w5 + w1) + CACHE_READ_WEIGHT * w * r
+
+
+def limit_units(model, i, o, w5, w1, r):
+    """Units behind the weekly-limit percentage (cache reads at LIMIT_CACHE_READ_WEIGHT); not for dollars."""
+    w = WEIGHTS[model_family(model)]
+    return w * (i + o + w5 + w1) + LIMIT_CACHE_READ_WEIGHT * w * r
 
 
 def load_tags(conn):
