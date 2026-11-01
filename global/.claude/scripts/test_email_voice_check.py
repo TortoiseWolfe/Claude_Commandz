@@ -348,9 +348,22 @@ class RecordClaimsAndFlatAnswers(unittest.TestCase):
                     '<p>%s The next step is clear.</p>' % answer)
             warning = self.check("I checked the work.", html=html)
             self.assertTrue(any(c == 'flat_answer' for c, _ in warning['warnings']), answer)
+            flat_messages = [m for c, m in warning['warnings'] if c == 'flat_answer']
+            self.assertIn('It\'s prepared but not running: <what proves it>', flat_messages[0])
+            self.assertNotIn('Not yet', flat_messages[0])
             strict = self.check("I checked the work.", html=html, strict=True)
             self.assertEqual(strict['verdict'], 'FAIL', answer)
             self.assertTrue(any(c == 'flat_answer' for c, _ in strict['house']), answer)
+
+    def test_prepared_state_passes_flat_answer_and_open_work(self):
+        answer = "It's prepared but not running: I checked production at 9 AM."
+        html = ('<blockquote class="gmail_quote"><p>Is the work running?</p></blockquote>'
+                '<p>%s</p>' % answer)
+        res = self.check(answer, html=html, strict=True)
+        self.assertFalse(any(c in ('flat_answer', 'open_work') for c, _ in res['matches']),
+                         res['matches'])
+        self.assertFalse(any(c in ('flat_answer', 'open_work') for c, _ in res['house']),
+                         res['house'])
 
     def test_not_a_flat_answer(self):
         for answer in ("No problem.", "No, it is still being prepared.",

@@ -1051,7 +1051,7 @@ def flat_answer_message(html):
     paragraph = re.sub(r'\s+', ' ', ''.join(parser.text)).strip()
     if re.match(r'^(?:no|yes|nope|yep)[.!?](?:\s|$)', paragraph, re.IGNORECASE):
         return (f'"{paragraph[:80]}" -> say how far it got instead of opening with a flat '
-                'yes or no (for example, "Not yet. It is prepared but not running.")')
+                'yes or no (for example, "It\'s prepared but not running: <what proves it>")')
     return None
 
 
@@ -1614,7 +1614,8 @@ def main():
         print("\nRecorded-work claims (every recipient): [record_claim] add a URL or HTML link beside anything you say")
         print("  you recorded, noted, wrote up, filed, logged, tracked or put on a list. Warns by default; fails under --strict.")
         print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
-        print("  Say how far it got instead. Warns by default; fails under --strict.")
+        print("  Say how far it got instead (for example, \"It's prepared but not running: <what proves it>\").")
+        print("  Warns by default; fails under --strict.")
         print("\nAcronyms (every recipient): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
         print("  e.g. CSS (Cascading Style Sheets, the code that controls how a page looks), or spelled out first:")
         print("  Cascading Style Sheets (CSS). Warns by default, hard FAIL under --strict. Skipped: URLs, addresses,")
