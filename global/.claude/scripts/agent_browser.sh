@@ -17,6 +17,9 @@
 #   - Never copy content off a site unless asked.
 set -euo pipefail
 PROFILE="$HOME/.config/afa/browser"
+# Tower (NCC-74656): Chromium libraries unpacked from Debian packages into the home folder (no root there)
+CL="$HOME/band-wagon-tower/chromium-libs/root"
+if [ -d "$CL" ]; then export LD_LIBRARY_PATH="$CL/usr/lib/x86_64-linux-gnu:$CL/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
 
 chrome() {
   local c
