@@ -75,21 +75,49 @@ class SessionToMarkdown(unittest.TestCase):
         self.assertIn("- Branch: `fixture-branch`", rendered)
 
     def test_enqueued_prompt_matching_user_record_is_rendered_once_at_user_time(self):
+        user_record = record("user", "2025-01-02T13:16:00Z", "Same invented prompt")
+        user_record["type"] = "UsEr"
         source = write_jsonl(self.source, [
             queue_operation("enqueue", "2025-01-02T13:14:00Z", "Same invented prompt"),
             queue_operation("dequeue", "2025-01-02T13:15:00Z", "Same invented prompt"),
-            record("user", "2025-01-02T13:16:00Z", "Same invented prompt"),
+            user_record,
+            {
+                "type": "api-request-blob",
+                "message": {"role": "user", "content": "Same invented prompt"},
+            },
+        ])
+        records = session_log.read_records(source)
+        with mock.patch.dict(os.environ, {"TZ": "UTC"}):
+            time.tzset()
+            try:
+                for include_all in (False, True):
+                    with self.subTest(include_all=include_all):
+                        rendered = session_log.render_markdown(
+                            source, records, include_all=include_all,
+                        )
+                        self.assertEqual(rendered.count("Same invented prompt"), 1)
+                        self.assertEqual(rendered.count("— Prompt 1"), 1)
+                        self.assertIn("## 1:16 PM — Prompt 1", rendered)
+                        self.assertNotIn("Queued, not sent", rendered)
+                        self.assertNotIn("unknown — Prompt", rendered)
+            finally:
+                time.tzset()
+
+    def test_user_prompt_without_timestamp_uses_nearest_earlier_time_approximately(self):
+        source = write_jsonl(self.source, [
+            queue_operation("enqueue", "2025-01-02T13:14:00Z", "Approximate invented prompt"),
+            queue_operation("dequeue", "2025-01-02T13:15:00Z", "Approximate invented prompt"),
+            record("user", None, "Approximate invented prompt"),
         ])
         with mock.patch.dict(os.environ, {"TZ": "UTC"}):
             time.tzset()
             try:
-                rendered = session_log.render_markdown(source, session_log.read_records(source))
+                records = session_log.read_records(source)
+                rendered = session_log.render_markdown(source, records)
             finally:
                 time.tzset()
-        self.assertEqual(rendered.count("Same invented prompt"), 1)
-        self.assertEqual(rendered.count("— Prompt 1"), 1)
-        self.assertIn("## 1:16 PM — Prompt 1", rendered)
-        self.assertNotIn("Queued, not sent", rendered)
+        self.assertEqual(rendered.count("Approximate invented prompt"), 1)
+        self.assertIn("## 1:15 PM (approx.) — Prompt 1", rendered)
         self.assertNotIn("unknown — Prompt", rendered)
 
     def test_unmatched_enqueue_is_listed_once_with_its_numeric_timestamp(self):

@@ -69,6 +69,7 @@ def resolve_latest(cwd):
 
 def read_records(path):
     records = []
+    previous_timestamp = None
     try:
         with path.open(encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, 1):
@@ -79,13 +80,21 @@ def read_records(path):
                 except json.JSONDecodeError as exc:
                     raise ExportError(f"invalid JSONL at line {line_number}") from exc
                 if isinstance(record, dict):
-                    records.append((line_number, record))
+                    record_timestamp = timestamp(record)
+                    sort_timestamp = record_timestamp or previous_timestamp
+                    if record_timestamp is not None:
+                        previous_timestamp = record_timestamp
+                    records.append((
+                        sort_timestamp or datetime.min.replace(tzinfo=timezone.utc),
+                        line_number,
+                        record,
+                    ))
     except OSError as exc:
         raise ExportError(f"cannot read transcript ({exc.strerror or type(exc).__name__})") from exc
     except UnicodeDecodeError as exc:
         raise ExportError("transcript is not valid UTF-8") from exc
-    records.sort(key=lambda item: (timestamp(item[1]) or datetime.min.replace(tzinfo=timezone.utc), item[0]))
-    return [record for _, record in records]
+    records.sort(key=lambda item: (item[0], item[1]))
+    return [record for _, _, record in records]
 
 
 def timestamp(record):
@@ -191,7 +200,7 @@ def tool_result_record(record):
 
 
 def user_prompt(record, include_all):
-    if str(record.get("type", "")).casefold() == "queue-operation":
+    if str(record.get("type", "")).casefold() != "user":
         return None
     message = record.get("message")
     if not isinstance(message, dict) or message.get("role") != "user":
@@ -490,6 +499,12 @@ def render_activity(records, source=None, include_all=False, with_subagents=Fals
 
 def render_markdown(source, records, with_subagents=False, include_all=False):
     all_records = records
+    earlier_timestamps = {}
+    previous_timestamp = None
+    for record in all_records:
+        earlier_timestamps[id(record)] = previous_timestamp
+        if (record_timestamp := timestamp(record)) is not None:
+            previous_timestamp = record_timestamp
     if not include_all:
         records = [record for record in records if not is_internal_record(record)]
     metadata = next((record for record in all_records if record.get("sessionId")), {})
@@ -540,7 +555,14 @@ def render_markdown(source, records, with_subagents=False, include_all=False):
             matches = pending_queued.get(prompt)
             if matches:
                 matches.pop(0)["matched"] = True
-            current = {"record": record, "prompt": prompt, "events": []}
+            record_timestamp = timestamp(record)
+            current = {
+                "record": record,
+                "prompt": prompt,
+                "time": record_timestamp or earlier_timestamps[id(record)],
+                "approximate_time": record_timestamp is None,
+                "events": [],
+            }
             turns.append(current)
             continue
         if current is not None and tool_result_record(record):
@@ -559,7 +581,10 @@ def render_markdown(source, records, with_subagents=False, include_all=False):
         out.append("")
 
     for number, turn in enumerate(turns, 1):
-        out.extend([f"## {local_time(timestamp(turn['record']))} — Prompt {number}", "",
+        prompt_time = local_time(turn["time"])
+        if turn["approximate_time"] and turn["time"] is not None:
+            prompt_time += " (approx.)"
+        out.extend([f"## {prompt_time} — Prompt {number}", "",
                     fenced(turn["prompt"]), ""])
         out.extend(render_activity(turn["events"], source=source, include_all=include_all,
                                    with_subagents=with_subagents))
