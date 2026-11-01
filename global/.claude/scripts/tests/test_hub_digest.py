@@ -400,6 +400,26 @@ class Page(unittest.TestCase):
         self.assertIn("Client mail: Example Brewing | absorb lane | 1a2b3c4d5e6f7a8d 1792119952000", page)
         self.assertNotIn("- none", page.split("## Open client lines")[1].split("##")[0])
 
+    def test_employer_replies_are_open_newest_first_and_limited_to_ten(self):
+        lines = [
+            f"- [ ] 2026-10-{day:02d} 10:00 | Job reply: Company {day} | REVIEW | Example subject | reply-{day}"
+            for day in range(1, 13)
+        ]
+        lines.append("- [x] 2026-10-31 10:00 | Job reply: Closed | ACTION | Done | reply-closed")
+        page = self.build(inbox_text="\n".join(lines))
+        section = page.split("## Employer replies (job mail)\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("- Job reply: Company 12", section)
+        self.assertIn("- Job reply: Company 3", section)
+        self.assertNotIn("Company 2", section)
+        self.assertNotIn("reply-closed", section)
+        self.assertIn("- and 2 more", section)
+        self.assertLess(page.index("## Open client lines"), page.index("## Employer replies (job mail)"))
+        self.assertNotIn("Job reply:", page.split("## Open hub-inbox items", 1)[1].split("\n## ", 1)[0])
+
+    def test_employer_replies_section_shows_none_when_empty(self):
+        page = self.build(inbox_text="- [x] 2026-10-31 10:00 | Job reply: Closed | ACTION | Done | reply-closed\n")
+        self.assertIn("## Employer replies (job mail)\n- none", page)
+
     def test_open_receptionist_section_is_first_and_includes_age(self):
         page = self.build(open_questions_text="oc-a1b2c3d4 | 26 min | deferred | Which sample check is current?\n")
         self.assertLess(page.index("## Open receptionist questions (1)"), page.index("## Lanes running"))

@@ -62,6 +62,11 @@ ok 'a NEW answer with no usable id: look only, no handler' 1 "$(count claude)"
 fresh '6 minutes'; run env
 ok 'mail index: update and jobs-queue run on a due poll' 1 "$(count 'mailidx update')"
 ok 'mail index: jobs-queue ran too' 1 "$(count 'mailidx jobs-queue')"
+ok 'mail index: replies sweep ran too' 1 "$(count 'mailidx replies')"
+queue_line=$(grep -n '^mailidx jobs-queue$' "$CALLS" | cut -d: -f1)
+replies_line=$(grep -n '^mailidx replies$' "$CALLS" | cut -d: -f1)
+[[ "$replies_line" -gt "$queue_line" ]] && echo 'PASS: replies sweep follows jobs-queue' || { echo 'FAIL: replies sweep order' >&2; exit 1; }
+ok 'mail index: replies sweep has a 120-second timeout' 1 "$(grep -Fxc '  timeout 120 python3 -I "$MAILIDX" replies >>"$LOG" 2>&1' "$SCRIPT")"
 fresh '6 minutes'; touch -d '2 minutes ago' "$ST/muse-poll-mail-index-last.stamp"; run env
 ok 'mail index looked 2 min ago: skipped' 0 "$(count mailidx)"
 fresh '6 minutes'; touch -d '2 minutes ago' "$ST/muse-poll-mail-index-last.stamp"; run env MUSE_MAIL_INDEX_EVERY=60
