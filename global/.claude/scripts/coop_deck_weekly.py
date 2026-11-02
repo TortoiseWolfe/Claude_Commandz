@@ -14,10 +14,10 @@ reached by import, not copied. Per run, in this order (each ends the run with on
   3. the inbox already holds this date's job or note     -> skip
   4. read-only pull of Talk, Deck and GitHub (digital-clones bin/pull_channels.py, 300 s); a dead Deck pull -> "Hub:" line, exit 1
   5. bin/deck_weekly.py diffs boards 2 and 8 against last week's snapshot and writes reports/deck-weekly-<date>.md (no model, no network)
-  6. nothing changed                                     -> one "Hub: Co-op Deck weekly: no change" inbox line, no lane
+  6. nothing changed and no routine card is open in Active -> one "Hub: Co-op Deck weekly: no change" inbox line, no lane
   7. the week would make a code lane wait                -> queue a Job line naming the digest (the hub starts the lane later), exit 0
   8. lane.sh fails, or no window appears in tmux "lanes" -> queue the same Job line, exit 1
-  9. otherwise                                           -> lane.sh coop-deck-weekly ~/repos/CD sonnet <prompt from coop-deck-weekly-template.md>
+  9. otherwise (changed > 0 or a routine card is open)   -> lane.sh coop-deck-weekly ~/repos/CD sonnet <prompt from coop-deck-weekly-template.md>
 
 Test hooks (rp_weekly's, shared): RP_WEEKLY_STATE, RP_WEEKLY_LANE_SH, RP_WEEKLY_BUDGET, RP_WEEKLY_MACHINE, RP_WEEKLY_SESSION.
 Its own: COOP_DECK_WEEKLY_CLONES (the digital-clones checkout, for a fake one in tests).
@@ -54,6 +54,26 @@ LOG = STATE / "coop-deck-weekly-schedule.log"
 TEMPLATE = LANES / "coop-deck-weekly-template.md"
 START_HOUR = 9  # Eastern
 TUESDAY = 1
+ROUTINE_CARDS = {"173": {"board": 8, "stack": "Active"}}
+
+
+def check_routine_cards(date):
+    """-> (open_routine_ids, log_note)"""
+    snapshot_path = CLONES / "state/deck-weekly" / ("%s.json" % date)
+    if not snapshot_path.exists():
+        return [], "snapshot missing"
+    try:
+        data = json.loads(snapshot_path.read_text())
+        cards = data.get("cards", {})
+        found = []
+        for cid, info in ROUTINE_CARDS.items():
+            card = cards.get(cid)
+            if card and card.get("board") == info["board"] and \
+               card.get("lane") == info["stack"] and card.get("state") == "OPEN":
+                found.append(cid)
+        return found, ""
+    except Exception as e:
+        return [], "snapshot unreadable: %s" % e
 
 
 def job_id(date):
@@ -145,20 +165,27 @@ def run(dry, force, date_arg):
     cmd = [rp.LANE_SH] + [a for rule in DENY for a in ("--deny", rule)] + [name, str(REPO), MODEL, str(prompt)]
     report = CLONES / "reports" / ("deck-weekly-%s.md" % date)
 
+    open_routine, note = check_routine_cards(date)
+    routine_desc = ("routine card %s open" % ", ".join(open_routine)) if open_routine else "no routine card open"
+    if note:
+        routine_desc += " (%s)" % note
+
     if dry:
         print("[dry-run] guards passed: NX-01, %s%s, no lane or inbox line for %s" % (
             date, " (forced)" if force else " is a Tuesday", date))
         print("[dry-run] would pull: %s (cwd %s, 300 s limit)" % (" ".join(pull_cmd()), CLONES))
         print("[dry-run] would diff: %s" % " ".join(diff_cmd(date_arg)))
         print("[dry-run] digest would be at %s" % report)
-        print("[dry-run] no change: would queue one \"Hub: %s: no change\" line; no lane" % PHRASE)
+        print("[dry-run] snapshot: %s" % routine_desc)
+        print("[dry-run] no change and no routine card: would queue one \"Hub: %s: no change\" line; no lane" % PHRASE)
         if reason:
-            print("[dry-run] changes + week full (%s): would queue the Job line instead of a lane" % reason)
+            print("[dry-run] (changes or routine card) + week full (%s): would queue the Job line instead of a lane" % reason)
         else:
-            print("[dry-run] changes: would render %s into %s" % (TEMPLATE, prompt))
-            print("[dry-run] changes: would run: " + " ".join(cmd))
-        say("decide | budget %s; nothing pulled or started" % (
-            reason or "allows a code lane (phase %d)" % dispatch.week_phase(now, b.get("reset"))[0]), dry, now)
+            print("[dry-run] changes or routine card: would render %s into %s" % (TEMPLATE, prompt))
+            print("[dry-run] changes or routine card: would run: " + " ".join(cmd))
+        say("decide | budget %s; %s; nothing pulled or started" % (
+            reason or "allows a code lane (phase %d)" % dispatch.week_phase(now, b.get("reset"))[0],
+            routine_desc), dry, now)
         return 0
 
     err = pull()
@@ -166,18 +193,19 @@ def run(dry, force, date_arg):
         result, err = digest(date_arg)
     if err:
         ok = rp.queue(date, err, dry, now, line=hub_line(date, "%s failed: %s" % (PHRASE, rp.outside(err))))
-        say("fail | %s; the Hub line %s" % (err.replace("\n", " "), "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
+        say("fail | %s; %s; the Hub line %s" % (err.replace("\n", " "), routine_desc, "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
         return 1
 
-    if result["changed"] == 0:
-        ok = rp.queue(date, "", dry, now, line=hub_line(date, "%s: no change (%d open cards of his on boards 2 and 8)" % (PHRASE, result["open_mine"])))
-        say("no change | %d open cards of his; digest %s; the Hub line %s" % (
-            result["open_mine"], result["report"], "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
+    if result["changed"] == 0 and not open_routine:
+        ok = rp.queue(date, "", dry, now, line=hub_line(date, "%s: no change; %s (%d open cards of his)" % (PHRASE, routine_desc, result["open_mine"])))
+        say("no change | %d open cards of his; %s; digest %s; the Hub line %s" % (
+            result["open_mine"], routine_desc, result["report"], "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
         return 0 if ok else 2
 
+    log_reason = ("%s; %d changes" % (routine_desc, result["changed"])) if open_routine else ("%d changes" % result["changed"])
     if reason:
         ok = rp.queue(date, "", dry, now, line=job_line(date, result["report"], reason))
-        say("queue | %s; the Job line %s" % (reason, "is in hub-inbox.md for the hub" if ok else "COULD NOT BE WRITTEN"), dry, now)
+        say("queue | %s; %s; the Job line %s" % (reason, log_reason, "is in hub-inbox.md for the hub" if ok else "COULD NOT BE WRITTEN"), dry, now)
         return 0 if ok else 2
 
     try:
@@ -192,10 +220,10 @@ def run(dry, force, date_arg):
     except (OSError, subprocess.TimeoutExpired) as e:
         failure = "could not start lane.sh: %s" % e
     if failure is None:
-        say("start | lane %s started in CD on %s; %d changes, digest %s" % (name, MODEL, result["changed"], result["report"]), dry, now)
+        say("start | lane %s started in CD on %s; %s; digest %s" % (name, MODEL, log_reason, result["report"]), dry, now)
         return 0
     ok = rp.queue(date, "", dry, now, line=job_line(date, result["report"], "starting the lane failed (%s)" % rp.outside(failure, 120)))
-    say("fail | %s; the Job line %s" % (failure.replace("\n", " "), "is in hub-inbox.md for the hub" if ok else "COULD NOT BE WRITTEN"), dry, now)
+    say("fail | %s; %s; the Job line %s" % (failure.replace("\n", " "), log_reason, "is in hub-inbox.md for the hub" if ok else "COULD NOT BE WRITTEN"), dry, now)
     return 1
 
 

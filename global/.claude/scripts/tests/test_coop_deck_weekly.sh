@@ -22,6 +22,10 @@ export RP_WEEKLY_MACHINE=NX-01 RP_WEEKLY_SESSION="$sess"
 OKB='{"projected":50,"used":50,"reset":null}'
 FULL='{"projected":148,"used":50,"reset":null}'
 run() { RP_WEEKLY_STATE="$S" COOP_DECK_WEEKLY_CLONES="$C" "$@"; }
+snapshot() { # clones_dir date board stack state
+  mkdir -p "$1/state/deck-weekly"
+  echo "{\"date\": \"$2\", \"cards\": {\"173\": {\"board\": $3, \"lane\": \"$4\", \"state\": \"$5\"}}}" > "$1/state/deck-weekly/$2.json"
+}
 TUE=2026-10-27
 
 cat >"$root/pull-ok.py" <<'X'
@@ -85,6 +89,45 @@ printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$(printf "Z %%.0s" $(seq 1 200))" 
 run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-long.sh" "$cdw" --date $TUE >/dev/null 2>&1
 l=$(tail -1 "$S/hub-inbox.md" | sed "s/^- \[ \] [0-9-]* [0-9:]* | //")
 check "a long failure: line <= 400, quotes balanced, id kept" '[ ${#l} -le 400 ] && [ $(( $(echo "$l" | tr -cd "\"" | wc -c) % 2 )) = 0 ] && echo "$l" | grep -q "\.\.\.\" | coop-deck-weekly-2026-10-27$"'
+
+# 5. changed 0, card 173 OPEN in Active on board 8: the lane starts.
+fresh 5
+snapshot "$C" $TUE 8 "Active" "OPEN"
+cat >"$root/diff-none.py" <<'X'
+print('RESULT {"changed": 0, "open_mine": 5, "report": "/x/deck-weekly-2026-10-27.md", "counts": {"new": 0}}')
+X
+cp "$root/diff-none.py" "$C/bin/deck_weekly.py"
+run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-ok.sh" "$cdw" --date $TUE >/dev/null 2>&1; rc=$?
+check "changed 0 + routine card: lane started, exit 0" '[ $rc = 0 ] && grep -q "| start | .* routine card 173 open; 0 changes" "$S/coop-deck-weekly-schedule.log"'
+
+# 6. changed 0, card 173 moved to Finished: no lane
+fresh 6
+snapshot "$C" $TUE 8 "Finished" "OPEN"
+cp "$root/diff-none.py" "$C/bin/deck_weekly.py"
+run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-ok.sh" "$cdw" --date $TUE >/dev/null 2>&1; rc=$?
+check "changed 0 + routine card Finished: no lane, exit 0" '[ $rc = 0 ] && grep -q "no routine card open" "$S/coop-deck-weekly-schedule.log" && ! grep -q "| start |" "$S/coop-deck-weekly-schedule.log"'
+
+# 7. changed 0, no snapshot file: no lane, log missing snapshot
+fresh 7
+# no snapshot() call
+cp "$root/diff-none.py" "$C/bin/deck_weekly.py"
+run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-ok.sh" "$cdw" --date $TUE >/dev/null 2>&1; rc=$?
+check "changed 0 + no snapshot: no lane, exit 0, logged as missing" '[ $rc = 0 ] && grep -q "no routine card open (snapshot missing)" "$S/coop-deck-weekly-schedule.log"'
+
+# 8. changed 2 and card 173 open: the lane starts once
+fresh 8
+snapshot "$C" $TUE 8 "Active" "OPEN"
+cp "$root/diff-changed.py" "$C/bin/deck_weekly.py"
+run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-ok.sh" "$cdw" --date $TUE >/dev/null 2>&1; rc=$?
+check "changed 2 + routine card: lane started once, exit 0" '[ $rc = 0 ] && grep -q "| start | .* routine card 173 open; 2 changes" "$S/coop-deck-weekly-schedule.log" && [ "$(grep -c "| start |" "$S/coop-deck-weekly-schedule.log")" = 1 ]'
+
+# 9. dry run shows the routine card
+fresh 9
+snapshot "$C" $TUE 8 "Active" "OPEN"
+cp "$root/diff-none.py" "$C/bin/deck_weekly.py"
+run env RP_WEEKLY_BUDGET="$OKB" RP_WEEKLY_LANE_SH="$root/lane-ok.sh" "$cdw" --date $TUE --dry-run >"$root/dry.txt" 2>&1
+check "dry run: routine card 173 open" 'grep -q "snapshot: routine card 173 open" "$root/dry.txt"'
+check "dry run: would start for routine card" 'grep -q "changes or routine card: would run:" "$root/dry.txt"'
 
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
