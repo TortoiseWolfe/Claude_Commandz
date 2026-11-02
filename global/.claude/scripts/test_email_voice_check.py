@@ -237,13 +237,15 @@ class CoopHtmlFormat(unittest.TestCase):
         body = '<p>Pat,</p><p>Both are on the list, as cd-nextcloud issue 18 and PR 24.</p><p>Jon</p>'
         for r in ('greg', 'gail', 'william'):
             cats, res = fmt_cats(body, recipient=r)
-            self.assertIn('format_links', cats, r)
-            text = ' '.join(m for _, m in res['house'])
-            self.assertIn('2 ticket reference(s)', text, r)
+            refs = [m for c, m in res['house'] if c == 'unlinked_ref']
+            self.assertEqual(len(refs), 2, r)
+            text = ' '.join(refs)
             self.assertIn('issue 18', text, r)
+            self.assertIn('PR 24', text, r)
         for ref in ('Deck card 16', '#312', 'owner/repo#12', 'pull request 9'):
-            cats, _ = fmt_cats('<p>Pat,</p><p>See %s today.</p><p>Jon</p>' % ref, recipient='gail')
-            self.assertIn('format_links', cats, ref)
+            html = '<p>Pat,</p><p>See %s today.</p><p>Jon</p>' % ref
+            res = v.detect_llm_signals("Pat,\nBody.\nJon", recipient='gail', html=html)
+            self.assertTrue(any(c == 'unlinked_ref' for c, _ in res['house']), ref)
 
     def test_linked_or_quoted_ticket_passes(self):
         linked = '<p>Pat,</p><p>See <b><a href="https://github.com/o/r/issues/18">cd-nextcloud issue 18</a></b>.</p><p>Jon</p>'
@@ -663,6 +665,19 @@ class TeamQuotes(unittest.TestCase):
         self.assertEqual(res['verdict'], 'PASS')
         self.assertIn('note: 1 code block not judged', res['skipped_note'])
 
+    def test_four_backtick_fence_holds_inner_fences(self):
+        t = ("See the prompt below.\n````\nContext: issue #12\nFIND:\n```\n"
+             "  answers: x;\n```\n// fixes it (#12)\n```\ny: z\n```\n````\nJon")
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+        self.assertIn('note: 1 code block not judged', res['skipped_note'])
+
+    def test_four_backtick_fence_hides_acronyms(self):
+        t = ("See the prompt below.\n````\nFIND:\n```\nx\n```\n"
+             "// own rows only under RLS\n````\nJon")
+        res = v.detect_llm_signals(t, recipient='team', strict=True)
+        self.assertEqual(res['verdict'], 'PASS')
+
     def test_inline_dash_passes(self):
         t = "Run `git log - oneline` now.\nJon"
         res = v.detect_llm_signals(t, recipient='team', strict=True)
@@ -793,6 +808,99 @@ class AccessAsk(unittest.TestCase):
     def test_team_text_exempt(self):
         res = v.detect_llm_signals("Please add me to the repo as a collaborator.", strict=True, recipient='team')
         self.assertFalse(any(c == 'access_ask' for c, _ in res['house'] + res['warnings']))
+
+
+class UnlinkedRefs(unittest.TestCase):
+    """A reference to one item (card, issue, pull request, message, commit) is a link (2 Nov 2026)."""
+    SHAPE = "They are cards 110 in the Ops Deck and 97 in the Support Deck, respectively, and that's where it lives."
+
+    def check(self, text, html=None, strict=False, recipient='reader'):
+        return v.detect_llm_signals(text, recipient=recipient, strict=strict, html=html)
+
+    def refs(self, res):
+        return [m for c, m in res['house'] + res['warnings'] if c == 'unlinked_ref']
+
+    def test_each_kind_warns_then_fails_strict(self):
+        for s in ("See card 110.", "See Deck card 12.", "See card #12.", "See issue 45.", "See issue #45.",
+                  "See ticket 7.", "See PR 12.", "See pull request 12.", "See #123.", "See owner/repo#12.",
+                  "See message 1535.", "See Talk message 1535.", "See commit abc1234.",
+                  "See commit 0123456789abcdef0123456789abcdef01234567."):
+            res = self.check(s)
+            self.assertTrue(any(c == 'unlinked_ref' for c, _ in res['warnings']), s)
+            self.assertFalse(any(c == 'unlinked_ref' for c, _ in res['house']), s)
+            self.assertEqual(self.check(s, strict=True)['verdict'], 'FAIL', s)
+            self.assertTrue(any(c == 'unlinked_ref' for c, _ in self.check(s, strict=True)['house']), s)
+
+    def test_cards_list_flags_both_numbers(self):
+        msgs = self.refs(self.check(self.SHAPE, strict=True))
+        self.assertEqual(len(msgs), 2)
+        self.assertIn('cards 110', msgs[0])
+        self.assertIn('97', msgs[1])
+        self.assertIn('card 110)](url)', msgs[0])        # the suggestion names the fix
+
+    def test_html_both_linked_passes(self):
+        html = ('<p>They are cards <b><a href="https://example.test/c/110">110</a></b> in the Ops Deck and '
+                '<b><a href="https://example.test/c/97">97</a></b> in the Support Deck.</p>')
+        res = self.check("They are cards 110 in the Ops Deck and 97 in the Support Deck.", html=html, strict=True)
+        self.assertEqual(self.refs(res), [])
+
+    def test_html_one_linked_one_not_flags_the_other(self):
+        html = ('<p>They are cards <b><a href="https://example.test/c/110">110</a></b> in the Ops Deck and '
+                '97 in the Support Deck.</p>')
+        msgs = self.refs(self.check("x", html=html))
+        self.assertEqual(len(msgs), 1)
+        self.assertIn('97', msgs[0])
+
+    def test_html_whole_phrase_linked_passes(self):
+        html = '<p>See <b><a href="https://example.test/i/45">the hosting ticket (issue 45)</a></b>.</p>'
+        self.assertEqual(self.refs(self.check("x", html=html)), [])
+
+    def test_html_unlinked_is_a_hard_fail_without_strict(self):
+        res = self.check("x", html='<p>See issue 45.</p>')
+        self.assertTrue(any(c == 'unlinked_ref' for c, _ in res['house']))
+        self.assertEqual(res['verdict'], 'FAIL')
+
+    def test_plain_text_url_in_parentheses_passes(self):
+        s = "They are cards 110 (https://example.test/c/110) and 97 (https://example.test/c/97) on the boards."
+        self.assertEqual(self.refs(self.check(s, strict=True)), [])
+        s2 = "Cards 110 and 97 are here (https://example.test/c/110, https://example.test/c/97)."
+        self.assertEqual(self.refs(self.check(s2, strict=True)), [])
+
+    def test_plain_text_url_in_other_sentence_does_not_count(self):
+        s = "See card 110. The board is at https://example.test/board."
+        self.assertEqual(len(self.refs(self.check(s))), 1)
+
+    def test_markdown_link_counts_as_linked(self):
+        s = "Read [the hosting card (card 110)](https://example.test/c/110) first."
+        self.assertEqual(self.refs(self.check(s, strict=True)), [])
+
+    def test_quantities_and_numbers_pass(self):
+        for s in ("I closed 3 cards today.", "There are 16 topics.", "We found 501 testimonials.",
+                  "Two issues remain.", "See page 2 of the PDF.", "It costs $12.", "The version is 2.0.11.",
+                  "We run v1.5.2 now.", "The call is at 9:00 AM on 2 Nov 2026.", "Phone 555-0100.",
+                  "I fixed issue 3 times over.", "Send the message 5 minutes before.", "Card 2 of 5 is done."):
+            self.assertEqual(self.refs(self.check(s, strict=True)), [], s)
+
+    def test_quoted_reply_text_is_not_judged(self):
+        self.assertEqual(self.refs(self.check("> Is issue 45 done?\nYes, it is done.", strict=True)), [])
+        html = ('<p>Yes, it is done.</p><blockquote class="gmail_quote">Is issue 45 done? '
+                'See cards 110 and 97.</blockquote>')
+        self.assertEqual(self.refs(self.check("x", html=html)), [])
+
+    def test_code_is_not_judged(self):
+        self.assertEqual(self.refs(self.check("Run `git show commit abc1234` now.", strict=True)), [])
+        self.assertEqual(self.refs(self.check("x", html='<p>Run <code>issue 45</code> now.</p>')), [])
+
+    def test_team_hash_form_stays_with_bare_ref(self):
+        res = self.check("See #123.", strict=True, recipient='team')
+        self.assertTrue(any(c == 'bare_ref' for c, _ in res['house']))
+        self.assertEqual(self.refs(res), [])
+        res = self.check("See card 110.", strict=True, recipient='team')
+        self.assertEqual(len(self.refs(res)), 1)
+
+    def test_chat_profile_is_not_judged(self):
+        res = v.detect_llm_signals("saw message 1535, all good", strict=True, chat=True)
+        self.assertEqual(self.refs(res), [])
 
 
 class ChatVoice(unittest.TestCase):

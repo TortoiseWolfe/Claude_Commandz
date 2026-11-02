@@ -552,7 +552,7 @@ _ACRONYM = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{1,4}(?:s|'s)?(?![A-Za-z0-9
 _ACRONYM_SMALL_WORDS = {'of', 'the', 'and', 'for', 'a', 'an', 'to', 'in', 'on', 'or', 'as'}
 _ACRONYM_SKIP = [
     re.compile(r'(?is)<(pre|code|style|script)\b.*?</\1\s*>'),   # code in HTML
-    re.compile(r'(?s)```.*?```'),                                 # fenced code
+    re.compile(r'(?s)(`{3,}).*?\1'),                             # fenced code, 3+ backticks (2 Nov)
     re.compile(r'`[^`\n]*`'),                                     # inline code
     re.compile(r'(?:https?://|www\.)[^\s<>")]+'),                 # URLs
     re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+'),                  # email addresses
@@ -666,7 +666,10 @@ def acronym_messages(text):
 # reference (or has fewer than two words besides it). Never flagged: inline code,
 # fenced code, and a link with real words in it.
 
-_FENCE = re.compile(r'(?ms)^[ \t]*```.*?^[ \t]*```[ \t]*$')
+# A fence opens with three or more backticks and closes on the same count, so a
+# four-backtick Cursor prompt (the RescueDogs house rule) that holds ``` blocks
+# inside it is one block, not split at its first inner fence (2 Nov).
+_FENCE = re.compile(r'(?ms)^[ \t]*(`{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$')
 _INLINE_CODE = re.compile(r'`[^`\n]+`')
 _MD_LINK = re.compile(r'\[([^\]\n]*)\]\(([^)\n]*)\)')
 _TICKET_REF = re.compile(
@@ -1378,13 +1381,75 @@ _ADDRESS = re.compile(r'(?:https?://|www\.)[^\s<>")]+|'
                       re.IGNORECASE)
 
 
-# A ticket named in words ("cd-nextcloud issue 18", "PR 24", "Deck card 16", "#312", "owner/repo#12") can be a
-# link, so outside an anchor it fails like a bare address (Jonathan, 1 Nov 2026, on a Greg draft that passed:
-# "anything that can be a clickable link should be ... cd-nextcloud issue 18 and Chattanooga-Digital issue 312").
-_TICKET_WORDS = re.compile(
-    r'(?i)\b(?:issues?|PRs?|pull\s+requests?|tickets?|(?:deck\s+)?cards?)\s+#?\d+\b'
-    r'|\b[\w.-]+/[\w.-]+#\d+\b'
-    r'|(?<![\w&/#])#\d+\b')
+# --- Unlinked references (2 Nov 2026) -----------------------------------------------
+# "anything that can be a clickable link should be" (Jonathan). A reference to one specific item on a
+# board, tracker or chat ("card 110", "issue 45", "PR 12", "message 1535", "commit abc1234", "#123",
+# "owner/repo#12") is a page somewhere, so it is written as a link. A list such as "cards 110 in the Ops
+# Deck and 97 in the Support Deck" names two items, so every number in it needs its own link.
+# Counts are not references ("3 cards", "two issues", "page 2 of the PDF").
+_LINKED = '\u00a7'     # stands in for text that sits inside a link
+_REF_WORDS = (r'(?:(?:deck\s+)?cards?|issues?|tickets?|PRs?|pull\s+requests?|merge\s+requests?|'
+              r'(?:talk\s+)?messages?)')
+_REF_PLURAL = re.compile(r'(?i)(?:cards|issues|tickets|PRs|pull\s+requests|merge\s+requests|messages)$')
+_REF_NUM = r'(#?\d+(?!\w|[.:,]\d)|' + _LINKED + r')'
+_REF_NOT_COUNT = r'(?!\s+(?:of|more|other|others|times?|min(?:ute)?s?|hours?|days?|weeks?|months?|years?|%))'
+_REF_HEAD = re.compile(r'(?i)\b(' + _REF_WORDS + r')\s+' + _REF_NUM + _REF_NOT_COUNT)
+_REF_NEXT = re.compile(r'(?i)(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+|[^.!?;\d' + _LINKED +
+                       r']{1,40}?\s+(?:and|or)\s+)' + _REF_NUM + _REF_NOT_COUNT)
+_REF_HASH = re.compile(r'(?<![\w&/#' + _LINKED + r'])#\d+(?!\w)|\b[\w.-]+/[\w.-]+#\d+(?!\w)')
+_REF_COMMIT = re.compile(r'(?i)\bcommit\s+((?=[0-9a-f]*\d)[0-9a-f]{7,40})\b')
+_REF_SUGGEST = ('Put words in the link and the number at the end, e.g. '
+                '"[the newsletter hosting card (card 110)](url)", bold in client email '
+                '(<b><a href="https://...">the newsletter hosting card (card 110)</a></b>).')
+
+
+def _scan_refs(line, skip_hash=False):
+    """Unlinked references in one line (linked text already replaced by _LINKED). Returns [str]."""
+    hits, seen = [], set()
+    for m in _REF_HEAD.finditer(line):
+        seen.add(m.start(2))
+        if m.group(2) != _LINKED:
+            hits.append(m.group().strip())
+        if not _REF_PLURAL.search(m.group(1)):
+            continue
+        pos = m.end()
+        while True:
+            n = _REF_NEXT.match(line, pos)
+            if not n:
+                break
+            seen.add(n.start(1))
+            if n.group(1) != _LINKED:
+                hits.append('%s ... %s' % (m.group(1), n.group(1)))
+            pos = n.end()
+    if not skip_hash:
+        for m in _REF_HASH.finditer(line):
+            if m.start() not in seen and not any(m.start() <= p < m.end() for p in seen):
+                hits.append(m.group())
+    for m in _REF_COMMIT.finditer(line):
+        hits.append(m.group().strip())
+    return hits
+
+
+def unlinked_ref_matches(text, html=None, skip_hash=False):
+    """References that could be links but are not. Returns [message]; one per reference.
+
+    HTML: a reference inside an <a> (or <code>) is linked; the quoted thread is skipped. Plain text:
+    linked when a full http(s) URL sits in the same sentence; markdown links, code and quoted lines are
+    blanked first."""
+    hits = []
+    if html is not None:
+        lines, _ = letter_lines(html)
+        for ln in lines:
+            line = ''.join(_LINKED if in_a else t for t, in_a, _ in ln['segs'])
+            hits.extend(_scan_refs(line, skip_hash))
+    else:
+        masked = _MD_LINK.sub(_blank, _CLOSING_LINE.sub(_blank, mask_quotes(mask_code(text))))
+        for raw in masked.split('\n'):
+            for sentence in split_sentences(raw):
+                if re.search(r'(?i)\bhttps?://\S', sentence):
+                    continue
+                hits.extend(_scan_refs(sentence, skip_hash))
+    return ['"%s": a reference to one specific item that is not a link. %s' % (h, _REF_SUGGEST) for h in hits]
 
 
 def quoted_topics(html):
@@ -1438,12 +1503,11 @@ def link_matches(html):
     An address or URL in the letter must sit in an <a href="https://..."> wrapped in <b> or
     <strong>. Returns [(category, message)]. The quoted part never counts."""
     lines, _ = letter_lines(html)
-    bare, plain_anchors, bad_href, refs = [], [], [], []
+    bare, plain_anchors, bad_href = [], [], []
     for ln in lines:
         for text, in_a, _ in ln['segs']:
             if not in_a:
                 bare.extend(_ADDRESS.findall(text))
-                refs.extend(m.group() for m in _TICKET_WORDS.finditer(text))
         for a in ln.get('anchors', []):
             label = (a['text'].strip() or a['href'])[:60]
             if not re.match(r'(?i)^https?://\S+', a['href']):
@@ -1455,10 +1519,6 @@ def link_matches(html):
     if bare:
         found.append(('format_links', f'{len(bare)} address(es) or URL(s) not a link, e.g. "{bare[0][:60]}" '
                       '-> make each a clickable link in bold: <b><a href="https://...">text</a></b>'))
-    if refs:
-        found.append(('format_links', f'{len(refs)} ticket reference(s) not a link, e.g. "{refs[0][:60]}" '
-                      '-> link each one in bold to its page: <b><a href="https://github.com/OWNER/REPO/issues/N">'
-                      'repo issue N</a></b>'))
     if plain_anchors:
         found.append(('format_links', f'{len(plain_anchors)} link(s) not bold, e.g. "{plain_anchors[0]}" '
                       '-> wrap each link in <b> (or <strong>)'))
@@ -1634,6 +1694,15 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     # Team text is teaching text (29 Oct): a ticket number is never bare. Hard FAIL.
     if (recipient or '').lower() == 'team':
         house = list(house) + [('bare_ref', m) for m in bare_ref_matches(text)]
+    # A reference to one item ("card 110", "issue 45") is a link (2 Nov). In an HTML body it stays a hard FAIL
+    # (it was one before, as a link-format finding); otherwise it warns, and fails under --strict.
+    if not chat:
+        unlinked = [('unlinked_ref', m) for m in
+                    unlinked_ref_matches(text, html=html, skip_hash=(recipient or '').lower() == 'team')]
+        if strict or html is not None:
+            house = list(house) + unlinked
+        else:
+            warnings += unlinked
     record_claims = record_claim_messages(text, html=html)
     if strict:
         house = list(house) + [('record_claim', m) for m in record_claims]
@@ -1758,6 +1827,11 @@ def main():
         print("  [format_headings] 2+ topic titles as plain lines with no <h2>   [format_links] (every recipient) an address or URL not a bold <a href=\"https://...\"> link")
         print("  The quoted part ('>' lines, <blockquote>, below 'On ... wrote:') never counts. Without --html a")
         print("  warning says the format was not checked.")
+        print("\nUnlinked references (every recipient except --chat): [unlinked_ref] a card, issue, ticket, pull request,")
+        print("  message or commit named by its number (card 110, issue #45, PR 12, message 1535, commit abc1234, #123)")
+        print("  that is not a link. Every number in a list ('cards 110 ... and 97') needs its own link. In --html a")
+        print("  reference must sit in an <a>; in plain text a full URL must sit in the same sentence. Counts")
+        print("  ('3 cards', 'page 2 of the PDF') are fine. Warns by default; fails under --strict and in HTML.")
         print("\nRecorded-work claims (every recipient): [record_claim] add a URL or HTML link beside anything you say")
         print("  you recorded, noted, wrote up, filed, logged, tracked or put on a list. Warns by default; fails under --strict.")
         print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
