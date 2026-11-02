@@ -165,18 +165,19 @@ def run(dry, force, date_arg):
     cmd = [rp.LANE_SH] + [a for rule in DENY for a in ("--deny", rule)] + [name, str(REPO), MODEL, str(prompt)]
     report = CLONES / "reports" / ("deck-weekly-%s.md" % date)
 
-    open_routine, note = check_routine_cards(date)
-    routine_desc = ("routine card %s open" % ", ".join(open_routine)) if open_routine else "no routine card open"
-    if note:
-        routine_desc += " (%s)" % note
-
     if dry:
+        open_routine_dry, note_dry = check_routine_cards(date)
+        routine_desc_dry = ("routine card %s open" % ", ".join(open_routine_dry)) if open_routine_dry else "no routine card open"
+        if note_dry:
+            routine_desc_dry += " (%s)" % note_dry
+        else:
+            routine_desc_dry += " (snapshot as of the last real run)"
         print("[dry-run] guards passed: NX-01, %s%s, no lane or inbox line for %s" % (
             date, " (forced)" if force else " is a Tuesday", date))
         print("[dry-run] would pull: %s (cwd %s, 300 s limit)" % (" ".join(pull_cmd()), CLONES))
         print("[dry-run] would diff: %s" % " ".join(diff_cmd(date_arg)))
         print("[dry-run] digest would be at %s" % report)
-        print("[dry-run] snapshot: %s" % routine_desc)
+        print("[dry-run] snapshot: %s" % routine_desc_dry)
         print("[dry-run] no change and no routine card: would queue one \"Hub: %s: no change\" line; no lane" % PHRASE)
         if reason:
             print("[dry-run] (changes or routine card) + week full (%s): would queue the Job line instead of a lane" % reason)
@@ -185,7 +186,7 @@ def run(dry, force, date_arg):
             print("[dry-run] changes or routine card: would run: " + " ".join(cmd))
         say("decide | budget %s; %s; nothing pulled or started" % (
             reason or "allows a code lane (phase %d)" % dispatch.week_phase(now, b.get("reset"))[0],
-            routine_desc), dry, now)
+            routine_desc_dry), dry, now)
         return 0
 
     err = pull()
@@ -193,8 +194,13 @@ def run(dry, force, date_arg):
         result, err = digest(date_arg)
     if err:
         ok = rp.queue(date, err, dry, now, line=hub_line(date, "%s failed: %s" % (PHRASE, rp.outside(err))))
-        say("fail | %s; %s; the Hub line %s" % (err.replace("\n", " "), routine_desc, "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
+        say("fail | %s; the Hub line %s" % (err.replace("\n", " "), "is in hub-inbox.md" if ok else "COULD NOT BE WRITTEN"), dry, now)
         return 1
+
+    open_routine, note = check_routine_cards(date)
+    routine_desc = ("routine card %s open" % ", ".join(open_routine)) if open_routine else "no routine card open"
+    if note:
+        routine_desc += " (%s)" % note
 
     if result["changed"] == 0 and not open_routine:
         ok = rp.queue(date, "", dry, now, line=hub_line(date, "%s: no change; %s (%d open cards of his)" % (PHRASE, routine_desc, result["open_mine"])))
