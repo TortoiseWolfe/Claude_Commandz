@@ -37,11 +37,12 @@ class HubLean(unittest.TestCase):
     def written(self):
         return json.loads(self.file.read_text())
 
-    def test_install_writes_the_three_managed_keys(self):
+    def test_install_writes_the_four_managed_keys(self):
         r = self.run_it("--install")
         self.assertEqual(r.returncode, 0, r.stderr)
         d = self.written()
-        self.assertEqual(sorted(d), ["deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertEqual(sorted(d), ["bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertEqual(d["bashOutputMaxChars"], 12000)
         self.assertEqual(d["permissions"]["deny"], ["Artifact", "ArtifactComments", "ArtifactData"])
         self.assertTrue(d["enabledPlugins"])
         self.assertFalse(any(d["enabledPlugins"].values()), "every listed plugin is switched off")
@@ -119,7 +120,7 @@ class HubLean(unittest.TestCase):
         r = self.run_it("--lean-dir")
         self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, str(self.lean), ""))
         d = json.loads(self.lean_file.read_text())
-        self.assertEqual(sorted(d), ["autoMemoryEnabled", "deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertEqual(sorted(d), ["autoMemoryEnabled", "bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "permissions"])
         self.assertIs(d["autoMemoryEnabled"], False)
         self.assertFalse(any(d["enabledPlugins"].values()))
         self.assertEqual(d["permissions"]["deny"], ["Artifact", "ArtifactComments", "ArtifactData"])
