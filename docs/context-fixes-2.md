@@ -8,7 +8,7 @@ Three questions about our own context cost, each checked against Claude Code's d
 
 What exists, and what we did with it:
 
-- `bashOutputMaxChars` (settings reference, v2.1.261 or later): output past the limit goes to a file and Claude gets a preview of up to 2,000 characters plus the path. Default 30,000, allowed range 4,000 to 128,000. Set to 12,000 for the hub and the unattended `claude -p` folder through `hub_lean.py`. Lanes need the same line in `lane.sh`'s `--settings` JSON, which waits for the lane.sh changes in flight to merge.
+- `bashOutputMaxChars` (settings reference, v2.1.261 or later): output past the limit goes to a file and Claude gets a preview of up to 2,000 characters plus the path. Default 30,000, allowed range 4,000 to 128,000. Set to 12,000 for the hub and the unattended `claude -p` folder through `hub_lean.py`. Lanes get the same line from `lane.sh`'s `--settings` JSON (added in the context-fixes-3 pull request).
 - `ctx_tool_share.py` measures it: where tool output comes from, how much of it is stale, and what a cap would keep out.
 - Not touched: the file read limit (`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`) and the connector output limit (`MAX_MCP_OUTPUT_TOKENS`). A lower file-read limit makes Claude read the same file in several pieces, and a lower connector limit cuts off mail data.
 
