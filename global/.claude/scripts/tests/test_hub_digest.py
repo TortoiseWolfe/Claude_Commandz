@@ -882,6 +882,20 @@ BOARD_OK = """__DECK=ok__ board {b} "Operations" at https://deck.example: 2 stac
 ## Doing (1)
 - #{o}04 Unassigned | by greg | to - | - | due - | changed 2026-10-30
 - #{extra} Another of mine | by greg | to TurtleWolfe | - | due - | changed 2026-10-31
+- #{o}05 Spoof | by greg | to TurtleWolfe | - | due - | changed 2026-10-31 | by greg | to Other | - | due - | changed 2026-10-31
+
+## Done (3)
+- #{o}06 Finished long ago | by greg | to TurtleWolfe | - | due - | changed 2026-09-01
+
+## Finished (1)
+- #{o}07 Also finished | by greg | to TurtleWolfe | - | due - | changed 2026-09-01
+
+## Review (2) [done column]
+- #{o}08 In a flagged done column | by greg | to TurtleWolfe | - | due - | changed 2026-09-01
+
+## Waiting (2)
+- #{o}09 Marked done by hand | by greg | to TurtleWolfe | - | due - | changed 2026-09-01 | done
+- #{o}10 A title | with a bar | by greg | to TurtleWolfe | - | due - | changed 2026-09-01
 """
 
 
@@ -907,7 +921,7 @@ class CoopCards(unittest.TestCase):
 
     def test_deck_read_keeps_only_cards_assigned_to_the_user_as_numbers(self):
         d = fresh_dir(self)
-        self.assertEqual(hd.deck_read(2, script=self.fake(d)), ([101, 103, 201], None))
+        self.assertEqual(hd.deck_read(2, script=self.fake(d)), ([101, 103, 110, 201], None))
 
     def test_a_failed_read_says_why_in_one_line_and_leaves_the_board_out(self):
         d = fresh_dir(self)
@@ -915,7 +929,7 @@ class CoopCards(unittest.TestCase):
         self.assertIsNone(ids)
         self.assertIn("HTTP 401", why)
         boards, fails = hd.deck_cards(1000.0, cache=Path(d) / "c.json", reader=self.reader(d, ok8=False))
-        self.assertEqual(boards, {2: [101, 103, 201]})
+        self.assertEqual(boards, {2: [101, 103, 110, 201]})
         self.assertEqual(len(fails), 1)
         self.assertTrue(fails[0].startswith("Deck read failed: board 8: "), fails)
         self.assertNotIn("\n", fails[0])
@@ -966,16 +980,37 @@ class CoopCards(unittest.TestCase):
                  "- [ ] 2026-11-03 07:00 | Job: the 111 cardigan order | x\n")
         self.assertEqual(hd.covered_cards(inbox), {101, 102, 103, 104, 105, 106, 107, 108})
 
+    def test_cards_in_done_stacks_or_marked_done_or_spoofed_in_a_title_do_not_count(self):
+        d = fresh_dir(self)
+        ids, _ = hd.deck_read(2, script=self.fake(d))
+        for closed in (105, 106, 107, 108, 109, 102, 104):
+            self.assertNotIn(closed, ids)
+
+    def test_covered_cards_reads_the_two_real_inbox_forms_that_were_missed(self):
+        window = ("- [ ] 2026-10-28 21:43 | Job: Tue 3 Nov 2026 7:32 PM co-op window: run the #139 index fix (CD then Eduity, dry run before each --go). "
+                  "Jonathan's go 28 Oct 9:43 PM ('Yes, Tue 3 Nov 7:32 PM'). Timer coop-fix139 starts lane coop-fix139 at 7:30 PM.\n")
+        listed = ("- [ ] 2026-11-02 15:39 | Hub: waiting on William: co-op Deck cards 153 (self-hosted git, Forgejo trial) and 154 (Vikunja trial on staging): "
+                  "Greg 28 Oct: 'not a big priority and definitely needs support from William'. No chase; recheck Mon 30 Nov. | cards from deck-assigned-2nov.md\n")
+        self.assertEqual(hd.covered_cards(window), {139})
+        self.assertEqual(hd.covered_cards(listed), {153, 154})
+
+    def test_a_hash_number_counts_only_on_a_line_that_says_co_op_deck_cd_or_card(self):
+        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: merge PR #139 for the scout repo | x\n"), set())
+        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: C.D #139 fix | x\n"), {139})
+        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: Deck #140 and #141 | x\n"), {140, 141})
+        self.assertEqual(hd.covered_cards("- [x] 2026-11-03 07:00 | Job: co-op #142 | x\n"), set())
+        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: cards 150 (a note, 999) and 151 | x\n"), {150, 151})
+
     def test_the_section_counts_and_lists_the_uncovered_cards(self):
         d = fresh_dir(self)
-        inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101 and 201 | x\n"
+        inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 201 and 301 | x\n"
         lines = hd.coop_cards_lines(inbox, 1000.0, cache=Path(d) / "c.json", reader=self.reader(d))
-        self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 6 (board 2: 3, board 8: 3)")
-        self.assertEqual(lines[1], "- uncovered: 103, 301, 303, 801")
+        self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 8 (board 2: 4, board 8: 4)")
+        self.assertEqual(lines[1], "- uncovered: 103, 110, 303, 310, 801")
 
     def test_everything_covered_says_none(self):
         d = fresh_dir(self)
-        inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 103, 201, 301, 303 and 801 | x\n"
+        inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 103, 110, 201, 301, 303, 310 and 801 | x\n"
         lines = hd.coop_cards_lines(inbox, 1000.0, cache=Path(d) / "c.json", reader=self.reader(d))
         self.assertEqual(lines[1], "- uncovered: none")
 
@@ -1013,7 +1048,7 @@ class CoopCards(unittest.TestCase):
         self.assertNotIn("Co-op cards", plain.stdout)
         wired = subprocess.run(base + ["--deck-fake", self.fake(d), "--deck-cache", str(d / "cache.json")], capture_output=True, text=True)
         self.assertEqual(wired.returncode, 0, wired.stderr)
-        self.assertIn("- uncovered: 101, 103, 201, 301, 303, 801", wired.stdout)
+        self.assertIn("- uncovered: 101, 103, 110, 201, 301, 303, 310, 801", wired.stdout)
 
 
 if __name__ == "__main__":
