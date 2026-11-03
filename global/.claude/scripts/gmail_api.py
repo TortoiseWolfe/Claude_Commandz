@@ -32,10 +32,12 @@ Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
   gmail_api.py draft-label DRAFT_ID LABEL    LABEL is a name or an id
   gmail_api.py draft-unlabel DRAFT_ID LABEL
   gmail_api.py draft-delete DRAFT_ID
-  gmail_api.py drafts-list [QUERY]
-  gmail_api.py messages-list QUERY [--limit N]   (read-only: MSG id | address | From | Subject | Date | labels | threadId)
+  gmail_api.py drafts-list [QUERY] [--full]
+  gmail_api.py messages-list QUERY [--limit N] [--full]   (read-only: MSG id | address | From | Subject | Date | labels | threadId)
   gmail_api.py message-header ID NAME   (read-only: one header's value, empty if absent; no body)
-  gmail_api.py message-text ID [--max-chars N]   (read-only: plain-text body, at most 20000 characters)
+  gmail_api.py message-text ID [--max-chars N] [--full]   (read-only: plain-text body, at most 20000 characters)
+  A lane or the hub (AFA_BIG_OUT=1) gets a summary and a file path for these three when the answer is over 8,000 characters; --full prints it all
+  (big_output.py). Scripts that parse the output are never given the summary: they run without AFA_BIG_OUT, or set it to 0.
 
 Credentials (mode 600, never printed): ~/.config/afa/gmail/client.json (OAuth Desktop client),
 ~/.config/afa/gmail/token.json. AFA_GMAIL_DIR overrides the folder (tests). AFA_GMAIL_ACCOUNT, if set, is the consent screen's login hint.
@@ -680,6 +682,17 @@ def _read_file(path):
         return f.read()
 
 
+def _emit(text, name, full):
+    """Print text; for a lane or hub session that asked for it (AFA_BIG_OUT=1) a long answer goes to a file with a summary instead."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from big_output import emit
+    except ImportError:
+        sys.stdout.write(text)
+        return
+    emit(text, name, full=full, newline=False)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Gmail drafts through the API (never sends).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -699,10 +712,10 @@ def main(argv=None):
     p = sub.add_parser("draft-raw"); p.add_argument("draft_id"); p.add_argument("--full", action="store_true")
     for n in ("draft-label", "draft-unlabel"):
         p = sub.add_parser(n); p.add_argument("draft_id"); p.add_argument("label")
-    p = sub.add_parser("drafts-list"); p.add_argument("query", nargs="?", default=""); p.add_argument("--limit", type=int, default=25)
-    p = sub.add_parser("messages-list"); p.add_argument("query"); p.add_argument("--limit", type=int, default=100)
+    p = sub.add_parser("drafts-list"); p.add_argument("query", nargs="?", default=""); p.add_argument("--limit", type=int, default=25); p.add_argument("--full", action="store_true")
+    p = sub.add_parser("messages-list"); p.add_argument("query"); p.add_argument("--limit", type=int, default=100); p.add_argument("--full", action="store_true")
     p = sub.add_parser("message-header"); p.add_argument("message_id"); p.add_argument("name")
-    p = sub.add_parser("message-text"); p.add_argument("message_id"); p.add_argument("--max-chars", type=int, default=20000)
+    p = sub.add_parser("message-text"); p.add_argument("message_id"); p.add_argument("--max-chars", type=int, default=20000); p.add_argument("--full", action="store_true")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "auth":
@@ -741,15 +754,13 @@ def main(argv=None):
             draft_delete(a.draft_id)
             print("deleted")
         elif a.cmd == "drafts-list":
-            for did, tid, to, subj in drafts_list(a.query, a.limit):
-                print(f"{did}\t{tid}\t{to}\t{subj}")
+            _emit("".join(f"{did}\t{tid}\t{to}\t{subj}\n" for did, tid, to, subj in drafts_list(a.query, a.limit)), "gmail-drafts", a.full)
         elif a.cmd == "messages-list":
-            for line in messages_list(a.query, a.limit):
-                print(line)
+            _emit("".join(line + "\n" for line in messages_list(a.query, a.limit)), "gmail-messages", a.full)
         elif a.cmd == "message-header":
             print(message_header(a.message_id, a.name))
         elif a.cmd == "message-text":
-            print(message_text(a.message_id, a.max_chars), end="")
+            _emit(message_text(a.message_id, a.max_chars), "gmail-text-" + a.message_id[:12], a.full)
     except GmailError as e:
         print(f"gmail_api: {e}", file=sys.stderr)
         return 1

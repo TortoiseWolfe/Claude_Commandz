@@ -177,7 +177,7 @@ CLAUDE_BIN = Path(os.environ.get("MUSE_CLAUDE") or HOME / ".local/bin/claude")
 PASS_FLAG = STATE / "openclaw-pass.skip"  # test switch: "skip" = the pass does nothing and records nothing, "fail" = it exits 1
 RESULTS_LOG = STATE / "openclaw-ask-results.log"
 LANE_INDEX = STATE / "lanes/index.tsv"
-LANE_RULES = REPOS / "hub/lane-rules.md"
+LANE_RULES = REPOS / "hub/lane-rules/fleet.md"
 DEAD_GRACE = 120  # seconds a Claude lane may lack a window before it counts as ended
 # What a new lane is handed besides its task (frontdesk-8, 17 Oct: a follow-up arrived as twenty words and none of the earlier work).
 FOLLOWUP_WINDOW = 24 * 3600  # a start in a repo is handed the newest lane of that repo that closed this recently
@@ -786,7 +786,7 @@ class LaneHost:
     def live_lanes(self):
         """-> set of every lane running now, whoever started it: the names `lane.sh --status` lists as alive that also have a window in
         the tmux session. Empty when either cannot be read."""
-        r = self._run([str(LANE_SH), "--status"], 60)
+        r = self._run([str(LANE_SH), "--status", "--full"], 60)
         wins = self.windows()
         if r is None or r.returncode != 0 or not wins:
             return set()

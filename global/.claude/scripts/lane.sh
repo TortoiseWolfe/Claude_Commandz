@@ -124,8 +124,11 @@
 #     The choice is recorded in column 11 of the index, shown by --status and reused on --resume;
 #   - --disallowedTools LANE_TOOLS_OFF (the Artifact tools: their schema is about a quarter of a lane's start);
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
-#     the slim rule file LANE_RULES (default ~/repos/hub/lane-rules.md). Both happen only when that
-#     file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
+#     the rules, composed per lane by lane_rules_compose.py from the parts in LANE_RULES_DIR (default ~/repos/hub/lane-rules/):
+#     core.md always, plus mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
+#     setting might match (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
+#     ~/repos/hub/lane-rules.md) is now a short pointer that prompts saying "Read lane-rules.md first" still read cheaply;
+#     both happen only when that file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
 #     memory index (MEMORY.md, about 4K tokens) is not loaded: the rule file carries the rules;
 #   - skillOverrides "off" for every skill and command not in LANE_SKILLS_KEEP, and syncClaudeAiSkills false so the
 #     claude.ai-synced skills (anthropic-skills:*) are not loaded (the skill listing is about 14K tokens).
@@ -219,10 +222,13 @@ TAB=$'\t'
 # AFA_LANE_HAND=<its hand-off folder>: such a lane is never asked "Run it?", it is allowed a delete inside its own folder, a
 # worktree or the scratchpad and refused the rest.
 lane_env_prefix() {
+  # AFA_BIG_OUT=1: this lane's long script output (lane.sh --status, the inbox board, mail text) goes to a file in AFA_LANE_FOLDER with a short
+  # summary on screen (big_output.py); --full prints it all. Scripts that parse output say --full themselves.
   printf 'AFA_LANE=1 '
   if [ "${AFA_LANE_UNATTENDED:-}" = 1 ] || [[ "$1" == oc-* ]]; then
     printf 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=%q ' "$2"
   fi
+  printf 'AFA_BIG_OUT=1 AFA_LANE_FOLDER=%q ' "$2"
   printf 'AFA_LANE_NAME=%q ' "$1"   # lane_session_hook.sh records the lane's session against this name
 }
 
@@ -264,7 +270,7 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-add_dirs_opt=(); dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
+add_dirs_opt=(); full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -317,6 +323,7 @@ while [ $# -gt 0 ]; do
     --console) console=1; shift ;;
     --headless) headless=1; shift ;;
     --status) mode=status; shift ;;
+    --full) full_out=1; shift ;;
     --send) mode=send; shift ;;
     --model) mode=model; shift ;;
     --recycle) mode=recycle; shift ;;
@@ -884,7 +891,23 @@ deny_rules() {  # <lane folder> [write]
   local IFS=,; printf '%s' "${all[*]}"
 }
 
-claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b] [extra tool rules to deny: a,b or -]
+# The rule file a Claude lane starts with: core plus the parts its name, folder, prompt text or connectors might need, written to
+# ~/.claude/state/lanes/.rules/<lane folder name>.md, hub-owned and outside the lane's own folder (a file the lane can write is a file
+# that could rewrite its own system prompt at its next resume, the same reason the .deny files live apart). A resume (reuse=1) keeps
+# the file the lane started with. Under --dry-run nothing is written in the lane
+# folder; the composed text goes to ~/.claude/state/out/dry-rules-<name>.md. When composing fails the lane gets every part, then
+# the pointer file, so a lane never starts with no rules.
+lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1>
+  local f="$HOME/.claude/state/lanes/.rules/$(basename "$1").md" me; me="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_rules_compose.py"
+  if [ "${6:-0}" = 1 ] && [ -s "$f" ]; then printf '%s' "$f"; return 0; fi
+  [ "$dry" = 1 ] && f="$HOME/.claude/state/out/dry-rules-$2.md"
+  mkdir -p -m 700 "$(dirname "$f")" 2>/dev/null || true
+  if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
+  elif python3 -I "$me" --all --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
+  else printf '%s' "$LANE_RULES"; fi
+}
+
+claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b] [extra tool rules to deny: a,b or -] [lane folder] [prompt file] [reuse the folder's rules.md: 1]
   local json p s r mcp keep
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
@@ -911,7 +934,9 @@ print(",".join(out))
   fi
   [ -f "$LANE_RULES" ] && json+=",\"claudeMdExcludes\":[\"$LANE_WORKSPACE_MD\"],\"autoMemoryEnabled\":false"
   json+=',"skillOverrides":'"$(lane_skill_overrides)"',"syncClaudeAiSkills":false'
-  json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}]}'
+  # rules_reminder.py: every 30 tool calls, or when the same command fails twice, the lane's three key rules come back into view (at most twice per kind).
+  local rr='[{"matcher":"*","hooks":[{"type":"command","command":"python3 '"$HOME"'/.claude/hooks/rules_reminder.py --role lane"}]}]'
+  json+=',"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'"$HOME"'/.claude/scripts/lane_session_hook.sh"}]}],"PostToolUse":'"$rr"',"PostToolUseFailure":'"$rr"'}'
   json+=',"enabledPlugins":{'
   for p in $LANE_PLUGINS_OFF; do json+="\"$p\":false,"; done
   json="${json%,}}"
@@ -930,7 +955,11 @@ print(",".join(out))
   local off="$LANE_TOOLS_OFF"
   [ -z "${7:-}" ] || [ "$7" = - ] || off="${off:+$off }${7//,/ }"
   [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
-  [ -f "$LANE_RULES" ] && printf -- ' --append-system-prompt-file %q' "$LANE_RULES"
+  if [ -f "$LANE_RULES" ]; then
+    local rf="$LANE_RULES"
+    [ -z "${8:-}" ] || [ "$8" = - ] || rf="$(lane_rules_for "$8" "${3:-lane}" "${5:-.}" "$2" "${9:-}" "${10:-0}")"
+    printf -- ' --append-system-prompt-file %q' "$rf"
+  fi
   return 0
 }
 
@@ -1041,6 +1070,12 @@ pane_spinner() { command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$1"; }
 
 if [ "$mode" = status ]; then
   command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
+  # A lane or the hub session (AFA_BIG_OUT=1) sees a short count and the path of the full list when it is over 8,000 characters; --full and
+  # every script that parses this list (lane_watch.sh, hub_digest.py, the dispatcher) get the whole list as before.
+  if [ "$full_out" != 1 ] && [ "${AFA_BIG_OUT:-}" = 1 ] && [ -z "${LANE_STATUS_INNER:-}" ]; then
+    LANE_STATUS_INNER=1 "$0" --status | python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/big_output.py" --name lane-status --group-by '^[^[:space:]]+ +report:[^ ]+ +([a-z]+)'
+    exit "${PIPESTATUS[0]}"
+  fi
   fill_ids
   now=$(date +%s); live=" "
   if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -1702,7 +1737,7 @@ if [ "$mode" = resume ]; then
     index_set "$name" 15 "$ad"
   fi
   adf="$(ad_flags "${ad:--}")"
-  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm" "$(deny_rules "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" write)")"
+  flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm" "$(deny_rules "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" write)" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" "${p:-}" 1)"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
     cmd="${uenv}$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --resume $(printf %q "$id") --model $(printf %q "$m") $adf$flags"
@@ -1870,7 +1905,7 @@ if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).
   rk="${recycle_at_opt:-$(lane_recycle_k "$prev_rk" "$prompt" "$dir" "$conn")}"
-  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm_start" "$(deny_rules "$hand" write)")"; eff="${eff:--}"
+  eff="$(lane_effort "$model")"; flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm_start" "$(deny_rules "$hand" write)" "$hand" "$prompt" 0)"; eff="${eff:--}"
 fi
 if [ "$engine" != claude ]; then
   out="$hand/out.log"

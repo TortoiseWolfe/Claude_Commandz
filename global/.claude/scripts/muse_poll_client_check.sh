@@ -32,6 +32,7 @@ query="from:($froms) newer_than:$WINDOW -from:me"
 # The message list comes straight from the Gmail API (gmail_api.py messages-list, metadata only, never a body):
 # no model copies the IDs. If the call fails, say so on stderr (muse_poll.sh logs it) and stop, so a dead token
 # can't pass for "nothing new".
+export AFA_BIG_OUT=0   # this reads every line of the list: never a summary
 if [[ -n "${MUSE_CLIENT_GMAIL:-}" ]]; then lister=("$MUSE_CLIENT_GMAIL" messages-list); else lister=(python3 "$S/gmail_api.py" messages-list); fi
 errf=$(mktemp); trap 'rm -f -- "$errf"' EXIT
 if ! out=$("${lister[@]}" "$query" 2>"$errf"); then

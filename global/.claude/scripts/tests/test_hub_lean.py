@@ -37,12 +37,16 @@ class HubLean(unittest.TestCase):
     def written(self):
         return json.loads(self.file.read_text())
 
-    def test_install_writes_the_four_managed_keys(self):
+    def test_install_writes_the_managed_keys(self):
         r = self.run_it("--install")
         self.assertEqual(r.returncode, 0, r.stderr)
         d = self.written()
-        self.assertEqual(sorted(d), ["bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertEqual(sorted(d), ["bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "env", "hooks", "permissions"])
         self.assertEqual(d["bashOutputMaxChars"], 12000)
+        self.assertEqual(d["env"]["AFA_BIG_OUT"], "1")
+        for ev in ("PostToolUse", "PostToolUseFailure"):
+            cmds = [h["command"] for g in d["hooks"][ev] for h in g["hooks"]]
+            self.assertTrue(any("rules_reminder.py --role hub" in c for c in cmds), ev)
         self.assertEqual(d["permissions"]["deny"], ["Artifact", "ArtifactComments", "ArtifactData"])
         self.assertTrue(d["enabledPlugins"])
         self.assertFalse(any(d["enabledPlugins"].values()), "every listed plugin is switched off")
