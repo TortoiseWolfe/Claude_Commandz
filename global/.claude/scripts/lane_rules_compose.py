@@ -123,9 +123,11 @@ def main():
         sys.exit("lane_rules_compose: %s/core.md is missing or empty" % rules_dir)
     text = compose(parts, rules_dir)
     out = Path(a.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(text)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
     os.replace(tmp, out)
     print(",".join(parts))
     return 0

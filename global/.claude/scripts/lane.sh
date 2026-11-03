@@ -126,7 +126,7 @@
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
 #     the rules, composed per lane by lane_rules_compose.py from the parts in LANE_RULES_DIR (default ~/repos/hub/lane-rules/):
 #     core.md always, plus mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
-#     setting might match (the composed file is <lane folder>/rules.md; a resume reuses it). LANE_RULES (default
+#     setting might match (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
 #     ~/repos/hub/lane-rules.md) is now a short pointer that prompts saying "Read lane-rules.md first" still read cheaply;
 #     both happen only when that file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
 #     memory index (MEMORY.md, about 4K tokens) is not loaded: the rule file carries the rules;
@@ -892,13 +892,16 @@ deny_rules() {  # <lane folder> [write]
 }
 
 # The rule file a Claude lane starts with: core plus the parts its name, folder, prompt text or connectors might need, written to
-# <lane folder>/rules.md. A resume (reuse=1) keeps the file the lane started with. Under --dry-run nothing is written in the lane
+# ~/.claude/state/lanes/.rules/<lane folder name>.md, hub-owned and outside the lane's own folder (a file the lane can write is a file
+# that could rewrite its own system prompt at its next resume, the same reason the .deny files live apart). A resume (reuse=1) keeps
+# the file the lane started with. Under --dry-run nothing is written in the lane
 # folder; the composed text goes to ~/.claude/state/out/dry-rules-<name>.md. When composing fails the lane gets every part, then
 # the pointer file, so a lane never starts with no rules.
 lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1>
-  local f="$1/rules.md" me; me="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_rules_compose.py"
+  local f="$HOME/.claude/state/lanes/.rules/$(basename "$1").md" me; me="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_rules_compose.py"
   if [ "${6:-0}" = 1 ] && [ -s "$f" ]; then printf '%s' "$f"; return 0; fi
   [ "$dry" = 1 ] && f="$HOME/.claude/state/out/dry-rules-$2.md"
+  mkdir -p -m 700 "$(dirname "$f")" 2>/dev/null || true
   if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
   elif python3 -I "$me" --all --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
   else printf '%s' "$LANE_RULES"; fi
