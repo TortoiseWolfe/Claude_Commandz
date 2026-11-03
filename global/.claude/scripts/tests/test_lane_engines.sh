@@ -477,6 +477,11 @@ STATUS_OUTPUT="$(cat "$TMP/status.out")"
 assert_contains "$STATUS_OUTPUT" 'engine/billing:subscription' 'status still reads legacy billing rows'
 assert_contains "$STATUS_OUTPUT" 'engine/billing:codex' 'status displays the Codex engine'
 assert_contains "$STATUS_OUTPUT" 'engine/billing:copilot' 'status displays the Copilot engine'
+# A long status is written to a file for a session that asked for that (AFA_BIG_OUT=1); --full and machine readers get it all.
+if TMUX_HAS_SESSION=1 TMUX_WINDOWS='default-lane codex-lane copilot-lane' AFA_BIG_OUT=1 AFA_LANE_FOLDER="$TMP" \
+  HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/status-calls2" TMUX_SENT="$TMP/status-sent2" \
+  bash "$SCRIPT" --status --full >"$TMP/status-full.out" 2>&1; then checks=$((checks + 1)); else fail '--status --full exits successfully'; fi
+assert_contains "$(cat "$TMP/status-full.out")" 'engine/billing:copilot' '--status --full prints every row'
 
 # Lean Claude lanes: effort high on every model, connectors/plugins/Artifact off, workspace CLAUDE.md swapped for the slim rules.
 PROMPT_MAIL="$TMP/prompt-mail.md"
@@ -485,6 +490,10 @@ run_lane --allow-high-tier "engines test fixture" lean-opus "$REPO" opus "$PROMP
 assert_contains "$LAST_COMMAND" '--effort high' 'opus defaults to effort high'
 assert_not_contains "$LAST_COMMAND" 'xhigh' 'no lane defaults to xhigh'
 assert_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'connectors are off by default'
+assert_contains "$LAST_COMMAND" 'rules_reminder.py' 'a Claude lane starts with the rules reminder hook'
+assert_contains "$LAST_COMMAND" 'PostToolUseFailure' 'the reminder hook also watches failed calls'
+assert_contains "$LAST_COMMAND" 'AFA_BIG_OUT=1' 'a Claude lane asks for big output to go to a file'
+assert_contains "$LAST_COMMAND" 'AFA_LANE_FOLDER=' 'a Claude lane names its folder for big output'
 assert_contains "$LAST_COMMAND" 'superpowers@claude-plugins-official' 'listed plugins are switched off'
 assert_contains "$LAST_COMMAND" 'creative-writing@grey-haven-plugins' 'creative-writing is switched off'
 assert_not_contains "$LAST_COMMAND" 'afa-mods' 'afa-mods stays on'
@@ -499,14 +508,19 @@ assert_not_contains "$LAST_COMMAND" '--effort' 'haiku takes no effort'
 run_lane --allow-high-tier "engines test fixture" --effort max lean-max "$REPO" opus "$PROMPT"
 assert_contains "$LAST_COMMAND" '--effort max' '--effort still overrides'
 
-printf '# Lane rules\n' >"$HOME_TEST/repos/hub/lane-rules.md"
+printf '# Lane rules (pointer)\n' >"$HOME_TEST/repos/hub/lane-rules.md"
+mkdir -p "$HOME_TEST/repos/hub/lane-rules"
+printf '## core\n\n- core rule\n' >"$HOME_TEST/repos/hub/lane-rules/core.md"
+printf '## mail\n\n- mail rule\n' >"$HOME_TEST/repos/hub/lane-rules/mail.md"
 mkdir -p "$HOME_TEST/.claude/commands" "$HOME_TEST/.claude/skills/zz-off-skill" "$HOME_TEST/.claude/skills/graphify" "$HOME_TEST/.claude/skills/no-skill-file"
 : >"$HOME_TEST/.claude/commands/zz-off-cmd.md"; : >"$HOME_TEST/.claude/commands/prep.md"
 : >"$HOME_TEST/.claude/skills/zz-off-skill/SKILL.md"; : >"$HOME_TEST/.claude/skills/graphify/SKILL.md"
 run_lane lean-rules "$REPO" sonnet "$PROMPT"
 assert_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is excluded once the rule file exists'
 assert_contains "$LAST_COMMAND" "$HOME_TEST/repos/CLAUDE.md" 'the exclude names the workspace CLAUDE.md'
-assert_contains "$LAST_COMMAND" "--append-system-prompt-file $HOME_TEST/repos/hub/lane-rules.md" 'the slim rules are appended'
+assert_contains "$LAST_COMMAND" "--append-system-prompt-file $(echo "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'the composed rules are appended'
+assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'core rule' 'the composed rules hold core'
+assert_not_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'mail rule' 'a lane with no mail words gets no mail part'
 assert_contains "$LAST_COMMAND" 'autoMemoryEnabled' 'the memory index is off once the rule file exists'
 assert_contains "$LAST_COMMAND" 'syncClaudeAiSkills' 'claude.ai synced skills are off'
 assert_contains "$LAST_COMMAND" 'skillOverrides' 'skills not on the keep list are switched off'
@@ -517,6 +531,7 @@ assert_not_contains "$LAST_COMMAND" 'graphify\":\"off' 'a kept skill stays on'
 assert_not_contains "$LAST_COMMAND" 'no-skill-file' 'a folder without SKILL.md is not a skill'
 
 run_lane lean-mail "$REPO" sonnet "$PROMPT_MAIL"
+assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-mail/rules.md)" 'mail rule' 'a Gmail prompt gets the mail part'
 assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a prompt that mentions Gmail keeps the connectors'
 assert_contains "$LAST_OUTPUT" 'connectors on' 'start line reports connectors on'
 run_lane triage-mail "$REPO" sonnet "$PROMPT"

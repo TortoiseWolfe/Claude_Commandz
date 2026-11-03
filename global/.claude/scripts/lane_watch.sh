@@ -57,6 +57,8 @@
 # primed lane at 95K; it wrote handoff.md, stopped, and sat idle until 8:28 AM.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
+# A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
+export AFA_BIG_OUT=0
 set -u
 
 # Does this pane text show a dialog that waits on the hub? Reads the pane on stdin.
@@ -392,7 +394,7 @@ client_line_open() {
 # "report stale: ..." when lane.sh --status says the lane's report.md is not its last word (input arrived after it, or a background job is
 # still running), else nothing. 19 Oct: a lane was closed on "report:yes idle" while it was mid-work.
 stale_note() {
-  "$HOME/.claude/scripts/lane.sh" --status 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
+  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
 }
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
@@ -426,7 +428,7 @@ watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last f
 # The live lanes now: rows of lane.sh --status that start in column one and are not "dead", and that have a tmux window.
 live_lanes() {
   local wins; wins=$(tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null) || return 0
-  "$HOME/.claude/scripts/lane.sh" --status 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
+  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
     while read -r n; do printf '%s\n' "$wins" | grep -qx "$n" && echo "$n"; done
 }
 refresh_watched() { # no names given: add the lanes that started since the last poll

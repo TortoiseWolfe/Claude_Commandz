@@ -577,5 +577,27 @@ class Commands(Creds):
         self.assertNotIn("Bearer", s)
 
 
+class BigOutput(unittest.TestCase):
+    """message-text of a long body: a session with AFA_BIG_OUT=1 gets a summary and a path; --full, or no AFA_BIG_OUT, gets the text."""
+    BODY = "A long line of mail text. " * 500
+
+    def run_cmd(self, *args, big="1"):
+        out = io.StringIO()
+        env = {"AFA_BIG_OUT": big, "AFA_LANE_FOLDER": str(fresh_dir())}
+        with mock.patch.dict(os.environ, env), mock.patch.object(g, "message_text", return_value=self.BODY), redirect_stdout(out):
+            g.main(["message-text", "abc123", *args])
+        return out.getvalue()
+
+    def test_long_text_goes_to_a_file_for_a_lane(self):
+        s = self.run_cmd()
+        self.assertLess(len(s), 700)
+        path = re.search(r": (\S+out-gmail-text-abc123-\S+\.txt)", s).group(1)
+        self.assertEqual(Path(path).read_text(), self.BODY)
+
+    def test_full_flag_and_machine_callers_get_everything(self):
+        self.assertEqual(self.run_cmd("--full"), self.BODY)
+        self.assertEqual(self.run_cmd(big="0"), self.BODY)
+
+
 if __name__ == "__main__":
     unittest.main()
