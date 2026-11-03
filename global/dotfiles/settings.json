@@ -286,7 +286,9 @@
     "deep-project@piercelamb-plugins": true,
     "deep-implement@piercelamb-plugins": true,
     "creative-writing-skills@creative-writing-skills": true,
-    "creative-writing@grey-haven-plugins": true
+    "creative-writing@grey-haven-plugins": true,
+    "typescript-lsp@claude-plugins-official": true,
+    "pyright-lsp@claude-plugins-official": true
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
