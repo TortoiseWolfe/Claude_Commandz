@@ -7,6 +7,8 @@ Reads <PREFIX>_URL, <PREFIX>_USER and <PREFIX>_PASS from the env file inside thi
 password is never printed, logged or put on a command line. GET requests only. Prints the board
 title, then each stack with its cards: id, title, assignees, labels, due date, last change, and
 the first 200 characters of the description.
+A stack that is a done column gets " [done column]" on its header; a done or archived card gets
+" | done" at the end of its line.
 """
 import argparse
 import base64
@@ -84,14 +86,15 @@ def main(argv=None):
     print(f"__DECK=ok__ board {a.board} \"{board.get('title')}\" at {base}: {len(stacks)} stacks, {n} open cards")
     for s in sorted(stacks, key=lambda s: s.get("order", 0)):
         cards = s.get("cards") or []
-        print(f"\n## {s.get('title')} ({len(cards)})")
+        print(f"\n## {s.get('title')} ({len(cards)})" + (" [done column]" if s.get("isDoneColumn") else ""))
         for cd in sorted(cards, key=lambda x: x.get("order", 0)):
             who = ",".join((u.get("participant") or {}).get("uid", "?") for u in cd.get("assignedUsers") or [])
             labels = ",".join(l.get("title", "") for l in cd.get("labels") or [])
             desc = " ".join((cd.get("description") or "").split())[:200]
             owner = (cd.get("owner") or {}).get("uid", "") if isinstance(cd.get("owner"), dict) else cd.get("owner", "")
             print(f"- #{cd.get('id')} {cd.get('title')} | by {owner} | to {who or '-'} | {labels or '-'}"
-                  f" | due {when(cd.get('duedate')) or '-'} | changed {when(cd.get('lastModified'))}")
+                  f" | due {when(cd.get('duedate')) or '-'} | changed {when(cd.get('lastModified'))}"
+                  + (" | done" if cd.get("done") or cd.get("archived") else ""))
             if desc:
                 print(f"    {desc}")
     return 0
