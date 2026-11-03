@@ -2,9 +2,10 @@
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+
+import tmpdirs
 
 SCRIPT = Path(__file__).resolve().parent.parent / "ctx_tool_share.py"
 
@@ -20,8 +21,7 @@ class CtxToolShare(unittest.TestCase):
             rows.append(line("assistant", [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": "x"}}]))
             size = 15000 if i == 0 else 100
             rows.append(line("user", [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "y" * size}]))
-        d = tempfile.mkdtemp()
-        p = Path(d) / "s.jsonl"
+        p = Path(tmpdirs.fresh_dir(self)) / "s.jsonl"
         p.write_text("\n".join(rows) + "\n")
         return p
 
@@ -39,7 +39,7 @@ class CtxToolShare(unittest.TestCase):
         self.assertIn("88% of all tool output", r.stdout)  # 15,300 of 17,400 characters sit in the first 4 results, more than 20 turns old at the end
 
     def test_no_tool_results_exits_1(self):
-        p = Path(tempfile.mkdtemp()) / "e.jsonl"
+        p = Path(tmpdirs.fresh_dir(self)) / "e.jsonl"
         p.write_text(line("user", "hi") + "\n")
         r = subprocess.run([sys.executable, str(SCRIPT), str(p)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
