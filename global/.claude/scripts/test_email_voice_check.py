@@ -127,10 +127,88 @@ class OpenWorkHold(unittest.TestCase):
         msgs = [m for c, m in res['matches'] if c == 'question_to_reader']
         self.assertTrue(msgs and 'research and decide it ourselves' in msgs[0])
 
-    def test_only_they_know_clears_the_question(self):
+    WAIVER = ('What name should go on the invoice::asked Gail in her 15 Oct mail; the invoice name '
+              'is not in any record we hold')
+
+    def _waiver(self, value=None):
+        return v.parse_waiver(self.WAIVER if value is None else value)[0]
+
+    def _cli(self, text, *extra):
+        import subprocess
+        return subprocess.run([sys.executable, str(Path(v.__file__)), '--stdin', '--strict',
+                               '--recipient', 'gail', *extra],
+                              input=text, capture_output=True, text=True)
+
+    def test_waiver_clears_only_its_own_question(self):
+        text = "What name should go on the invoice?\nDoes Resend show the domain as verified?\nJon"
+        res = v.detect_llm_signals(text, strict=True, recipient='gail', waivers=[self._waiver()])
+        held = [m for c, m in res['matches'] if c == 'question_to_reader']
+        self.assertEqual(len(held), 1)
+        self.assertIn('Resend', held[0])
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertEqual([q for q, _ in res['kept_questions']], ['What name should go on the invoice?'])
+
+    def test_waiver_alone_passes_a_single_question(self):
         res = v.detect_llm_signals("What name should go on the invoice?\nJon", strict=True,
-                                   recipient='gail', only_they_know=True)
+                                   recipient='gail', waivers=[self._waiver()])
         self.assertFalse(any(c == 'question_to_reader' for c, _ in res['matches']))
+
+    def test_waiver_matches_by_contains_and_ignores_case(self):
+        waiver = self._waiver('SHOULD GO ON THE INVOICE::asked Gail in her 15 Oct mail; no record holds it')
+        res = v.detect_llm_signals("What name should go on the invoice?\nJon", strict=True,
+                                   recipient='gail', waivers=[waiver])
+        self.assertFalse(any(c == 'question_to_reader' for c, _ in res['matches']))
+
+    def test_waiver_matching_no_question_fails(self):
+        res = v.detect_llm_signals("The invoice is attached.\nJon", strict=True, recipient='gail',
+                                   waivers=[self._waiver()])
+        self.assertEqual(res['verdict'], 'FAIL')
+        self.assertTrue(any(c == 'question_waiver_unused' for c, _ in res['matches']))
+
+    def test_bare_flag_fails_with_the_new_form(self):
+        run = self._cli("Greg, does Resend show the domain as verified?\n", '--only-they-know')
+        self.assertEqual(run.returncode, 2)
+        self.assertIn('one question at a time', run.stdout)
+        self.assertNotIn('Verdict: PASS', run.stdout)
+
+    def test_flag_without_reason_fails(self):
+        run = self._cli("Greg, does Resend show the domain as verified?\n", '--only-they-know', 'Greg, does Resend')
+        self.assertEqual(run.returncode, 2)
+        self.assertIn('one question at a time', run.stdout)
+
+    def test_short_reason_fails(self):
+        run = self._cli("Greg, does Resend show the domain as verified?\n",
+                        '--only-they-know', 'Greg, does Resend::I checked it')
+        self.assertEqual(run.returncode, 2)
+        self.assertIn('at least 25', run.stdout)
+
+    def test_stock_phrase_reason_fails(self):
+        for reason in ('only they know the answer to this', 'Only the reader can answer, only they know.'):
+            err = v.parse_waiver(f'Greg, does Resend::{reason}')[1]
+            self.assertIsNotNone(err, reason)
+            self.assertIn('stock phrase', err)
+
+    def test_valid_waiver_passes_and_prints_kept_question_line(self):
+        reason = 'Resend dashboard showed no such record and only Greg holds the registrar login'
+        run = self._cli("Greg, does the registrar still list the old address?\n",
+                        '--only-they-know', f'Greg, does the registrar::{reason}')
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn('Verdict: PASS', run.stdout)
+        self.assertIn(f'kept question: Greg, does the registrar still list the old address? | checked: {reason}',
+                      run.stdout)
+
+    def test_pass_with_no_kept_question_prints_no_kept_line(self):
+        run = self._cli("The invoice is attached.\n")
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertNotIn('kept question', run.stdout)
+
+    def test_each_flag_waives_its_own_question(self):
+        text = "Greg, does the registrar still list the old address?\nIs the calendar feed a plain file?\n"
+        r1 = 'Greg, does the registrar::registrar login is Greg only; the public lookup shows nothing'
+        r2 = 'the calendar feed::fetched the feed URL, it needs a member sign-in we lack'
+        run = self._cli(text, '--only-they-know', r1, '--only-they-know', r2)
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertEqual(run.stdout.count('kept question:'), 2)
 
     def test_quoted_question_is_not_asked(self):
         res = v.detect_llm_signals("> Which version does the host run?\nVersion 35, checked today.\nJon",
