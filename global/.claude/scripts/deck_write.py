@@ -119,7 +119,7 @@ def main(argv=None):
         print(f"#{cd['id']} {cd['title']} [{s['title']}]\n---\n{cd.get('description') or ''}")
     elif a.action == "comment":
         find_card(c, b, a.card)
-        call(c, "POST", f"/cards/{a.card}/comments", {"message": a.text})
+        call(c, "POST", f"/cards/{a.card}/comments", {"message": a.text}, api="/ocs/v2.php/apps/deck/api/v1.0")  # comments exist only on the OCS route; the REST route answers 405
         print(f"commented on #{a.card}")
     elif a.action in ("replace", "append"):
         s, cd = find_card(c, b, a.card)
