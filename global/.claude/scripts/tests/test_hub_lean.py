@@ -41,7 +41,8 @@ class HubLean(unittest.TestCase):
         r = self.run_it("--install")
         self.assertEqual(r.returncode, 0, r.stderr)
         d = self.written()
-        self.assertEqual(sorted(d), ["deniedMcpServers", "enabledPlugins", "env", "hooks", "permissions"])
+        self.assertEqual(sorted(d), ["bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "env", "hooks", "permissions"])
+        self.assertEqual(d["bashOutputMaxChars"], 12000)
         self.assertEqual(d["env"]["AFA_BIG_OUT"], "1")
         for ev in ("PostToolUse", "PostToolUseFailure"):
             cmds = [h["command"] for g in d["hooks"][ev] for h in g["hooks"]]
@@ -123,7 +124,7 @@ class HubLean(unittest.TestCase):
         r = self.run_it("--lean-dir")
         self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, str(self.lean), ""))
         d = json.loads(self.lean_file.read_text())
-        self.assertEqual(sorted(d), ["autoMemoryEnabled", "deniedMcpServers", "enabledPlugins", "permissions"])
+        self.assertEqual(sorted(d), ["autoMemoryEnabled", "bashOutputMaxChars", "deniedMcpServers", "enabledPlugins", "permissions"])
         self.assertIs(d["autoMemoryEnabled"], False)
         self.assertFalse(any(d["enabledPlugins"].values()))
         self.assertEqual(d["permissions"]["deny"], ["Artifact", "ArtifactComments", "ArtifactData"])
