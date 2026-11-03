@@ -153,7 +153,7 @@ LANE_PLUGINS_OFF="
   superpowers@claude-plugins-official hookify@claude-plugins-official feature-dev@claude-plugins-official
   coderabbit@claude-plugins-official frontend-design@claude-plugins-official
   claude-code-setup@claude-plugins-official claude-md-management@claude-plugins-official
-  supabase@claude-plugins-official
+  supabase@claude-plugins-official vercel-plugin@vercel
 "
 # Tools withheld from every Claude lane (--disallowedTools). The Artifact tool's schema alone is about a
 # quarter of a lane's starting context, and the standing rule is that nothing is published to Artifacts.
