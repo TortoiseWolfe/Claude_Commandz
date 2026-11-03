@@ -39,7 +39,8 @@ class DeckCommentVoiceGate(unittest.TestCase):
 
         request.assert_called_once_with(
             {"URL": "https://example.test"}, "POST", "/cards/9/comments",
-            {"message": "hey, did the link open? i found it in the notes, the page looked fine on my end."})
+            {"message": "hey, did the link open? i found it in the notes, the page looked fine on my end."},
+            api="/ocs/v2.php/apps/deck/api/v1.0")  # comments exist only on the OCS route; the REST route answers 405
         self.assertIn("Verdict: PASS", output.getvalue())
 
 
