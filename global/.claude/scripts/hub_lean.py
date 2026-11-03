@@ -8,9 +8,12 @@ settings file in ~/repos reaches the hub with no new flags typed: Claude Code re
 What it writes into ~/repos/.claude/settings.json (the workspace .gitignore allowlist keeps it untracked):
   enabledPlugins        false for every plugin in lane.sh's LANE_PLUGINS_OFF (parsed from lane.sh, so there is one list)
   permissions.deny      lane.sh's LANE_TOOLS_OFF: the Artifact tools, whose schema alone is about 13K tokens
+  bashOutputMaxChars    12000 (Claude Code's default is 30000): output past it goes to a file, Claude sees a preview and the path
   deniedMcpServers      every claude.ai connector except the three the hub used in its 16-19 Oct transcripts (Gmail,
                         Google Calendar, Google Drive): Resend, Calendly, Clay ... are not even connected.
-Other keys already in the file are kept; the three above are managed.
+  env                   AFA_BIG_OUT=1: long script output goes to a file with a short summary (big_output.py)
+  hooks                 PostToolUse and PostToolUseFailure run rules_reminder.py --role hub (three key rules back in view)
+Other keys already in the file are kept; the six above are managed.
 
   hub_lean.py --print     show the managed settings
   hub_lean.py --install   write them if the file differs (silent when already current)
@@ -45,6 +48,11 @@ HUB_CONNECTORS_OFF = [
 ]
 
 
+# Characters of a command's output Claude receives inline; past this, Claude Code saves the output to a file in the session
+# folder and Claude gets a preview of up to 2,000 characters plus the path (settings-reference.md, bashOutputMaxChars; range
+# 4,000 to 128,000, default 30,000, needs Claude Code v2.1.261). 12,000 because the 2 Nov 2026 transcript sweep (531 sessions,
+# ctx_tool_share.py) found 127 command results over 12,000 characters, 1.7 million characters that stay out of context.
+BASH_OUTPUT_MAX_CHARS = 12000
 REMINDER_HOOK = {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/rules_reminder.py --role hub"}]}
 
 
@@ -62,6 +70,7 @@ def managed():
         "enabledPlugins": {p: False for p in lane_list("LANE_PLUGINS_OFF")},
         "permissions": {"deny": lane_list("LANE_TOOLS_OFF")},
         "deniedMcpServers": [{"serverName": n} for n in HUB_CONNECTORS_OFF],
+        "bashOutputMaxChars": BASH_OUTPUT_MAX_CHARS,
         # AFA_BIG_OUT=1: long script output (lane status, the inbox board, mail text) goes to a file with a short summary (big_output.py).
         "env": {"AFA_BIG_OUT": "1"},
         # rules_reminder.py: the hub's three habits come back into view every 30 tool calls or when the same command fails twice.
@@ -105,6 +114,7 @@ def merged(existing):
     perms["deny"] = list(dict.fromkeys([*perms.get("deny", []), *want["permissions"]["deny"]]))
     out["permissions"] = perms
     out["deniedMcpServers"] = want["deniedMcpServers"]
+    out["bashOutputMaxChars"] = want["bashOutputMaxChars"]
     out["env"] = {**existing.get("env", {}), **want["env"]}
     hooks = {ev: list(v) for ev, v in existing.get("hooks", {}).items()}
     for ev, entries in want["hooks"].items():
