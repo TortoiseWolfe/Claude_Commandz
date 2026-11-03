@@ -1053,14 +1053,67 @@ def open_work_hits(text):
     return hits
 
 
-def reader_questions(text):
+def reader_questions(text, full=False):
     """Prose sentences that ask the reader something. Returns [sentence].
 
     We research and decide technical questions ourselves; a question stays only
-    when just the reader can know the answer (then pass --only-they-know).
+    when just the reader can know the answer, one question at a time, with a
+    written reason naming what we checked (--only-they-know "<start>::<reason>").
+    full=True returns the whole sentence instead of the first 80 characters.
     """
-    return [sentence.strip()[:80] for sentence, _ in _prose_sentences(text)
+    return [sentence.strip() if full else sentence.strip()[:80]
+            for sentence, _ in _prose_sentences(text)
             if sentence.rstrip().endswith('?')]
+
+
+WAIVER_MIN_REASON = 25
+# Stock phrases that say nothing about what was checked. A reason made only of these is refused.
+WAIVER_STOCK_PHRASES = [
+    'only they know', 'only the reader knows', 'only the reader can know', 'only the reader can answer',
+    'only they can know', 'only they can answer', 'only he knows', 'only she knows', 'they know',
+    'only the recipient knows', 'only the recipient can answer', 'only the client knows',
+    'only the client can answer', 'the reader knows', 'reader only', 'only they',
+]
+WAIVER_USAGE = ('--only-they-know "<start of the question>::<what we checked, and why only the reader '
+                'can answer>" (repeat the flag once per question)')
+
+
+def parse_waiver(value):
+    """Parse one --only-they-know value. Returns ((start, reason), None) or (None, error message)."""
+    if value is None or '::' not in value:
+        return None, f'--only-they-know takes one question at a time, in the form {WAIVER_USAGE}'
+    start, reason = (part.strip() for part in value.split('::', 1))
+    if not start:
+        return None, f'--only-they-know needs the start of the question before "::". Form: {WAIVER_USAGE}'
+    if len(reason) < WAIVER_MIN_REASON:
+        return None, (f'--only-they-know reason for "{start}" is {len(reason)} characters; it needs at least '
+                      f'{WAIVER_MIN_REASON}, naming what we checked and why only the reader can answer')
+    rest = re.sub(r'[^a-z0-9 ]+', ' ', reason.lower())
+    for phrase in sorted(WAIVER_STOCK_PHRASES, key=len, reverse=True):
+        rest = rest.replace(phrase, ' ')
+    rest = ' '.join(rest.split())
+    if len(rest) < WAIVER_MIN_REASON:
+        return None, (f'--only-they-know reason for "{start}" is a stock phrase. Say what we checked '
+                      f'(the dashboard, record or live test) and why only the reader can answer')
+    return (start, reason), None
+
+
+def match_waivers(text, waivers):
+    """Split the text's reader questions by the waivers given.
+
+    Returns (held, kept, unused): held = questions with no waiver (80-char form),
+    kept = [(question, reason)] waived, unused = [start] waivers that matched no question.
+    """
+    held, kept, used = [], [], set()
+    for q in reader_questions(text, full=True):
+        low = q.lower()
+        hit = next((w for w in waivers if w[0].lower() in low), None)
+        if hit is None:
+            held.append(q[:80])
+        else:
+            kept.append((q[:80], hit[1]))
+            used.add(hit[0])
+    return held, kept, [w[0] for w in waivers if w[0] not in used]
 
 
 def promise_messages(text):
@@ -1074,10 +1127,11 @@ def open_work_messages(text):
             f'the client what was not done' for ph, ln in open_work_hits(text)]
 
 
-def question_messages(text):
+def question_messages(text, held=None):
+    held = reader_questions(text) if held is None else held
     return [f'"{q}" -> HOLD: research and decide it ourselves. Keep a question only if just '
-            f'the reader can know the answer, then rerun with --only-they-know'
-            for q in reader_questions(text)]
+            f'the reader can know the answer, then rerun with {WAIVER_USAGE}'
+            for q in held]
 
 
 RECORD_CLAIM_PATTERNS = [
@@ -1571,7 +1625,7 @@ def house_rule_matches(text, recipient='greg', is_reply=False, recipient_explici
 
 
 def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
-                       recipient_explicit=True, only_they_know=False, html=None,
+                       recipient_explicit=True, waivers=None, html=None,
                        access_proof=None, chat=False):
     """
     Analyze an email or chat body for AI-ish voice.
@@ -1620,6 +1674,7 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
 
     structural = structural_matches(check_text)
     matches.extend(structural)
+    kept_questions = []
 
     # Under --recipient team these four email-only rules are off: a ticket is where plans
     # live and TechJoy's PR template asks the author reflection questions (29 Oct).
@@ -1628,9 +1683,14 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
             matches.append(('promises_future_work', msg))
         for msg in open_work_messages(text):
             matches.append(('open_work', msg))
-        if not only_they_know and not chat:
-            for msg in question_messages(text):
+        if not chat:
+            held, kept_questions, unused = match_waivers(text, waivers or [])
+            for msg in question_messages(text, held):
                 matches.append(('question_to_reader', msg))
+            for start in unused:
+                matches.append(('question_waiver_unused',
+                                f'--only-they-know "{start}" matches no question in the text; '
+                                f'drop it or fix the start'))
 
     signal_count = len(matches)
     structural_count = len(structural)
@@ -1732,6 +1792,7 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
         'strict': strict,
         'skipped_note': skipped_note,
         'access_note': access_note,
+        'kept_questions': kept_questions,
     }
 
 
@@ -1740,7 +1801,15 @@ def main():
     strict = "--strict" in args
     chat = "--chat" in args
     is_reply = "--reply" in args
-    only_they_know = "--only-they-know" in args
+    waivers = []
+    for i, a in enumerate(args):
+        if a == '--only-they-know':
+            value = args[i + 1] if i + 1 < len(args) and not args[i + 1].startswith('--') else None
+            waiver, error = parse_waiver(value)
+            if error:
+                print(f"ERROR: {error}")
+                sys.exit(2)
+            waivers.append(waiver)
     # A value starting with '--' is a flag, never a recipient. Without this,
     # `--recipient --strict` consumed '--strict' as the recipient name, every
     # house rule was skipped as "not greg", and the script printed PASS and
@@ -1796,6 +1865,8 @@ def main():
         facts_original = fp.read_text()
     skip = {"--strict", "--chat", "--reply", "--only-they-know", "--recipient", recipient, "--html",
             "--keep-facts-from", "--access-proof"}
+    for start, reason in waivers:
+        skip.add(f'{start}::{reason}')
     if access_proof is not None:
         skip.add(access_proof)
     if html_path is not None:
@@ -1862,7 +1933,10 @@ def main():
         print("\nOpen work and questions (--strict only; a HOLD, not a style nit):")
         print("  [open_work] still open / not yet / next up / we plan / on my list. Do the work first, then")
         print("  report it done; never trim the line. [question_to_reader] any prose question to the reader:")
-        print("  research and decide it ourselves; add --only-they-know once only the reader can answer.")
+        print("  research and decide it ourselves. A question passes only one at a time:")
+        print('  --only-they-know "<start of the question>::<what we checked, and why only the reader can answer>"')
+        print("  (repeatable; reason 25+ characters, never a stock phrase; a start matching no question fails).")
+        print("  PASS lists each kept question with its reason.")
         print("\nAsks the reader for access (every recipient except team):")
         print("  [access_ask] a sentence asking for access: add <address> as a Viewer, invite me, give me access,")
         print("  grant/share access, sign-in/login for, admin access, add me to, send me the password. Warns by")
@@ -1883,7 +1957,7 @@ def main():
 
     result = detect_llm_signals(text, strict=strict, recipient=recipient, is_reply=is_reply,
                                recipient_explicit=recipient_explicit,
-                               only_they_know=only_they_know, html=html,
+                               waivers=waivers, html=html,
                                access_proof=access_proof, chat=chat)
     dropped = dropped_facts(facts_original, text) if facts_original is not None else []
     if dropped:
@@ -1900,6 +1974,8 @@ def main():
         print(result['skipped_note'])
     if result.get('access_note'):
         print(result['access_note'])
+    for question, reason in result.get('kept_questions') or []:
+        print(f"kept question: {question} | checked: {reason}")
     print(f"Contraction ratio: {result['contraction_ratio']}")
     print(f"Mid-sentence dashes: {result['dash_count']}")
     print(f"Body words: {result['body_words']} (recipient: {result['recipient']})")
