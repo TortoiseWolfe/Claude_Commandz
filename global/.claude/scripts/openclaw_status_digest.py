@@ -888,7 +888,7 @@ def main(argv=None):
     body = Path(a.roadmap_file).read_text() if a.roadmap_file else _run(
         ["gh", "issue", "view", "1", "-R", "TortoiseWolfe/workspace", "--json", "body", "-q", ".body"])
     status = Path(a.lane_status_file).read_text() if a.lane_status_file else _run(
-        [str(HOME / ".claude/scripts/lane.sh"), "--status"])
+        [str(HOME / ".claude/scripts/lane.sh"), "--status", "--full"])
     try:
         inbox = Path(a.inbox).read_text(errors="replace")
     except OSError:

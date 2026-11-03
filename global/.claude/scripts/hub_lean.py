@@ -11,7 +11,9 @@ What it writes into ~/repos/.claude/settings.json (the workspace .gitignore allo
   bashOutputMaxChars    12000 (Claude Code's default is 30000): output past it goes to a file, Claude sees a preview and the path
   deniedMcpServers      every claude.ai connector except the three the hub used in its 16-19 Oct transcripts (Gmail,
                         Google Calendar, Google Drive): Resend, Calendly, Clay ... are not even connected.
-Other keys already in the file are kept; the four above are managed.
+  env                   AFA_BIG_OUT=1: long script output goes to a file with a short summary (big_output.py)
+  hooks                 PostToolUse and PostToolUseFailure run rules_reminder.py --role hub (three key rules back in view)
+Other keys already in the file are kept; the six above are managed.
 
   hub_lean.py --print     show the managed settings
   hub_lean.py --install   write them if the file differs (silent when already current)
@@ -51,6 +53,7 @@ HUB_CONNECTORS_OFF = [
 # 4,000 to 128,000, default 30,000, needs Claude Code v2.1.261). 12,000 because the 2 Nov 2026 transcript sweep (531 sessions,
 # ctx_tool_share.py) found 127 command results over 12,000 characters, 1.7 million characters that stay out of context.
 BASH_OUTPUT_MAX_CHARS = 12000
+REMINDER_HOOK = {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/rules_reminder.py --role hub"}]}
 
 
 def lane_list(name):
@@ -68,6 +71,10 @@ def managed():
         "permissions": {"deny": lane_list("LANE_TOOLS_OFF")},
         "deniedMcpServers": [{"serverName": n} for n in HUB_CONNECTORS_OFF],
         "bashOutputMaxChars": BASH_OUTPUT_MAX_CHARS,
+        # AFA_BIG_OUT=1: long script output (lane status, the inbox board, mail text) goes to a file with a short summary (big_output.py).
+        "env": {"AFA_BIG_OUT": "1"},
+        # rules_reminder.py: the hub's three habits come back into view every 30 tool calls or when the same command fails twice.
+        "hooks": {ev: [REMINDER_HOOK] for ev in ("PostToolUse", "PostToolUseFailure")},
     }
 
 
@@ -82,6 +89,18 @@ def lean_dir():
 def lean_merged(existing):
     """The hub's managed keys plus autoMemoryEnabled false, laid over whatever the lean folder's file already holds."""
     out = merged(existing)
+    # The lean folder serves unattended headless calls: no long-output files and no rule reminders there.
+    env = {k: v for k, v in out.get("env", {}).items() if k != "AFA_BIG_OUT"}
+    if env:
+        out["env"] = env
+    else:
+        out.pop("env", None)
+    hooks = {ev: [h for h in v if "rules_reminder.py" not in json.dumps(h)] for ev, v in out.get("hooks", {}).items()}
+    hooks = {ev: v for ev, v in hooks.items() if v}
+    if hooks:
+        out["hooks"] = hooks
+    else:
+        out.pop("hooks", None)
     out["autoMemoryEnabled"] = False
     return out
 
@@ -96,6 +115,12 @@ def merged(existing):
     out["permissions"] = perms
     out["deniedMcpServers"] = want["deniedMcpServers"]
     out["bashOutputMaxChars"] = want["bashOutputMaxChars"]
+    out["env"] = {**existing.get("env", {}), **want["env"]}
+    hooks = {ev: list(v) for ev, v in existing.get("hooks", {}).items()}
+    for ev, entries in want["hooks"].items():
+        have = [h for h in hooks.get(ev, []) if "rules_reminder.py" not in json.dumps(h)]
+        hooks[ev] = have + entries
+    out["hooks"] = hooks
     return out
 
 

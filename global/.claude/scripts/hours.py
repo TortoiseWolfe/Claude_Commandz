@@ -769,7 +769,8 @@ def sent_mail(cfg, key, lo, hi):
         q = "in:sent to:(%s) after:%s before:%s" % (" OR ".join(to), dt.datetime.fromtimestamp(t, ET).strftime("%Y/%m/%d"),
                                                       dt.datetime.fromtimestamp(t2 + 86400, ET).strftime("%Y/%m/%d"))
         try:
-            res = subprocess.run(cmd + ["messages-list", q, "--limit", "500"], capture_output=True, text=True, timeout=120)
+            res = subprocess.run(cmd + ["messages-list", q, "--limit", "500"], capture_output=True, text=True, timeout=120,
+                                 env={**os.environ, "AFA_BIG_OUT": "0"})  # this reads every line: no summary
         except (OSError, subprocess.TimeoutExpired):
             break
         for line in res.stdout.splitlines():
