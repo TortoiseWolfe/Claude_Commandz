@@ -117,6 +117,7 @@
 #
 # A lane starts lean (Claude lanes only, every start and resume). Each lane re-reads everything it
 # starts with on every turn, so the same --settings JSON also carries:
+#   - bashOutputMaxChars 12000, so a command result over 12,000 characters goes to a file (preview plus path) instead of the lane's context;
 #   - the plugins in LANE_PLUGINS_OFF set to false (list below, near the top of the code);
 #   - disableClaudeAiConnectors, so the claude.ai connectors (Calendly, Clay, Resend, PayPal ...)
 #     are not loaded. They stay on when the lane name ends in -mail, when the prompt file mentions
@@ -813,6 +814,9 @@ default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
 lane_recycle_k() {  # <stored value or empty> <prompt-file> <dir> <connectors> -> K tokens
   if [[ "${1:-}" =~ ^[0-9]+$ ]]; then echo "$1"; else default_recycle_k "$(lane_kind "${2:-}" "${3:-}" "${4:--}")" "${4:--}"; fi
 }
+# Characters of a command's output a lane receives inline; past it Claude Code saves the output to a file and gives a preview plus the path.
+# Same value as BASH_OUTPUT_MAX_CHARS in hub_lean.py (the hub gets it through its project settings; lanes through --settings).
+LANE_BASH_OUTPUT_MAX_CHARS=12000
 window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (200000: the window of every tier a lane runs on)
   local cap=${LANE_WINDOW_CAP:-200000} w
   w=$(( ((${1:-100} + ${LANE_BACKSTOP_ROOM_K:-60}) * 100000 / 84 + 9999) / 10000 * 10000 ))
@@ -912,7 +916,7 @@ claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recy
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
-  json='{"autoCompactWindow":'"$(window_for "${4:-100}")"
+  json='{"autoCompactWindow":'"$(window_for "${4:-100}")"',"bashOutputMaxChars":'"$LANE_BASH_OUTPUT_MAX_CHARS"
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   mcp="$(project_mcp_names "${5:-.}")"
   # --project-mcp <name[,name]>: those servers stay out of the disabled list and are pre-approved, so no dialog and the lane has their tools.

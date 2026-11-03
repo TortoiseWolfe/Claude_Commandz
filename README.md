@@ -85,6 +85,24 @@ mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
 uv tool install graphifyy==0.9.23 && graphify install --platform claude   # graphify is third-party: reinstall it, don't back it up
 ```
 
+### Updating a machine that already runs (install after a merge)
+
+Scenarios A and B are for an empty machine: their `cp -a` lines overwrite every file, so on a machine with live files they
+would also overwrite a file edited after its last commit, or one that was left older than the repo on purpose. After a merge
+use the install script instead. It copies only the files that changed since the last install, and refuses a file whose live
+copy matches neither the old nor the new repo version (a live edit), printing its name.
+
+```bash
+cd ~/repos/Claude_Commandz && git pull
+python3 global/.claude/scripts/install_global.py --dry-run   # what would be copied, what would be refused
+python3 global/.claude/scripts/install_global.py             # copy it; the commit is recorded in ~/.claude/state/install-global-commit
+python3 global/.claude/scripts/install_global.py --status    # every live file that differs from the repo: "stale" or "live edit"
+```
+
+First run on a machine with no record: `--status`, deal with each "live edit" (commit it into the repo, or discard it), then
+`--record` (or pass `--from <commit>`). `--include-stale` also reinstalls the stale files `--status` lists. It covers scripts,
+hooks, workflows, agents and skills. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_global.py`.
+
 ### Scenario C — Single repo only
 
 ```bash
