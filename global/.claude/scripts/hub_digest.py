@@ -688,15 +688,20 @@ DECK_USER = "TurtleWolfe"
 DECK_CACHE = HOME / ".claude/state/deck-cards-cache.json"
 DECK_TTL = 3600
 DECK_ENV = "~/repos/Chattanooga-Digital/.env"   # read by deck_board.py inside its own process; never printed here
-DECK_CARD_LINE = re.compile(r"^- #(\d+) .*? \| to ([^|]*?) \|")
+DECK_CARD_LINE = re.compile(r"^- #(\d+) ")
+DECK_STACK_LINE = re.compile(r"^## (.*) \(\d+\)( \[done column\])?$")
+DECK_DONE_STACK = re.compile(r"(?i)^(?:done|finished)\b")   # a stack of finished cards; the boards have no flag on it, only the name
 DECK_REASON_LIMIT = 90
-CARD_REF = re.compile(r"\bcards?\s+#?(\d+(?:\s*(?:,|and|&)\s*#?\d+)*)", re.I)
+_NUM = r"#?\d+(?:\s*\([^)]*\))?"   # a card number, with an optional parenthetical after it: "153 (self-hosted git, Forgejo trial)"
+CARD_REF = re.compile(r"\bcards?\s+(" + _NUM + r"(?:\s*(?:,|and|&)\s*" + _NUM + r")*)", re.I)
+HASH_REF = re.compile(r"(?<![\w&])#(\d+)\b")
+CARD_WORDS = re.compile(r"(?i)\bco-?op\b|\bdeck\b|\bC\.D\b|\bcards?\b")   # "#N" counts as a card only on a line that says one of these
 CARD_URL = re.compile(r"deck/(?:#/)?board/\d+/card/(\d+)", re.I)
 
 
 def deck_read(board, script=None, env=DECK_ENV, timeout=60):
-    """-> (ids of the open cards assigned to DECK_USER on one board, None) or (None, why it failed). Only numbers leave this function:
-    card titles are member-written text and never reach the page."""
+    """-> (ids of the OPEN cards assigned to DECK_USER on one board, None) or (None, why it failed). Open = not in a Done or Finished stack
+    and not marked done. Only numbers leave this function: card titles are member-written text and never reach the page."""
     script = script or str(HOME / ".claude/scripts/deck_board.py")
     try:
         r = subprocess.run([sys.executable, script, "--env", os.path.expanduser(env), "--prefix", "NEXTCLOUD_PROD", "--board", str(board)],
@@ -712,10 +717,26 @@ def deck_read(board, script=None, env=DECK_ENV, timeout=60):
             tail = (r.stderr or "").strip().splitlines()
             why = tail[-1] if tail else "no answer"
         return None, one_line(re.sub(r"[^\x20-\x7e]", " ", scrub(why)).strip(), DECK_REASON_LIMIT)
-    ids = []
+    ids, closed_stack = [], False
     for line in lines[1:]:
+        h = DECK_STACK_LINE.match(line)
+        if h:
+            closed_stack = bool(h.group(2) or DECK_DONE_STACK.match(h.group(1)))
+            continue
         m = DECK_CARD_LINE.match(line)
-        if m and DECK_USER.lower() in [u.strip().lower() for u in m.group(2).split(",")]:
+        if not m or closed_stack:
+            continue
+        # "- #id title | by owner | to users | labels | due D | changed D[ | done]": read the fields from the right, so a title holding " | " cannot pose as one
+        tail = line.split(" | ")
+        done = tail[-1] == "done"
+        if done:
+            tail = tail[:-1]
+        if len(tail) < 6 or done:
+            continue
+        users = tail[-4]
+        if not users.startswith("to "):
+            continue
+        if DECK_USER.lower() in [u.strip().lower() for u in users[3:].split(",")]:
             ids.append(int(m.group(1)))
     return sorted(set(ids)), None
 
@@ -757,14 +778,17 @@ def deck_cards(now_ts, cache=None, reader=deck_read, ttl=DECK_TTL):
 
 
 def covered_cards(inbox_text):
-    """Every card number an open inbox line ('- [ ] ') names: 'card N', 'cards N and M' / 'N, M and K', 'deck/board/B/card/N'."""
+    """Every card number an open inbox line ('- [ ] ') names: 'card N', 'cards N and M' / 'N, M (note) and K', 'deck/board/B/card/N',
+    and '#N' on a line that also says co-op, Deck, C.D or card (a GitHub issue number on any other line is not cover)."""
     out = set()
     for line in (inbox_text or "").splitlines():
         if not line.startswith("- [ ] "):
             continue
         for m in CARD_REF.finditer(line):
-            out.update(int(n) for n in re.findall(r"\d+", m.group(1)))
+            out.update(int(n) for n in re.findall(r"\d+", re.sub(r"\([^)]*\)", " ", m.group(1))))
         out.update(int(n) for n in CARD_URL.findall(line))
+        if CARD_WORDS.search(line):
+            out.update(int(n) for n in HASH_REF.findall(line))
     return out
 
 
