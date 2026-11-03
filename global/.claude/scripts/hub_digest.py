@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo
 HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lane_handoff_summary import handoff_summary  # noqa: E402
+from big_output import emit  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
 CAP_DEFAULT = 6850  # the page must stay under 7 KB (PAGE_HARD_CAP is the check). 5800 until 29 Oct 2026: the page already sat at 5774,
@@ -976,6 +977,7 @@ def default_inbox():
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", help="write here (atomically) instead of stdout")
+    ap.add_argument("--full", action="store_true", help="print the whole page even when this session asked for long output to go to a file")
     ap.add_argument("--now", help="ISO time to stamp (tests)")
     ap.add_argument("--cap", type=int, default=CAP_DEFAULT)
     ap.add_argument("--roadmap-file")
@@ -1005,7 +1007,7 @@ def main(argv=None):
     body = Path(a.roadmap_file).read_text() if a.roadmap_file else _run(
         ["gh", "issue", "view", "1", "-R", HUB_REPO, "--json", "body", "-q", ".body"])
     status = Path(a.lane_status_file).read_text() if a.lane_status_file else _run(
-        [str(HOME / ".claude/scripts/lane.sh"), "--status"])
+        [str(HOME / ".claude/scripts/lane.sh"), "--status", "--full"])
     try:
         inbox = Path(a.inbox).read_text(errors="replace")
     except OSError:
@@ -1074,7 +1076,9 @@ def main(argv=None):
         tmp.chmod(0o600)
         tmp.replace(p)
     else:
-        sys.stdout.write(page)
+        # A lane or hub session that asked for it (AFA_BIG_OUT=1) gets a short summary and the path when the page is over 8,000 characters;
+        # --full prints it all. The page written with --out is never touched.
+        emit(page, "hub-digest", full=a.full, newline=False)
     # Only NX-01 owns the figure, and only a live build: a fixture run (--roadmap-file) never publishes.
     if a.publish_budget and machine == "NX-01" and not a.roadmap_file:
         publish_budget(budget_published_value(budget, phase_note(now), now))

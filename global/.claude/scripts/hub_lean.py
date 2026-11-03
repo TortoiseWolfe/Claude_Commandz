@@ -45,6 +45,9 @@ HUB_CONNECTORS_OFF = [
 ]
 
 
+REMINDER_HOOK = {"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/rules_reminder.py --role hub"}]}
+
+
 def lane_list(name):
     """The space-separated value of NAME="..." in lane.sh (the one place the lane launch flags are kept)."""
     text = (HERE / "lane.sh").read_text()
@@ -59,6 +62,10 @@ def managed():
         "enabledPlugins": {p: False for p in lane_list("LANE_PLUGINS_OFF")},
         "permissions": {"deny": lane_list("LANE_TOOLS_OFF")},
         "deniedMcpServers": [{"serverName": n} for n in HUB_CONNECTORS_OFF],
+        # AFA_BIG_OUT=1: long script output (lane status, the inbox board, mail text) goes to a file with a short summary (big_output.py).
+        "env": {"AFA_BIG_OUT": "1"},
+        # rules_reminder.py: the hub's three habits come back into view every 30 tool calls or when the same command fails twice.
+        "hooks": {ev: [REMINDER_HOOK] for ev in ("PostToolUse", "PostToolUseFailure")},
     }
 
 
@@ -73,6 +80,18 @@ def lean_dir():
 def lean_merged(existing):
     """The hub's managed keys plus autoMemoryEnabled false, laid over whatever the lean folder's file already holds."""
     out = merged(existing)
+    # The lean folder serves unattended headless calls: no long-output files and no rule reminders there.
+    env = {k: v for k, v in out.get("env", {}).items() if k != "AFA_BIG_OUT"}
+    if env:
+        out["env"] = env
+    else:
+        out.pop("env", None)
+    hooks = {ev: [h for h in v if "rules_reminder.py" not in json.dumps(h)] for ev, v in out.get("hooks", {}).items()}
+    hooks = {ev: v for ev, v in hooks.items() if v}
+    if hooks:
+        out["hooks"] = hooks
+    else:
+        out.pop("hooks", None)
     out["autoMemoryEnabled"] = False
     return out
 
@@ -86,6 +105,12 @@ def merged(existing):
     perms["deny"] = list(dict.fromkeys([*perms.get("deny", []), *want["permissions"]["deny"]]))
     out["permissions"] = perms
     out["deniedMcpServers"] = want["deniedMcpServers"]
+    out["env"] = {**existing.get("env", {}), **want["env"]}
+    hooks = {ev: list(v) for ev, v in existing.get("hooks", {}).items()}
+    for ev, entries in want["hooks"].items():
+        have = [h for h in hooks.get(ev, []) if "rules_reminder.py" not in json.dumps(h)]
+        hooks[ev] = have + entries
+    out["hooks"] = hooks
     return out
 
 

@@ -16,7 +16,7 @@
 #   muse_poll_record.sh client-seen "<id> [<id>...]"
 #                                             -> marks absorbed Gmail or Talk IDs (client-mail-seen.txt) and
 #                                                ticks open client lines whose IDs are all absorbed. Also used for routine alerts.
-#   muse_poll_record.sh open [<prefix>] [-v]  -> prints the open lines only (never the done history), optionally one
+#   muse_poll_record.sh open [<prefix>] [-v] [--full]  -> prints the open lines only (never the done history), optionally one
 #                                                kind ("Waiting on Hatch"); -v adds each open line's indented notes.
 #                                                This is how a model reads the board: never read the whole file.
 #   muse_poll_record.sh archive [<days>]      -> moves done lines (with their indented notes) not touched for more
@@ -147,16 +147,20 @@ case "${1:-}" in
     cat "$tmp" >"$INBOX"; rm -f "$tmp"
     ;;
   open)
-    shift; prefix=""; notes=0
-    for a in "$@"; do if [[ "$a" == "-v" ]]; then notes=1; else prefix="$a"; fi; done
+    shift; prefix=""; notes=0; full=0
+    for a in "$@"; do if [[ "$a" == "-v" ]]; then notes=1; elif [[ "$a" == "--full" ]]; then full=1; else prefix="$a"; fi; done
     [[ -f "$INBOX" ]] || exit 0
-    awk -v p="$prefix" -v notes="$notes" '
+    # A lane or hub session (AFA_BIG_OUT=1) gets a count by kind and the path when the board is over 8,000 characters; --full prints it all.
+    out=$(awk -v p="$prefix" -v notes="$notes" '
       /^- \[[ x]\] / { show = 0 }
       /^- \[ \] / {
         t = $0; sub(/^- \[ \] [^|]*\| /, "", t)
         if (p == "" || tolower(substr(t, 1, length(p))) == tolower(p)) { print; show = 1 }
         next }
-      /^[ \t]/ { if (show && notes) print }' "$INBOX"
+      /^[ \t]/ { if (show && notes) print }' "$INBOX")
+    [[ -n "$out" ]] || exit 0
+    if [[ $full == 1 ]]; then printf '%s\n' "$out"
+    else printf '%s\n' "$out" | python3 -I "$(dirname "$(readlink -f "$0")")/big_output.py" --name inbox-open --group-by '^- \[ \] [^|]*\| ([A-Za-z][A-Za-z ]*[A-Za-z])[:|]'; fi
     ;;
   archive)
     exec python3 "$(dirname "$(readlink -f "$0")")/hub_inbox_archive.py" --inbox "$INBOX" --days "${2:-7}"
