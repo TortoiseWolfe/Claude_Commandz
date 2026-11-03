@@ -16,6 +16,8 @@ No model calls and no Gmail (the client pollers queue mail and chat lines in the
   - last week's hours line that hours.py writes on Monday (~/.claude/state/hours-week.txt; no section when missing or older than 9 days);
   - the mail index (hub/scripts/mail_index.py keeps ~/.claude/state/mail-index.tsv): metadata counts by class for the last 2 days,
     unhandled person, job and client-alert rows, and one-time plain-rule reply results (client rows already show as client lines);
+  - Jonathan's open co-op Deck cards (boards 2 and 8, read-only through deck_board.py, cached an hour in ~/.claude/state/deck-cards-cache.json):
+    the count, and the card numbers no open inbox line names ("uncovered"); a failed read prints "Deck read failed: ...", never a gap;
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
     hub/scripts/model_quality_report.py (cached for an hour: the report takes ~15 s).
 
@@ -40,9 +42,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lane_handoff_summary import handoff_summary  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
-CAP_DEFAULT = 6700  # the page must stay under 7 KB (PAGE_HARD_CAP is the check). 5800 until 29 Oct 2026: the page already sat at 5774,
+CAP_DEFAULT = 6850  # the page must stay under 7 KB (PAGE_HARD_CAP is the check). 5800 until 29 Oct 2026: the page already sat at 5774,
                     # so the hub's own-spend line would have pushed the "Waiting on Jonathan" items off the end. 6000 until later that day,
-                    # when the "Incoming mail" section (counts plus the unhandled person, job and client-alert rows) needed its room.
+                    # when the "Incoming mail" section (counts plus the unhandled person, job and client-alert rows) needed its room. 6700 until
+                    # 3 Nov 2026 (the "Co-op cards" section, about 200 bytes; PAGE_HARD_CAP stays the limit).
 BUDGET_TTL = 3600
 REPORT_WORD = {"yes": "written", "stale": "stale (new input or a job still running; not done)"}
 GIT_DATE = "format:%a %-I:%M %p"  # git log --date value: 12-hour clock
@@ -676,9 +679,111 @@ def drafts_lines(path=None, now=None):
     return [f"Drafts: {len(old)} fleet notes over {DRAFT_ALERT_DAYS} days with no absorbed proof (oldest {stamp(min(u['t'] for u in old))}), by pair: {by}"]
 
 
+# ---------------------------------------------------------------------------------------------
+# Co-op cards: Jonathan's open Deck cards on boards 2 and 8, and which of them nothing in the inbox covers
+# ---------------------------------------------------------------------------------------------
+
+DECK_BOARDS = (2, 8)
+DECK_USER = "TurtleWolfe"
+DECK_CACHE = HOME / ".claude/state/deck-cards-cache.json"
+DECK_TTL = 3600
+DECK_ENV = "~/repos/Chattanooga-Digital/.env"   # read by deck_board.py inside its own process; never printed here
+DECK_CARD_LINE = re.compile(r"^- #(\d+) .*? \| to ([^|]*?) \|")
+DECK_REASON_LIMIT = 90
+CARD_REF = re.compile(r"\bcards?\s+#?(\d+(?:\s*(?:,|and|&)\s*#?\d+)*)", re.I)
+CARD_URL = re.compile(r"deck/(?:#/)?board/\d+/card/(\d+)", re.I)
+
+
+def deck_read(board, script=None, env=DECK_ENV, timeout=60):
+    """-> (ids of the open cards assigned to DECK_USER on one board, None) or (None, why it failed). Only numbers leave this function:
+    card titles are member-written text and never reach the page."""
+    script = script or str(HOME / ".claude/scripts/deck_board.py")
+    try:
+        r = subprocess.run([sys.executable, script, "--env", os.path.expanduser(env), "--prefix", "NEXTCLOUD_PROD", "--board", str(board)],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, type(exc).__name__
+    lines = (r.stdout or "").splitlines()
+    first = lines[0] if lines else ""
+    if "__DECK=ok__" not in first:
+        if "__DECK=error__" in first:
+            why = first.split("__DECK=error__", 1)[1]
+        else:
+            tail = (r.stderr or "").strip().splitlines()
+            why = tail[-1] if tail else "no answer"
+        return None, one_line(re.sub(r"[^\x20-\x7e]", " ", scrub(why)).strip(), DECK_REASON_LIMIT)
+    ids = []
+    for line in lines[1:]:
+        m = DECK_CARD_LINE.match(line)
+        if m and DECK_USER.lower() in [u.strip().lower() for u in m.group(2).split(",")]:
+            ids.append(int(m.group(1)))
+    return sorted(set(ids)), None
+
+
+def deck_cards(now_ts, cache=None, reader=deck_read, ttl=DECK_TTL):
+    """-> ({board: [card ids]}, [failure lines]). Each board is read at most once an hour (the cache keeps the last good read per board);
+    a board whose read fails gets a failure line and is left out of the counts, never a silent gap."""
+    cache = Path(cache or DECK_CACHE)
+    try:
+        saved = json.loads(cache.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    boards, fails, dirty = {}, [], False
+    for b in DECK_BOARDS:
+        ent = saved.get(str(b))
+        if isinstance(ent, dict) and isinstance(ent.get("t"), (int, float)) and isinstance(ent.get("ids"), list) \
+                and 0 <= now_ts - ent["t"] < ttl and all(isinstance(i, int) for i in ent["ids"]):
+            boards[b] = ent["ids"]
+            continue
+        ids, why = reader(b)
+        if ids is None:
+            fails.append(f"Deck read failed: board {b}: {why}")
+            continue
+        boards[b] = ids
+        saved[str(b)] = {"t": now_ts, "ids": ids}
+        dirty = True
+    if dirty:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_name(cache.name + ".tmp")
+            tmp.write_text(json.dumps(saved))
+            tmp.chmod(0o600)
+            tmp.replace(cache)
+        except OSError:
+            pass  # the cache is a convenience; the next build just reads again
+    return boards, fails
+
+
+def covered_cards(inbox_text):
+    """Every card number an open inbox line ('- [ ] ') names: 'card N', 'cards N and M' / 'N, M and K', 'deck/board/B/card/N'."""
+    out = set()
+    for line in (inbox_text or "").splitlines():
+        if not line.startswith("- [ ] "):
+            continue
+        for m in CARD_REF.finditer(line):
+            out.update(int(n) for n in re.findall(r"\d+", m.group(1)))
+        out.update(int(n) for n in CARD_URL.findall(line))
+    return out
+
+
+def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read):
+    boards, fails = deck_cards(now_ts, cache=cache, reader=reader)
+    lines = []
+    if boards:
+        per = ", ".join(f"board {b}: {len(ids)}" for b, ids in sorted(boards.items()))
+        every = {i for ids in boards.values() for i in ids}
+        lines.append(f"- open assigned to {DECK_USER}: {len(every)} ({per})")
+        unc = sorted(every - covered_cards(inbox_text))
+        lines.append("- uncovered: " + (", ".join(str(i) for i in unc) if unc else "none"))
+    lines.extend(f"- {f}" for f in fails)
+    return lines
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
                    report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
-                   mail=None, machine="NX-01", drafts=None):
+                   mail=None, machine="NX-01", drafts=None, coop_cards=None):
     sections = []
 
     if open_questions_error:
@@ -687,6 +792,9 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
         questions = [one_line(line, 210) for line in (open_questions_text or "").splitlines()
                      if line.strip() and not line[0].isspace() and line.strip() != "none"]
         sections.append((f"Open receptionist questions ({len(questions)})", [f"- {line}" for line in questions] or ["- none"]))
+
+    if coop_cards:
+        sections.append(("Co-op cards (Deck boards 2 and 8, numbers only; an uncovered card gets a lane or a named blocker first)", coop_cards))
 
     # Lanes
     live, dead = parse_lane_status(lane_status or "")
@@ -863,6 +971,8 @@ def main(argv=None):
     ap.add_argument("--mail-index", help="mail-index.tsv to use instead of ~/.claude/state/mail-index.tsv")
     ap.add_argument("--internship-file", help="internship_status.py --digest output to use instead of running it")
     ap.add_argument("--spend-file", help="lane_spend.py --json output to use instead of reading the live ledger")
+    ap.add_argument("--deck-fake", help="a script that prints deck_board.py's output, used instead of the live Deck read (tests)")
+    ap.add_argument("--deck-cache", help="deck cards cache file to use instead of ~/.claude/state/deck-cards-cache.json (tests)")
     ap.add_argument("--alert-state", help="dispatch state .json to file the alert in (tests); default the live one")
     a = ap.parse_args(argv)
 
@@ -911,10 +1021,17 @@ def main(argv=None):
         internship = internship_lines()
     hours = hours_lines(a.hours_file) if a.hours_file else (hours_lines() if not a.roadmap_file else None)
     mail = mail_index_lines(a.mail_index, now) if a.mail_index else (mail_index_lines(now=now) if not a.roadmap_file else None)
+    if a.deck_fake:
+        coop_cards = coop_cards_lines(inbox, now.timestamp(), cache=a.deck_cache, reader=lambda b: deck_read(b, script=a.deck_fake))
+    elif not a.roadmap_file:
+        coop_cards = coop_cards_lines(inbox, now.timestamp(), cache=a.deck_cache)
+    else:
+        coop_cards = None
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine,
-                          drafts=None if a.roadmap_file else drafts_lines(now=now))
+                          drafts=None if a.roadmap_file else drafts_lines(now=now),
+                          coop_cards=coop_cards)
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)
