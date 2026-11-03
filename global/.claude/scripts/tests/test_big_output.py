@@ -3,13 +3,13 @@ import io
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import big_output as bo  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 BIG = "".join("- [ ] 2026-10-%02d 08:21 | Job: item %d with some words in it to make it long\n" % (i % 28 + 1, i) for i in range(200))
 SMALL = "one\ntwo\n"
@@ -17,7 +17,7 @@ SMALL = "one\ntwo\n"
 
 class BigOutputTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
         self.saved = dict(os.environ)
         os.environ.pop("AFA_BIG_OUT", None)
         os.environ.pop("AFA_LANE_FOLDER", None)
