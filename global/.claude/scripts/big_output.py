@@ -80,11 +80,13 @@ def emit(text, name, *, full=False, limit=LIMIT, folder=None, summary=None, grou
             stream.write("\n")
         return None
     d = out_folder(folder)
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)  # a folder made here is owner-only; a lane folder that exists keeps its mode
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", name)[:40] or "out"
     path = d / ("out-%s-%s.txt" % (safe, time.strftime("%H%M%S")))
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # the text can hold mail and board lines: owner only
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
     os.replace(tmp, path)
     s = (summary if summary is not None else default_summary(text, group_by))[:SUMMARY_MAX]
     stream.write(s.rstrip("\n") + "\n")

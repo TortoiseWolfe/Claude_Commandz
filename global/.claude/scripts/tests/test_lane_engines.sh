@@ -518,9 +518,9 @@ mkdir -p "$HOME_TEST/.claude/commands" "$HOME_TEST/.claude/skills/zz-off-skill" 
 run_lane lean-rules "$REPO" sonnet "$PROMPT"
 assert_contains "$LAST_COMMAND" 'claudeMdExcludes' 'workspace CLAUDE.md is excluded once the rule file exists'
 assert_contains "$LAST_COMMAND" "$HOME_TEST/repos/CLAUDE.md" 'the exclude names the workspace CLAUDE.md'
-assert_contains "$LAST_COMMAND" "--append-system-prompt-file $(echo "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'the composed rules are appended'
-assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'core rule' 'the composed rules hold core'
-assert_not_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-rules/rules.md)" 'mail rule' 'a lane with no mail words gets no mail part'
+assert_contains "$LAST_COMMAND" "--append-system-prompt-file $(echo "$HOME_TEST"/.claude/state/lanes/.rules/*-lean-rules.md)" 'the composed rules are appended'
+assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/.rules/*-lean-rules.md)" 'core rule' 'the composed rules hold core'
+assert_not_contains "$(cat "$HOME_TEST"/.claude/state/lanes/.rules/*-lean-rules.md)" 'mail rule' 'a lane with no mail words gets no mail part'
 assert_contains "$LAST_COMMAND" 'autoMemoryEnabled' 'the memory index is off once the rule file exists'
 assert_contains "$LAST_COMMAND" 'syncClaudeAiSkills' 'claude.ai synced skills are off'
 assert_contains "$LAST_COMMAND" 'skillOverrides' 'skills not on the keep list are switched off'
@@ -531,7 +531,7 @@ assert_not_contains "$LAST_COMMAND" 'graphify\":\"off' 'a kept skill stays on'
 assert_not_contains "$LAST_COMMAND" 'no-skill-file' 'a folder without SKILL.md is not a skill'
 
 run_lane lean-mail "$REPO" sonnet "$PROMPT_MAIL"
-assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/*-lean-mail/rules.md)" 'mail rule' 'a Gmail prompt gets the mail part'
+assert_contains "$(cat "$HOME_TEST"/.claude/state/lanes/.rules/*-lean-mail.md)" 'mail rule' 'a Gmail prompt gets the mail part'
 assert_not_contains "$LAST_COMMAND" 'disableClaudeAiConnectors' 'a prompt that mentions Gmail keeps the connectors'
 assert_contains "$LAST_OUTPUT" 'connectors on' 'start line reports connectors on'
 run_lane triage-mail "$REPO" sonnet "$PROMPT"

@@ -39,6 +39,13 @@ class BigOutputTest(unittest.TestCase):
         self.assertEqual(out, BIG)
         self.assertIsNone(p)
 
+    def test_the_file_is_owner_only_and_a_new_folder_too(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        fresh = os.path.join(self.tmp, "made-here")
+        _, p = self.run_emit(BIG, folder=fresh)
+        self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(p.parent.stat().st_mode & 0o777), "0o700")
+
     def test_on_big_goes_to_file_with_short_summary(self):
         os.environ["AFA_BIG_OUT"] = "1"
         out, p = self.run_emit(BIG, folder=self.tmp, group_by=r"\| (\w+):")
