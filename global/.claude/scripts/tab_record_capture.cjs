@@ -2,8 +2,8 @@
 // Usage: node tab_record_capture.cjs <config.json>
 //
 // It attaches to the browser's debugging port, follows ONE tab (the same page object, through every navigation, including the
-// submit and the confirmation page) and, about once a second, takes a screenshot of the whole page. A frame is kept only when the
-// picture changed. Next to each frame it saves where personal data sits on the page (rectangles), so the blurred copy can be
+// submit and the confirmation page) and, about once a second, takes a screenshot of the VIEWPORT. A frame is kept only when the
+// picture changed. Next to each frame it saves where personal data sits in the viewport (rectangles), so the blurred copy can be
 // made later. It never clicks, scrolls, types, navigates, reloads or closes anything, and never closes the browser.
 //
 // Ends when: the stop file appears; a job flag file newer than the start appears and 25 s pass (the confirmation page);
@@ -32,12 +32,13 @@ const TEXT_RES = [
 const FIELD_RE = '(e-?mail|phone|mobile|linkedin|address|street|zip|postal|salary|compensation|pay\\b|ssn|social security|birth|gender|race|ethnic|veteran|disabilit|pronoun|sexual|hispanic|latino|resume|cv\\b|cover letter|github|portfolio|website|twitter)'
 
 // Runs inside the page (and inside each frame). Read only: it measures, it changes nothing.
+// Returns rectangles in VIEWPORT coordinates (CSS pixels). The screenshot is also viewport-only
+// (captureBeyondViewport: false), so rectangles align 1:1 with the image. No full-page resize, no flash.
 const COLLECT = ({ texts, fieldRe, top }) => {
   const re = new RegExp(texts.join('|'), 'gi')
   const fre = new RegExp(fieldRe, 'i')
-  const sx = top ? window.scrollX : 0, sy = top ? window.scrollY : 0 // a child frame is placed by its own box, so its rectangles stay frame-relative
   const out = []
-  const add = (r, why) => { if (r.width > 1 && r.height > 1) out.push({ x: r.left + sx, y: r.top + sy, w: r.width, h: r.height, why }) }
+  const add = (r, why) => { if (r.width > 1 && r.height > 1) out.push({ x: r.left, y: r.top, w: r.width, h: r.height, why }) }
   // 1. page text
   const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT)
   let n
@@ -90,16 +91,14 @@ const collectAll = async (page) => {
       if (isMain) { all.push(...rects); continue }
       const box = await (await fr.frameElement()).boundingBox() // viewport coordinates of the frame
       if (!box) continue // a frame with no box is not on screen
-      const sc = await page.evaluate(() => [window.scrollX, window.scrollY])
-      for (const r of rects) all.push({ x: r.x + box.x + sc[0], y: r.y + box.y + sc[1], w: r.w, h: r.h, why: 'frame-' + r.why })
+      for (const r of rects) all.push({ x: r.x + box.x, y: r.y + box.y, w: r.w, h: r.h, why: 'frame-' + r.why })
     } catch (e) {
-      // Could not read this frame: blur its whole box (or the whole page for the main frame) rather than risk showing it.
+      // Could not read this frame: blur its whole box (or the whole viewport for the main frame) rather than risk showing it.
       let boxed = false
       if (!isMain) {
         try {
           const box = await (await fr.frameElement()).boundingBox()
-          const sc = await page.evaluate(() => [window.scrollX, window.scrollY])
-          if (box) { all.push({ x: box.x + sc[0], y: box.y + sc[1], w: box.width, h: box.height, why: 'frame-unreadable' }); boxed = true }
+          if (box) { all.push({ x: box.x, y: box.y, w: box.width, h: box.height, why: 'frame-unreadable' }); boxed = true }
         } catch (e2) { /* fall through */ }
       }
       if (!boxed) all.push(EVERYTHING)
@@ -111,29 +110,35 @@ const collectAll = async (page) => {
 
 // Playwright's page.screenshot waits for the tab to paint and hangs on a tab that is not in front. The browser's own
 // Page.captureScreenshot reads the page surface without bringing the tab forward, so it films a background tab too.
+// captureBeyondViewport: false captures only the viewport — no full-page resize, no flash on a headed window.
+// Rectangles from COLLECT are in viewport CSS pixels, so they align 1:1 with the screenshot.
 const sessions = new WeakMap()
 const shoot = async (page) => {
   let s = sessions.get(page)
   if (!s) { s = await page.context().newCDPSession(page); sessions.set(page, s) }
   const r = await Promise.race([
-    s.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: true }),
+    s.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }),
     new Promise((_, rej) => setTimeout(() => rej(new Error('screenshot timeout')), 10000)),
   ])
   const buf = Buffer.from(r.data, 'base64')
-  // Pixels per CSS pixel as the picture really came out (its width over the page's CSS width), not as the page claims: the
-  // blur rectangles are CSS pixels, so a wrong ratio would put every box beside its text.
+  // Pixels per CSS pixel as the picture really came out, not as the page claims: the blur rectangles are CSS pixels.
   let dpr = null // unknown: the blurred video then blurs this whole frame
   try {
-    const m = await s.send('Page.getLayoutMetrics')
-    const cssW = (m.cssContentSize || m.contentSize).width
-    const ratio = cssW > 0 ? buf.readUInt32BE(16) / cssW : 0
-    const claimed = await page.evaluate(() => window.devicePixelRatio || 1).catch(() => 0)
+    // A viewport shot is the window's inner size in device pixels, so pixels per CSS pixel = picture width / window.innerWidth
+    // (innerWidth counts the scrollbar, which the picture also shows; the layout metrics' clientWidth does not).
+    const [innerW, claimed] = await page.evaluate(() => [window.innerWidth, window.devicePixelRatio || 1])
+    const ratio = innerW > 0 ? buf.readUInt32BE(16) / innerW : 0
     // The measured ratio must agree with what the page says, or the picture is not the page we measured.
     if (ratio >= 0.5 && ratio <= 4 && claimed > 0 && Math.abs(ratio - claimed) / claimed < 0.05) dpr = ratio
     else log('pixel ratio not trusted: measured', ratio.toFixed(3), 'page says', claimed)
   } catch (e) { log('pixel ratio unreadable:', String(e).slice(0, 80)) }
   return { buf, dpr }
 }
+// Rectangles are in viewport coordinates, so they are only right for a picture taken at the same scroll position and zoom. This
+// signature is read before the first measurement and after the last one; a frame whose signature moved is dropped, never blurred
+// by boxes that sit beside their text.
+const viewSig = (page) => page.evaluate(() => [window.scrollX, window.scrollY, window.innerWidth, window.innerHeight,
+  window.visualViewport ? [window.visualViewport.pageLeft, window.visualViewport.pageTop, window.visualViewport.scale].join('/') : ''].join(','))
 const CONFIRM = /confirmation|thank-?you|thanks|submitted|success|applied/i
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const flagFresh = () => {
@@ -178,12 +183,14 @@ const flagFresh = () => {
     }
     if (endAt && Date.now() > endAt) break
     try {
+      const sig0 = await viewSig(page)
       const before = await collectAll(page)
       const { buf, dpr } = await shoot(page)
       const h = crypto.createHash('md5').update(buf).digest('hex')
       if (h !== last) {
-        last = h
         const after = await collectAll(page) // page may have changed between the first read and the picture: keep both
+        if (await viewSig(page) !== sig0) { log('page scrolled or resized while filming: frame dropped'); await sleep(200); continue }
+        last = h
         const ms = Date.now()
         const f = path.join(cfg.dir, 'frames', 'f' + ms + '.png')
         fs.writeFileSync(f, buf, { mode: 0o600 })
