@@ -216,5 +216,24 @@ class Clips(unittest.TestCase):
         self.assertFalse(tr.clip_ok(clip + "-missing.mp4")[0])
 
 
+class CaptureConfig(unittest.TestCase):
+    """Ensure tab_record_capture.cjs uses viewport-only capture (no full-page resize flash)."""
+
+    def test_capture_uses_viewport_only(self):
+        capture_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tab_record_capture.cjs")
+        with open(capture_path, "r") as f:
+            content = f.read()
+        # Must use captureBeyondViewport: false (viewport-only, no flash on headed window)
+        self.assertIn('captureBeyondViewport: false', content)
+        # Must NOT use captureBeyondViewport: true (causes full-page resize flash)
+        self.assertNotIn('captureBeyondViewport: true', content)
+        # Rectangles must be in viewport coordinates (no scrollX/scrollY added)
+        self.assertNotIn('window.scrollX', content)
+        self.assertNotIn('window.scrollY', content)
+        # the pixel ratio is the picture width over the window's inner width, not the page's full content width
+        self.assertIn('window.innerWidth', content)
+        self.assertNotIn('cssContentSize', content)
+
+
 if __name__ == "__main__":
     unittest.main()
