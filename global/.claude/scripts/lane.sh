@@ -544,7 +544,12 @@ own_checkouts() {  # <lane folder>: one existing checkout folder per line
   repo="${rel%%/*}"
   if [ "$repo" = .worktrees ]; then rel="${rel#.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"; fi
   case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
-  for c in "$wt/$repo"--*; do [ -d "$c" ] && printf '%s\n' "$c"; done
+  # Only plain folders with plain names: a symlink could point anywhere, and a colon, tab or newline in a name would split the colon list in index column 15.
+  for c in "$wt/$repo"--*; do
+    [ -d "$c" ] && [ ! -L "$c" ] || continue
+    case "${c##*/}" in *[!A-Za-z0-9._-]*) continue ;; esac
+    printf '%s\n' "$c"
+  done
   return 0
 }
 # Latest index row for a lane name (tab-separated line), or nothing.

@@ -153,6 +153,12 @@ lane --resume wtr
 has "$(last_cmd)" "--add-dir $WT/proj--late " "--resume adds a checkout made since the start"
 hasnt "$(last_cmd)" "topic-b" "--resume drops a removed checkout"
 [ "$(ad_of wtr)" = "$WT/proj--topic-a:$WT/proj--late" ] || fail "the index follows, got $(ad_of wtr)"; ok
+# a symlink and a name with a colon are never added (the colon would split the list in column 15)
+ln -s "$TMP/outside" "$WT/proj--link"; mkdir -p "$WT/proj--co:lon"
+lane wtq "$WORK" sonnet "$TMP/p1.md"
+hasnt "$(last_cmd)" "proj--link" "a symlinked checkout is not added"
+hasnt "$(last_cmd)" "co:lon" "a checkout with a colon in its name is not added"
+rm -f "$WT/proj--link"; rmdir "$WT/proj--co:lon"
 # the HOME of a lane with no ~/repos/.worktrees at all is untouched
 rm -rf "$WT"
 lane nowt "$WORK" sonnet "$TMP/p1.md"
