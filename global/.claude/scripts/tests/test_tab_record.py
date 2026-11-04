@@ -227,12 +227,14 @@ class CaptureConfig(unittest.TestCase):
         self.assertIn('captureBeyondViewport: false', content)
         # Must NOT use captureBeyondViewport: true (causes full-page resize flash)
         self.assertNotIn('captureBeyondViewport: true', content)
-        # Rectangles must be in viewport coordinates (no scrollX/scrollY added)
-        self.assertNotIn('window.scrollX', content)
-        self.assertNotIn('window.scrollY', content)
+        # Rectangles must be in viewport coordinates (no scroll offset added to them)
+        self.assertIn('x: r.left, y: r.top', content)
+        self.assertNotIn('r.left + sx', content)
         # the pixel ratio is the picture width over the window's inner width, not the page's full content width
         self.assertIn('window.innerWidth', content)
         self.assertNotIn('cssContentSize', content)
+        # rectangles are only right at the scroll position the picture was taken at: a frame whose scroll moved is dropped
+        self.assertIn('viewSig(page) !== sig0', content)
 
 
 if __name__ == "__main__":

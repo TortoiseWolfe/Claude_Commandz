@@ -134,6 +134,11 @@ const shoot = async (page) => {
   } catch (e) { log('pixel ratio unreadable:', String(e).slice(0, 80)) }
   return { buf, dpr }
 }
+// Rectangles are in viewport coordinates, so they are only right for a picture taken at the same scroll position and zoom. This
+// signature is read before the first measurement and after the last one; a frame whose signature moved is dropped, never blurred
+// by boxes that sit beside their text.
+const viewSig = (page) => page.evaluate(() => [window.scrollX, window.scrollY, window.innerWidth, window.innerHeight,
+  window.visualViewport ? [window.visualViewport.pageLeft, window.visualViewport.pageTop, window.visualViewport.scale].join('/') : ''].join(','))
 const CONFIRM = /confirmation|thank-?you|thanks|submitted|success|applied/i
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const flagFresh = () => {
@@ -178,12 +183,14 @@ const flagFresh = () => {
     }
     if (endAt && Date.now() > endAt) break
     try {
+      const sig0 = await viewSig(page)
       const before = await collectAll(page)
       const { buf, dpr } = await shoot(page)
       const h = crypto.createHash('md5').update(buf).digest('hex')
       if (h !== last) {
-        last = h
         const after = await collectAll(page) // page may have changed between the first read and the picture: keep both
+        if (await viewSig(page) !== sig0) { log('page scrolled or resized while filming: frame dropped'); await sleep(200); continue }
+        last = h
         const ms = Date.now()
         const f = path.join(cfg.dir, 'frames', 'f' + ms + '.png')
         fs.writeFileSync(f, buf, { mode: 0o600 })
