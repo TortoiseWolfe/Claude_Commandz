@@ -8,11 +8,19 @@ wakes it. The script exits after each wake and the hub must start it again. On
 unseen until the owner asked "looks like you're stuck". When the hub tries to
 end a turn while lanes are open and no watcher runs, this Stop hook blocks the
 stop and says to re-arm the watcher.
+
+One exemption: once the hub has written its hand-off (a ~/.claude/state/hub-handoff-*.md
+changed in the last 30 minutes) and touched ~/.claude/state/hub-handed-off.<session id>,
+it may stop, so it stops answering wakes and growing. AFA_STATE_DIR moves the state folder.
 """
+import glob
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
+import time
 
 WATCHER_PATTERN = r"^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)"
 
@@ -63,6 +71,22 @@ def main():
         lanes = open_lanes()
         if not lanes or watcher_running():
             return 0
+
+        # Hand-off exemption: let it stop if a hand-off file was recently modified
+        # and the session's handed-off marker exists.
+        state_dir = os.environ.get("AFA_STATE_DIR") or "~/.claude/state"
+        state_path = Path(os.path.expanduser(state_dir))
+        session_id = payload.get("session_id")
+        marker = None
+        if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9._-]+", session_id):
+            marker = state_path / f"hub-handed-off.{session_id}"
+
+        if marker is not None and marker.exists():
+            handoff_files = glob.glob(str(state_path / "hub-handoff-*.md"))
+            now = time.time()
+            if any(now - os.path.getmtime(f) < 30 * 60 for f in handoff_files):
+                return 0
+
         reason = (
             f"{len(lanes)} lane(s) open ({', '.join(lanes[:6])}) and no lane_watch.sh "
             "is running, so lane reports will not wake this session. Re-arm it now: "

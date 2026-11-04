@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -18,6 +19,8 @@ class LaneWatchGuardTests(unittest.TestCase):
         self.hub.mkdir()
         self.other = self.root / "other"
         self.other.mkdir()
+        self.state = self.root / "state"
+        self.state.mkdir()
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -27,6 +30,7 @@ class LaneWatchGuardTests(unittest.TestCase):
         env["LANE_WATCH_GUARD_HUB"] = str(self.hub)
         env["LANE_WATCH_GUARD_LANES"] = lanes
         env["LANE_WATCH_GUARD_RUNNING"] = running
+        env["AFA_STATE_DIR"] = str(self.state)
         if lane_env:
             env["AFA_LANE"] = "1"
         if stdin is None:
@@ -65,6 +69,43 @@ class LaneWatchGuardTests(unittest.TestCase):
     def test_lane_names_are_capped_at_six(self):
         data = json.loads(self.run_hook(lanes="a,b,c,d,e,f,g,h"))
         self.assertIn("8 lane(s) open (a, b, c, d, e, f)", data["reason"])
+
+    def handoff(self, age_minutes):
+        path = self.state / "hub-handoff-2026-11-04-1500.md"
+        path.write_text("hand-off", encoding="utf-8")
+        old = time.time() - age_minutes * 60
+        os.utime(path, (old, old))
+
+    def marker(self, session="hub-1"):
+        (self.state / f"hub-handed-off.{session}").write_text("", encoding="utf-8")
+
+    def test_marker_without_handoff_file_still_blocks(self):
+        self.marker()
+        self.assertEqual(json.loads(self.run_hook(session_id="hub-1"))["decision"], "block")
+
+    def test_handoff_file_without_marker_still_blocks(self):
+        self.handoff(1)
+        self.assertEqual(json.loads(self.run_hook(session_id="hub-1"))["decision"], "block")
+
+    def test_marker_with_31_minute_old_handoff_still_blocks(self):
+        self.marker()
+        self.handoff(31)
+        self.assertEqual(json.loads(self.run_hook(session_id="hub-1"))["decision"], "block")
+
+    def test_marker_with_fresh_handoff_allows_stop(self):
+        self.marker()
+        self.handoff(5)
+        self.assertEqual(self.run_hook(session_id="hub-1"), "")
+
+    def test_marker_for_another_session_does_not_count(self):
+        self.marker("other-session")
+        self.handoff(5)
+        self.assertEqual(json.loads(self.run_hook(session_id="hub-1"))["decision"], "block")
+
+    def test_missing_session_id_does_not_match_a_marker_named_none(self):
+        self.marker("None")
+        self.handoff(5)
+        self.assertEqual(json.loads(self.run_hook())["decision"], "block")
 
 
 if __name__ == "__main__":
