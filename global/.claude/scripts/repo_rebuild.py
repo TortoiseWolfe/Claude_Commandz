@@ -708,7 +708,9 @@ def phase_swap(args, d):
         raise Stop(f"{repo} does not exist (a swap that already ran? check {old_repo})")
     if not old.get("private"):
         raise Stop(f"{repo} is public; this tool only rebuilds private repos")
-    if repo_exists(old_repo):
+    taken = repo_exists(old_repo)
+    # after a roll-back by hand GitHub still answers the old name with the repo's current name (a redirect, which a rename may reuse)
+    if taken and str(taken.get("full_name", "")).lower() == old_repo.lower():
         raise Stop(f"{old_repo} already exists")
     preflight_fresh(repo, meta, d, args.allow_open_prs)
     owner_type = api("GET", f"users/{owner}")["type"]

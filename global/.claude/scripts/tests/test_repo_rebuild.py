@@ -161,7 +161,7 @@ class FakeGitHub:
             return self.err(404)
         if rest == "":
             if method == "GET":
-                return self.ok({"name": r["name"], "full_name": full, "private": r["private"], "node_id": f"R_{r['id']}", "full_name": r["full"], "default_branch": r["default_branch"],
+                return self.ok({"name": r["name"], "private": r["private"], "node_id": f"R_{r['id']}", "full_name": r["full"], "default_branch": r["default_branch"],
                                 "size": 1, "open_issues_count": 0, "topics": [], **r["settings"]})
             if "name" in body:
                 new = f"{full.split('/')[0]}/{body['name']}"
@@ -921,6 +921,13 @@ class EndToEnd(unittest.TestCase):
         out = self.run_phase("reattach", "--secrets-map", str(self.map))
         self.assertIn("x@example.com", out)
         self.assertIn("deploy keys still held by the old repo", out)
+
+    def test_swap_goes_ahead_when_the_old_name_is_only_a_redirect_left_by_a_roll_back(self):
+        self.up_to_clean()
+        meta = json.loads((self.dir / "meta.json").read_text())
+        self.gh.redirects[f"owner/{meta['old_name']}"] = self.repo  # as after renaming the old copy back to the original name
+        self.swap()
+        self.assertIn(f"owner/{meta['old_name']}", self.gh.repos)
 
     def test_full_run_then_prove_and_delete_old(self):
         out = self.full_run()
