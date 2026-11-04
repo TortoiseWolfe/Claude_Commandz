@@ -531,6 +531,22 @@ ad_flags() {  # <colon list>
   done
   printf '%s' "$out"
 }
+# A lane started in a repo reads and edits that repo's own worktree checkouts, ~/repos/.worktrees/<repo>--<topic>. They sit outside the lane's
+# folder, so Claude Code's "Read outside the working directories" dialog froze the lane on every file in one (sh-1414, 29 Oct 2026, three times;
+# each stop woke the hub). Each existing checkout of the lane's own repo becomes an --add-dir: no global allow and the guard stays on, and
+# another repo's checkouts stay out of reach. <repo> is the first folder under ~/repos (or, for a lane started in a checkout, the part of
+# its name before "--"). A checkout made after the lane started is not covered until the lane is restarted or resumed.
+own_checkouts() {  # <lane folder>: one existing checkout folder per line
+  local root wt rel repo c
+  root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || return 0
+  wt="$root/.worktrees"; [ -d "$wt" ] || return 0
+  case "$1/" in "$root/"*) rel="${1#"$root"/}" ;; *) return 0 ;; esac
+  repo="${rel%%/*}"
+  if [ "$repo" = .worktrees ]; then rel="${rel#.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"; fi
+  case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  for c in "$wt/$repo"--*; do [ -d "$c" ] && printf '%s\n' "$c"; done
+  return 0
+}
 # Latest index row for a lane name (tab-separated line), or nothing.
 index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)print r}' "$INDEX" || true; }
 
@@ -1770,9 +1786,11 @@ if [ "$mode" = resume ]; then
   pm="${project_mcp_opt:-${pm:--}}"
   [ -z "$project_mcp_opt" ] || index_set "$name" 14 "$pm"
   # The extra folders it started with stay; any --add-dir given now is added and recorded.
-  if [ "${#add_dirs_new[@]}" -gt 0 ]; then
-    ad="$(ad_merge "${ad:--}" "${add_dirs_new[@]}")"
-    index_set "$name" 15 "$ad"
+  mapfile -t _own < <(own_checkouts "$dir")
+  if [ "${#add_dirs_new[@]}" -gt 0 ] || [ "${#_own[@]}" -gt 0 ]; then
+    _ad_old="${ad:--}"
+    ad="$(ad_merge "${ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
+    [ "$dry" = 1 ] || [ "$ad" = "$_ad_old" ] || index_set "$name" 15 "$ad"
   fi
   adf="$(ad_flags "${ad:--}")"
   flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm" "$(deny_rules "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" write)" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" "${p:-}" 1)"
@@ -1928,7 +1946,8 @@ fi
 lane_t0=$(date +%s)
 target="$SESSION:$name"
 # Extra folders: the previous row's (same folder only, like the recycle line) plus any --add-dir given now.
-ad_start="$(ad_merge "${prev_ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"})"
+mapfile -t _own < <(own_checkouts "$dir")
+ad_start="$(ad_merge "${prev_ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
 adsf="$(ad_flags "$ad_start")"
 # Project MCP servers: --project-mcp wins; on a restart (same folder) the previous row's value carries over.
 if [ -n "$project_mcp_opt" ]; then

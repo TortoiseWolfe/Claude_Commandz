@@ -81,6 +81,25 @@ expect_dialog match "prompt with 8 lines below it matches" "$buried"
 scrolled=$(printf '%s\n' 'Esc to cancel'; for i in $(seq 1 20); do echo "output $i"; done)
 expect_dialog none "dialog scrolled out of the last 15 lines does not match" "$scrolled"
 
+# The "Read outside the working directories" dialog: the watcher names the path the lane is waiting on.
+expect_read_path() { # expect_read_path <expected path, or NONE for "not this dialog"> <label> <pane text>
+  local want=$1 label=$2 got rc=0
+  got=$(printf '%s\n' "$3" | dialog_read_path) || rc=$?
+  if [ "$want" = NONE ]; then
+    if [ "$rc" = 1 ] && [ -z "$got" ]; then echo "ok   $label"; else echo "FAIL $label: want rc 1 and no output, got rc $rc '$got'"; failures=$((failures + 1)); fi
+  elif [ "$rc" = 0 ] && [ "$got" = "$want" ]; then echo "ok   $label"
+  else echo "FAIL $label: want '$want', got rc $rc '$got'"; failures=$((failures + 1)); fi
+}
+read_dialog=$(printf '%s\n' 'Read outside the working directories' '' '  Read(/home/u/x/ep7/a.txt)' '' \
+  'Do you want to proceed?' '❯ 1. Yes' '  2. Yes, allow reading from ep7/ during this session' '  4. Yes, but ask again next time' '  3. No' 'Esc to cancel')
+expect_read_path /home/u/x/ep7/a.txt "read dialog names the path in Read( )" "$read_dialog"
+bare_dialog=$(printf '%s\n' 'Read outside the working directories' '  /home/u/x/ep7/b.txt' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel')
+expect_read_path /home/u/x/ep7/b.txt "read dialog with a bare path line names that path" "$bare_dialog"
+nopath_dialog=$(printf '%s\n' 'Read outside the working directories' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel')
+expect_read_path "a file outside its working directories" "read dialog with no path says so" "$nopath_dialog"
+expect_read_path NONE "a Bash permission prompt is not the read dialog" "$permission_prompt"
+expect_read_path NONE "a working screen is not the read dialog" "$working"
+
 # No lane names: the heartbeat still runs and exits 0.
 home="$TMP/home"; mkdir -p "$home"
 rc=0; out=$(HOME="$home" bash "$SCRIPT" --max-min 0) || rc=$?
@@ -317,6 +336,20 @@ if grep -q '^waiting on a dialog: late' "$out"; then
   echo "ok   no lane names: a late lane stuck on a dialog wakes the watcher"
 else
   echo "FAIL late lane dialog: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+rm -f "$PANE_DIR/late"
+
+# A lane stuck on the read dialog: the wake-up line names the path (the prefix is unchanged, so greps on it still match).
+: > "$out"; echo early > "$LIVE_FILE"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 25 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 2.5; echo late >> "$LIVE_FILE"
+printf '%s\n' 'Read outside the working directories' '  Read(/home/u/x/ep7/a.txt)' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' > "$PANE_DIR/late"
+wait "$watcher" || true
+if grep -q '^waiting on a dialog: late (waiting on a read of /home/u/x/ep7/a.txt)' "$out"; then
+  echo "ok   a lane stuck on the read dialog wakes the watcher with the path"
+else
+  echo "FAIL read dialog line: out=$(cat "$out")"; failures=$((failures + 1))
 fi
 rm -f "$PANE_DIR/late"
 
