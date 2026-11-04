@@ -18,7 +18,7 @@ Every phase takes --dry-run (reads only, prints the plan, changes nothing) and r
 nothing is guessed and nothing is retried across a changed state. Never prints a token or a secret value.
 
 Forbidden items are given at export and kept in <folder>/forbidden.json, so every later phase checks the same list:
-  --forbid-path db-snapshot.sql.gz   a file name or path (globs allowed), matched anywhere in any pushed commit
+  --forbid-path secret-dump.sql.gz   a file name or path (globs allowed), matched anywhere in any pushed commit
   --forbid-blob <40-hex id>          a file's content id; the live proof needs all 40 characters (a short id gets a false 404)
   --forbid-commit <hex id>           a commit id or prefix
 

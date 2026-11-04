@@ -317,9 +317,9 @@ class Pure(unittest.TestCase):
         self.assertNotIn("​fence", out)
 
     def test_path_matching(self):
-        self.assertTrue(rb.path_matches("db-snapshot.sql.gz", "db-snapshot.sql.gz"))
-        self.assertTrue(rb.path_matches("old/dir/db-snapshot.sql.gz", "db-snapshot.sql.gz"))
-        self.assertFalse(rb.path_matches("old/db-snapshot.sql.gz.txt", "db-snapshot.sql.gz"))
+        self.assertTrue(rb.path_matches("secret-dump.sql.gz", "secret-dump.sql.gz"))
+        self.assertTrue(rb.path_matches("old/dir/secret-dump.sql.gz", "secret-dump.sql.gz"))
+        self.assertFalse(rb.path_matches("old/secret-dump.sql.gz.txt", "secret-dump.sql.gz"))
         self.assertTrue(rb.path_matches("a/b.sql.gz", "*.sql.gz"))
         self.assertFalse(rb.path_matches("a/b.sql", "*.sql.gz"))
 
@@ -410,14 +410,14 @@ class Scan(unittest.TestCase):
         git("init", "-q", "-b", "main", str(work))
         (work / "ok.txt").write_text("ok")
         (work / "sub").mkdir()
-        (work / "sub" / "db-snapshot.sql.gz").write_text("dump")
+        (work / "sub" / "secret-dump.sql.gz").write_text("dump")
         git("add", "-A", cwd=work)
         git("commit", "-q", "-m", "oops", cwd=work)
         bad = git("rev-parse", "HEAD", cwd=work)
-        blob = git("rev-parse", "HEAD:sub/db-snapshot.sql.gz", cwd=work)
+        blob = git("rev-parse", "HEAD:sub/secret-dump.sql.gz", cwd=work)
         git("rm", "-q", "-r", "sub", cwd=work)
         git("commit", "-q", "-m", "remove", cwd=work)  # gone from the tip, still in history
-        _, hits = rb.scan_git(work / ".git", {"paths": ["db-snapshot.sql.gz"], "blobs": [], "commits": []})
+        _, hits = rb.scan_git(work / ".git", {"paths": ["secret-dump.sql.gz"], "blobs": [], "commits": []})
         self.assertEqual(len(hits), 1)
         _, hits = rb.scan_git(work / ".git", {"paths": [], "blobs": [blob[:8]], "commits": []})
         self.assertTrue(hits[0].startswith("blob " + blob))
@@ -461,7 +461,7 @@ class EndToEnd(unittest.TestCase):
         r["milestones"] = [{"number": 1, "title": "v1", "state": "open", "description": "m", "due_on": None}]
         r["variables"] = [{"name": "RUNNER_LABEL", "value": "workstation"}]
         r["secrets"] = ["API_KEY"]
-        r["collabs"] = [{"login": "owner", "role_name": "admin"}, {"login": "greg", "role_name": "write"}, {"login": "bill", "role_name": "maintain"}]
+        r["collabs"] = [{"login": "owner", "role_name": "admin"}, {"login": "sam", "role_name": "write"}, {"login": "pat", "role_name": "maintain"}]
         r["invites"] = [{"invitee": {"login": "newbie"}, "permissions": "read"}]
         r["releases"] = [{"id": 11, "tag_name": "v1", "name": "one", "body": "notes", "draft": False, "prerelease": False,
                           "published_at": "2026-01-01T00:00:00Z", "assets": [{"id": 5, "name": "dump.sql.gz", "size": 4}]}]
@@ -496,7 +496,7 @@ class EndToEnd(unittest.TestCase):
         return q.text
 
     def export(self, *forbid):
-        return self.run_phase("export", *(forbid or ("--forbid-path", "db-snapshot.sql.gz")))
+        return self.run_phase("export", *(forbid or ("--forbid-path", "secret-dump.sql.gz")))
 
     def up_to_clean(self):
         self.export()
@@ -519,7 +519,7 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(self.dir.exists())
 
     def test_export_keeps_everything_and_never_a_secret_value(self):
-        self.export("--forbid-path", "db-snapshot.sql.gz", "--forbid-commit", "abc123")
+        self.export("--forbid-path", "secret-dump.sql.gz", "--forbid-commit", "abc123")
         for name in ("settings.json", "labels.json", "milestones.json", "releases.json", "collaborators.json", "invitations.json",
                      "variables.json", "secret-names.json", "runners.json", "extras.json", "forbidden.json", "meta.json", "release-assets.json"):
             self.assertTrue((self.dir / name).exists(), name)
@@ -683,7 +683,7 @@ class EndToEnd(unittest.TestCase):
         new = self.gh.repos[self.repo]
         self.assertTrue(new["actions_enabled"])
         self.assertEqual(new["variables"], [{"name": "RUNNER_LABEL", "value": "workstation"}])
-        self.assertEqual(sorted(new["collabs"]), [("bill", "maintain"), ("greg", "push"), ("newbie", "pull")])
+        self.assertEqual(sorted(new["collabs"]), [("newbie", "pull"), ("pat", "maintain"), ("sam", "push")])
         self.assertEqual([r["tag_name"] for r in new["releases"]], ["v1"])
         self.assertEqual([a["name"] for a in new["releases"][0]["assets"]], ["dump.sql.gz"])
         self.assertEqual(self.gh.secrets_set, [(self.repo, "API_KEY", "very-secret-value-123")])
@@ -780,7 +780,7 @@ class EndToEnd(unittest.TestCase):
         self.swap()
         self.run_phase("rebuild")
         work = self.git_base / f"{self.repo}.git-work"
-        (work / "db-snapshot.sql.gz").write_text("dump")
+        (work / "secret-dump.sql.gz").write_text("dump")
         git("checkout", "-q", "main", cwd=work)
         git("add", "-A", cwd=work)
         git("commit", "-q", "-m", "bad", cwd=work)
