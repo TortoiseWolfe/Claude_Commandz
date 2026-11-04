@@ -81,44 +81,89 @@ class ContextWarnTests(unittest.TestCase):
     def warning(self, output):
         return json.loads(output)["hookSpecificOutput"]
 
-    def test_below_early_point_is_silent(self):
-        self.write_transcript((79_999, 0, 0))
-        self.assertEqual(self.call_hook(), "")
-
-    def test_early_warning_at_80k_only_once(self):
-        self.write_transcript((80_000, 0, 0))
+    def test_below_250k_shows_per_turn_line(self):
+        self.write_transcript((249_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 80K tokens. Hand-off line is 100K", self.warning(output)["additionalContext"])
-        self.write_transcript((90_000, 0, 0))
-        self.assertEqual(self.call_hook(), "")
+        self.assertEqual(self.warning(output)["additionalContext"], "Hub context: 249K of 367K")
+
+    def test_250k_tier_shows_once(self):
+        self.write_transcript((250_000, 0, 0))
+        output = self.call_hook()
+        self.assertIn("Hub context 250K: start the running hand-off file now", self.warning(output)["additionalContext"])
+        self.write_transcript((251_000, 0, 0))
+        output = self.call_hook()
+        self.assertEqual(self.warning(output)["additionalContext"], "Hub context: 251K of 367K")
+
+    def test_310k_tier_shows_once(self):
+        # Move past 250K first to "consume" that warning
+        self.write_transcript((250_000, 0, 0))
+        self.call_hook()
+        # Now hit 310K
+        self.write_transcript((310_000, 0, 0))
+        output = self.call_hook()
+        self.assertIn("Hand-off line is 330K: start wrapping up", self.warning(output)["additionalContext"])
+        self.write_transcript((311_000, 0, 0))
+        output = self.call_hook()
+        self.assertEqual(self.warning(output)["additionalContext"], "Hub context: 311K of 367K")
+
+    def test_330k_tier_repeats_every_turn(self):
+        self.write_transcript((331_000, 0, 0))
+        output1 = self.call_hook()
+        self.assertIn("hand off and end, no new work", self.warning(output1)["additionalContext"])
+        self.assertIn("touch ~/.claude/state/hub-handed-off.fixture-session", self.warning(output1)["additionalContext"])
+
+        output2 = self.call_hook()
+        self.assertIn("hand off and end, no new work", self.warning(output2)["additionalContext"])
+
+    def test_every_size_gets_the_per_turn_line_and_tiers_fire_as_specified(self):
+        seen = []
+        for tokens in (249_000, 250_000, 310_000, 331_000, 331_000):
+            self.write_transcript((tokens, 0, 0))
+            text = self.warning(self.call_hook())["additionalContext"]
+            self.assertTrue(text.startswith(f"Hub context: {tokens // 1000}K of 367K"), text)
+            seen.append(text)
+        self.assertNotIn("\n", seen[0])
+        self.assertIn("start the running hand-off file now", seen[1])
+        self.assertIn("start wrapping up", seen[2])
+        self.assertIn("hand off and end", seen[3])
+        self.assertIn("hand off and end", seen[4])
+
+    def test_AFA_HANDOFF_START_K_setting(self):
+        self.write_transcript((200_000, 0, 0))
+        output = self.call_hook(extra_env={"AFA_HANDOFF_START_K": "200"})
+        self.assertIn("start the running hand-off file now", self.warning(output)["additionalContext"])
+
+    def test_below_lowest_point_resets_warning_stamp(self):
+        self.write_transcript((250_000, 0, 0))
+        self.call_hook()
+        self.write_transcript((240_000, 0, 0))
+        self.call_hook()
+        self.write_transcript((250_000, 0, 0))
+        output = self.call_hook()
+        self.assertIn("start the running hand-off file now", self.warning(output)["additionalContext"])
 
     def test_synthetic_last_entry_uses_prior_usage_without_resetting_stamp(self):
-        self.write_transcript((80_000, 0, 0))
+        self.write_transcript((250_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
-        self.write_transcript((80_000, 0, 0), synthetic_last=True)
-        self.assertEqual(self.call_hook(), "")
-        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "80")
+        self.assertIn("Hub context 250K", self.warning(output)["additionalContext"])
+        self.write_transcript((250_000, 0, 0), synthetic_last=True)
+        self.assertEqual(self.warning(self.call_hook())["additionalContext"], "Hub context: 250K of 367K")
+        self.assertEqual((self.state / ("context-warn." + self.session_id)).read_text(), "250")
 
-    def test_hand_off_warning_at_100k(self):
-        self.write_transcript((60_000, 0, 40_000))
+    def test_hand_off_warning_at_330k(self):
+        self.write_transcript((330_000, 0, 0))
         output = self.call_hook()
-        self.assertIn("past the 100K hand-off line", self.warning(output)["additionalContext"])
+        self.assertIn("hand off and end, no new work", self.warning(output)["additionalContext"])
 
-    def test_setting_moves_both_points(self):
-        self.write_transcript((79_999, 0, 0))
-        self.assertEqual(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}), "")
-        self.write_transcript((80_000, 0, 0))
-        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}))["additionalContext"]
-        self.assertIn("Context is at 80K tokens. Hand-off line is 100K", out)
+    def test_setting_moves_points(self):
         self.write_transcript((100_000, 0, 0))
-        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "100"}))["additionalContext"]
-        self.assertIn("past the 100K hand-off line", out)
+        output = self.call_hook(extra_env={"AFA_HANDOFF_K": "100"})
+        self.assertIn("hand off and end, no new work", self.warning(output)["additionalContext"])
 
-    def test_bad_setting_falls_back_to_100(self):
-        self.write_transcript((100_000, 0, 0))
+    def test_bad_setting_falls_back_to_defaults(self):
+        self.write_transcript((330_000, 0, 0))
         out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "lots"}))["additionalContext"]
-        self.assertIn("past the 100K hand-off line", out)
+        self.assertIn("hand off and end, no new work", out)
 
     def test_size_mode_on_missing_file_exits_1_quietly(self):
         result = subprocess.run([sys.executable, str(HOOK), "--size", str(self.root / "nope.jsonl")],
@@ -138,18 +183,9 @@ class ContextWarnTests(unittest.TestCase):
         self.assertEqual(self.call_hook(), "")
 
     def test_corrupt_last_line_falls_back_to_valid_usage(self):
-        self.write_transcript((80_000, 0, 0), corrupt_last=True)
+        self.write_transcript((250_000, 0, 0), corrupt_last=True)
         output = self.call_hook()
-        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
-
-    def test_below_early_point_resets_warning_stamp(self):
-        self.write_transcript((80_000, 0, 0))
-        self.call_hook()
-        self.write_transcript((70_000, 0, 0))
-        self.assertEqual(self.call_hook(), "")
-        self.write_transcript((80_000, 0, 0))
-        output = self.call_hook()
-        self.assertIn("Context is at 80K", self.warning(output)["additionalContext"])
+        self.assertIn("Hub context 250K", self.warning(output)["additionalContext"])
 
     def test_hook_event_name_is_echoed(self):
         self.write_transcript((150_000, 0, 0))

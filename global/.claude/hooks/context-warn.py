@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Warn the hub before its context reaches the hand-off line (330K tokens by default, the last tenth before auto-compact at 367K; Jonathan 31 Oct at 157K: "still too soon, fifty seven percent left").
 
-The hand-off line, in thousands of tokens, is read from AFA_HANDOFF_K (default 330;
-a value that is not a positive whole number falls back to 330). Both warning points
-come from it, as absolute token counts rather than percentages of an auto-compaction window:
-an early warning once at (hand-off - 20)K ("start wrapping up"), and a hand-off warning once at
-the hand-off line ("write the hand-off, run /session-prime, and ask Jonathan for a fresh
-terminal and /prep; never auto-compact"). Each is shown once per session.
+The hub (cwd = ~/repos) gets a short "Hub context: NNNK of 367K" line on every call, plus three tiers.
+All come from absolute token counts, not percentages of an auto-compaction window:
+  - AFA_HANDOFF_START_K (default 250): "start the running hand-off file now", once per session;
+  - hand-off line minus 20K (310K by default): "start wrapping up", once per session;
+  - AFA_HANDOFF_K (default 330): "hand off and end, no new work" with the marker to touch,
+    repeated on every call past the line (lane-watch-guard.py lets the session stop once
+    ~/.claude/state/hub-handed-off.<session id> exists and a fresh hub-handoff-*.md does).
+A setting that is not a positive whole number falls back to its default. Lanes (any other cwd) see nothing.
 
 A --size <transcript> mode prints the latest context size in tokens and exits
 (exit 1, no traceback, when the file is missing, unreadable or has no usage).
@@ -20,16 +22,17 @@ import sys
 
 READ_LIMIT = 512 * 1024
 DEFAULT_HANDOFF_K = 330
+DEFAULT_HANDOFF_START_K = 250
 EARLY_MARGIN_K = 20  # the early warning comes this many thousand tokens before the hand-off line
 
 
-def handoff_k_setting():
-    """The hand-off line in thousands of tokens; a bad AFA_HANDOFF_K falls back to the default."""
+def get_setting(env_var, default):
+    """Read a setting from environment; a bad value falls back to the default."""
     try:
-        value = int(os.environ.get("AFA_HANDOFF_K", str(DEFAULT_HANDOFF_K)))
+        value = int(os.environ.get(env_var, str(default)))
     except ValueError:
-        return DEFAULT_HANDOFF_K
-    return value if value > 0 else DEFAULT_HANDOFF_K
+        return default
+    return value if value > 0 else default
 
 
 def latest_context_size(transcript_path):
@@ -89,47 +92,65 @@ def main():
         if not isinstance(transcript_path, str):
             return 0
 
-        handoff_k = handoff_k_setting()
+        handoff_k = get_setting("AFA_HANDOFF_K", DEFAULT_HANDOFF_K)
+        handoff_start_k = get_setting("AFA_HANDOFF_START_K", DEFAULT_HANDOFF_START_K)
         early_k = max(handoff_k - EARLY_MARGIN_K, 1)
-        thresholds_k = (early_k, handoff_k)
+        thresholds_k = sorted({handoff_start_k, early_k, handoff_k})
         size = latest_context_size(transcript_path)
         if size is None:
             return 0
 
+        tokens_k = (size + 500) // 1000
+        message = f"Hub context: {tokens_k}K of 367K"
+
         state_dir = Path(os.path.expanduser(os.environ.get("AFA_STATE_DIR", "~/.claude/state")))
         stamp = state_dir / ("context-warn." + session_id)
-        # Reset the stamp when below the early warning point
-        if size < early_k * 1000:
+        # Reset the stamp when below the lowest warning point
+        if size < min(thresholds_k) * 1000:
             stamp.unlink(missing_ok=True)
+            # Still show the per-turn line
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": payload.get("hook_event_name"),
+                    "additionalContext": message,
+                }
+            }))
             return 0
 
         # Find the highest threshold we've crossed
         threshold_k = max((value for value in thresholds_k if size >= value * 1000), default=0)
-        if threshold_k == 0:
-            return 0
         try:
             warned = int(stamp.read_text(encoding="ascii").strip())
         except (OSError, ValueError):
             warned = 0
-        if threshold_k <= warned:
-            return 0
 
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.write_text(str(threshold_k), encoding="ascii")
-        tokens_k = (size + 500) // 1000
-        if threshold_k < handoff_k:
-            message = (
-                f"Context is at {tokens_k}K tokens. Hand-off line is {handoff_k}K: "
-                "start wrapping up. Finish the step in hand, answer any open receptionist "
-                "questions, run /session-prime, then sign off telling the operator to close "
-                "this terminal, open a fresh one in ~/repos and type /prep."
+        extra = None
+        if threshold_k > warned and threshold_k < handoff_k:
+            if threshold_k == handoff_start_k:
+                extra = (
+                    f"Hub context {tokens_k}K: start the running hand-off file now "
+                    f"(~/.claude/state/hub-handoff-<date>-<HHMM>.md)."
+                )
+            elif threshold_k == early_k:
+                extra = (
+                    f"Context is at {tokens_k}K tokens. Hand-off line is {handoff_k}K: "
+                    "start wrapping up. Finish the step in hand, answer any open receptionist "
+                    "questions, run /session-prime, then sign off telling the operator to close "
+                    "this terminal, open a fresh one in ~/repos and type /prep."
+                )
+            stamp.parent.mkdir(parents=True, exist_ok=True)
+            stamp.write_text(str(threshold_k), encoding="ascii")
+
+        # The hand-off warning repeats every turn past 330K
+        if threshold_k >= handoff_k:
+            extra = (
+                f"Hub context {tokens_k}K: hand off and end, no new work. "
+                f"When the hand-off file is written: touch ~/.claude/state/hub-handed-off.{session_id}"
             )
-        else:  # threshold_k == handoff_k
-            message = (
-                f"Context is at {tokens_k}K tokens, past the {handoff_k}K hand-off line. "
-                "Write the hand-off, run /session-prime, and ask Jonathan for a fresh terminal "
-                "and /prep. Never auto-compact."
-            )
+
+        if extra:
+            message += "\n" + extra
+
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": payload.get("hook_event_name"),
