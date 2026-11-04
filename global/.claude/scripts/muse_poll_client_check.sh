@@ -15,6 +15,7 @@
 # client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
 # kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script
 # hold none. Overrides for tests and seeding: MUSE_CLIENT_TSV, MUSE_CLIENT_SEEN, MUSE_CLIENT_INBOX (point at copies; the board is hub-inbox.md now), MUSE_CLIENT_GMAIL (an executable that stands in for gmail_api.py: called as `<it> messages-list <query>`),
+# MUSE_CLIENT_ALERT_ISSUES (an executable that stands in for alert_issues.py: called as `<it> <message id>`),
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d), MUSE_CLIENT_PAYIDS (a file that gets the ID of every payment-kind line printed).
 set -u
 S=$HOME/.claude/scripts
@@ -46,6 +47,11 @@ pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
 # kind "payment" senders (Gusto) mail from no-reply addresses but have their own handler step (mark the invoice
 # paid), so they are never tagged "Client alert"
 paypats=$(awk -F'\t' 'NR>1 && $3=="payment" && $4!="" {print tolower($4)}' "$TSV")
+# kind "alerts" senders (a site's security plugin): their scan-findings mail goes to alert_issues.py (GitHub issues).
+alertpats=$(awk -F'\t' 'NR>1 && $3=="alerts" && $4!="" {print tolower($4)}' "$TSV")
+alerter=()
+if [[ -n "${MUSE_CLIENT_ALERT_ISSUES:-}" ]]; then alerter=("$MUSE_CLIENT_ALERT_ISSUES")
+elif [[ -r "$S/alert_issues.py" ]]; then alerter=(python3 "$S/alert_issues.py"); fi
 # A pattern with @ is one address and must match exactly; a bare domain matches that domain and its subdomains.
 sender_is() { local a=$1 p=${2//[[:space:]]/}; [[ -n "$p" ]] || return 1
   if [[ "$p" == *@* ]]; then [[ "$a" == "$p" ]]; else [[ "$a" == *"@$p" || "$a" == *".$p" ]]; fi; }
@@ -97,6 +103,22 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
   # From, Subject and Date pass through as printed (between the address and the labels), for the reader only.
   mid=${rest#*|}; mid=${mid%|*}; mid=${mid%|*}
+  # A Wordfence scan-findings alert from an alerts-kind sender becomes GitHub issues (alert_issues.py), here between
+  # sessions too, so its findings stop living only in email (4 Nov 2026). Done (exit 0): the ID is absorbed like any
+  # client-seen one and no NEW line prints. Unparsed or failed (exit 2, 3): the line prints as before, so it is handled
+  # by hand. The script's own lines go to the log, never a mail body.
+  if (( ${#alerter[@]} > 0 )); then
+    subj=${mid#*|}; subj=${subj%|*}
+    if printf '%s' "$subj" | grep -qiE 'scan finding|problems found on'; then
+      isalert=""; while IFS= read -r p; do sender_is "$addr" "$p" && { isalert=1; break; }; done <<<"$alertpats"
+      if [[ -n "$isalert" ]]; then
+        aout=$(ALERT_ISSUES_TSV="$TSV" "${alerter[@]}" "$id" </dev/null 2>>"$LOG"); arc=$?
+        printf '%s\n' "$aout" | while IFS= read -r al; do [[ -n "$al" ]] && printf '%s client check: alert_issues %s: %s\n' "$(date '+%F %T')" "$id" "$al" >>"$LOG"; done
+        if (( arc == 0 )); then echo "$id" >>"$SEEN"; continue; fi
+        printf '%s client check: alert_issues %s exited %s, left for the handler\n' "$(date '+%F %T')" "$id" "$arc" >>"$LOG"
+      fi
+    fi
+  fi
   # MUSE_CLIENT_PAYIDS (muse_poll.sh sets it): a file that collects the IDs of the payment-kind lines printed below, one per line.
   # The poller grants the Gmail message reader and the Gusto script to the handler only when it holds an ID, and the Gusto script
   # refuses any --ref that is not in it (29 Oct hub security call: an injected mail must not steer an unattended pass).
