@@ -20,14 +20,15 @@ echo "tmux $*" >>"$FAKE_DIR/tmux.log"
 case "$1" in
   has-session) [ -e "$FAKE_DIR/session" ] ;;
   list-windows) cat "$FAKE_DIR/windows" 2>/dev/null ;;
-  new-session) touch "$FAKE_DIR/session" ;;
+  new-session) touch "$FAKE_DIR/session"; ls -l /proc/$$/fd 2>/dev/null | grep -q 'fleet-up.run.lock' && echo "tmux new-session" >>"$FAKE_DIR/lock-leak.log"; true ;;
   *) : ;;
 esac
 SH
 cat >"$T/bin/lane.sh" <<'SH'
 #!/usr/bin/env bash
 echo "lane.sh $*" >>"$FAKE_DIR/lane.log"
-[ "${FAKE_LANE_FAIL:-}" = "$(printf '%s\n' "$@" | grep -m1 '^2026' )" ] && { echo "refusing: client repo" >&2; exit 1; }
+ls -l /proc/$$/fd 2>/dev/null | grep -q 'fleet-up.run.lock' && echo "lane.sh" >>"$FAKE_DIR/lock-leak.log"
+[ -n "${FAKE_LANE_FAIL:-}" ] && [ "$FAKE_LANE_FAIL" = "$(printf '%s\n' "$@" | grep -m1 '^2026' )" ] && { echo "refusing: client repo" >&2; exit 1; }
 exit 0
 SH
 chmod +x "$T/bin/"*
@@ -42,8 +43,12 @@ setup() {  # <machine>
 run() { FLEET_NOW=$NOW bash "$HERE/fleet-up.sh" "$@"; }
 NOW=1793200000
 addlane() {  # <name> [with-handoff] [extra folders, colon list: index column 15]
-  printf '%s\t%s\t%s\t%s\tsubscription\tp\tr\tsid\t1\t-\ton\t-\t-\t-\t%s\n' "2026-10-28" "$1" "$HOME/work" sonnet "${3:--}" >>"$S/lanes/index.tsv"
-  [ "${2:-}" = handoff ] && { mkdir -p "$S/lanes/$1"; echo "next step" >"$S/lanes/$1/handoff.md"; }
+  # Hand-off folders are dated (<date>-<name>); column 7 of the index row names the folder's report.md. A hand-off is written at HAND_AT
+  # (default: 5 minutes before the last heartbeat that setup 3 uses), its report.md at REPORT_AT (default: the same second).
+  local d="$S/lanes/2026-10-28-$1" h=${HAND_AT:-$((NOW - 3300))}
+  printf '%s\t%s\t%s\t%s\tsubscription\t%s\t%s\tsid\t1\t-\ton\t-\t-\t-\t%s\n' "2026-10-28" "$1" "$HOME/work" sonnet "$d/prompt.md" "$d/report.md" "${3:--}" >>"$S/lanes/index.tsv"
+  mkdir -p "$d"
+  if [ "${2:-}" = handoff ]; then echo "next step" >"$d/handoff.md"; touch -d "@$h" "$d/handoff.md"; echo "report" >"$d/report.md"; touch -d "@${REPORT_AT:-$h}" "$d/report.md"; fi
 }
 
 # 1. heartbeat: stamp, live.tsv, gap copy
@@ -163,6 +168,48 @@ printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; printf '%s\n' "$NOW" >"$S/h
 printf '%s\n' "BOOT=2026-10-28T14:30:00" >"$FAKE_WIN"
 out=$(run --dry-run)
 check "dry run prints the record and writes none" 'echo "$out" | grep -q "# Recovery on NCC-74656" && [ ! -d $S/recovery ] && [ -e $S/heartbeat.gap ]'
+
+# 6b. 4 Nov 2026 reboot: dated hand-off folders, only a fresh hand-off restarts, a stale gap is dropped, no child keeps the run lock
+reboot() {  # <name>: one dead lane with a hand-off, a crash with the last heartbeat at NOW-3000
+  setup NCC-74656
+  addlane "$1" handoff; touch "$FAKE_DIR/session"; echo other >"$FAKE_DIR/windows"; printf '%s\n' "$1" >"$S/lanes/live.tsv"
+  printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
+  printf '%s\n' "BOOT=2026-10-28T14:30:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
+  : >"$FAKE_DIR/lane.log"; run; rec=$(ls $S/recovery/*.md 2>/dev/null | head -1)
+}
+reboot tut                                     # (a) hand-off written 5 minutes before the stop, in a dated folder
+check "a fresh hand-off in a dated folder restarts the lane" 'grep -q -- "--restart.* tut $HOME/work sonnet" $FAKE_DIR/lane.log && grep -q "lane tut restarted fresh" "$rec"'
+HAND_AT=$((NOW - 3000 - 4 * 3600)) reboot old  # (b) four hours before the stop: stale
+check "a hand-off older than 3 hours before the stop is not restarted" '! grep -q " old " $FAKE_DIR/lane.log && grep -q "lane old: not restarted: handoff from .*; the hub decides" "$rec"'
+REPORT_AT=$((NOW - 3300 + 700)) reboot moved   # (c) report.md 700 s newer than the hand-off: the lane carried on after writing it
+check "a report.md that moved on after the hand-off is not restarted" '! grep -q " moved " $FAKE_DIR/lane.log && grep -q "lane moved: not restarted: handoff from .*report.md moved on at .*; the hub decides" "$rec"'
+REPORT_AT=$((NOW - 3300 + 2)) reboot pair      # (d) report.md 2 s after the hand-off is how a lane writes both: still restarts
+check "a report.md 2 s after the hand-off still restarts" 'grep -q -- "--restart.* pair $HOME/work" $FAKE_DIR/lane.log'
+FLEET_HANDOFF_HOURS=1 HAND_AT=$((NOW - 3000 - 2 * 3600)) reboot hrs
+check "FLEET_HANDOFF_HOURS changes the window" '! grep -q " hrs " $FAKE_DIR/lane.log && grep -q "lane hrs: not restarted: handoff from" "$rec"'
+
+# (e) a heartbeat.gap from before the last full run was already looked at: dropped, no record
+setup NCC-74656
+touch "$FAKE_DIR/session"; printf '%s\n' "BOOT=2026-10-28T08:00:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
+printf '%s\n' "$((NOW - 10))" >"$S/fleet-up.seen"; printf '%s\n' "$((NOW - 5000))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
+run
+check "a stale heartbeat.gap is removed, logged, and writes no record" '[ ! -e $S/heartbeat.gap ] && grep -q "dropped a stale heartbeat.gap" $S/fleet-up.log && { [ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]; }'
+check "every full run stamps fleet-up.seen" '[ "$(head -1 $S/fleet-up.seen)" = $NOW ]'
+printf '%s\n' "$((NOW + 100))" >"$S/heartbeat.gap"; NOW=$((NOW + 200)) run
+check "a gap newer than the last full run is still acted on" '[ -n "$(ls $S/recovery 2>/dev/null)" ]'
+
+# (f) no child keeps the run lock: tmux, lane.sh and a service start all see fd 8 closed (a tmux server that kept it blocked every run for six days)
+reboot lk
+: >"$FAKE_DIR/lock-leak.log"
+printf 'svc\t1\t%s\tfalse\tls -l /proc/self/fd | grep -c run.lock >%s/svc-fds; true\n' "$HOME/work" "$HOME/work" >"$HOME/.config/afa/services.tsv"
+rm -f "$FAKE_DIR/session" "$S/fleet-up.seen"; printf "lk\n" >"$S/lanes/live.tsv"; printf "%s\n" "$((NOW - 3000))" >"$S/heartbeat.gap"; rm -rf "$S/recovery"; : >"$FAKE_DIR/lane.log"
+run
+check "lane.sh and tmux are started with the run lock closed" '[ -s $FAKE_DIR/lane.log ] && [ ! -s $FAKE_DIR/lock-leak.log ]'
+check "a service start command has the run lock closed" '[ "$(cat $HOME/work/svc-fds 2>/dev/null)" = 0 ]'
+# (g) the lock is free again once the run ends: a second full run is not turned away
+rm -f "$S/fleet-up.seen"; printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; rm -rf "$S/recovery"
+run
+check "a second full run is not blocked by the first" '[ -n "$(ls $S/recovery 2>/dev/null)" ]'
 
 # 7. bad flag
 bash "$HERE/fleet-up.sh" --nope >/dev/null 2>&1; check "unknown flag exits 2" '[ $? = 2 ]'

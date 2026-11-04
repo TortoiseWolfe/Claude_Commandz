@@ -5,3 +5,7 @@
 # A name listed here is never restarted as a lane.
 #renderer	1	~/work/renderer	pgrep -f render_loop.py >/dev/null	nohup ./render_loop.py >>render.log 2>&1 &
 #stream	0	~/work/stream	tmux has-session -t stream 2>/dev/null	tmux new-session -d -s stream ./go-live.sh
+# A job that writes its own pid file: check that the pid names a live process of the right program (a pid file alone goes stale, and a reused pid
+# is a different process), and start it through a wrapper that keeps secrets (a stream key) off the command line. The 24/7 stream on the tower:
+#rotation	1	~/clawd-twitch/air/reel-v1	p=$(cat rotate.pid 2>/dev/null) && [ -n "$p" ] && tr '\0' ' ' </proc/$p/cmdline | grep -q rotate.py	bash ~/repos/OBS_MCP_bot/playout/tutorials/air-rotation.sh
+# A job whose start is guarded by a date or event that has passed always fails; give it enabled 0 until someone rewrites it.
