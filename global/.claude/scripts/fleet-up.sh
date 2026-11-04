@@ -14,8 +14,15 @@
 #                             restart with who and why, and the battery or UPS when one is present), when Windows started, when the user
 #                             signed in, then each thing it brings back with its time:
 #                               - the tmux session "lanes" at the fixed size (lane.sh creates it with the first restarted lane)
-#                               - each dead lane with a handoff.md, started fresh with lane.sh --restart (never --resume: a restart
-#                                 reads prompt.md and handoff.md, so it does not carry the old context)
+#                               - each dead lane whose handoff.md is FRESH, started fresh with lane.sh --restart (never --resume: a
+#                                 restart reads prompt.md and handoff.md, so it does not carry the old context). The hand-off folder is
+#                                 the dated one (~/.claude/state/lanes/<YYYY-MM-DD>-<name>/), found as the dirname of column 7 (report.md)
+#                                 of the lane's last row in lanes/index.tsv. FRESH means written up to 3 hours (FLEET_HANDOFF_HOURS)
+#                                 before the stop (the last heartbeat; the boot time when no heartbeat gap is known) or later, and
+#                                 not followed by a report.md more than 10 minutes newer (the lane kept working after writing it). Every
+#                                 other dead lane is recorded as "not restarted: handoff from <date>; the hub decides": 4 Nov 2026, a
+#                                 reboot would have restarted 16 lanes at once, most from hand-offs of 29 Oct to 2 Nov (cost, and finished
+#                                 work done twice); only the hand-offs the hub asked for before the stop are meant to come back by themselves.
 #                               - long jobs in ~/.config/afa/services.tsv (see examples/services.tsv.example)
 #                             It adds one line to this machine's inbox (peer-inbox.md off NX-01, hub-inbox.md on NX-01) so /prep shows it.
 #                             The record reaches the other machine only through the notes route, which here makes Gmail drafts and never
@@ -27,7 +34,12 @@
 #   on the machine this is silent, and it switches on by itself the first time a battery appears.
 #
 #   --dry-run (or FLEET_DRY=1): print what would happen; start, send and write nothing outside the record on stdout.
-# Test hooks: POWERSHELL, TMUX_BIN, LANE_SH, FLEET_NOW (epoch seconds), and HOME (everything lives under it).
+#   Two guards learned on 4 Nov 2026. (1) The full run's lock is a file nothing else can hold: the tmux server this script starts (and any
+#   service it starts) inherited the lock's file descriptor and held it for six days, so every 15-minute run exited at once and no
+#   record was written; children now start with the descriptor closed, and the lock file has a new name. (2) A heartbeat.gap left from an
+#   outage a full run had already recorded is dropped, not reported again as the latest outage: the gap counts only when it is newer
+#   than state/fleet-up.seen, the time of the last full run.
+# Test hooks: POWERSHELL, TMUX_BIN, LANE_SH, FLEET_NOW (epoch seconds), FLEET_HANDOFF_HOURS, and HOME (everything lives under it).
 set -u
 dry=${FLEET_DRY:-0}; mode=full
 for a in "$@"; do
@@ -133,11 +145,18 @@ if [ "$mode" = heartbeat ]; then
 fi
 
 # ---- full run ----
-exec 8>"$STATE/fleet-up.lock"; flock -n 8 || exit 0
+# fd 8 is closed (8>&-) on everything started below: a child that keeps it holds the lock after this script exits.
+exec 8>"$STATE/fleet-up.run.lock"; flock -n 8 || exit 0
 LOGF="$STATE/fleet-up.log"
 
 hb_epoch=""; [ -r "$STATE/heartbeat" ] && hb_epoch=$(head -1 "$STATE/heartbeat")
 gap_epoch=""; [ -r "$STATE/heartbeat.gap" ] && gap_epoch=$(head -1 "$STATE/heartbeat.gap")
+seen_epoch=""; [ -r "$STATE/fleet-up.seen" ] && seen_epoch=$(head -1 "$STATE/fleet-up.seen")
+if [[ "$gap_epoch" =~ ^[0-9]+$ ]] && [[ "$seen_epoch" =~ ^[0-9]+$ ]] && ((gap_epoch < seen_epoch)); then
+  # This outage ended before the last full run, which already looked at it. Drop it.
+  [ "$dry" = 1 ] || { rm -f "$STATE/heartbeat.gap"; printf '%s fleet-up: dropped a stale heartbeat.gap (%s, before the last run at %s)\n' "$(date -d "@$now" '+%F %T')" "$gap_epoch" "$seen_epoch" >>"$LOGF"; }
+  gap_epoch=""
+fi
 down_epoch=""
 if [[ "$gap_epoch" =~ ^[0-9]+$ ]]; then down_epoch=$gap_epoch
 elif [[ "$hb_epoch" =~ ^[0-9]+$ ]] && ((now - hb_epoch > 300)); then down_epoch=$hb_epoch; fi
@@ -202,6 +221,7 @@ incident=0
 remember() {   # keep what the next run compares against
   [ "$dry" = 1 ] && return 0
   [ -n "$boot_iso" ] && printf '%s' "$boot_iso" >"$STATE/fleet-up.boot"
+  printf '%s\n' "$now" >"$STATE/fleet-up.seen"   # the last full run; a heartbeat.gap older than this was already looked at
   if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then lane_windows | atomic_write "$LANES/live.tsv"; fi
 }
 
@@ -227,13 +247,29 @@ rec="$rec_dir/$(date -d "@$now" '+%F-%H%M').md"
 back=()   # "time | what" lines, in the order they happened
 note_back() { back+=("$(clock "${FLEET_NOW:-$(date +%s)}") | $1"); }
 
-restart_lane() {  # <name>: start it fresh from its hand-off
-  local name=$1 row dir model billing eff conn recyc ent pmcp adirs hand args out ad
+# When the machine stopped: the last heartbeat; failing that, when Windows started; failing that, now.
+stop_epoch=$down_epoch
+if ! [[ "$stop_epoch" =~ ^[0-9]+$ ]]; then stop_epoch=$(iso_epoch "$boot_iso" 2>/dev/null); fi
+[[ "$stop_epoch" =~ ^[0-9]+$ ]] || stop_epoch=$now
+fresh_secs=$(( ${FLEET_HANDOFF_HOURS:-3} * 3600 ))
+mtime() { stat -c %Y -- "$1" 2>/dev/null; }
+
+restart_lane() {  # <name>: start it fresh from its hand-off, when the hand-off is fresh
+  local name=$1 row dir model billing eff conn recyc rep ent pmcp adirs hand args out ad hm rm_
   row=$(awk -F'\t' -v n="$name" '$2==n{r=$0} END{if(r)print r}' "$LANES/index.tsv" 2>/dev/null)
   [ -n "$row" ] || { note_back "lane $name: not restarted, no index row"; return; }
-  IFS=$'\t' read -r _ _ dir model billing _ _ _ _ eff conn recyc ent pmcp adirs <<<"$row"
-  hand="$LANES/$name"
+  IFS=$'\t' read -r _ _ dir model billing _ rep _ _ eff conn recyc ent pmcp adirs <<<"$row"
+  # The hand-off folder is dated (<YYYY-MM-DD>-<name>): it is the folder of the report.md named in column 7 (lane.sh --restart finds it the same way).
+  if [ -n "${rep:-}" ] && [ "$rep" != - ]; then hand=$(dirname "$rep"); else hand="$LANES/$name"; fi
   [ -s "$hand/handoff.md" ] || { note_back "lane $name: not restarted, no handoff.md in $hand"; return; }
+  hm=$(mtime "$hand/handoff.md"); hm=${hm:-0}
+  rm_=$(mtime "$hand/report.md"); rm_=${rm_:-0}
+  if ((hm < stop_epoch - fresh_secs)); then
+    note_back "lane $name: not restarted: handoff from $(pretty "$hm"); the hub decides"; return
+  fi
+  if ((rm_ > hm + 600)); then
+    note_back "lane $name: not restarted: handoff from $(pretty "$hm"), but report.md moved on at $(pretty "$rm_"); the hub decides"; return
+  fi
   case "$billing" in console|subscription) ;; *) note_back "lane $name: not restarted, it ran on engine $billing (start it by hand)"; return ;; esac
   [ -d "$dir" ] || { note_back "lane $name: not restarted, folder $dir is gone"; return; }
   local note; note=$(mktemp "$rec_dir/.restart-note.XXXXXX")
@@ -248,7 +284,7 @@ restart_lane() {  # <name>: start it fresh from its hand-off
     for ad in "${adl[@]}"; do [ -d "$ad" ] && args+=(--add-dir "$ad"); done
   fi
   if [ "$dry" = 1 ]; then echo "would run: $LANE_SH ${args[*]} $name $dir $model $note"; rm -f "$note"; return; fi
-  if out=$("$LANE_SH" "${args[@]}" "$name" "$dir" "$model" "$note" 2>&1); then
+  if out=$("$LANE_SH" "${args[@]}" "$name" "$dir" "$model" "$note" 2>&1 8>&-); then
     note_back "lane $name restarted fresh from its hand-off (model $model)"
   else
     note_back "lane $name: lane.sh refused: $(printf '%s' "$out" | tail -1 | cut -c1-160)"
@@ -268,7 +304,8 @@ if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   note_back "tmux session $SESSION is up ($(( ${#dead[@]} )) dead lane(s) found)"
 elif [ "$dry" = 1 ]; then echo "would create tmux session $SESSION at ${SIZE_X}x${SIZE_Y}"
 else
-  "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" \
+  envopt=(); [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1 && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" ${envopt[@]+"${envopt[@]}"} 8>&- \
     && "$TMUX_BIN" set-option -t "$SESSION" window-size manual \
     && "$TMUX_BIN" set-option -t "$SESSION" default-size "${SIZE_X}x${SIZE_Y}" \
     && note_back "tmux session $SESSION created at ${SIZE_X}x${SIZE_Y}, window-size manual" \
@@ -279,10 +316,10 @@ if [ -r "$CONF/services.tsv" ]; then   # name, enabled (1 or 0), working folder,
   while IFS=$'\t' read -r sname senabled sdir scheck sstart; do
     case "$sname" in ''|'#'*) continue ;; esac
     sdir=${sdir/#\~/$HOME}
-    if [ -n "$scheck" ] && (cd "$sdir" 2>/dev/null && bash -c "$scheck" >/dev/null 2>&1); then note_back "service $sname: already running"; continue; fi
+    if [ -n "$scheck" ] && (cd "$sdir" 2>/dev/null && bash -c "$scheck" >/dev/null 2>&1 8>&-); then note_back "service $sname: already running"; continue; fi
     if [ "$senabled" != 1 ]; then note_back "service $sname: down, left alone (disabled in services.tsv; it waits for Jonathan's word)"; continue; fi
     if [ "$dry" = 1 ]; then echo "would start service $sname in $sdir: $sstart"; continue; fi
-    if (cd "$sdir" 2>&1 && bash -c "$sstart") >>"$LOGF" 2>&1; then note_back "service $sname started"; else note_back "service $sname: start command failed (see fleet-up.log)"; fi
+    if (cd "$sdir" 2>&1 && bash -c "$sstart") >>"$LOGF" 2>&1 8>&-; then note_back "service $sname started"; else note_back "service $sname: start command failed (see fleet-up.log)"; fi
   done <"$CONF/services.tsv"
 fi
 

@@ -414,8 +414,42 @@ t() { if [ "$dry" = 1 ]; then printf 'tmux'; printf ' %q' "$@"; echo; else tmux 
 # was in the lane's transcript). window-size manual keeps detached windows at default-size; windows in a session that already exists are
 # never resized, so only a session created here gets these options.
 SESSION_SIZE_X=200; SESSION_SIZE_Y=50
+# The caller's unlocked ssh agent goes to the lanes. ~/.bashrc starts a fresh ssh-agent in any shell with no SSH_AUTH_SOCK and runs ssh-add, which asks
+# for the key's passphrase; a session made from a Windows task (fleet-up.sh at sign-in) has no agent, so on 4 Nov 2026 the first lane windows sat at that
+# prompt and the start command was typed into it ("Bad passphrase, try again"). When the caller's agent works (ssh-add -l exits 0), the session (-e on
+# a new one) and the server's global environment (for the windows that follow) carry its socket before any window opens.
+ssh_agent_ok() { [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1; }
+share_ssh_agent() {  # needs a running tmux server
+  if [ "$dry" = 1 ]; then echo "# if SSH_AUTH_SOCK works (ssh-add -l exits 0): tmux set-environment -g SSH_AUTH_SOCK <it>"; return 0; fi
+  ssh_agent_ok || return 0
+  tmux set-environment -g SSH_AUTH_SOCK "$SSH_AUTH_SOCK" 2>/dev/null
+  # A session made by a caller that had an (older) socket keeps its own copy, which wins over the global one.
+  ! tmux has-session -t "$SESSION" 2>/dev/null || tmux set-environment -t "$SESSION" SSH_AUTH_SOCK "$SSH_AUTH_SOCK" 2>/dev/null
+  return 0
+}
+# Before a start command is typed, the new window must be at a shell prompt. A passphrase prompt (the ssh-add above, with no agent to share) is
+# cancelled, the window is closed, and the start stops: typing a start command into it feeds the command to ssh-add as a passphrase guess.
+pane_ready_for_start() {  # <window target>
+  if [ "$dry" = 1 ]; then echo "# then wait for the shell prompt; a passphrase prompt is cancelled and the start stops"; return 0; fi
+  local target="$1" prev="" cur i
+  for i in $(seq 1 20); do
+    cur="$(tmux capture-pane -p -t "$target" 2>/dev/null || true)"
+    if command grep -qiE 'passphrase' <<<"$cur"; then
+      tmux send-keys -t "$target" C-c; sleep 0.3; tmux send-keys -t "$target" C-c; sleep 0.3
+      tmux kill-window -t "$target" 2>/dev/null
+      echo "$target was at an ssh passphrase prompt (~/.bashrc started an ssh-agent and ran ssh-add because this shell had no SSH_AUTH_SOCK). I cancelled it, closed the window and did not start the lane. Run lane.sh from a shell whose ssh agent is unlocked (ssh-add -l exits 0)." >&2
+      return 1
+    fi
+    if [ -n "${cur//[[:space:]]/}" ] && [ "$cur" = "$prev" ]; then return 0; fi
+    prev="$cur"; sleep 0.5
+  done
+  return 0
+}
 new_lane_session() {  # <window name> <dir>
-  t new-session -d -x "$SESSION_SIZE_X" -y "$SESSION_SIZE_Y" -s "$SESSION" -n "$1" -c "$2"
+  local -a envopt=()
+  [ "$dry" = 1 ] || ! ssh_agent_ok || envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  [ "$dry" = 0 ] || echo "# (a new session also gets -e SSH_AUTH_SOCK=<the caller's working agent>)"
+  t new-session -d -x "$SESSION_SIZE_X" -y "$SESSION_SIZE_Y" -s "$SESSION" -n "$1" -c "$2" ${envopt[@]+"${envopt[@]}"}
   t set-option -t "$SESSION" window-size manual
   t set-option -t "$SESSION" default-size "${SESSION_SIZE_X}x${SESSION_SIZE_Y}"
 }
@@ -1752,8 +1786,10 @@ if [ "$mode" = resume ]; then
   if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
     new_lane_session "$name" "$dir"
   else
+    share_ssh_agent
     t new-window -t "$SESSION:" -n "$name" -c "$dir"
   fi
+  pane_ready_for_start "$SESSION:$name" || exit 1
   t send-keys -t "$SESSION:$name" "$cmd" Enter
   echo "resumed: $name  ($m, effort ${eff:--}, connectors $conn, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
   exit 0
@@ -1885,6 +1921,7 @@ elif [ "$dry" = 1 ]; then
   echo "# else:"
   t new-window -t "$SESSION:" -n "$name" -c "$dir"
 else
+  share_ssh_agent
   tmux new-window -t "$SESSION:" -n "$name" -c "$dir"
 fi
 
@@ -1948,6 +1985,7 @@ else
   # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
   cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
 fi
+pane_ready_for_start "$target" || exit 1
 t send-keys -t "$target" "$cmd" Enter
 
 if [ "$engine" != claude ] || [ "$headless" = 1 ]; then
