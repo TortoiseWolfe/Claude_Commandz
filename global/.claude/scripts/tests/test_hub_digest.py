@@ -1020,6 +1020,48 @@ class CoopCards(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertTrue(all(l.startswith("- Deck read failed: board ") for l in lines), lines)
 
+    def test_a_machine_other_than_nx01_prints_one_line_and_never_reads_the_deck(self):
+        d = fresh_dir(self)
+        calls = []
+        def reader(b):
+            calls.append(b)
+            return [1], None
+        lines = hd.coop_cards_for("NCC-74656", "", 1000.0, cache=Path(d) / "c.json", reader=reader)
+        self.assertEqual(lines, ["- NX-01 reads the co-op cards (this machine holds no Nextcloud sign-in)"])
+        self.assertEqual(calls, [])
+        self.assertFalse((Path(d) / "c.json").exists())
+
+    def test_nx01_and_an_unnamed_machine_still_read_the_boards_and_report_a_real_failure(self):
+        d = fresh_dir(self)
+        for machine in ("NX-01", "unknown"):
+            lines = hd.coop_cards_for(machine, "", 1000.0, cache=Path(d) / f"{machine}.json", reader=self.reader(d))
+            self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 8 (board 2: 4, board 8: 4)", machine)
+        lines = hd.coop_cards_for("NX-01", "", 1000.0, cache=Path(d) / "bad.json", reader=self.reader(d, ok2=False, ok8=False))
+        self.assertTrue(all(l.startswith("- Deck read failed: board ") for l in lines), lines)
+
+    def test_the_command_line_on_the_tower_never_runs_the_deck_script(self):
+        d = Path(fresh_dir(self))
+        home = d / "home"
+        (home / ".config/afa").mkdir(parents=True)
+        (home / ".config/afa/machine").write_text("NCC-74656\n")
+        marker = d / "deck-ran"
+        script = d / "deck.py"
+        script.write_text(f"open({str(marker)!r}, 'a').write('ran')\nprint('nothing')\n")
+        for name, text in (("roadmap.md", ROADMAP), ("lanes.txt", LANE_STATUS), ("inbox.md", INBOX), ("tidy.txt", TIDY),
+                           ("budget.txt", "Week resets Wed: used 1%\n"), ("nq.txt", "none\n")):
+            (d / name).write_text(text)
+        (d / "lanes").mkdir()
+        cmd = [sys.executable, str(HERE.parent / "hub_digest.py"), "--roadmap-file", str(d / "roadmap.md"),
+               "--lane-status-file", str(d / "lanes.txt"), "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"),
+               "--budget-file", str(d / "budget.txt"), "--lanes-dir", str(d / "lanes"), "--git-repo", str(d),
+               "--open-questions-file", str(d / "nq.txt"), "--spend-file", str(d / "nospend.json"), "--now", "2026-10-16T21:00:00",
+               "--deck-fake", str(script), "--deck-cache", str(d / "cache.json")]
+        r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("NX-01 reads the co-op cards (this machine holds no Nextcloud sign-in)", r.stdout)
+        self.assertNotIn("Deck read failed", r.stdout)
+        self.assertFalse(marker.exists())
+
     def test_the_page_carries_the_section_and_no_card_text_and_stays_small(self):
         d = fresh_dir(self)
         cards = hd.coop_cards_lines(INBOX, 1000.0, cache=Path(d) / "c.json", reader=self.reader(d))
@@ -1043,10 +1085,15 @@ class CoopCards(unittest.TestCase):
                 "--lane-status-file", str(d / "lanes.txt"), "--inbox", str(d / "inbox.md"), "--tidy-file", str(d / "tidy.txt"),
                 "--budget-file", str(d / "budget.txt"), "--lanes-dir", str(d / "lanes"), "--git-repo", str(d),
                 "--open-questions-file", str(d / "nq.txt"), "--spend-file", str(d / "nospend.json"), "--now", "2026-10-16T21:00:00"]
-        plain = subprocess.run(base, capture_output=True, text=True)
+        # The machine decides whether the Deck is read at all, so this run is NX-01 in its own HOME, whatever machine runs the test.
+        home = d / "home"
+        (home / ".config/afa").mkdir(parents=True)
+        (home / ".config/afa/machine").write_text("NX-01\n")
+        env = {**os.environ, "HOME": str(home)}
+        plain = subprocess.run(base, capture_output=True, text=True, env=env)
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertNotIn("Co-op cards", plain.stdout)
-        wired = subprocess.run(base + ["--deck-fake", self.fake(d), "--deck-cache", str(d / "cache.json")], capture_output=True, text=True)
+        wired = subprocess.run(base + ["--deck-fake", self.fake(d), "--deck-cache", str(d / "cache.json")], capture_output=True, text=True, env=env)
         self.assertEqual(wired.returncode, 0, wired.stderr)
         self.assertIn("- uncovered: 101, 103, 110, 201, 301, 303, 310, 801", wired.stdout)
 

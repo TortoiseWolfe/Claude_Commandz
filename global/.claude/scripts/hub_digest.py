@@ -17,7 +17,8 @@ No model calls and no Gmail (the client pollers queue mail and chat lines in the
   - the mail index (hub/scripts/mail_index.py keeps ~/.claude/state/mail-index.tsv): metadata counts by class for the last 2 days,
     unhandled person, job and client-alert rows, and one-time plain-rule reply results (client rows already show as client lines);
   - Jonathan's open co-op Deck cards (boards 2 and 8, read-only through deck_board.py, cached an hour in ~/.claude/state/deck-cards-cache.json):
-    the count, and the card numbers no open inbox line names ("uncovered"); a failed read prints "Deck read failed: ...", never a gap;
+    the count, and the card numbers no open inbox line names ("uncovered"); a failed read prints "Deck read failed: ...", never a gap.
+    Only NX-01 holds the Nextcloud sign-in: any other machine skips the read and prints "NX-01 reads the co-op cards ...";
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
     hub/scripts/model_quality_report.py (cached for an hour: the report takes ~15 s).
 
@@ -806,6 +807,18 @@ def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read):
     return lines
 
 
+DECK_ELSEWHERE = "- NX-01 reads the co-op cards (this machine holds no Nextcloud sign-in)"
+
+
+def coop_cards_for(machine, inbox_text, now_ts, cache=None, reader=deck_read):
+    """The Co-op cards lines for this machine. Only NX-01 holds the Nextcloud sign-in (4 Nov 2026: the tower's /prep stopped on a "Deck read failed"
+    that could never pass there), so any other named machine prints one plain line and never calls the reader. A missing machine file ("unknown")
+    reads the Deck, the way this file already treats it for the inbox; a real failure on NX-01 still prints "Deck read failed"."""
+    if machine not in ("NX-01", "unknown"):
+        return [DECK_ELSEWHERE]
+    return coop_cards_lines(inbox_text, now_ts, cache=cache, reader=reader)
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
                    report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
                    mail=None, machine="NX-01", drafts=None, coop_cards=None):
@@ -1048,9 +1061,9 @@ def main(argv=None):
     hours = hours_lines(a.hours_file) if a.hours_file else (hours_lines() if not a.roadmap_file else None)
     mail = mail_index_lines(a.mail_index, now) if a.mail_index else (mail_index_lines(now=now) if not a.roadmap_file else None)
     if a.deck_fake:
-        coop_cards = coop_cards_lines(inbox, now.timestamp(), cache=a.deck_cache, reader=lambda b: deck_read(b, script=a.deck_fake))
+        coop_cards = coop_cards_for(machine, inbox, now.timestamp(), cache=a.deck_cache, reader=lambda b: deck_read(b, script=a.deck_fake))
     elif not a.roadmap_file:
-        coop_cards = coop_cards_lines(inbox, now.timestamp(), cache=a.deck_cache)
+        coop_cards = coop_cards_for(machine, inbox, now.timestamp(), cache=a.deck_cache)
     else:
         coop_cards = None
     secs = build_sections(roadmap_body=body, lane_status=status, lanes_dir=a.lanes_dir, inbox_text=inbox,
