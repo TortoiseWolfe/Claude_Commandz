@@ -61,12 +61,16 @@ class FakeGitHub:
         self.creates = 0
         self.rate_limit_next = 0
         self.deleted = []
+        self.redirects = {}
+        self.create_private = True
+        self.fail_comment_after = None
+        self.comment_posts = 0
 
     def add_repo(self, full, private=True, **kw):
         r = {"full": full, "name": full.split("/")[1], "private": private, "id": len(self.repos) + 1, "issues": {}, "next": 1,
              "comments": [], "review_comments": [], "pulls": {}, "reviews": {}, "commits": {}, "labels": [], "milestones": [], "releases": [],
              "variables": [], "collabs": [], "invites": [], "runners": [], "secrets": [], "actions_enabled": True, "settings": {"description": "d", "has_issues": True},
-             "default_branch": "main", **kw}
+             "default_branch": "main", "objects": set(), "keys": [], **kw}
         self.repos[full] = r
         return r
 
@@ -126,7 +130,9 @@ class FakeGitHub:
         return 0, json.dumps(doc), ""
 
     def find(self, full):
-        return self.repos.get(full)
+        if full in self.repos:
+            return self.repos[full]
+        return self.repos.get(self.redirects.get(full))  # GitHub follows a renamed repo's old name
 
     def route(self, method, path, body):
         q = {}
@@ -140,12 +146,13 @@ class FakeGitHub:
             return self.ok({"type": "User"})
         if path == "user/repos":
             full = f"{self.login}/{body['name']}"
+            self.redirects.pop(full, None)
             r = self.add_repo(full, private=body["private"])
             r["settings"]["description"] = body.get("description", "")
             bare = self.base / f"{full}.git"
             bare.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
-            return self.ok({"name": r["name"], "private": True})
+            return self.ok({"name": r["name"], "private": self.create_private})
         if not m:
             return self.err(404)
         full, rest = m.group(1), m.group(2) or ""
@@ -154,19 +161,30 @@ class FakeGitHub:
             return self.err(404)
         if rest == "":
             if method == "GET":
-                return self.ok({"name": r["name"], "full_name": full, "private": r["private"], "node_id": f"R_{full}", "default_branch": r["default_branch"],
+                return self.ok({"name": r["name"], "full_name": full, "private": r["private"], "node_id": f"R_{r['id']}", "full_name": r["full"], "default_branch": r["default_branch"],
                                 "size": 1, "open_issues_count": 0, "topics": [], **r["settings"]})
             if "name" in body:
                 new = f"{full.split('/')[0]}/{body['name']}"
                 old_bare, new_bare = self.base / f"{full}.git", self.base / f"{new}.git"
                 old_bare.rename(new_bare)
                 self.repos[new] = self.repos.pop(full)
+                self.redirects[full] = new
                 r["name"], r["full"] = body["name"], new
                 return self.ok({})
             if "default_branch" in body:
                 r["default_branch"] = body["default_branch"]
             r["settings"].update({k: v for k, v in body.items() if k != "default_branch"})
             return self.ok({})
+        mm = re.fullmatch(r"(commits|git/blobs)/([0-9a-f]+)", rest)
+        if mm:
+            return self.ok({"sha": mm.group(2)}) if mm.group(2) in r["objects"] else self.err(422 if mm.group(1) == "commits" else 404)
+        if rest == "keys":
+            if method == "POST":
+                if any(body["key"] in x["key"] for rr in self.repos.values() for x in rr["keys"]):
+                    return self.err(422, "key is already in use")
+                r["keys"].append(dict(body))
+                return self.ok({})
+            return self.ok(r["keys"])
         if rest == "topics":
             return self.ok({})
         if rest == "actions/permissions":
@@ -209,6 +227,9 @@ class FakeGitHub:
         if mm:
             n = int(mm.group(1))
             if method == "POST":
+                self.comment_posts += 1
+                if self.fail_comment_after is not None and self.comment_posts > self.fail_comment_after:
+                    return self.err(500, "boom")
                 r["comments"].append({"id": 5000 + len(r["comments"]), "issue_url": f"https://api.github.com/repos/{full}/issues/{n}",
                                       "user": {"login": self.login}, "body": body["body"], "created_at": "2026-02-01T00:00:00Z",
                                       "updated_at": "2026-02-01T00:00:00Z"})
@@ -274,7 +295,7 @@ class FakeGitHub:
     def graphql(self, doc):
         v = doc["variables"]
         src = next(r for r in self.repos.values() for i in r["issues"].values() if i["node_id"] == v["i"])
-        dst = next(r for r in self.repos.values() if f"R_{r['full']}" == v["r"])
+        dst = next(r for r in self.repos.values() if f"R_{r['id']}" == v["r"])
         issue = next(i for i in src["issues"].values() if i["node_id"] == v["i"])
         del src["issues"][issue["number"]]
         n = dst["next"] + self.transfer_skew
@@ -510,7 +531,7 @@ class EndToEnd(unittest.TestCase):
         self.swap()
         self.run_phase("rebuild")
         self.run_phase("reattach", "--secrets-map", str(self.map))
-        return self.run_phase("prove", "--spot-checks", "10")
+        return self.run_phase("prove")
 
     # -- export
     def test_export_dry_run_writes_nothing_and_counts_everything(self):
@@ -717,7 +738,7 @@ class EndToEnd(unittest.TestCase):
         rdir.mkdir()
         (rdir / ".runner").write_text('﻿{"agentName": "ws"}')
         for n in ("config.sh", "run.sh"):
-            (rdir / n).write_text(f'#!/bin/sh\necho "$@" >> "{rdir}/{n}.args"\n')
+            (rdir / n).write_text(f'#!/bin/sh\necho "$@" >> "{rdir}/{n}.args"\necho "$ACTIONS_RUNNER_INPUT_TOKEN" >> "{rdir}/{n}.token"\n')
             (rdir / n).chmod(0o755)
         self.gh.repos[self.repo]["runners"] = []
         old_runners = [{"name": "ws", "status": "online", "labels": [{"name": "self-hosted", "type": "read-only"}, {"name": "workstation", "type": "custom"}]}]
@@ -742,6 +763,164 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("--name ws --labels workstation --replace", args[1])
         self.assertNotIn("TOK123", out)
         self.assertNotIn("TOK123", (self.dir / "rebuild.log").read_text())
+        self.assertNotIn("TOK123", " ".join(args))  # not on the command line, where other users can read it
+        self.assertEqual((rdir / "config.sh.token").read_text().splitlines(), ["", "TOK123"])  # the remove call has none; the register call has it in its environment
+
+    # -- the review's findings
+    def test_delete_old_refuses_after_a_manual_roll_back_because_github_follows_the_old_name(self):
+        self.full_run()
+        old = f"owner/{json.loads((self.dir / 'meta.json').read_text())['old_name']}"
+        self.gh.scopes = "repo, delete_repo"
+        # the operator rolls back by hand: the new repo steps aside, the old one takes its name back
+        self.gh.route("PATCH", f"repos/{self.repo}", {"name": "proj-bad"})
+        self.gh.route("PATCH", f"repos/{old}", {"name": "proj"})
+        out = self.run_phase("delete-old", "--yes-delete", expect=1)
+        self.assertIn("refusing to delete", out)
+        self.assertEqual(self.gh.deleted, [])
+        self.assertIn("owner/proj", self.gh.repos)
+
+    def test_rebuild_resumes_a_placeholder_without_doubling_its_comments(self):
+        self.up_to_clean()
+        self.swap()
+        self.gh.fail_comment_after = 1  # the first comment lands, the second fails: stopped in the middle of #2
+        self.run_phase("rebuild", expect=1)
+        on2 = lambda: [c["body"] for c in self.gh.repos[self.repo]["comments"] if c["issue_url"].endswith("/issues/2")]
+        self.assertEqual(len(on2()), 1)
+        self.gh.fail_comment_after = None
+        self.run_phase("rebuild")
+        self.assertEqual(len(on2()), 2)
+        self.assertEqual(len(set(on2())), 2)
+        self.assertEqual(self.gh.repos[self.repo]["issues"][2]["state"], "closed")
+
+    def test_rebuild_stops_when_a_number_was_taken_by_something_else(self):
+        self.up_to_clean()
+        self.swap()
+        self.gh.fail_after_creates = 0  # #1 transfers, creating #2 fails
+        self.run_phase("rebuild", expect=1)
+        self.gh.fail_after_creates = None
+        self.gh.issue(self.repo, "Bump a dependency", number=2, user="dependabot[bot]", pull={})
+        out = self.run_phase("rebuild", expect=1)
+        self.assertIn("is not our placeholder", out)
+        self.assertEqual(self.gh.repos[self.repo]["issues"][2]["state"], "open")  # nothing written onto it
+        self.assertEqual([c for c in self.gh.repos[self.repo]["comments"] if c["issue_url"].endswith("/issues/2")], [])
+
+    def test_reattach_never_claims_actions_are_on_when_they_are_not(self):
+        self.up_to_clean()
+        self.swap()
+        self.run_phase("rebuild")
+        extras = json.loads((self.dir / "extras.json").read_text())
+        extras["actions_permissions"] = {"error": 403}
+        (self.dir / "extras.json").write_text(json.dumps(extras))
+        out = self.run_phase("reattach", "--secrets-map", str(self.map), expect=1)
+        self.assertIn("ACTIONS ARE STILL OFF", out)
+        self.assertIn("Actions is still off", out)
+        self.assertFalse(self.gh.repos[self.repo]["actions_enabled"])
+        self.assertNotIn("back on", out)
+
+    def test_export_stops_when_a_list_cannot_be_read(self):
+        real = self.gh.route
+
+        def route(method, path, body=None):
+            if path.startswith(f"repos/{self.repo}/actions/secrets"):
+                return self.gh.err(403, "Must have admin rights")
+            return real(method, path, body)
+        self.gh.route = route
+        self.assertIn("could not read Actions secrets", self.run_phase("export", "--forbid-path", "x", expect=1))
+        self.assertFalse((self.dir / "meta.json").exists())
+
+    def test_export_keeps_only_the_host_of_a_webhook(self):
+        real = self.gh.route
+
+        def route(method, path, body=None):
+            if path == f"repos/{self.repo}/hooks?per_page=100":
+                return self.gh.ok([{"id": 1, "name": "web", "config": {"url": "https://hooks.example.com/services/T000/B000/SECRETPART"},
+                                    "events": ["push"], "active": True}])
+            return real(method, path, body)
+        self.gh.route = route
+        self.export()
+        text = (self.dir / "extras.json").read_text()
+        self.assertIn("hooks.example.com", text)
+        self.assertNotIn("SECRETPART", text)
+
+    def test_swap_stops_when_the_new_repo_comes_back_public(self):
+        self.up_to_clean()
+        self.gh.create_private = False
+        out = self.swap(expect=1)
+        self.assertIn("came back public", out)
+        self.assertIn("to undo", out)
+
+    def test_a_failed_push_says_what_state_things_are_in(self):
+        self.up_to_clean()
+        real = rb.run_git
+
+        def failing(*args, **kw):
+            if args[:3] == ("-C", str(self.dir / "repo.git"), "push"):
+                raise rb.Stop("git push exited 1: denied")
+            return real(*args, **kw)
+        with mock.patch.object(rb, "run_git", failing):
+            out = self.swap(expect=1)
+        self.assertIn("partly filled", out)
+        self.assertIn("to undo", out)
+
+    def test_prove_passes_when_the_old_repo_serves_the_object_and_the_new_one_does_not(self):
+        commit, blob = "a" * 40, "b" * 40
+        self.gh.repos[self.repo]["objects"] |= {commit, blob}  # after the swap these stay with the old repo
+        self.export("--forbid-commit", commit, "--forbid-blob", blob)
+        self.run_phase("prove-clean")
+        self.swap()
+        self.run_phase("rebuild")
+        self.run_phase("reattach", "--secrets-map", str(self.map))
+        out = self.run_phase("prove")
+        self.assertIn(f"old commit {commit[:10]} -> 422", out)
+        self.assertIn(f"old blob {blob[:10]} -> 404", out)
+        self.assertIn("control: the old repo still serves", out)
+        self.gh.repos[self.repo]["objects"] |= {commit}  # now the new repo serves it: the proof must fail
+        self.assertIn("FAIL old commit", self.run_phase("prove", expect=1))
+
+    def test_prove_fails_when_the_new_repo_is_public(self):
+        self.up_to_clean()
+        self.swap()
+        self.run_phase("rebuild")
+        self.gh.repos[self.repo]["private"] = True
+        self.run_phase("prove")
+        self.gh.repos[self.repo]["private"] = False
+        self.assertIn("FAIL the new repo is private", self.run_phase("prove", expect=1))
+
+    def test_prove_compares_every_number_not_a_sample(self):
+        self.up_to_clean()
+        self.swap()
+        self.run_phase("rebuild")
+        self.gh.repos[self.repo]["issues"][3]["title"] = "tampered"  # a gap placeholder, unlikely to be in any sample
+        out = self.run_phase("prove", expect=1)
+        self.assertIn("#3 does not match", out)
+
+    def test_swap_is_stopped_by_an_edit_made_after_the_export(self):
+        self.up_to_clean()
+        self.gh.repos[self.repo]["issues"][1]["updated_at"] = "2099-01-01T00:00:00Z"
+        self.assertIn("changed since the export", self.swap(expect=1))
+
+    def test_reattach_adds_only_the_missing_asset_of_a_half_uploaded_release(self):
+        self.up_to_clean()
+        self.swap()
+        self.run_phase("rebuild")
+        self.gh.repos[self.repo]["releases"] = [{"id": 5, "tag_name": "v1", "name": "one", "body": "", "draft": False, "prerelease": False, "assets": []}]
+        self.run_phase("reattach", "--secrets-map", str(self.map))
+        self.assertEqual([a["name"] for a in self.gh.repos[self.repo]["releases"][0]["assets"]], ["dump.sql.gz"])
+        self.assertEqual(len(self.gh.repos[self.repo]["releases"]), 1)
+
+    def test_reattach_skips_an_email_invitation_and_a_deploy_key_the_old_repo_holds(self):
+        self.up_to_clean()
+        self.swap()
+        self.run_phase("rebuild")
+        (self.dir / "invitations.json").write_text(json.dumps([{"invitee": None, "email": "x@example.com", "permissions": "read"}]))
+        extras = json.loads((self.dir / "extras.json").read_text())
+        extras["deploy_keys"] = [{"title": "ci", "key": "ssh-ed25519 AAAA", "read_only": True}]
+        (self.dir / "extras.json").write_text(json.dumps(extras))
+        old = next(r for k, r in self.gh.repos.items() if k != self.repo)
+        old["keys"].append({"title": "ci", "key": "ssh-ed25519 AAAA"})
+        out = self.run_phase("reattach", "--secrets-map", str(self.map))
+        self.assertIn("x@example.com", out)
+        self.assertIn("deploy keys still held by the old repo", out)
 
     def test_full_run_then_prove_and_delete_old(self):
         out = self.full_run()
@@ -794,7 +973,7 @@ class EndToEnd(unittest.TestCase):
         self.swap()
         self.run_phase("rebuild")
         self.gh.repos[self.repo]["issues"][5]["title"] = "tampered"
-        out = self.run_phase("prove", "--spot-checks", "10", expect=1)
+        out = self.run_phase("prove", expect=1)
         self.assertIn("#5 does not match", out)
         self.gh.repos[self.repo]["issues"][5]["title"] = "closed issue"
         out = self.run_phase("prove", "--forbid-blob", "abcd1234", expect=1)

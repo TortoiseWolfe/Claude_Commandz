@@ -11,7 +11,7 @@ releases, secrets, collaborators and the self-hosted runner, and it keeps the ol
   repo_rebuild.py swap OWNER/REPO         rename the old repo to <repo>-old-<date>, create the new private repo, push branches and tags
   repo_rebuild.py rebuild OWNER/REPO      numbers 1..N in order: issues move over, pull requests and gaps become closed placeholders
   repo_rebuild.py reattach OWNER/REPO     labels, milestones, releases, collaborators, variables, secrets, branch protection, runner
-  repo_rebuild.py prove OWNER/REPO        old commit gone, old blob gone, forbidden paths 0 on every ref, numbers spot-checked
+  repo_rebuild.py prove OWNER/REPO        old commit gone, old blob gone, forbidden paths 0 on every ref, every number compared
   repo_rebuild.py delete-old OWNER/REPO   delete the renamed old repo; needs --yes-delete and a passed prove in the same folder
 
 Every phase takes --dry-run (reads only, prints the plan, changes nothing) and runs on its own. Each stops at the first surprise:
@@ -34,7 +34,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import random
 import re
 import shutil
 import signal
@@ -42,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 ZWSP = "​"
@@ -238,6 +238,7 @@ def is_hex(s):
 
 def forbidden_from(args, d):
     saved = load(d / "forbidden.json", {"paths": [], "blobs": [], "commits": []})
+    changed = False
     for key, attr in (("paths", "forbid_path"), ("blobs", "forbid_blob"), ("commits", "forbid_commit")):
         for v in getattr(args, attr, None) or []:
             v = v.lower() if key != "paths" else v
@@ -245,6 +246,9 @@ def forbidden_from(args, d):
                 raise Stop(f"--forbid-{key[:-1]} '{v}' is not a hex id")
             if v not in saved[key]:
                 saved[key].append(v)
+                changed = True
+    if changed and not getattr(args, "dry_run", False) and (d / "forbidden.json").exists():
+        save(d / "forbidden.json", saved)  # every later phase checks the same list
     return saved
 
 
@@ -422,9 +426,9 @@ def fetch_activity(repo):
         got = api("GET", path)
         if got:
             newest = max(newest, got[0].get("updated_at", ""))
-    got = api("GET", f"repos/{repo}/issues?state=all&sort=created&direction=desc&per_page=1")
-    if got:
-        top = got[0]["number"]
+    # the highest number, not the newest by creation date: a transferred issue keeps its old date
+    nums = [i["number"] for i in paged(f"repos/{repo}/issues?state=all")]
+    top = max(nums) if nums else 0
     return newest, top
 
 
@@ -432,8 +436,16 @@ def counts_line(c):
     return ", ".join(f"{v} {k}" for k, v in c.items())
 
 
+def listed(what, answer):
+    """A list the export must not silently treat as empty: an error here would drop secrets, people or runners without a word."""
+    if isinstance(answer, dict) and "error" in answer:
+        raise Stop(f"could not read {what} (HTTP {answer['error']}); the token needs admin rights on the repo. Nothing was written")
+    return answer
+
+
 def phase_export(args, d):
     repo = args.repo
+    newest, top_live = fetch_activity(repo)  # taken first: anything that changes while the export runs shows up as newer at swap time
     issues = paged(f"repos/{repo}/issues?state=all&sort=created&direction=asc")
     by_n = {i["number"]: i for i in issues}
     pulls = [n for n, i in by_n.items() if "pull_request" in i]
@@ -460,6 +472,11 @@ def phase_export(args, d):
          "runners": len(runners) if isinstance(runners, list) else "?"}
     top = max(by_n) if by_n else 0
     log(f"{repo}: highest number {top}; {counts_line(c)}")
+    if not args.dry_run:
+        for what, answer in (("collaborators", collabs), ("invitations", invites), ("Actions secrets", secrets), ("Dependabot secrets", dep_secrets),
+                             ("Actions variables", variables), ("runners", runners)):
+            listed(what, answer)
+        listed("Actions permissions", maybe(api, "GET", f"repos/{repo}/actions/permissions"))
     if args.dry_run:
         refs = run_git("ls-remote", git_url(repo)).stdout.split("\n")
         heads = [r for r in refs if "\trefs/heads/" in r]
@@ -536,7 +553,7 @@ def phase_export(args, d):
     save(d / "extras.json", {
         "actions_permissions": maybe(api, "GET", f"repos/{repo}/actions/permissions"),
         "workflow_permissions": maybe(api, "GET", f"repos/{repo}/actions/permissions/workflow"),
-        "hooks": [{"id": h["id"], "name": h.get("name"), "url": (h.get("config") or {}).get("url"), "events": h.get("events"),
+        "hooks": [{"id": h["id"], "name": h.get("name"), "host": urllib.parse.urlparse((h.get("config") or {}).get("url") or "").hostname, "events": h.get("events"),
                    "active": h.get("active")} for h in hooks] if isinstance(hooks, list) else hooks,
         "deploy_keys": maybe(paged, f"repos/{repo}/keys"),
         "environments": maybe(api, "GET", f"repos/{repo}/environments"),
@@ -544,7 +561,6 @@ def phase_export(args, d):
         "rulesets": maybe(api, "GET", f"repos/{repo}/rulesets"),
         "pages": maybe(api, "GET", f"repos/{repo}/pages"),
     })
-    newest, top_live = fetch_activity(repo)
     save(d / "meta.json", {"repo": repo, "exported_at": datetime.datetime.now().isoformat(timespec="seconds"), "date": args.date,
                            "old_name": f"{repo.split('/')[1]}-old-{args.date}", "max_number": top, "counts": c,
                            "default_branch": default, "heads": heads, "heads_digest": digest, "latest_activity": newest,
@@ -660,11 +676,6 @@ def preflight_fresh(repo, meta, d, allow_open_prs):
         if not ref.endswith("^{}"):
             remote[ref] = sha
     local = {r: s for r, s in heads.items()}
-    peeled = {}
-    for line in run_git("ls-remote", "--tags", git_url(repo)).stdout.splitlines():
-        sha, ref = line.split("\t")
-        if ref.endswith("^{}"):
-            peeled[ref[:-3]] = sha
     if remote != local:
         diff = sorted(set(remote.items()) ^ set(local.items()))[:6]
         raise Stop(f"GitHub's branches or tags moved since the export ({diff}); re-run export --refresh and prove-clean")
@@ -709,13 +720,19 @@ def phase_swap(args, d):
     if args.dry_run:
         log("dry run: nothing changed")
         return 0
+    undo = (f"to undo: delete or rename the new {repo}, then rename {old_repo} back to {name}; "
+            f"if the new repo is only partly filled, delete it and run swap again after renaming the old one back")
     api("PATCH", f"repos/{repo}", {"name": old_name})
     log(f"renamed {repo} -> {old_repo}")
     for attempt in range(10):
         try:
             body = {"name": name, "private": True, "description": settings.get("description") or "", "homepage": settings.get("homepage") or ""}
-            api("POST", f"orgs/{owner}/repos" if owner_type == "Organization" else "user/repos", body)
+            made = api("POST", f"orgs/{owner}/repos" if owner_type == "Organization" else "user/repos", body)
+            if not made.get("private"):
+                raise Stop(f"the new {repo} came back public; make it private at once ({undo})")
             break
+        except Stop:
+            raise
         except ApiError as e:
             if attempt == 9:
                 raise Stop(f"could not create {repo} ({e}); the old repo is {old_repo}, rename it back to undo")
@@ -733,7 +750,10 @@ def phase_swap(args, d):
     order += [r for r in heads if r.startswith("refs/tags/")]
     for ref in order:
         if ref in heads:
-            run_git("-C", mirror, "push", git_url(repo), f"{ref}:{ref}")
+            try:
+                run_git("-C", mirror, "push", git_url(repo), f"{ref}:{ref}")
+            except Stop as e:
+                raise Stop(f"{e}. State: the old repo is {old_repo}; the new {repo} is partly filled and Actions is off there; {undo}")
     api("PATCH", f"repos/{repo}", {"default_branch": default})
     after = {}
     for line in run_git("ls-remote", "--heads", "--tags", git_url(repo)).stdout.splitlines():
@@ -741,8 +761,9 @@ def phase_swap(args, d):
         if not ref.endswith("^{}"):
             after[ref] = sha
     if after != heads:
-        raise Stop(f"after the push the new repo's branches differ from the mirror: {sorted(set(after.items()) ^ set(heads.items()))[:6]}")
+        raise Stop(f"after the push the new repo's branches differ from the mirror: {sorted(set(after.items()) ^ set(heads.items()))[:6]}; {undo}")
     save(d / "swap.json", {"old_name": old_name, "old_repo": old_repo, "new_repo": repo, "pushed": len(heads),
+                           "old_node_id": old.get("node_id"), "old_full_name": old_repo,
                            "at": datetime.datetime.now().isoformat(timespec="seconds")})
     log(f"pushed {len(heads)} branches and tags; the new repo matches the mirror; Actions is off until reattach")
     return 0
@@ -851,6 +872,11 @@ def build_placeholder(new, n, item, milestones, label_names, recreated, resume):
             raise Stop(f"placeholder for #{n} came back as #{made['number']}; stopped. The new repo holds items up to #{made['number']}")
         posted = 0
     else:
+        # a number can be taken by something else between a crash and the re-run (a bot's pull request, a hand-made issue)
+        there = api("GET", f"repos/{new}/issues/{n}")
+        if "pull_request" in there or there.get("title") != placeholder_title(item, n) or who(there.get("user")) != user_login():
+            raise Stop(f"#{n} on the new repo is not our placeholder ('{(there.get('title') or '')[:50]}' by {who(there.get('user'))}); "
+                       f"stopped before writing anything onto it. Check it by hand")
         posted = len(paged(f"repos/{new}/issues/{n}/comments"))
     texts = placeholder_comments(item)
     for text in texts[posted:]:
@@ -961,11 +987,22 @@ def protection_to_put(p):
 
 def apply_releases(repo, d, default, skip_patterns, dry):
     releases = sorted(load(d / "releases.json"), key=lambda r: r["id"])
-    have = {r["tag_name"] for r in paged(f"repos/{repo}/releases")}
+    have = {r["tag_name"]: r for r in paged(f"repos/{repo}/releases")}
     made = uploaded = skipped = 0
     for r in releases:
         tag = r["tag_name"]
-        if tag in have:
+        if tag in have:  # a run that stopped half way: add only the assets that are missing
+            present = {a["name"] for a in have[tag].get("assets", [])}
+            skip = lambda a: any(fnmatch.fnmatch(f"{tag}/{a['name']}", pat) or fnmatch.fnmatch(a["name"], pat) for pat in skip_patterns)
+            for a in r.get("assets", []):
+                if a["name"] in present or skip(a):
+                    continue
+                if not dry:
+                    f = d / "releases" / str(r["id"]) / a["name"]
+                    rc, out, err = run_gh(["release", "upload", tag, str(f), "--repo", repo, "--clobber"])
+                    if rc != 0:
+                        raise Stop(f"upload of {tag}/{a['name']} failed: {err.strip()[:200]}")
+                uploaded += 1
             continue
         note = f"\n\n_Originally published {day(r.get('published_at') or r.get('created_at'))}; re-created when the repo was rebuilt._"
         skip = lambda a: any(fnmatch.fnmatch(f"{tag}/{a['name']}", pat) or fnmatch.fnmatch(a["name"], pat) for pat in skip_patterns)
@@ -1022,8 +1059,10 @@ def reattach_runner(repo, d, dry):
         sleep(1)
     subprocess.run(["./config.sh", "remove", "--local"], cwd=rdir, capture_output=True)
     tok = api("POST", f"repos/{repo}/actions/runners/registration-token")["token"]
-    p = subprocess.run(["./config.sh", "--unattended", "--url", f"https://github.com/{repo}", "--token", tok, "--name", agent,
-                        "--labels", ",".join(labels), "--replace"], cwd=rdir, capture_output=True, text=True)
+    # the token goes in the environment, not on the command line, where any local user could read it
+    p = subprocess.run(["./config.sh", "--unattended", "--url", f"https://github.com/{repo}", "--name", agent,
+                        "--labels", ",".join(labels), "--replace"], cwd=rdir, capture_output=True, text=True,
+                       env={**os.environ, "ACTIONS_RUNNER_INPUT_TOKEN": tok})
     if p.returncode != 0:
         raise Stop(f"runner registration failed (exit {p.returncode}); the folder is {rdir}")
     with open(rdir / "runner-stdout.log", "a") as lf:
@@ -1059,14 +1098,20 @@ def phase_reattach(args, d):
     for c in collabs if isinstance(collabs, list) else []:
         if c["login"] != owner:
             todo.append((c["login"], collaborator_permission(c)))
+    by_hand = []
     for i in invites if isinstance(invites, list) else []:
-        todo.append((i["invitee"]["login"], PERMISSION.get(i.get("permissions"))))
+        if (i.get("invitee") or {}).get("login"):
+            todo.append((i["invitee"]["login"], PERMISSION.get(i.get("permissions"))))
+        else:
+            by_hand.append(i.get("email") or "an email address")
     for login, perm in todo:
         if not perm:
             raise Stop(f"collaborator {login} has a role this tool can't map; add them by hand")
         if not dry:
             api("PUT", f"repos/{repo}/collaborators/{login}", {"permission": perm})
     out.append(f"collaborators: {len(todo)} invited ({', '.join(f'{l}={p}' for l, p in todo)}); GitHub emails each invitee")
+    if by_hand:
+        out.append(f"NOT invited (pending invitations sent to an email address, invite again by hand): {', '.join(by_hand)}")
     variables = load(d / "variables.json", [])
     for v in variables if isinstance(variables, list) else []:
         if not dry:
@@ -1088,20 +1133,35 @@ def phase_reattach(args, d):
             raise Stop(f"gh secret set {name} failed: {err.strip()[:200].replace(chr(10), ' ')}")
     out.append(f"secrets: {len(mapping)} set from local sources ({', '.join(mapping)}); values not shown")
     # Actions back on, as it was
-    ap = extras.get("actions_permissions") or {}
-    if not dry and isinstance(ap, dict) and "error" not in ap:
-        body = {"enabled": ap.get("enabled", True)}
+    ap = extras.get("actions_permissions")
+    actions_known = isinstance(ap, dict) and "error" not in ap and "enabled" in ap
+    if actions_known and not dry:
+        body = {"enabled": ap["enabled"]}
         if body["enabled"] and ap.get("allowed_actions"):
             body["allowed_actions"] = ap["allowed_actions"]
         api("PUT", f"repos/{repo}/actions/permissions", body)
     wp = extras.get("workflow_permissions") or {}
     if not dry and isinstance(wp, dict) and "error" not in wp:
         api("PUT", f"repos/{repo}/actions/permissions/workflow", {k: wp[k] for k in ("default_workflow_permissions", "can_approve_pull_request_reviews") if k in wp})
-    out.append(f"actions: back {'on' if (ap or {}).get('enabled', True) else 'off'} as it was")
+    if actions_known:
+        out.append(f"actions: set back to {'on' if ap['enabled'] else 'off'}, as it was")
+    else:
+        out.append("ACTIONS ARE STILL OFF: the export has no record of the old setting; turn them on by hand in the new repo's settings")
     keys = extras.get("deploy_keys")
-    for k in keys if isinstance(keys, list) else []:
-        if not dry:
-            api("POST", f"repos/{repo}/keys", {"title": k["title"], "key": k["key"], "read_only": k.get("read_only", True)})
+    held = []
+    if isinstance(keys, list) and keys and not dry:
+        present = {k["key"] for k in paged(f"repos/{repo}/keys")}
+        for k in keys:
+            if k["key"] in present:
+                continue
+            try:
+                api("POST", f"repos/{repo}/keys", {"title": k["title"], "key": k["key"], "read_only": k.get("read_only", True)})
+            except ApiError as e:
+                if e.status != 422:
+                    raise
+                held.append(k["title"])  # GitHub allows a deploy key on one repo only; the old repo still holds it
+    if held:
+        out.append(f"deploy keys still held by the old repo (add each by hand after delete-old): {', '.join(held)}")
     body = protection_to_put(extras.get("branch_protection"))
     if body:
         if not dry:
@@ -1114,6 +1174,8 @@ def phase_reattach(args, d):
     out.append(reattach_runner(repo, d, dry))
     for line in out:
         log(("dry run: " if dry else "") + line)
+    if not actions_known and not dry:
+        raise Stop(f"Actions is still off on {repo}; everything else was carried. Turn Actions on in its settings by hand")
     return 0
 
 
@@ -1136,6 +1198,8 @@ def phase_prove(args, d):
     sw = need_swap(d)
     forbid = forbidden_from(args, d)
     problems, ok = [], []
+    new_info = repo_exists(repo) or {}
+    (ok if new_info.get("private") is True else problems).append(f"the new repo is private: {new_info.get('private')}")
     old_exists = bool(repo_exists(sw["old_repo"]))
     for c in forbid["commits"]:
         g, st = gone(f"repos/{repo}/commits/{c}")
@@ -1170,16 +1234,15 @@ def phase_prove(args, d):
         shutil.rmtree(tmp, ignore_errors=True)
     # numbers
     top = meta["max_number"]
-    total = len(paged(f"repos/{repo}/issues?state=all"))
-    (ok if total == top else problems).append(f"issues on the new repo: {total} (wanted {top})")
-    nums = sorted({1, top, *random.sample(range(1, top + 1), min(top, args.spot_checks))}) if top else []
+    live = {i["number"]: i for i in paged(f"repos/{repo}/issues?state=all")}  # one list call; every number is compared, not a sample
+    (ok if len(live) == top else problems).append(f"issues on the new repo: {len(live)} (wanted {top})")
+    nums = list(range(1, top + 1))
     bad = 0
     for n in nums:
         p = d / "items" / f"{n}.json"
         item = load(p) if p.exists() else None
-        try:
-            now = api("GET", f"repos/{repo}/issues/{n}")
-        except ApiError:
+        now = live.get(n)
+        if now is None:
             problems.append(f"#{n} is missing on the new repo")
             bad += 1
             continue
@@ -1191,7 +1254,7 @@ def phase_prove(args, d):
         if not same:
             problems.append(f"#{n} does not match the original ('{now['title'][:50]}')")
             bad += 1
-    (ok if not bad else problems).append(f"spot-checked numbers {nums}: {len(nums) - bad} of {len(nums)} match")
+    (ok if not bad else problems).append(f"every number compared with the export: {len(nums) - bad} of {len(nums)} match")
     for line in ok:
         log(("     " if line.startswith("  ") else "PASS ") + line)
     for line in problems:
@@ -1200,7 +1263,7 @@ def phase_prove(args, d):
         raise Stop(f"prove failed on {len([p for p in problems if not p.startswith('  ')])} check(s); the old repo was not touched")
     if not args.dry_run:
         save(d / "proved.json", {"ok": True, "repo": repo, "old_repo": sw["old_repo"], "at": datetime.datetime.now().isoformat(timespec="seconds"),
-                                 "swap_at": sw["at"]})
+                                 "swap_at": sw["at"], "new_node_id": new_info.get("node_id")})
     log("prove: every check passed")
     return 0
 
@@ -1219,6 +1282,11 @@ def phase_delete_old(args, d):
         return 0
     if "-old-" not in old or old == args.repo or not info.get("private"):
         raise Stop(f"refusing to delete {old}: it must be the renamed private old copy")
+    # GitHub follows renames: asking for the old name after a manual roll-back answers with the ORIGINAL repo. Compare what came back.
+    if str(info.get("full_name", "")).lower() != old.lower() or not sw.get("old_node_id") or info.get("node_id") != sw["old_node_id"] \
+            or (pr.get("new_node_id") and info.get("node_id") == pr["new_node_id"]):
+        raise Stop(f"refusing to delete: GitHub says {old} is now {info.get('full_name')} (id differs from the one recorded at swap). "
+                   f"Something was renamed or rolled back by hand; check both repos before deleting anything")
     log(f"delete-old plan: delete {old} ({info.get('size', '?')} KB, {info.get('open_issues_count', '?')} open issues there); the new repo and the export folder stay")
     if args.dry_run:
         log("dry run: nothing deleted")
@@ -1259,7 +1327,6 @@ def build_parser():
     ap.add_argument("--skip-secrets-check", action="store_true", help="swap, reattach: carry no secrets (names are listed, not set)")
     ap.add_argument("--no-transfer", action="store_true", help="rebuild, prove: copy issues as text instead of transferring them")
     ap.add_argument("--skip-assets", action="append", help="reattach: release asset pattern (tag/name or name) not to upload")
-    ap.add_argument("--spot-checks", type=int, default=8, help="prove: how many random numbers to compare, besides first and last")
     ap.add_argument("--yes-delete", action="store_true", help="delete-old: really delete")
     return ap
 
