@@ -143,6 +143,27 @@ def dialog_held(screen):
     return re.search(DIALOG_WAITING, tail) is not None
 
 
+OUTSIDE_READ = re.compile(r"outside the working director", re.I)
+READ_CALL = re.compile(r"Read\(([^)\n]+)\)")
+PATHISH = re.compile(r"(?:~|/)[A-Za-z0-9._~+@/-]*[A-Za-z0-9._~+@-]")
+
+
+def outside_read_path(lines):
+    """For Claude Code's "Read outside the working directories" dialog (its lines, from dialog_lines): the path it asks about, "?" when the
+    dialog is up but shows none, None when it is some other dialog. lane_watch.sh dialog_read_path does the same on a pane."""
+    text = "\n".join(lines or [])
+    if not OUTSIDE_READ.search(text):
+        return None
+    m = READ_CALL.search(text)
+    if m:
+        return m.group(1).strip()
+    for ln in lines:
+        m = PATHISH.search(ln)
+        if m and not OUTSIDE_READ.search(ln):
+            return m.group(0)
+    return "?"
+
+
 def dialog_lines(joined, limit=15):
     """The dialog's first lines: from the horizontal rule above its last trigger line (its top border) down, joined lines, blanks dropped."""
     lines = [ln.rstrip() for ln in (joined or "").splitlines()]
@@ -429,7 +450,7 @@ def brief(name, n_lines=12, now=None):
 
     if headless:
         b["pane"] = None
-        b["dialog"] = {"held": False, "lines": []}
+        b["dialog"] = {"held": False, "lines": [], "read_path": None}
         tail = tail_lines(out_log, 400) if out_log else None
         tail = [ANSI.sub("", ln).rstrip() for ln in (tail or []) if ANSI.sub("", ln).strip()]
         code = ""
@@ -451,7 +472,8 @@ def brief(name, n_lines=12, now=None):
     joined = tmux("capture-pane", "-p", "-J", "-S", "-200", "-t", f"{SESSION}:{name}")
     pane_e = tmux("capture-pane", "-e", "-p", "-t", f"{SESSION}:{name}")
     held = alive is not False and dialog_held(screen)
-    b["dialog"] = {"held": held, "lines": dialog_lines(joined) if held else []}
+    dlines = dialog_lines(joined) if held else []
+    b["dialog"] = {"held": held, "lines": dlines, "read_path": outside_read_path(dlines) if held else None}
     if joined is None and screen is None:
         b["status"] = "no window"
     elif screen and ERROR_LINE.search(screen):
@@ -482,6 +504,9 @@ def headline(b):
     if p["alive"] is False:
         return "DEAD: the claude process is gone (resume with lane.sh --resume %s)" % b["lane"]
     if b["dialog"]["held"]:
+        rp = b["dialog"].get("read_path")
+        if rp:
+            return "NEEDS YOU: waiting on a read of %s" % (rp if rp != "?" else "a file outside its working directories")
         return "NEEDS YOU: waiting on a dialog"
     if b["recycle_k"] and b["context_k"] and b["context_k"] >= b["recycle_k"]:
         return f"{b['status']}, past its recycle line ({b['context_k']}K of {b['recycle_k']}K)"

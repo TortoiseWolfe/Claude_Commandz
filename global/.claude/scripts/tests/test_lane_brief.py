@@ -233,6 +233,37 @@ class LaneBrief(unittest.TestCase):
         self.assertIn(command, dialog)  # the full command, not what the screen width showed
         self.assertNotIn("earlier output", dialog)  # the dialog starts at its top border
 
+    def test_a_held_read_dialog_names_the_path_it_waits_on(self):
+        self.lane("alpha")
+        path = "/home/u/bandwagon-takes-out/vq-clips/ep7/a.txt"
+        screen = "\n".join(["  earlier output", RULE, " Read outside the working directories", "", "   Read(" + path + ")", "", " Do you want to proceed?", " ❯ 1. Yes", "   4. Yes, but ask again next time", "   3. No", "", " Esc to cancel"]) + "\n"
+        self.pane("alpha", screen=screen, joined=screen)
+        out = self.run_brief("alpha").stdout
+        self.assertIn("NEEDS YOU: waiting on a read of " + path, out)
+        self.assertNotIn("NEEDS YOU: waiting on a dialog", out)
+
+    def test_a_held_read_dialog_with_no_visible_path_still_says_what_it_is(self):
+        self.lane("alpha")
+        screen = "\n".join([RULE, " Read outside the working directories", " Do you want to proceed?", " ❯ 1. Yes", " Esc to cancel"]) + "\n"
+        self.pane("alpha", screen=screen, joined=screen)
+        self.assertIn("NEEDS YOU: waiting on a read of a file outside its working directories", self.run_brief("alpha").stdout)
+
+    def test_a_bash_dialog_still_says_waiting_on_a_dialog_only(self):
+        self.lane("alpha")
+        screen = "\n".join([RULE, " Bash command", "   git push origin main", " Do you want to proceed?", " ❯ 1. Yes", " Esc to cancel"]) + "\n"
+        self.pane("alpha", screen=screen, joined=screen)
+        out = self.run_brief("alpha").stdout
+        self.assertIn("NEEDS YOU: waiting on a dialog", out)
+        self.assertNotIn("waiting on a read", out)
+
+    def test_outside_read_path_unit(self):
+        f = lane_brief.outside_read_path
+        self.assertEqual(f([" Read outside the working directories", "   Read(/a/b/c.txt)", " Do you want to proceed?"]), "/a/b/c.txt")
+        self.assertEqual(f([" Read outside the working directories", "   /a/b/d.txt", " Do you want to proceed?"]), "/a/b/d.txt")
+        self.assertEqual(f([" Read outside the working directories", " Do you want to proceed?"]), "?")
+        self.assertIsNone(f([" Bash command", "   git push origin main", " Do you want to proceed?"]))
+        self.assertIsNone(f([]))
+
     def test_dialog_rule_is_the_one_lane_watch_uses(self):
         watch = (SCRIPTS / "lane_watch.sh").read_text()
         m = re.search(r"dialog_waiting\(\) \{\s*tail -(\d+) \| grep -qE '([^']+)'", watch)

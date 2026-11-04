@@ -68,6 +68,18 @@ dialog_waiting() {
   tail -15 | grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'
 }
 
+# Claude Code's "Read outside the working directories" dialog: prints the path it asks about (or "a file outside its working directories" when
+# none is visible) and returns 0; returns 1 for any other pane. Reads the pane on stdin. lane.sh gives each lane its own hand-off folder and its
+# repo's worktree checkouts as --add-dir, so this dialog means something else is being read; the hub answers it, and sees the path here.
+dialog_read_path() {
+  local text path
+  text=$(tail -30)
+  grep -qiE 'outside the working director' <<<"$text" || return 1
+  path=$(sed -nE 's/.*Read\(([^)]+)\).*/\1/p' <<<"$text" | tail -1)
+  [ -n "$path" ] || path=$(grep -viE 'outside the working director|Esc to cancel|Enter to select|Do you want' <<<"$text" | grep -oE '(~|/)[A-Za-z0-9._~+@/-]*[A-Za-z0-9._~+@-]' | head -1)
+  printf '%s\n' "${path:-a file outside its working directories}"
+}
+
 # Return the last completed-turn line visible in this pane.
 turn_done_line() {
   # Keep only up to the done time: the tail ("· 5 monitors still running", spaces, a box edge) is redrawn as jobs end.
@@ -590,7 +602,9 @@ while :; do
     else
       pane=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null)
       if printf '%s\n' "$pane" | dialog_waiting; then
-        echo "waiting on a dialog: $l"; hit=1; other=1
+        if rp=$(printf '%s\n' "$pane" | dialog_read_path); then echo "waiting on a dialog: $l (waiting on a read of $rp)"
+        else echo "waiting on a dialog: $l"; fi
+        hit=1; other=1
       fi
       dead_check "$l"
       high_check "$l"
