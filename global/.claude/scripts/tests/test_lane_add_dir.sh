@@ -118,4 +118,50 @@ lane --resume res
 [ "$LAST_RC" = 0 ] || fail "--resume with a removed folder still works ($LAST_OUT)"; ok
 hasnt "$(last_cmd)" "--add-dir $OTHER " "a removed folder is not passed on a resume"
 
+# 10. A lane started in a repo gets that repo's own worktree checkouts (~/repos/.worktrees/<repo>--<topic>) as --add-dir, and nothing else
+#     (29 Oct 2026: sh-1414 froze three times on "Read outside the working directories" for files in its own checkout). Another repo's
+#     checkouts, a repo whose name merely starts the same, and a folder outside ~/repos get none.
+WT="$HOME_T/repos/.worktrees"
+mkdir -p "$WT/proj--topic-a" "$WT/proj--topic-b" "$WT/projx--other" "$WT/elsewhere--c" "$TMP/outside"
+lane wt "$WORK" sonnet "$TMP/p1.md"
+[ "$LAST_RC" = 0 ] || fail "a start in a repo with checkouts works ($LAST_OUT)"; ok
+c="$(last_cmd)"
+has "$c" "--add-dir $WT/proj--topic-a --add-dir $WT/proj--topic-b " "both checkouts of the lane's repo are added, each before a flag"
+hasnt "$c" "projx--other" "a repo whose name starts the same is not matched"
+hasnt "$c" "elsewhere--c" "another repo's checkout is not added"
+hasnt "$c" "--add-dir $WT " "the whole .worktrees folder is never added"
+has "$c" "$LANES/$(date +%F)-wt" "the hand-off folder is still added"
+[ "$(ad_of wt)" = "$WT/proj--topic-a:$WT/proj--topic-b" ] || fail "column 15 holds the checkouts, got $(ad_of wt)"; ok
+lane --add-dir "$STREAM" wt2 "$WORK/" sonnet "$TMP/p1.md"
+[ "$(ad_of wt2)" = "$STREAM:$WT/proj--topic-a:$WT/proj--topic-b" ] || fail "an explicit --add-dir stays, the checkouts follow it, got $(ad_of wt2)"; ok
+mkdir -p "$WORK/sub"
+lane wt3 "$WORK/sub" sonnet "$TMP/p1.md"
+has "$(last_cmd)" "--add-dir $WT/proj--topic-a " "a lane started in a folder inside the repo gets the repo's checkouts"
+lane wt4 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+has "$(last_cmd)" "--add-dir $WT/proj--topic-b " "a lane started in a checkout gets its repo's other checkouts"
+hasnt "$(last_cmd)" "elsewhere--c" "...and not another repo's"
+lane out "$TMP/outside" sonnet "$TMP/p1.md"
+[ "$LAST_RC" = 0 ] && hasnt "$(last_cmd)" "$WT" "a lane outside ~/repos gets no checkout"
+[ "$(ad_of out)" = - ] || fail "column 15 is - outside ~/repos, got $(ad_of out)"; ok
+lane --dry-run dry "$WORK" sonnet "$TMP/p1.md"
+has "$LAST_OUT" "proj--topic-a" "a dry run shows the checkouts"
+# a checkout made after the lane started is picked up by --resume, and a removed one is dropped
+mkdir -p "$WT/proj--late"; rmdir "$WT/proj--topic-b"
+printf '2026-11-04\twtr\t%s\tsonnet\tsubscription\t%s\t%s\tsess-2\t1700000000\thigh\toff\t100\t-\t-\t%s\n' "$WORK" "$LANES/wtr/prompt.md" "$LANES/wtr/report.md" "$WT/proj--topic-a:$WT/proj--topic-b" >>"$LANES/index.tsv"
+lane --resume wtr
+[ "$LAST_RC" = 0 ] || fail "--resume with a new checkout works ($LAST_OUT)"; ok
+has "$(last_cmd)" "--add-dir $WT/proj--late " "--resume adds a checkout made since the start"
+hasnt "$(last_cmd)" "topic-b" "--resume drops a removed checkout"
+[ "$(ad_of wtr)" = "$WT/proj--topic-a:$WT/proj--late" ] || fail "the index follows, got $(ad_of wtr)"; ok
+# a symlink and a name with a colon are never added (the colon would split the list in column 15)
+ln -s "$TMP/outside" "$WT/proj--link"; mkdir -p "$WT/proj--co:lon"
+lane wtq "$WORK" sonnet "$TMP/p1.md"
+hasnt "$(last_cmd)" "proj--link" "a symlinked checkout is not added"
+hasnt "$(last_cmd)" "co:lon" "a checkout with a colon in its name is not added"
+rm -f "$WT/proj--link"; rmdir "$WT/proj--co:lon"
+# the HOME of a lane with no ~/repos/.worktrees at all is untouched
+rm -rf "$WT"
+lane nowt "$WORK" sonnet "$TMP/p1.md"
+[ "$LAST_RC" = 0 ] && [ "$(ad_of nowt)" = - ] || fail "no .worktrees folder: nothing added"; ok
+
 printf 'ok: %s checks\n' "$checks"
