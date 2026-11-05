@@ -27,6 +27,15 @@ case "$LAST_OUT" in *"refusing engine agy"*"not installed on this machine (NCC-T
 lane2 "" --dry-run --engine opencode lane1 "$WORK" sonnet "$TMP/p.md"
 [ "$LAST_RC" = 1 ] || fail "a dry run refuses a missing engine ($LAST_OUT)"; ok
 
+# 2b. A local lane runs OpenCode on an Ollama server, so the program it needs is opencode, and the refusal names that program.
+lane2 "" --dry-run --engine local lane1 "$WORK" sonnet "$TMP/p.md"
+[ "$LAST_RC" = 1 ] || fail "a local lane is refused when opencode is missing ($LAST_OUT)"; ok
+case "$LAST_OUT" in *"refusing engine local"*"the program 'opencode' is not installed"*) ok ;; *) fail "the refusal names the engine and the program: $LAST_OUT" ;; esac
+lane2 "local" --dry-run --engine local lane1 "$WORK" sonnet "$TMP/p.md"
+[ "$LAST_RC" = 1 ] || fail "listing 'local' does not stand in for the opencode program"; ok
+lane2 "opencode" --dry-run --engine local lane1 "$WORK" sonnet "$TMP/p.md"
+case "$LAST_OUT" in *"not installed on this machine"*) fail "a local lane passes when opencode is present: $LAST_OUT" ;; *) ok ;; esac
+
 # 3. An engine found on PATH passes the check (here a fake codex).
 printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/codex"; chmod +x "$BIN/codex"
 lane2 "" --dry-run --engine codex lane1 "$WORK" sonnet "$TMP/p.md"

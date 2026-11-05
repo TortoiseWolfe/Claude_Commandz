@@ -92,7 +92,14 @@ for m in ${OPENCODE_LOOP_MODELS:-}; do
 done
 printf 'tests ran: this text says rate limit and quota but is not an Error line\n'
 STUB
-chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot" "$BIN/agy" "$BIN/opencode"
+# curl stub for the local engine's server check: logs the arguments; LOCAL_STUB_DOWN=1 fails like a refused connection; LOCAL_STUB_TAGS is the model list it answers.
+cat >"$BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CURL_CALLS"
+[ "${LOCAL_STUB_DOWN:-0}" = 1 ] && exit 7
+if [ -n "${LOCAL_STUB_TAGS:-}" ]; then printf '{"models":[%s]}' "$LOCAL_STUB_TAGS"; else printf '{"models":[{"name":"qwen3-coder:30b"},{"name":"gpt-oss:20b"}]}'; fi
+STUB
+chmod +x "$BIN/tmux" "$BIN/sleep" "$BIN/codex" "$BIN/copilot" "$BIN/agy" "$BIN/opencode" "$BIN/curl"
 
 checks=0
 fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
@@ -119,7 +126,7 @@ run_lane() {
   (cd "$TMP" && HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/tmux-calls" TMUX_SENT="$sent" \
     TMUX_HAS_SESSION="${TMUX_HAS_SESSION:-0}" TMUX_WINDOWS="${TMUX_WINDOWS:-}" TMUX_PANE_FILE="${TMUX_PANE_FILE:-}" \
     CODEX_CALLS="$TMP/codex-calls" COPILOT_CALLS="$TMP/copilot-calls" AGY_CALLS="$TMP/agy-calls" \
-    OPENCODE_CALLS="$TMP/opencode-calls" OPENCODE_QUOTA_MODELS="${OPENCODE_QUOTA_MODELS:-}" OPENCODE_LOOP_MODELS="${OPENCODE_LOOP_MODELS:-}" OPENCODE_LANE_POLL=1 \
+    CURL_CALLS="$TMP/curl-calls" OPENCODE_CALLS="$TMP/opencode-calls" OPENCODE_QUOTA_MODELS="${OPENCODE_QUOTA_MODELS:-}" OPENCODE_LOOP_MODELS="${OPENCODE_LOOP_MODELS:-}" OPENCODE_LANE_POLL=1 \
     TEST_CWD="$REPO" RUN_LANE_COMMANDS=1 \
     bash "$SCRIPT" --claude-because "engines test fixture" "$@") >"$output" 2>&1
   status=$?
@@ -344,13 +351,71 @@ run_lane --engine opencode blocked-root-oc / sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'opencode: / is refused'
 run_lane --engine opencode --allow-client allowed-client-oc "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'opencode: --allow-client bypasses the repository guard'
+# local: OpenCode on an Ollama server on this machine. Headless, same wrapper shape as opencode, never a hosted model, never a key.
+HELP_LOCAL="$(HOME="$HOME_TEST" bash "$SCRIPT" --help)"
+assert_contains "$HELP_LOCAL" '--engine claude|codex|copilot|agy|opencode|local' 'help lists the local engine'
+: >"$TMP/opencode-calls"; : >"$TMP/curl-calls"
+run_lane --engine local lo-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'local lane starts'
+LO_HAND="$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-lane"
+assert_contains "$LAST_COMMAND" 'local_lane.sh' 'local runs through its wrapper'
+assert_contains "$LAST_COMMAND" 'ollama/qwen3-coder:30b' 'a Claude alias becomes the default local model'
+assert_contains "$LAST_COMMAND" "$(printf %q "$LO_HAND/prompt.md")" 'the local prompt is a file the wrapper reads at run time'
+assert_not_contains "$LAST_COMMAND" 'touch injected' 'the local prompt is not interpolated into the shell command'
+assert_not_contains "$LAST_COMMAND" 'API_KEY' 'no key variable is named in the local command'
+assert_contains "$(cat "$LO_HAND/out.log")" 'local: model ollama/qwen3-coder:30b on http://127.0.0.1:11434' 'the wrapper says which model and server ran'
+assert_contains "$(cat "$LO_HAND/out.log")" 'exit 0' 'local exit code is recorded in out.log'
+assert_contains "$(cat "$TMP/curl-calls")" 'http://127.0.0.1:11434/api/tags' 'the server is asked what it holds before OpenCode starts'
+assert_contains "$(cat "$TMP/opencode-calls")" "ollama/qwen3-coder:30b $LO_HAND/opencode.json" 'opencode is called with the local model and the lane-folder config'
+LO_CONF="$(cat "$LO_HAND/opencode.json")"
+assert_contains "$LO_CONF" '"baseURL": "http://127.0.0.1:11434/v1"' 'the local config points at the local server'
+assert_contains "$LO_CONF" '"enabled_providers"' 'only the ollama provider is enabled'
+assert_not_contains "$LO_CONF" 'google' 'no hosted provider is in the local config'
+assert_not_contains "$LO_CONF" 'openrouter' 'no OpenRouter provider is in the local config'
+assert_contains "$LO_CONF" "$LO_HAND/**" 'local may write the lane folder'
+assert_contains "$LO_CONF" "$HOME_TEST/repos/.worktrees/$(basename "$REPO")--*/**" 'local may use its own repo worktrees'
+assert_not_contains "$LO_CONF" "$HOME_TEST/repos/.worktrees/**" 'local may not use every repo worktree'
+[ ! -e "$REPO/opencode.json" ] || fail 'local writes its config to the lane folder, never into the repo'
+[ ! -e "$REPO/injected" ] || fail 'local prompt contents are not executed by the shell'
+case "$(grep -P '\tlo-lane\t' "$HOME_TEST/.claude/state/lanes/index.tsv")" in *$'\tlocal\t'*) checks=$((checks + 1)) ;; *) fail 'the index row says billing local' ;; esac
+# A model named ollama/<tag> passes through; a hosted name does not.
+run_lane --dry-run --engine local lo-map "$REPO" ollama/gpt-oss:20b "$PROMPT"
+case "$LAST_OUTPUT" in *'ollama/gpt-oss:20b'*) checks=$((checks + 1)) ;; *) fail "ollama/gpt-oss:20b should pass through: $LAST_OUTPUT" ;; esac
+run_lane --dry-run --engine local lo-map2 "$REPO" google/gemini-3-flash-preview "$PROMPT"
+assert_not_contains "$(grep 'send-keys' <<<"$LAST_OUTPUT")" 'gemini' 'a hosted model name never reaches a local lane'
+# No server, or the model not pulled: stop before OpenCode starts, say so, and exit 69. Never a hosted fallback.
+: >"$TMP/opencode-calls"
+LOCAL_STUB_DOWN=1 run_lane --engine local lo-down "$REPO" sonnet "$PROMPT"
+LO_DOWN="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-down/out.log")"
+assert_contains "$LO_DOWN" 'local: no Ollama server answers at http://127.0.0.1:11434' 'a missing server is named'
+assert_contains "$LO_DOWN" 'exit 69' 'a missing server exits 69'
+[ ! -s "$TMP/opencode-calls" ] || fail 'opencode must not start when the local server is down'
+LOCAL_STUB_TAGS='{"name":"gpt-oss:20b"}' run_lane --engine local lo-nomodel "$REPO" sonnet "$PROMPT"
+LO_NM="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-nomodel/out.log")"
+assert_contains "$LO_NM" 'local: model qwen3-coder:30b is not on the server' 'a model that is not pulled is named'
+assert_contains "$LO_NM" 'exit 69' 'a missing model exits 69'
+[ ! -s "$TMP/opencode-calls" ] || fail 'opencode must not start when the model is not pulled'
+# The wrapper talks only to this machine.
+LOCAL_LANE_URL=http://example.com:11434 run_lane --engine local lo-remote "$REPO" sonnet "$PROMPT"
+LO_RM="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-remote/out.log")"
+assert_contains "$LO_RM" 'a local lane talks only to this machine' 'a remote server URL is refused'
+assert_contains "$LO_RM" 'exit 69' 'a remote server URL exits 69'
+# Same client guard as the other engines.
+run_lane --engine local blocked-client-lo "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'local: protected repository is refused'
+assert_contains "$LAST_OUTPUT" 'refusing engine local' 'local refusal names the engine'
+run_lane --engine local blocked-cd-lo "$HOME_TEST/repos/CD/nested" sonnet "$PROMPT"
+assert_exit 1 "$LAST_STATUS" 'local: the protected CD tree is refused'
+run_lane --engine local --allow-client allowed-client-lo "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'local with --allow-client starts'
+
 mv "$HOME_TEST/repos/hub/client-repos.txt" "$TMP/client-repos.txt"
 run_lane --engine opencode missing-repos-list-oc "$REPO" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'opencode: a missing client list fails closed'
 mv "$TMP/client-repos.txt" "$HOME_TEST/repos/hub/client-repos.txt"
 run_lane --dry-run --engine bogus oc-bad "$REPO" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'an unknown engine is refused'
-assert_contains "$LAST_OUTPUT" 'agy, or opencode' 'the unknown-engine message lists opencode'
+assert_contains "$LAST_OUTPUT" 'opencode, or local' 'the unknown-engine message lists opencode and local'
 run_lane --engine opencode --console oc-console "$REPO" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'opencode: --console is refused'
 run_lane --send oc-lane 'echo should-not-be-sent'
