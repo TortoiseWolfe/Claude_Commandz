@@ -763,6 +763,22 @@ class BypassGapTests(Fixture):
         self.assertIsNone(self.call("Bash", cwd=self.p("work"), command="find -name x -delete"))
         self.assertIsNotNone(self.call("Bash", cwd=self.d("hooks"), command="find -name x -delete"))
 
+    # a directory change the text cannot resolve: the working folder is unknown, so relative targets fail closed
+    def test_directory_changes_the_parser_cannot_resolve_fail_closed(self):
+        h = self.home
+        for cmd in ("cd - && rm x.py", "cd %s/.claude/hooks; cd - ; rm x.py" % h, "popd && find -delete", "cd $WHERE && rm x.py",
+                    "cd $(pwd)/../.claude/hooks && rm x.py", "cd `echo hooks` && find -delete", "builtin cd - && rm no-ai-wall-guard.py",
+                    "env -C %s/.claude/hooks rm x.py" % h, "env -C %s/.claude/hooks find -delete" % h, "cd %s/.claude && cd - && echo hi > x.py" % h,
+                    "sudo -u root rm %s/.claude/hooks/x.py" % h):
+            self.denied(cmd)
+        # known folders: a bare cd or cd ~ goes to the home folder, pushd and builtin cd work like cd
+        for cmd in ("cd && rm .claude/hooks/x.py", "cd ~ && rm .claude/hooks/x.py", "pushd %s/.claude/hooks && rm x.py" % h,
+                    "builtin cd %s/.claude/scripts && find -delete" % h, "command cd %s/.claude/hooks && rm x.py" % h):
+            self.denied(cmd)
+        for cmd in ("cd %s && cd - && ls" % self.p("work"), "cd %s/.claude/commands && rm c.md" % h, "pushd %s && rm y.txt" % self.p("work"),
+                    "env -C %s ls" % self.p("work"), "cd - && cat x.py"):
+            self.allowed(cmd)
+
     # MEDIUM: one normaliser for Windows drives
     def test_windows_drive_paths_ignore_case_in_every_check(self):
         os.environ["HOME"] = "/mnt/c/Users/Someone"
