@@ -17,6 +17,9 @@
 #      private hub/client-senders.tsv (metadata only; IDs in client-mail-seen.txt are dropped), and a Sonnet
 #      pass queues one "Client mail:" or "Client alert:" line per client in hub-inbox.md through
 #      muse_poll_record.sh (which never queues an ID twice). /prep then starts an absorb lane for each.
+#      The no-AI wall (issue 228): a sender on the private ~/.config/afa/no-ai-senders.tsv never reaches this pass. The check script holds
+#      that mail itself, with no model: one desktop toast and one "No-AI mail: <client> | <address> | <time>" inbox line (no subject, no
+#      body). `muse_poll_client_check.sh --dry-run` shows the counts without touching anything.
 #      Co-op Talk/Deck uses channel_watch.py on the same cadence; tags wake the hub, but chat text never
 #      reaches a model unattended.
 #   1. A cheap Haiku pass only LOOKS: is there a [MUSE>CC] note, or a [NCC-74656>NX-01] note from

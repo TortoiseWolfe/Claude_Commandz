@@ -11,6 +11,9 @@
 #                                             -> queues "<label>: <client> | absorb lane | <ids>", leaving out
 #                                                every ID already in client-mail-seen.txt or already on an
 #                                                inbox line (open or ticked), so no ID is queued twice
+#   muse_poll_record.sh no-ai-mail "<client>" "<address>" "<message id>" "<time>"
+#                                             -> the no-AI wall's line for mail from a listed sender: "No-AI mail: <client> | <address> | <time>",
+#                                                no subject, no body, once per message id (no-ai-mail-seen.txt); prints "queued 1" or "queued 0"
 #   muse_poll_record.sh client-talk "<client>" "<detail>" "<talk|deck ids>"
 #                                             -> queues one client-talk line for co-op chat, never a model pass
 #   muse_poll_record.sh client-seen "<id> [<id>...]"
@@ -40,7 +43,7 @@ fi
 INBOX=${HUB_INBOX:-${MUSE_INBOX:-$STATE/$BOARD}}
 [[ -e "$INBOX" ]] && INBOX=$(readlink -f "$INBOX")   # sed -i on the old symlink name would replace the link with a file
 LOCK=$(dirname "$INBOX")/hub-inbox.lock
-CANON_RE='^(Waiting on Hatch|Waiting on tower|Waiting on NX-01|Waiting on NCC-74656|Job|Client mail|Client alert|Client talk|Question|Hub):'
+CANON_RE='^(Waiting on Hatch|Waiting on tower|Waiting on NX-01|Waiting on NCC-74656|Job|Client mail|Client alert|Client talk|No-AI mail|Question|Hub):'
 lock() { mkdir -p "$(dirname "$LOCK")"; exec 9>>"$LOCK"; flock -w 60 9 || { echo "hub-inbox is locked by another writer" >&2; exit 1; }; }
 case "${1:-}" in
   processed)
@@ -108,6 +111,22 @@ case "${1:-}" in
       echo "queued 0"
     fi
     ;;
+  no-ai-mail)
+    client="${2:?client}"; addr="${3:?address}"; id="${4:?message id}"; when="${5:-$(date '+%-I:%M %p')}"
+    [[ "$id" =~ ^[0-9a-f]{15,16}$ ]] || { echo "bad id" >&2; exit 1; }
+    client="${client//$'\n'/ }"; client="${client//$'\r'/ }"; client="${client//|/\/}"
+    addr="${addr//$'\n'/ }"; addr="${addr//$'\r'/ }"; addr="${addr//|/\/}"
+    when="${when//$'\n'/ }"; when="${when//|/\/}"
+    lock
+    touch "$STATE/no-ai-mail-seen.txt"
+    if grep -qxF "$id" "$STATE/no-ai-mail-seen.txt"; then
+      echo "queued 0"
+    else
+      echo "$id" >>"$STATE/no-ai-mail-seen.txt"
+      printf -- '- [ ] %s | No-AI mail: %s | %s | %s\n' "$(date '+%F %H:%M')" "${client:0:80}" "${addr:0:120}" "${when:0:20}" >>"$INBOX"
+      echo "queued 1"
+    fi
+    ;;
   client-talk)
     client="${2:?client}"; detail="${3:?detail}"; ids="${4:?ids}"
     client="${client//$'\n'/ }"; client="${client//$'\r'/ }"; client="${client//|/\/}"
@@ -165,5 +184,5 @@ case "${1:-}" in
   archive)
     exec python3 "$(dirname "$(readlink -f "$0")")/hub_inbox_archive.py" --inbox "$INBOX" --days "${2:-7}"
     ;;
-  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] | archive [<days>]" >&2; exit 2 ;;
+  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | client-mail <label> <client> <ids> | no-ai-mail <client> <address> <id> <time> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] | archive [<days>]" >&2; exit 2 ;;
 esac

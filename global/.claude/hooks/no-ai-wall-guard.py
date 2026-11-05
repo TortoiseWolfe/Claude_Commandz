@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook: the no-AI wall. Denies Read, Edit, Write, MultiEdit, NotebookEdit, Grep, Glob and Bash
+when a path they name (or any path-looking word in a Bash command) sits under an entry of ~/.config/afa/no-ai-paths.txt,
+and for every tool when the session's working folder is listed. A Grep, Glob or recursive shell search whose root
+CONTAINS a listed folder is denied too, with a message naming the matched entry so the caller narrows the root.
+
+stdin: {"tool_name": ..., "tool_input": {...}, "cwd": ...}
+deny: reason on stderr, exit 2, one line in ~/.claude/state/no-ai-refusals.log (time, tool, matched entry; never content).
+allow: exit 0. A missing list means the wall is off; a list that exists but cannot be read denies (fail closed).
+Fast by design: it runs on every tool call, so no network, no model, nothing but two small files and a few stat calls.
+The decisions live in no_ai_wall.py (scripts/), shared with lane.sh, the mail poller and the digest.
+"""
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".claude", "scripts"))
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+    try:
+        import no_ai_wall as w
+    except Exception:  # the shared module is gone: stay closed only when a list exists to protect
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        lists = [os.environ.get("NO_AI_PATHS_FILE") or os.path.join(home, ".config", "afa", "no-ai-paths.txt")]
+        if any(os.path.lexists(p) for p in lists):
+            sys.stderr.write("no-ai wall: no_ai_wall.py cannot be loaded, so file and shell tools are refused until it is restored\n")
+            return 2
+        return 0
+    try:
+        verdict = w.evaluate(payload)
+    except Exception as exc:  # a bug in the check must not open the wall
+        verdict = (payload.get("tool_name") or "?", "(check failed)", "no-ai wall: the check failed (%s), so this call is refused" % type(exc).__name__)
+    if not verdict:
+        return 0
+    tool, entry, message = verdict
+    w.log_refusal(tool, entry)
+    sys.stderr.write(message + "\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

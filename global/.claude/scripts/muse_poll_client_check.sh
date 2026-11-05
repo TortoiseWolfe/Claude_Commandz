@@ -19,6 +19,13 @@
 # MUSE_CLIENT_WINDOW (Gmail newer_than value, default 2d), MUSE_CLIENT_PAYIDS (a file that gets the ID of every payment-kind line printed).
 set -u
 S=$HOME/.claude/scripts
+SD=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# The no-AI wall (issue 228): mail from a sender on ~/.config/afa/no-ai-senders.tsv never reaches a model. This script's output goes to a model
+# pass (muse_poll.sh) and to /prep, so a listed sender is handled here and never printed: no_ai_wall_notify raises a desktop toast and queues one
+# "No-AI mail: <client> | <address> | <time>" inbox line, with no subject and no body. --dry-run lists, counts and writes nothing.
+DRY=0; [[ "${1:-}" == --dry-run ]] && DRY=1
+# shellcheck source=no_ai_wall.sh
+source "$SD/no_ai_wall.sh"
 TSV=${MUSE_CLIENT_TSV:-$HOME/repos/hub/client-senders.tsv}
 SEEN=${MUSE_CLIENT_SEEN:-$HOME/.claude/state/client-mail-seen.txt}
 INBOX=${MUSE_CLIENT_INBOX:-${HUB_INBOX:-${MUSE_INBOX:-$HOME/.claude/state/hub-inbox.md}}}
@@ -26,8 +33,11 @@ LOG=$HOME/.claude/state/muse-poll.log
 WINDOW=${MUSE_CLIENT_WINDOW:-2d}
 # Client mail is NX-01's job only; the second tower exits quietly so the same mail is not absorbed twice.
 [[ "$(cat "$HOME/.config/afa/machine" 2>/dev/null)" == NX-01 ]] || exit 0
-[[ -r "$TSV" ]] || exit 0
-froms=$(awk -F'\t' 'NR>1 && $4!="" {print $4}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
+# The listed senders join the query, so their mail is seen (as ids and addresses only) and held. An unreadable list holds all client mail.
+noai_pats=$(python3 -I "$SD/no_ai_wall.py" senders 2>>"$LOG") || { printf '%s client check: the no-AI sender list is unreadable; client mail is held\n' "$(date '+%F %T')" >&2; exit 1; }
+export NO_AI_QUIET=1  # the line above said "list missing" if it was; once per run
+[[ -r "$TSV" ]] || { [[ -n "$noai_pats" ]] || exit 0; }
+froms=$({ [[ -r "$TSV" ]] && awk -F'\t' 'NR>1 && $4!="" {print $4}' "$TSV"; printf '%s\n' "$noai_pats"; } | sed '/^[[:space:]]*$/d' | sort -u | paste -sd' ' | sed 's/ / OR /g')
 [[ -n "$froms" ]] || exit 0
 query="from:($froms) newer_than:$WINDOW -from:me"
 # The message list comes straight from the Gmail API (gmail_api.py messages-list, metadata only, never a body):
@@ -40,10 +50,12 @@ if ! out=$("${lister[@]}" "$query" 2>"$errf"); then
   printf '%s client check: messages-list failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >&2
   exit 1
 fi
-touch "$SEEN"
+(( DRY )) || touch "$SEEN"
+[[ -r "$TSV" ]] || TSV=/dev/null
+counts=$(mktemp); trap 'rm -f -- "$errf" "$counts"' EXIT
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
-pats=$(awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
+pats=$([[ -r "$TSV" ]] && awk -F'\t' 'NR>1 && $4!="" {print tolower($4)}' "$TSV")
 # kind "payment" senders (Gusto) mail from no-reply addresses but have their own handler step (mark the invoice
 # paid), so they are never tagged "Client alert"
 paypats=$(awk -F'\t' 'NR>1 && $3=="payment" && $4!="" {print tolower($4)}' "$TSV")
@@ -87,6 +99,11 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
     printf '%s client check: dropped %s: sender field is not one plain address\n' "$(date '+%F %T')" "$id" >>"$LOG"
     continue
   fi
+  # The no-AI wall comes first: a listed sender is held here, before any other rule, and never printed to the model pass.
+  if noai_client=$(no_ai_wall_sender_client "$addr"); then
+    if (( DRY )); then echo noai >>"$counts"; else no_ai_wall_notify "$noai_client" "$addr" "$id"; fi
+    continue
+  fi
   ok=""; while IFS= read -r p; do sender_is "$addr" "$p" && { ok=1; break; }; done <<<"$pats"
   [[ -n "$ok" ]] || continue
   # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.
@@ -103,6 +120,7 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   grep -qF -- "$id" "$INBOX" 2>/dev/null && continue
   # From, Subject and Date pass through as printed (between the address and the labels), for the reader only.
   mid=${rest#*|}; mid=${mid%|*}; mid=${mid%|*}
+  if (( DRY )); then echo new >>"$counts"; continue; fi
   # A Wordfence scan-findings alert from an alerts-kind sender becomes GitHub issues (alert_issues.py), here between
   # sessions too, so its findings stop living only in email (4 Nov 2026). Done (exit 0): the ID is absorbed like any
   # client-seen one and no NEW line prints. Unparsed or failed (exit 2, 3): the line prints as before, so it is handled
@@ -125,3 +143,6 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   [[ -n "$pay" && -n "${MUSE_CLIENT_PAYIDS:-}" ]] && printf '%s\n' "$id" >>"$MUSE_CLIENT_PAYIDS"
   printf 'NEW %s%s | %s |%s\n' "$id" "$tag" "$addr" "$mid"
 done
+if (( DRY )); then
+  printf 'dry run (counts only): %s message(s) from no-AI senders held and not shown, %s other new\n' "$(grep -c '^noai$' "$counts")" "$(grep -c '^new$' "$counts")"
+fi
