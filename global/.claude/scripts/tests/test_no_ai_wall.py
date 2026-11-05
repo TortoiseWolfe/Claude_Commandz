@@ -730,6 +730,39 @@ class BypassGapTests(Fixture):
                     "find %s/.claude/hooks -type f -print" % h, "fd py %s/.claude/scripts" % h):
             self.allowed(cmd)
 
+    # follow-ups from the plugin's security review of the first push
+    def test_brace_sequences_and_oversize_braces_fail_closed(self):
+        h = self.home
+        for cmd in ("rm -rf %s/.claude/{a..z}ooks" % h, "rm %s/.claude/hooks/x{1..3}.py" % h, "rm -rf %s/.claude/hooks{,.bak}" % h,
+                    "rm %s/.claude/hooks/x{1..999999}" % h, "rm %s/.claude/{a,b,c,d,e,f,g,h}{1..60}" % h, "rm -rf %s/.claude/{x,{hooks,y}}" % h):
+            self.denied(cmd)
+        self.assertEqual(w._brace_expand("a{1..3}")[0], ["a1", "a2", "a3"])
+        self.assertEqual(w._brace_expand("{c..a}")[0], ["c", "b", "a"])
+        self.assertEqual(w._brace_expand("x{1..9..4}"), (["x1", "x5", "x9"], True))
+        self.assertFalse(w._brace_expand("x{1..9999999}")[1])
+        for cmd in ("rm /tmp/f{1..3}.txt", "rm %s/.claude/projects/p{1..3}.txt" % h, "find %s -name x -exec echo {} +" % self.p("work")):
+            self.allowed(cmd)
+
+    def test_an_option_value_after_the_operands_does_not_hide_the_destination(self):
+        s, hk = self.d("scripts"), self.d("hooks")
+        for cmd in ("cp /tmp/a %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py --suffix .bak" % s, "cp /tmp/a %s/x.py --suf .bak" % s, "install /tmp/a %s/y.sh -m 755" % hk,
+                    "install /tmp/a %s/y.sh -o root -g root" % hk, "rsync -a /tmp/empty/ %s/ --exclude x" % hk, "rsync -a /tmp/empty/ %s/ -e ssh" % hk,
+                    "ln -sf /tmp/evil %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py -v -S .bak" % s):
+            self.denied(cmd)
+        for cmd in ("cp -S .bak /tmp/a /tmp/b", "install -m 755 /tmp/a /tmp/b", "cp /tmp/a /tmp/b --suffix .bak", "rsync -a /tmp/a/ /tmp/b/ --exclude x",
+                    "cp -a /tmp/a /tmp/b -v"):
+            self.allowed(cmd)
+
+    def test_find_and_fd_with_no_root_start_in_the_working_folder(self):
+        h = self.home
+        for cmd in ("cd %s/.claude/hooks && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py' -delete" % h,
+                    "cd %s/.claude/scripts && fd -x rm" % h, "cd %s/.claude && find -L -delete" % h, "cd %s/.claude/hooks && find . -delete" % h):
+            self.denied(cmd)
+        for cmd in ("cd %s && find -delete" % self.p("work"), "cd %s/.claude/commands && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py'" % h):
+            self.allowed(cmd)
+        self.assertIsNone(self.call("Bash", cwd=self.p("work"), command="find -name x -delete"))
+        self.assertIsNotNone(self.call("Bash", cwd=self.d("hooks"), command="find -name x -delete"))
+
     # MEDIUM: one normaliser for Windows drives
     def test_windows_drive_paths_ignore_case_in_every_check(self):
         os.environ["HOME"] = "/mnt/c/Users/Someone"

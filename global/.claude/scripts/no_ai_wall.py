@@ -483,22 +483,54 @@ _BRACES = re.compile(r"\{([^{}]*,[^{}]*)\}")
 _WRAPPERS = ("sudo", "env", "command", "nohup", "time", "exec")
 
 
-def _brace_expand(word, limit=64):
-    """The words the shell makes of `a{b,c}d` (never more than `limit`)."""
-    out = [word]
-    for _ in range(8):
+_SEQUENCE = re.compile(r"\{(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?\}")
+
+
+def _sequence(m):
+    """The words of one `{1..3}` or `{a..e}` brace sequence, or None when it is too long to list."""
+    a, b, step = m.group(1), m.group(2), abs(int(m.group(3) or 1)) or 1
+    if a.lstrip("-").isdigit() != b.lstrip("-").isdigit():
+        return None  # the shell leaves a mixed sequence as it is
+    if a.lstrip("-").isdigit():
+        lo, hi = int(a), int(b)
+        if abs(hi - lo) // step > 256:
+            return None
+        return [str(n) for n in (range(lo, hi + 1, step) if hi >= lo else range(lo, hi - 1, -step))]
+    lo, hi = ord(a), ord(b)
+    return [chr(n) for n in (range(lo, hi + 1, step) if hi >= lo else range(lo, hi - 1, -step))]
+
+
+def _brace_expand(word, limit=256):
+    """-> (words, complete): the words the shell makes of `a{b,c}d` and `a{1..3}`. `complete` is False when the cap cut the list short or a
+    brace form was left unexpanded; the caller then fails closed, because a guarded name could hide in what was not listed."""
+    out, complete = [word], True
+    for _ in range(12):
         nxt, changed = [], False
         for x in out:
             m = _BRACES.search(x)
-            if not m:
-                nxt.append(x)
+            if m:
+                changed = True
+                nxt.extend(x[:m.start()] + alt + x[m.end():] for alt in m.group(1).split(","))
                 continue
-            changed = True
-            nxt.extend(x[:m.start()] + alt + x[m.end():] for alt in m.group(1).split(","))
+            m = _SEQUENCE.search(x)
+            seq = _sequence(m) if m else None
+            if m and seq is not None:
+                changed = True
+                nxt.extend(x[:m.start()] + s + x[m.end():] for s in seq)
+                continue
+            if m:
+                complete = False
+            nxt.append(x)
+        if len(nxt) > limit:
+            complete = False
         out = nxt[:limit]
         if not changed:
             break
-    return out
+    else:
+        complete = False
+    if any(_BRACES.search(x) or _SEQUENCE.search(x) for x in out):
+        complete = False
+    return out, complete
 
 
 def _glob_matches(pattern, path):
@@ -536,18 +568,23 @@ def _operand_forms(arg, cur):
     """-> [(path, pattern)]: every absolute path an operand could mean. Brace alternatives and the part after `=` (--opt=PATH) are tried,
     and a wildcard gives its pattern plus what it matches on disk (pattern is the wildcard form the hit came from)."""
     out = []
-    for b in _brace_expand(arg):
+    words, complete = _brace_expand(arg)
+    for b in words:
         for piece in ([b, b.split("=")[-1]] if "=" in b else [b]):
             full = expand(piece, cur)
             out.append((full, full))
             out.extend((hit, full) for hit in _expand_globs(full))
-    return out
+    return out, complete
 
 
 def _touches(arg, cur, places, folders=False, is_dir=False):
     """True when an operand is, lies above, or (a wildcard) could be a guarded file or one of `places`. `folders` also asks whether it is
-    a folder that holds guarded files (a copy lands inside it); `is_dir` says the operand is known to be a folder (a -t target)."""
-    for path, pattern in _operand_forms(arg, cur):
+    a folder that holds guarded files (a copy lands inside it); `is_dir` says the operand is known to be a folder (a -t target). An
+    operand whose braces cannot be listed in full counts as touching: it fails closed."""
+    forms, complete = _operand_forms(arg, cur)
+    if not complete:
+        return True
+    for path, pattern in forms:
         if _is_guarded_config(path, cur) or (places and _reaches(path, cur, places)):
             return True
         if folders and (is_dir or arg.endswith("/") or os.path.isdir(path)) and _is_guarded_config(os.path.join(path, "x.py"), cur):
@@ -583,6 +620,37 @@ def _copy_targets(prog, args):
                         out.append(a[j + 1:] or nxt)
                     break
     return out
+
+
+_VALUED_LONG = ("suffix", "mode", "owner", "group", "strip-program", "context")  # cp, install and ln options that take a separate value
+_RSYNC_PLAIN = ("archive", "recursive", "verbose", "quiet", "dry-run", "progress", "compress", "times", "perms", "owner", "group", "links",
+                "update", "force", "checksum", "partial", "human-readable", "stats", "itemize-changes", "inplace", "whole-file", "delete",
+                "remove-source-files", "backup", "relative", "dirs", "hard-links", "numeric-ids", "protect-args", "list-only", "info")
+
+
+def _option_values_may_move_the_destination(prog, args):
+    """True when an option could take the NEXT word as its value (`-S .bak`, `-m 755`, `--suffix .bak`, rsync `-e ssh`). GNU getopt lets
+    options follow the operands, so `cp a ~/.claude/scripts/x.py -S .bak` ends in a value, not in the destination: the last-operand rule
+    cannot be trusted, and every operand is checked as a destination instead."""
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, _ = a[2:].partition("=")
+            if eq or not name:
+                continue
+            if prog == "rsync":
+                if not any(p.startswith(name) for p in _RSYNC_PLAIN):
+                    return True
+            elif any(v.startswith(name) for v in _VALUED_LONG):
+                return True
+        elif a.startswith("-") and len(a) > 1:
+            for ch in a[1:]:
+                if ch in ("eTfBM@" if prog == "rsync" else "Smog"):
+                    return True
+                if ch == "t" and prog != "rsync":
+                    break  # the target folder is read by _copy_targets
+    return False
 
 
 def _skip_wrappers(words):
@@ -634,8 +702,15 @@ def bash_writes_guarded(command, cwd):
             flags = _short_flags(args)
             recursive = prog == "rsync" or bool(flags & set("rRa")) or any(a.startswith(("--r", "--a")) for a in args)
             every = any(a.startswith(("--delete", "--del", "--remove")) for a in args) or (prog != "rsync" and "T" in flags)
-            targets = [] if every else _copy_targets(prog, args)
-            dests = operands if every else (targets or operands[-1:])
+            targets = _copy_targets(prog, args)
+            if every:
+                dests = operands + targets
+            elif targets:
+                dests = targets
+            elif _option_values_may_move_the_destination(prog, args):
+                dests = operands
+            else:
+                dests = operands[-1:]
             # The destination (every operand when a delete, remove or -T option is on) may not be a guarded file, lie in a guarded folder,
             # or, for a recursive copy, rsync, ln or a delete, be a folder that holds one: `rsync --delete empty/ ~/.claude/` empties the hooks.
             reach = places if (recursive or prog == "ln" or every) else [p for p in places if os.path.isfile(p) or os.path.islink(p)]
@@ -643,7 +718,10 @@ def bash_writes_guarded(command, cwd):
                 return True
             continue  # the sources of a copy are only read
         if prog in _FIND_PROGRAMS and any(a in _FIND_WRITE_ACTIONS for a in args):
-            if any(_touches(a, cur, places, folders=True) for a in operands):  # a root, or the file an action writes
+            roots = list(operands)  # a root, or the file an action writes
+            if prog != "find" or not [a for a in args[:1] if not a.startswith(("-", "!", "(", ","))]:
+                roots.append(cur)  # find with no root starts in the working folder; so does fd, whose path argument is optional
+            if any(_touches(a, cur, places, folders=True) for a in roots):
                 return True
         if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
             if any(_touches(t, cur, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
