@@ -648,13 +648,13 @@ def _known_program(word):
     return name in _ALL_PROGRAMS or bool(_INLINE_PROGRAM.match(name))
 
 
-def _skip_wrappers(words):
+def _skip_wrappers(words, scan=True):
     """Index of the program a command really runs, past sudo, env, VAR=x and the like. A wrapper's own options and values (`sudo -u root rm`,
     `env -C dir find`, `timeout 5 rm`) are skipped too: the program is the first known one after them, inline interpreters included."""
     i = 0
     while i < len(words) and (words[i] in _WRAPPERS or re.fullmatch(r"\w+=\S*", words[i])):
         i += 1
-    if i and i < len(words) and not _known_program(words[i]) and re.fullmatch(r"\w+=\S*", words[i - 1]) is None:
+    if scan and i and i < len(words) and not _known_program(words[i]) and re.fullmatch(r"\w+=\S*", words[i - 1]) is None:
         for k in range(i, len(words)):
             if _known_program(words[k]):
                 return k
@@ -690,7 +690,7 @@ def _is_launcher(seg):
     if re.search(r"`|\$\(|[()<]", seg):
         return False
     words = _words(seg)
-    i = _skip_wrappers(words)
+    i = _skip_wrappers(words, scan=False)  # a wrapper option before lane.sh means this is not a plain launch
     if i < len(words) and os.path.basename(words[i]) in ("bash", "sh"):
         i += 1
         if i < len(words) and words[i].startswith("-"):

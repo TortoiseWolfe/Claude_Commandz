@@ -835,6 +835,10 @@ class BypassGapTests(Fixture):
         self.denied("lane.sh n %s sonnet `rg x %s`" % (self.p("work"), parent), "entry 1")
         self.denied("find %s -name x; lane.sh n /tmp s p.md" % parent, "entry 1")
         self.denied("bash -c 'lane.sh n /tmp s p.md; find %s'" % parent, "entry 1")
+        # a wrapper option before lane.sh is not a plain launch, so no scan for a "known program" may make it one
+        self.denied("env -S 'find %s' lane.sh n /tmp s p.md" % parent, "entry 1")
+        self.denied("flock -c 'rg x %s' lane.sh n /tmp s p.md" % parent, "entry 1")
+        self.denied("timeout 5 find %s -name x; lane.sh n /tmp s p.md" % parent, "entry 1")
 
 
 if __name__ == "__main__":
