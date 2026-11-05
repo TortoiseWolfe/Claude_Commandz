@@ -19,6 +19,10 @@ Command line (used by the bash helper no_ai_wall.sh):
   no_ai_wall.py check-path [--cwd D] P...    exit 0 = none listed, 3 = one is listed (or the list is unreadable)
   no_ai_wall.py check-text FILE              exit 3 when the text names a listed path
 Environment overrides (tests): NO_AI_PATHS_FILE, NO_AI_REFUSAL_LOG.
+
+Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py). The tamper
+guard below covers that folder, the list, and the settings*.json files, and nothing else under ~/.claude, so ordinary tooling in
+~/.claude/scripts and ~/.claude/hooks installs without anyone's hands. The hook loads this file by absolute path from its own folder.
 """
 import datetime
 import fnmatch
@@ -39,6 +43,15 @@ def home():
 
 def paths_file():
     return os.environ.get("NO_AI_PATHS_FILE") or os.path.join(home(), ".config", "afa", "no-ai-paths.txt")
+
+
+WALL_FOLDER = "no-ai-wall"
+_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh")
+
+
+def wall_dir():
+    """The live folder that holds only the wall's own files."""
+    return os.path.join(home(), ".claude", WALL_FOLDER)
 
 
 def refusal_log():
@@ -416,11 +429,13 @@ def pattern_start(pattern, root, cwd):
 
 
 def protected_files():
-    """Files no session may change: the list itself, the hook and the module (and its bash helper). A session that could edit
-    them could turn the wall off. They are checked by realpath, so a symlink to one counts too."""
-    h = home()
-    return [paths_file()] + [os.path.join(h, ".claude", *rel) for rel in (
-        ("hooks", "no-ai-wall-guard.py"), ("scripts", "no_ai_wall.py"), ("scripts", "no_ai_wall.sh"))]
+    """Files no session may change: the list itself, and the hook, the module and its bash helper in the wall's own folder. The three places
+    the wall lived before that folder existed count too, while a file is still there (a machine not yet moved runs from them); once the
+    install has moved them away, ~/.claude/scripts and ~/.claude/hooks hold no wall file and are ordinary folders. A session that could edit
+    a protected file could turn the wall off. They are checked by realpath, so a symlink to one counts too."""
+    base = os.path.join(home(), ".claude")
+    legacy = [os.path.join(base, "hooks", "no-ai-wall-guard.py"), os.path.join(base, "scripts", "no_ai_wall.py"), os.path.join(base, "scripts", "no_ai_wall.sh")]
+    return [paths_file()] + [os.path.join(wall_dir(), n) for n in _WALL_FILES] + [f for f in legacy if os.path.lexists(f)]
 
 
 def _is_protected(path, cwd, which):
@@ -443,23 +458,17 @@ def _reaches(path, cwd, files):
     return False
 
 
-_CODE_SUFFIXES = (".py", ".sh")
-
-
 def _is_guarded_config(path, cwd):
-    """True for a file a session could use to switch the wall off without touching the wall's own files: any .py or .sh under
-    ~/.claude/hooks or ~/.claude/scripts (a script the hook imports, or one a hook runs), and the settings*.json files that register the
-    hook, in ~/.claude and in any project's .claude folder. Writes only; reading and running them stays open."""
-    base = os.path.join(home(), ".claude")
-    folders = set()
-    for sub in ("hooks", "scripts"):
-        d = os.path.join(base, sub)
-        folders.update({os.path.normpath(d), os.path.realpath(d)})
+    """True for a file a session could use to switch the wall off: anything inside the wall's own folder (~/.claude/no-ai-wall, any name, new
+    files too) and the settings*.json files that register the hook, in ~/.claude and in any project's .claude folder. Other files under
+    ~/.claude/scripts and ~/.claude/hooks are ordinary tooling and are not guarded: the hook compiles the module from the wall's folder by
+    absolute path, so nothing beside it can stand in for it. Writes only; reading and running them stays open."""
+    folders = {os.path.normpath(wall_dir()), os.path.realpath(wall_dir())}
     folders_c = {_fold(d) for d in folders}
     for c in PathList()._candidates(path, cwd):
         c = _fold(c)  # a Windows drive: /mnt/c/Users/X/.CLAUDE/Settings.JSON is the same file
         name = os.path.basename(c)
-        if name.endswith(_CODE_SUFFIXES) and any(c.startswith(d.rstrip("/") + "/") for d in folders_c):
+        if any(c.startswith(d.rstrip("/") + "/") for d in folders_c):
             return True
         if fnmatch.fnmatchcase(name, "settings*.json") and os.path.basename(os.path.dirname(c)) == ".claude":
             return True
@@ -467,10 +476,10 @@ def _is_guarded_config(path, cwd):
 
 
 def guarded_places():
-    """The files and folders whose loss would unguard the wall: the protected files, the hooks and scripts folders, and the home .claude
-    folder with its settings. An operand of rm, mv or chmod that IS one of them or lies above one (renaming the folder away) is a write."""
+    """The files and folders whose loss would unguard the wall: the protected files, the wall's own folder, and the home settings files.
+    An operand of rm, mv or chmod that IS one of them or lies above one (renaming ~/.claude away) is a write."""
     base = os.path.join(home(), ".claude")
-    return protected_files() + [os.path.join(base, "hooks"), os.path.join(base, "scripts"), os.path.join(base, "settings.json"), os.path.join(base, "settings.local.json")]
+    return protected_files() + [wall_dir(), os.path.join(base, "settings.json"), os.path.join(base, "settings.local.json")]
 
 
 _WRITE_PROGRAMS = {"rm", "unlink", "shred", "truncate", "tee", "touch", "chmod", "chown", "chgrp", "mv", "dd", "patch", "sponge"}
@@ -560,8 +569,7 @@ def _glob_reaches(pattern, files):
 
 
 def _guarded_folders():
-    base = os.path.join(home(), ".claude")
-    return [os.path.join(base, "hooks"), os.path.join(base, "scripts")]
+    return [wall_dir()]
 
 
 def _operand_forms(arg, cur):
@@ -803,7 +811,7 @@ def _read_only_listing(command):
             continue
         if prog.startswith("python"):
             rest = [w for w in words[1:] if not w.startswith("-")]
-            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", n)) for n in ("redact_view.py", "no_ai_wall.py")]  # run, not edited
+            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py"))]  # run, not edited
             if rest and os.path.realpath(expand(rest[0], "/")) in ok:
                 continue
         return False
@@ -856,6 +864,9 @@ def _strings(value, depth=0):
             yield from _strings(v, depth + 1)
 
 
+_SUBAGENT_TOOLS = ("Agent", "Task")
+
+
 def evaluate(payload, paths=None):
     """The hook's decision for one tool call. -> None to allow, else (tool, entry, message) to deny. `entry` is "entry N" (the list
     position), never the listed path: the refusal reaches a model's context and the log is a file a model could open."""
@@ -887,7 +898,7 @@ def evaluate(payload, paths=None):
         return (tool, label(entry), "no-ai wall: this search would walk into a folder on the no-AI list (%s). Narrow the search root so it leaves that folder out." % label(entry))
 
     def deny_protected():
-        return (tool, "protected file", "no-ai wall: the no-AI list, its hook and its module, the hook and script files beside them and the settings files cannot be changed from a session. Edit them outside the model.")
+        return (tool, "protected file", "no-ai wall: the no-AI list, the wall's own folder (~/.claude/no-ai-wall) and the settings files cannot be changed from a session. Edit them outside the model.")
 
     def deny_list_search():
         return (tool, "protected file", "no-ai wall: the no-AI list is private config and this search would read it. Narrow the search root to the folder you need.")
@@ -957,7 +968,10 @@ def evaluate(payload, paths=None):
         return None
 
     # An MCP tool or any tool this module does not know: its arguments could name a listed path in any field, so every string
-    # in them is read as a path or as text that names one.
+    # in them is read as a path or as text that names one. A subagent prompt (Agent, Task) is judged by what the subagent does, not by
+    # the words in it: its own tool calls pass through this same hook, so a prompt that only mentions a protected file is not refused.
+    # It still may not name a listed path (that text goes to the vendor model).
+    is_subagent = tool in _SUBAGENT_TOOLS
     for text in _strings(ti):
         pieces = [text] + [t.strip("'\"`,;:()[]{}<>") for t in text[:20000].split()[:400]]  # a sentence naming a relative path; capped
         for piece in pieces:
@@ -966,12 +980,12 @@ def evaluate(payload, paths=None):
             h = paths.match(piece, cwd)  # a relative one is joined with the session folder, as the shell tools do
             if h:
                 return deny_path(h)
-            if is_guarded(piece):
+            if not is_subagent and is_guarded(piece):
                 return deny_protected()
         h = text_names_listed_path(text, paths)
         if h:
             return deny_path(h)
-        if any(is_guarded(t) for t in text_paths(text)):
+        if not is_subagent and any(is_guarded(t) for t in text_paths(text)):
             return deny_protected()
     return None
 

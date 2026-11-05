@@ -80,4 +80,18 @@ LIST="$TMP/bad.txt" lane --dry-run w5 "$OPEN" sonnet "$TMP/p.md"; [ "$LAST_RC" !
 # 7. --clean-room is for starting a lane only.
 lane --dry-run --clean-room "$SCRATCH" --resume w3; [ "$LAST_RC" != 0 ] || fail "--clean-room with --resume is refused"; ok
 
+# 8. The helper comes from the wall's own folder under HOME, by absolute path; the checkout's mirror is only the fallback, and with neither the launcher refuses.
+mkdir -p "$HOME_T/.claude/no-ai-wall"
+printf 'no_ai_wall_paths_hit() { return 0; }\nno_ai_wall_text_hit() { return 0; }\n' >"$HOME_T/.claude/no-ai-wall/no_ai_wall.sh"
+lane --dry-run w6 "$OPEN" sonnet "$TMP/p.md"
+[ "$LAST_RC" != 0 ] || fail "the helper in ~/.claude/no-ai-wall is the one that decides (a refuse-all stand-in did not refuse: $LAST_OUT)"; ok
+rm -f "$HOME_T/.claude/no-ai-wall/no_ai_wall.sh"
+lane --dry-run w6 "$OPEN" sonnet "$TMP/p.md"
+[ "$LAST_RC" = 0 ] || fail "with no home copy the checkout's mirror is used ($LAST_OUT)"; ok
+# a lane.sh copied away from its repo mirror, with no helper under HOME either: refused, never started without the wall
+mkdir -p "$TMP/lonely/scripts"; cp "$SCRIPT" "$TMP/lonely/scripts/lane.sh"
+set +e; LAST_OUT="$(HOME="$HOME_T" PATH="$BIN:$PATH" FAKE_KEYS="$KEYS" NO_AI_PATHS_FILE="$PF" bash "$TMP/lonely/scripts/lane.sh" --dry-run w7 "$OPEN" sonnet "$TMP/p.md" 2>&1)"; LAST_RC=$?; set -e
+[ "$LAST_RC" != 0 ] || fail "with no helper anywhere the launcher must not start ($LAST_OUT)"; ok
+has "$LAST_OUT" "no-ai-wall/no_ai_wall.sh is missing" "the refusal says which file is missing"
+
 echo "all $checks checks passed"

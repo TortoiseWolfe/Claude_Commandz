@@ -280,11 +280,14 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# The no-AI wall's bash helper (reads the same private lists as the hook, the poller and the digest). A lane launcher that cannot load it must not
-# start lanes: with no helper the wall would silently be off.
-[ -r "$SCRIPT_DIR/no_ai_wall.sh" ] || { echo "refusing: $SCRIPT_DIR/no_ai_wall.sh is missing, so the no-AI wall cannot be checked" >&2; exit 1; }
-# shellcheck source=no_ai_wall.sh
-. "$SCRIPT_DIR/no_ai_wall.sh"
+# The no-AI wall's bash helper (reads the same private lists as the hook, the poller and the digest). It lives in the wall's own folder,
+# ~/.claude/no-ai-wall, by absolute path (a run from a repo checkout, which has no home copy, uses the checkout's mirror of that folder).
+# A lane launcher that cannot load it must not start lanes: with no helper the wall would silently be off.
+NO_AI_WALL_SH="${HOME:-/nonexistent}/.claude/no-ai-wall/no_ai_wall.sh"
+[ -r "$NO_AI_WALL_SH" ] || NO_AI_WALL_SH="$SCRIPT_DIR/../no-ai-wall/no_ai_wall.sh"
+[ -r "$NO_AI_WALL_SH" ] || { echo "refusing: ~/.claude/no-ai-wall/no_ai_wall.sh is missing, so the no-AI wall cannot be checked" >&2; exit 1; }
+# shellcheck source=../no-ai-wall/no_ai_wall.sh
+. "$NO_AI_WALL_SH"
 add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in

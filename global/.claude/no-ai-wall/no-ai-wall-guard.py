@@ -4,21 +4,22 @@ entry of ~/.config/afa/no-ai-paths.txt: Read, Edit, Write, MultiEdit, NotebookEd
 path-looking word in a Bash command), an MCP or unknown tool by any string in its arguments, and EVERY tool when the session's working
 folder is listed. A Grep, Glob or recursive shell search whose root CONTAINS a listed folder is denied too, and so is a Grep or Glob
 rooted on the list file or a folder above it. Relative paths in any tool's arguments are joined with the session folder first.
-The list, this hook, no_ai_wall.py, every .py and .sh under ~/.claude/hooks and ~/.claude/scripts and the settings*.json files
-cannot be written from a session (reading and running them stays open), with the list full or empty. Nothing else is blocked.
+The list, everything in ~/.claude/no-ai-wall (this hook, no_ai_wall.py, no_ai_wall.sh: a folder that holds only the wall's own files)
+and the settings*.json files cannot be written from a session (reading and running them stays open), with the list full or empty.
+Other files in ~/.claude/scripts and ~/.claude/hooks are ordinary tooling and are not guarded. Nothing else is blocked.
 
 stdin: {"tool_name": ..., "tool_input": {...}, "cwd": ...}
 deny: reason on stderr (it names the list entry by number, never by path), exit 2, one line in ~/.claude/state/no-ai-refusals.log
 (time, tool, entry number; never content).
 allow: exit 0. A missing list means the wall is off; a list that exists but cannot be read denies (fail closed).
 Fast by design: it runs on every tool call, so no network, no model, nothing but one small file and a few stat calls.
-The decisions live in no_ai_wall.py (scripts/), shared with lane.sh.
+The decisions live in no_ai_wall.py (this folder), shared with lane.sh through no_ai_wall.sh.
 """
 import os
 import sys
 
 # Nothing but `os` and `sys` (both already loaded by Python itself) is imported before this point. A hook that imported anything else
-# from a search path holding a folder a session can write (this script's own folder, ~/.claude/scripts, PYTHONPATH, the user's site
+# from a search path holding a folder a session can write (the working folder, ~/.claude/scripts, PYTHONPATH, the user's site
 # folder) would run a planted json.py or re.py inside the wall. Isolated mode (-I) drops the script folder, the working folder,
 # PYTHONPATH and the user site from the search path; the standard library is all that is left. Register the hook as
 # `python3 -I <this file>` as well, so the first start-up is isolated too.
@@ -36,21 +37,20 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 
 
 def load_wall():
-    """The shared module, compiled from its source at an absolute path (beside the hook, else ~/.claude/scripts): never found by a search of sys.path,
-    so a look-alike elsewhere cannot stand in for it."""
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    for folder in (os.path.join(HERE, "..", "scripts"), os.path.join(home, ".claude", "scripts")):
-        path = os.path.realpath(os.path.join(folder, "no_ai_wall.py"))
-        if os.path.isfile(path):
-            # Compile the source itself: a cached .pyc planted in __pycache__ is never read, and none is written.
-            sys.dont_write_bytecode = True
-            with open(path, "rb") as fh:
-                code = compile(fh.read(), path, "exec")
-            mod = types.ModuleType("no_ai_wall")
-            mod.__file__ = path
-            exec(code, mod.__dict__)
-            return mod
-    raise ImportError("no_ai_wall.py not found")
+    """The shared module, compiled from its source at an absolute path in this hook's own folder (~/.claude/no-ai-wall, which holds only the
+    wall's files and which a session may not write): never found by a search of sys.path, and never looked for anywhere else, so a
+    look-alike in ~/.claude/scripts or any other folder cannot stand in for it."""
+    path = os.path.join(HERE, "no_ai_wall.py")
+    if not os.path.isfile(path):
+        raise ImportError("no_ai_wall.py not found beside the hook")
+    # Compile the source itself: a cached .pyc planted in __pycache__ is never read, and none is written.
+    sys.dont_write_bytecode = True
+    with open(path, "rb") as fh:
+        code = compile(fh.read(), path, "exec")
+    mod = types.ModuleType("no_ai_wall")
+    mod.__file__ = path
+    exec(code, mod.__dict__)
+    return mod
 
 
 def main():
