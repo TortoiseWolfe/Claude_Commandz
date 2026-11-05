@@ -19,7 +19,7 @@ Every backed-up file lives at its **original relative path** under one of three 
 
 ```
 global/.claude/<dir>/<file>           mirrors  ~/.claude/<dir>/<file>
-                                      <dir> = commands | workflows | agents | skills | scripts | hooks
+                                      <dir> = commands | workflows | agents | skills | scripts | hooks | no-ai-wall
 global/dotfiles/<file>                mirrors  ~/.claude/<file>    (selected files)
 repos/<name>/.claude/commands/<file>  mirrors  ~/repos/<name>/.claude/commands/<file>
 ```
@@ -33,6 +33,13 @@ Restore is always a direct `cp -a` with no path rewriting. Because of this:
 - **Do not rename.** The filename is the slash-command name — renaming breaks restore.
 - **Do not reorganize by category** (e.g., `speckit/`, `wireframe/`). Category grouping destroys the mirror and makes restore bespoke per file.
 - **Do not dedupe across repos.** Two files with the same name (e.g., `prep-operator.md` in `ScriptHammer` vs `TurtleWolfe`) usually have different contents — they are per-project customizations.
+
+## The no-AI wall has its own folder, and a person installs it
+
+`global/.claude/no-ai-wall/` mirrors `~/.claude/no-ai-wall/` for three files only: `no_ai_wall.py`, `no_ai_wall.sh` and `no-ai-wall-guard.py`.
+Sessions are refused any change there, to the no-AI list and to settings files, and to nothing else in scripts or hooks.
+`install.sh` and `smoke.py` sit beside them in the repo but are never copied live, and `install_global.py` does not touch this folder.
+The install is a person-only step, run in a terminal and never by a session (README.md, "Installing the no-AI wall"). Do not add a `cp` line for it to the refresh list.
 
 ## Authoring rule
 

@@ -105,6 +105,20 @@ First run on a machine with no record: `--status`, deal with each "live edit" (c
 `--record` (or pass `--from <commit>`). `--include-stale` also reinstalls the stale files `--status` lists. It covers scripts,
 hooks, workflows, agents and skills. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_global.py`.
 
+### Installing the no-AI wall (a person runs this, never a session)
+
+The wall's three files live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
+commit (it reads git, never the working tree or the network), backs up every live file it replaces, moves the hook entry in
+`settings.json`, also runs the usual install step for the other global files, and proves the result:
+
+```bash
+bash <(git -C ~/repos/Claude_Commandz show <commit>:global/.claude/no-ai-wall/install.sh) <commit>
+```
+
+The last line it prints is `WALL OK <commit> refused <n>/<n> ordinary <n>/<n>`, or `WALL FAILED <reason> after undoing itself`.
+The backup folder, `~/.claude/state/no-ai-wall-backups/<date>-<commit>/`, holds `undo.sh`; `bash <that folder>/undo.sh` puts everything back.
+Tests: `python3 -m pytest global/.claude/scripts/tests/test_no_ai_wall_install.py`.
+
 ### Scenario C — Single repo only
 
 ```bash

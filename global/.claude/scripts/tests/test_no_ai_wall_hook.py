@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 
-HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "hooks", "no-ai-wall-guard.py")
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "no-ai-wall", "no-ai-wall-guard.py")
 
 
 class HookTests(unittest.TestCase):
@@ -103,14 +103,15 @@ class HookIsolationTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmp = os.path.realpath(self._tmp.name)
         self.home = os.path.join(self.tmp, "home")
-        self.hooks = os.path.join(self.home, ".claude", "hooks")
+        self.wallhome = os.path.join(self.home, ".claude", "no-ai-wall")  # the wall's own live folder: only wall files
+        self.hooks = os.path.join(self.home, ".claude", "hooks")  # ordinary tooling folders, where anything may be planted
         self.scripts = os.path.join(self.home, ".claude", "scripts")
-        for d in (self.hooks, self.scripts, os.path.join(self.tmp, "wall/clientA"), os.path.join(self.tmp, "work"), os.path.join(self.tmp, "evil")):
+        for d in (self.wallhome, self.hooks, self.scripts, os.path.join(self.tmp, "wall/clientA"), os.path.join(self.tmp, "work"), os.path.join(self.tmp, "evil")):
             os.makedirs(d)
         src = os.path.dirname(HOOK)
-        shutil.copy(HOOK, os.path.join(self.hooks, "no-ai-wall-guard.py"))
-        shutil.copy(os.path.join(src, "..", "scripts", "no_ai_wall.py"), os.path.join(self.scripts, "no_ai_wall.py"))
-        self.hook = os.path.join(self.hooks, "no-ai-wall-guard.py")
+        shutil.copy(HOOK, os.path.join(self.wallhome, "no-ai-wall-guard.py"))
+        shutil.copy(os.path.join(src, "no_ai_wall.py"), os.path.join(self.wallhome, "no_ai_wall.py"))
+        self.hook = os.path.join(self.wallhome, "no-ai-wall-guard.py")
         self.pfile = os.path.join(self.tmp, "paths.txt")
         open(self.pfile, "w").write(os.path.join(self.tmp, "wall", "clientA") + "\n")
         self.marker = os.path.join(self.tmp, "planted-code-ran")
@@ -128,16 +129,10 @@ class HookIsolationTests(unittest.TestCase):
     def listed_read(self):
         return dict(file_path=os.path.join(self.tmp, "wall/clientA/x.txt"))
 
-    def lone_hook(self):
-        lone = os.path.join(self.tmp, "lone")
-        os.makedirs(lone)
-        shutil.copy(HOOK, os.path.join(lone, "no-ai-wall-guard.py"))
-        self.hook = os.path.join(lone, "no-ai-wall-guard.py")
-
     def test_a_planted_bytecode_cache_of_the_module_is_never_read(self):
         import importlib.util
         import importlib._bootstrap_external as be
-        real = os.path.join(self.scripts, "no_ai_wall.py")
+        real = os.path.join(self.wallhome, "no_ai_wall.py")
         st = os.stat(real)
         evil = compile("open(%r, 'w').write('ran')\nimport sys\nsys.exit(0)\n" % self.marker, real, "exec")
         pyc = importlib.util.cache_from_source(real)
@@ -153,7 +148,7 @@ class HookIsolationTests(unittest.TestCase):
 
     def test_a_stdlib_name_planted_beside_the_hook_does_not_run(self):
         for name in ("json.py", "re.py", "shlex.py", "glob.py", "datetime.py"):
-            self.plant(self.hooks, name)
+            self.plant(self.wallhome, name)
         r = self.run_hook(**self.listed_read())
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertFalse(os.path.exists(self.marker))
@@ -173,20 +168,66 @@ class HookIsolationTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertFalse(os.path.exists(self.marker))
 
-    def test_the_hook_finds_the_module_in_the_home_scripts_folder_when_run_from_elsewhere(self):
-        self.lone_hook()
-        self.assertEqual(self.run_hook(**self.listed_read()).returncode, 2)
+    def test_a_same_named_module_planted_in_scripts_or_hooks_is_ignored(self):
+        """The wall imports only from its own folder: a no_ai_wall.py (or a stdlib name) in the ordinary scripts and hooks folders, in the
+        working folder and on PYTHONPATH changes nothing."""
+        for folder in (self.scripts, self.hooks, os.path.join(self.tmp, "work"), os.path.join(self.tmp, "evil")):
+            for name in ("no_ai_wall.py", "json.py", "re.py", "types.py"):
+                self.plant(folder, name)
+        env = dict(self.env, PYTHONPATH=os.pathsep.join((self.scripts, os.path.join(self.tmp, "evil"))))
+        r = self.run_hook(env=env, **self.listed_read())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("no-AI list", r.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+        # and the ordinary call still passes, so the refusal above came from the real wall and not from a planted exit(2)
+        self.assertEqual(self.run_hook(env=env, file_path=os.path.join(self.tmp, "work", "a.txt")).returncode, 0)
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_a_copy_of_the_module_in_scripts_is_not_a_fallback(self):
+        """A hook with no module beside it stays closed even when ~/.claude/scripts holds one: that folder is not a place the wall reads."""
+        shutil.copy(os.path.join(self.wallhome, "no_ai_wall.py"), os.path.join(self.scripts, "no_ai_wall.py"))
+        os.remove(os.path.join(self.wallhome, "no_ai_wall.py"))
+        r = self.run_hook("Bash", command="echo hi")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot be loaded", r.stderr)
 
     def test_no_module_and_a_list_present_stays_closed(self):
-        os.remove(os.path.join(self.scripts, "no_ai_wall.py"))
-        self.lone_hook()
+        os.remove(os.path.join(self.wallhome, "no_ai_wall.py"))
         self.assertEqual(self.run_hook("Bash", command="echo hi").returncode, 2)
 
-    def test_settings_and_scripts_cannot_be_edited_even_with_an_empty_list(self):
+    def test_no_module_and_no_list_is_off(self):
+        os.remove(os.path.join(self.wallhome, "no_ai_wall.py"))
+        os.remove(self.pfile)
+        self.assertEqual(self.run_hook("Bash", command="echo hi").returncode, 0)
+
+    def test_the_wall_folder_and_settings_cannot_be_edited_even_with_an_empty_list(self):
         open(self.pfile, "w").write("# nothing yet\n")
-        for f in (os.path.join(self.home, ".claude/settings.json"), os.path.join(self.scripts, "any.py"), os.path.join(self.hooks, "any.sh")):
+        for f in (os.path.join(self.home, ".claude/settings.json"), os.path.join(self.wallhome, "no_ai_wall.py"), os.path.join(self.wallhome, "new-file.txt"),
+                  os.path.join(self.wallhome, "no-ai-wall-guard.py")):
             self.assertEqual(self.run_hook("Edit", file_path=f).returncode, 2, f)
+        self.assertEqual(self.run_hook("Bash", command="echo x > " + os.path.join(self.wallhome, "x.sh")).returncode, 2)
         self.assertEqual(self.run_hook("Read", file_path=os.path.join(self.home, ".claude/settings.json")).returncode, 0)
+
+    def test_ordinary_scripts_and_hooks_can_be_edited(self):
+        """The narrow lock: tooling in ~/.claude/scripts and ~/.claude/hooks installs without anyone's hands."""
+        for f in (os.path.join(self.scripts, "lane.sh"), os.path.join(self.scripts, "any.py"), os.path.join(self.hooks, "coop-scrubber.py"),
+                  os.path.join(self.hooks, "any.sh")):
+            self.assertEqual(self.run_hook("Edit", file_path=f).returncode, 0, f)
+            self.assertEqual(self.run_hook("Write", file_path=f).returncode, 0, f)
+        self.assertEqual(self.run_hook("Bash", command="cp /tmp/x %s/lane.sh" % self.scripts).returncode, 0)
+        self.assertEqual(self.run_hook("Bash", command="echo x > %s/hooks/y.sh" % os.path.join(self.home, ".claude")).returncode, 0)
+
+    def test_a_subagent_prompt_that_names_the_wall_files_is_refused_only_for_a_listed_path(self):
+        """Agent prompts are not refused for naming protected files; the subagent's own calls pass through this hook. A listed path still is."""
+        prompt = "Read %s and %s and report the guard's scope. Do not edit anything." % (os.path.join(self.wallhome, "no_ai_wall.py"), os.path.join(self.home, ".claude/settings.json"))
+        for tool in ("Agent", "Task"):
+            self.assertEqual(self.run_hook(tool, prompt=prompt, description="read-only review").returncode, 0, tool)
+            r = self.run_hook(tool, prompt="Summarise %s" % os.path.join(self.tmp, "wall/clientA/secret.txt"))
+            self.assertEqual(r.returncode, 2, tool)
+        # the same words in an MCP tool call are still a protected-file mention
+        self.assertEqual(self.run_hook("mcp__fs__write", path=os.path.join(self.wallhome, "no_ai_wall.py"), content="x").returncode, 2)
+        # and the subagent's own tool calls are guarded as any session's are
+        self.assertEqual(self.run_hook("Edit", file_path=os.path.join(self.wallhome, "no_ai_wall.py")).returncode, 2)
 
 
 if __name__ == "__main__":
