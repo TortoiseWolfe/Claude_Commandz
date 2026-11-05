@@ -420,12 +420,23 @@ def _is_guarded_config(path, cwd):
         d = os.path.join(base, sub)
         folders.update({os.path.normpath(d), os.path.realpath(d)})
     for c in PathList()._candidates(path, cwd):
+        if c.lower().startswith("/mnt/"):  # a Windows drive: /mnt/c/Users/X/.CLAUDE/Settings.JSON is the same file
+            c, folders_c = c.lower(), {d.lower() for d in folders}
+        else:
+            folders_c = folders
         name = os.path.basename(c)
-        if name.endswith(_CODE_SUFFIXES) and any(c.startswith(d.rstrip("/") + "/") for d in folders):
+        if name.endswith(_CODE_SUFFIXES) and any(c.startswith(d.rstrip("/") + "/") for d in folders_c):
             return True
         if fnmatch.fnmatchcase(name, "settings*.json") and os.path.basename(os.path.dirname(c)) == ".claude":
             return True
     return False
+
+
+def guarded_places():
+    """The files and folders whose loss would unguard the wall: the protected files, the hooks and scripts folders, and the home .claude
+    folder with its settings. An operand of rm, mv or chmod that IS one of them or lies above one (renaming the folder away) is a write."""
+    base = os.path.join(home(), ".claude")
+    return protected_files() + [os.path.join(base, "hooks"), os.path.join(base, "scripts"), os.path.join(base, "settings.json"), os.path.join(base, "settings.local.json")]
 
 
 _WRITE_PROGRAMS = {"rm", "unlink", "shred", "truncate", "tee", "touch", "chmod", "chown", "chgrp", "mv", "dd", "patch", "sponge"}
@@ -466,6 +477,7 @@ def bash_writes_guarded(command, cwd):
 
         if prog in _DEST_LAST_PROGRAMS:
             into = [nxt for a, nxt in zip(args, args[1:]) if a in ("-t", "--target-directory")]  # always a folder
+            into += [a.split("=", 1)[1] for a in args if a.startswith("--target-directory=")] + [a[2:] for a in args if a.startswith("-t") and len(a) > 2 and not a.startswith("--")]
             if any(_is_guarded_config(os.path.join(d, "x.py"), cur) for d in into):
                 return True
             if not into and operands[-1:] and (guarded(operands[-1]) or into_guarded_folder(operands[-1])):
@@ -474,6 +486,8 @@ def bash_writes_guarded(command, cwd):
         if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
             if any(guarded(t) for a in args for t in text_paths(a)):  # code in the command line that names one of them
                 return True
+        if prog in _WRITE_PROGRAMS and any(_reaches(a, cur, guarded_places()) for a in operands):
+            return True  # `mv ~/.claude/hooks /tmp/x` or `rm -r ~/.claude` unguards the wall as surely as editing a file
         if not any(guarded(a) for a in operands):
             continue
         if prog in _WRITE_PROGRAMS:

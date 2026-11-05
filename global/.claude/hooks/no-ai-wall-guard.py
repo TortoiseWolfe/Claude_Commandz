@@ -29,22 +29,26 @@ if not sys.flags.isolated:
         _here = os.path.dirname(os.path.realpath(__file__))
         sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != _here and "site-packages" not in p and "dist-packages" not in p]
 
-import importlib.util  # noqa: E402  (standard library, imported only after the search path is safe)
-import json  # noqa: E402
+import json  # noqa: E402  (standard library, imported only after the search path is safe)
+import types  # noqa: E402
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 
 
 def load_wall():
-    """The shared module, loaded by its absolute path (beside the hook, else ~/.claude/scripts): never found by a search of sys.path,
+    """The shared module, compiled from its source at an absolute path (beside the hook, else ~/.claude/scripts): never found by a search of sys.path,
     so a look-alike elsewhere cannot stand in for it."""
     home = os.environ.get("HOME") or os.path.expanduser("~")
     for folder in (os.path.join(HERE, "..", "scripts"), os.path.join(home, ".claude", "scripts")):
         path = os.path.realpath(os.path.join(folder, "no_ai_wall.py"))
         if os.path.isfile(path):
-            spec = importlib.util.spec_from_file_location("no_ai_wall", path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            # Compile the source itself: a cached .pyc planted in __pycache__ is never read, and none is written.
+            sys.dont_write_bytecode = True
+            with open(path, "rb") as fh:
+                code = compile(fh.read(), path, "exec")
+            mod = types.ModuleType("no_ai_wall")
+            mod.__file__ = path
+            exec(code, mod.__dict__)
             return mod
     raise ImportError("no_ai_wall.py not found")
 

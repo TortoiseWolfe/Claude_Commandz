@@ -547,6 +547,30 @@ class ReviewFixTests(Fixture):
             self.assertIsNotNone(r, cmd)
             self.assertEqual(r[1], "protected file", cmd)
 
+    def test_bash_may_not_move_or_delete_the_folders_that_hold_the_guarded_files(self):
+        h = self.home
+        for cmd in ("mv %s/.claude/hooks /tmp/gone" % h, "rm -rf %s/.claude/scripts" % h, "rm -r %s/.claude" % h, "mv %s/.claude /tmp/x" % h,
+                    "chmod 000 %s/.claude/hooks" % h, "rm -rf " + h, "cd %s/.claude && rm -rf hooks" % h, "mv ../home/.claude/scripts /tmp/y"):
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("rm -rf %s/.claude/projects/x" % h, "mv %s/.claude/commands /tmp/c" % h, "rm -rf %s/.cache" % h, "rm /tmp/a"):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
+    def test_cp_target_directory_forms_are_destinations(self):
+        h = self.home
+        d = os.path.join(h, ".claude/scripts")
+        for cmd in ("cp --target-directory=%s /tmp/a" % d, "cp -t%s /tmp/a" % d, "cp --target-directory %s /tmp/a" % d, "install -t %s /tmp/a" % d):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        self.assertIsNone(self.call("Bash", command="cp -t /tmp/dest %s/.claude/scripts/x.py" % h))
+
+    def test_guarded_files_on_a_windows_drive_ignore_case(self):
+        os.environ["HOME"] = "/mnt/c/Users/Someone"
+        for f in ("/mnt/C/USERS/SOMEONE/.CLAUDE/Settings.JSON", "/mnt/c/users/someone/.claude/SCRIPTS/X.PY", "/mnt/c/Users/Someone/.Claude/hooks/y.SH"):
+            r = self.call("Write", file_path=f)
+            self.assertIsNotNone(r, f)
+            self.assertEqual(r[1], "protected file", f)
+
     def test_bash_runs_and_reads_scripts_and_settings_freely(self):
         h = self.home
         s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/scripts/x.py"), os.path.join(h, ".claude/hooks/y.sh")

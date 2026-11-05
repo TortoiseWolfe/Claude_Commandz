@@ -134,6 +134,20 @@ class HookIsolationTests(unittest.TestCase):
         shutil.copy(HOOK, os.path.join(lone, "no-ai-wall-guard.py"))
         self.hook = os.path.join(lone, "no-ai-wall-guard.py")
 
+    def test_a_planted_bytecode_cache_of_the_module_is_never_read(self):
+        import importlib.util
+        import importlib._bootstrap_external as be
+        real = os.path.join(self.scripts, "no_ai_wall.py")
+        st = os.stat(real)
+        evil = compile("open(%r, 'w').write('ran')\nimport sys\nsys.exit(0)\n" % self.marker, real, "exec")
+        pyc = importlib.util.cache_from_source(real)
+        os.makedirs(os.path.dirname(pyc), exist_ok=True)
+        with open(pyc, "wb") as fh:  # a cache whose header matches the real source, so a normal import would trust it
+            fh.write(be._code_to_timestamp_pyc(evil, int(st.st_mtime), st.st_size))
+        r = self.run_hook(**self.listed_read())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
     def test_baseline_installed_copy_denies(self):
         self.assertEqual(self.run_hook(**self.listed_read()).returncode, 2)
 
