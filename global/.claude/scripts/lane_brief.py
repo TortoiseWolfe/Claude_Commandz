@@ -37,7 +37,7 @@ from lane_handoff_summary import handoff_summary  # noqa: E402
 from lane_report_state import report_state  # noqa: E402
 
 SESSION = "lanes"
-HEADLESS_ENGINES = ("codex", "copilot", "agy", "opencode")
+HEADLESS_ENGINES = ("codex", "copilot", "agy", "opencode", "local")
 # lane_watch.sh dialog_waiting: Claude Code menus say "Enter to select"; permission prompts say "Do you want to proceed" and end with
 # "Esc to cancel". Only the last 15 lines of the visible screen are checked. test_lane_brief.py fails if lane_watch.sh's pattern changes.
 DIALOG_WAITING = r"Enter to select|Do you want to proceed|Esc to cancel"

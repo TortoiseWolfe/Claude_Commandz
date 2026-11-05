@@ -2,7 +2,7 @@
 # Start a lane in its own tmux window. Claude Code is the default engine; Codex,
 # GitHub Copilot, Google Antigravity (agy) and OpenCode (opencode, on free Gemini / OpenRouter keys) can be selected with --engine.
 #
-#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
+#   lane.sh [--dry-run] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors] [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <id>] <name> <dir> <model> <prompt-file>
 #   e.g. lane.sh prod-logs ~/repos/SpokeToWork sonnet ~/.claude/state/lanes/2026-10-11-prod-logs/prompt.md
 #
 # The hub (~/repos on NX-01) is the director of directors: it dispatches lanes and reads
@@ -43,6 +43,11 @@
 # openrouter/nvidia/nemotron-3-ultra-550b-a55b:free as the fallback when the first is out of quota; any other model name (a Claude alias) becomes the
 # first. Both free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
 # like Codex/Copilot: git, tests and the report are the lane's own. Order for his own-repo code lanes: agy, codex, copilot, opencode, then Claude Sonnet.
+# --engine local runs local_lane.sh (beside this script): the same OpenCode, on an Ollama server on this machine (LOCAL_LANE_URL, default
+# http://127.0.0.1:11434), so no prompt, file or key leaves the machine and there is no quota. Model: ollama/<name> (default ollama/qwen3-coder:30b);
+# any other model name (a Claude alias) becomes that default. It never falls back to a hosted API: with no server, or the model not pulled, it stops
+# with "local: ..." in out.log. Same client guard as the others for now; the ~/repos rule does not apply (nothing is sent out). Not in the dispatcher's
+# engine order (it is chosen by hand). Pilot numbers: the PR that added it.
 #
 # 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/, site-model, band-wagon/stage or turnaround (3D fitting, photo
 # matching, site models, Blender character work) starts or resumes only on fable or opus, each at effort high.
@@ -89,14 +94,14 @@
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
-#   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, console
+#   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
 #                                       --headless), "dead <cmd>" when the pane shows a bare shell or nothing; lane_watch.sh wakes the hub on dead
 #   lane.sh --tier <name>               "<model> TAB <reason>": the model in the lane's row and the --allow-high-tier reason written there ("-" = none;
 #                                       "site-model" for a site-model prompt). lane_watch.sh names a live lane on opus or fable with no reason.
 #   lane.sh --turn <name>               what its last finished turn was: monitor (a Monitor progress event that asked nothing; lane_watch.sh does
 #                                       not wake the hub for it), real, or ? (see lane_turn_kind.py)
 # Every start appends one row to ~/.claude/state/lanes/index.tsv (tab-separated, no header):
-#   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)  project-mcp(comma list of .mcp.json servers kept on; "-" = none)  add-dirs(colon list of extra folders from --add-dir; "-" = none)
+#   date  name  dir  model  billing(console|subscription; codex|copilot|agy|opencode|local)  prompt  report  session-id  start-epoch  effort(- if none)  connectors(on|off|- )  recycle-at(K tokens; "-" = default for its kind)  high-tier reason("-" = none)  project-mcp(comma list of .mcp.json servers kept on; "-" = none)  add-dirs(colon list of extra folders from --add-dir; "-" = none)
 # Rows from before the connectors column have nothing in it; they were started with connectors loaded and count as on.
 # The session id is the one the lane's own SessionStart hook recorded (lane_session_hook.sh, ~/.claude/state/lanes/sessions/<name>), never
 # a guess from file age; if it is not there yet at start, the next --status fills it in.
@@ -236,7 +241,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--clean-room <scratch-dir>] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -246,9 +251,9 @@ Usage:
   lane.sh --recycle-point <name>
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
 
-Claude is the default engine. Codex, Copilot, agy and opencode run headless and write to out.log.
+Claude is the default engine. Codex, Copilot, agy, opencode and local run headless and write to out.log.
 Their model flag is used only when <model> is not a Claude name.
-Codex, Copilot, agy and opencode refuse repositories listed in client-senders.tsv or client-repos.txt,
+Codex, Copilot, agy, opencode and local refuse repositories listed in client-senders.tsv or client-repos.txt,
 and folders under ~/repos/CD (opencode also refuses ~/repos itself: its free APIs train on input). client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
@@ -287,7 +292,7 @@ while [ $# -gt 0 ]; do
     --restart) restart_opt=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --engine)
-      [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, agy, or opencode" >&2; exit 1; }
+      [ $# -ge 2 ] || { echo "--engine requires claude, codex, copilot, agy, opencode, or local" >&2; exit 1; }
       engine="$2"; shift 2 ;;
     --engine=*) engine="${1#*=}"; shift ;;
     --effort)
@@ -352,8 +357,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$engine" in
-  claude|codex|copilot|agy|opencode) ;;
-  *) echo "unknown engine: $engine (choose claude, codex, copilot, agy, or opencode)" >&2; exit 1 ;;
+  claude|codex|copilot|agy|opencode|local) ;;
+  *) echo "unknown engine: $engine (choose claude, codex, copilot, agy, opencode, or local)" >&2; exit 1 ;;
 esac
 
 # An engine whose program this machine does not have is refused up front, with the machine named, instead of a window that opens and dies
@@ -372,8 +377,9 @@ engine_present() {  # <engine>
   done
   return 1
 }
-if [ "$mode" = start ] && ! engine_present "$engine"; then
-  echo "refusing engine $engine: the program '$engine' is not installed on this machine ($(cat "$HOME/.config/afa/machine" 2>/dev/null || hostname)); pick another engine, or install it" >&2
+engine_program="$engine"; [ "$engine" = local ] && engine_program=opencode  # a local lane is OpenCode pointed at Ollama
+if [ "$mode" = start ] && ! engine_present "$engine_program"; then
+  echo "refusing engine $engine: the program '$engine_program' is not installed on this machine ($(cat "$HOME/.config/afa/machine" 2>/dev/null || hostname)); pick another engine, or install it" >&2
   exit 1
 fi
 
@@ -768,6 +774,14 @@ opencode_model() {
   esac
 }
 
+# A local lane's model is an Ollama tag, written ollama/<tag>; anything else (a Claude alias) is the default.
+local_model() {
+  case "$1" in
+    ollama/?*) printf '%s' "$1" ;;
+    *) printf 'ollama/qwen3-coder:30b' ;;
+  esac
+}
+
 is_claude_model() {
   case "$1" in
     opus|sonnet|haiku|fable|claude-*) return 0 ;;
@@ -1106,7 +1120,7 @@ else:
 }
 
 is_headless_billing() {
-  case "$1" in codex|copilot|agy|opencode) return 0 ;; *) return 1 ;; esac
+  case "$1" in codex|copilot|agy|opencode|local) return 0 ;; *) return 1 ;; esac
 }
 
 # Colour-coded pane text (tmux capture-pane -e) in, plain text out.
@@ -1217,8 +1231,8 @@ if [ "$mode" = status ]; then
       fi
       printf '%-18s report:%-3s %-7s %s%s\n' "$w" "$wrote" "$state" "$last" "$sug"
       ctx="?"
-      case "${b:-subscription}" in codex|copilot|agy|opencode) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
-      case "${b:-subscription}" in codex|copilot|agy|opencode) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
+      case "${b:-subscription}" in codex|copilot|agy|opencode|local) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
+      case "${b:-subscription}" in codex|copilot|agy|opencode|local) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
       printf '    dir:%s model:%s effort:%s connectors:%s%s%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$([ "${pm:--}" = - ] || printf ' project-mcp:%s' "$pm")" "$([ "${ad:--}" = - ] || printf ' add-dirs:%s' "$ad")" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
       # A hand-off newer than the report (or with no report) is the lane's latest word: show its Done and Next first lines, read by the
@@ -1410,7 +1424,7 @@ send_held() {
   row="$(index_row "$name")"; [ -n "$row" ] || return 1
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
   is_headless_billing "${b:-}" && return 1
-  case "${b:-subscription}" in codex|copilot|agy|opencode) return 1 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy|opencode|local) return 1 ;; esac
   [ -n "${rep:-}" ] && [ -z "$(find "$(dirname "$rep")/out.log" -maxdepth 0 2>/dev/null)" ] || return 1
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" || return 1
   lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
@@ -1545,7 +1559,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
-  case "${b:-subscription}" in codex|copilot|agy|opencode) echo "?"; exit 0 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy|opencode|local) echo "?"; exit 0 ;; esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(proven_session "$1" "$st")"
@@ -1918,7 +1932,7 @@ if [ "$engine" != claude ] && [ "$console" = 1 ]; then
   exit 1
 fi
 if [ "$engine" != claude ] && [ "$headless" = 1 ]; then
-  echo "--headless applies only to Claude with --console; Codex, Copilot, agy and opencode are already headless" >&2
+  echo "--headless applies only to Claude with --console; Codex, Copilot, agy, opencode and local are already headless" >&2
   exit 1
 fi
 [ "$engine" != claude ] || site_tier_ok "$model" "$prompt" || exit 1
@@ -2043,6 +2057,9 @@ if [ "$engine" != claude ]; then
     cmd+=" \"$prompt_cmd\" >$out_cmd 2>&1"
   elif [ "$engine" = opencode ]; then
     cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/opencode_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(opencode_model "$model")") $(printf %q "$lprompt")"
+    cmd+=" >$out_cmd 2>&1"
+  elif [ "$engine" = local ]; then
+    cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/local_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(local_model "$model")") $(printf %q "$lprompt")"
     cmd+=" >$out_cmd 2>&1"
   elif [ "$engine" = agy ]; then
     cmd="cd $(printf %q "$dir") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --add-dir $(printf %q "$hand") $adsf--model $(printf %q "$(agy_model "$model")")"
