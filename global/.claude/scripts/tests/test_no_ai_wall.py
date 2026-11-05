@@ -652,5 +652,194 @@ class ReviewFixTests(Fixture):
         self.assertIsNone(self.call("mcp__x__ask", prompt="compare work/a.txt with ../wall/open/ok.txt"))
 
 
+class BypassGapTests(Fixture):
+    """Four gaps the automated security review found after the tier 1 merge (issue 228, PR 230), and issue 233. Fake folders only."""
+
+    def call(self, tool, cwd=None, **ti):
+        return w.evaluate({"tool_name": tool, "tool_input": ti, "cwd": cwd or self.p("work")}, w.load_paths())
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"))
+        h = self.home
+        for d in (".claude/hooks", ".claude/scripts", ".claude/commands", ".claude/projects", "empty"):
+            os.makedirs(os.path.join(h, d))
+        for f in (".claude/hooks/x.py", ".claude/hooks/no-ai-wall-guard.py", ".claude/scripts/x.py", ".claude/scripts/no_ai_wall.py",
+                  ".claude/settings.json", ".claude/commands/c.md", ".claude/projects/p.txt"):
+            with open(os.path.join(h, f), "w") as fh:
+                fh.write("x")
+        self.d = lambda rel: os.path.join(h, ".claude", rel)
+
+    def denied(self, cmd, what="protected file"):
+        r = self.call("Bash", command=cmd)
+        self.assertIsNotNone(r, cmd)
+        self.assertEqual(r[1], what, cmd)
+
+    def allowed(self, cmd):
+        self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
+    # HIGH: wildcards in an operand
+    def test_wildcard_operands_that_reach_the_guarded_places_are_writes(self):
+        h = self.home
+        for cmd in ("rm -rf %s/.claude/h*" % h, "rm -rf %s/.cl*" % h, "rm -rf %s/.claude/hooks/*" % h, "chmod 000 %s/.c*/scripts" % h,
+                    "mv %s/.claude/s* /tmp/x" % h, "rm %s/.claude/hooks/no-ai-*" % h, "rm -rf %s/.claude/{hooks,junk}" % h, "rm -rf %s/.claude/ho?ks" % h,
+                    "rm -rf %s/.claude/[h]ooks" % h, "cd %s/.claude && rm -rf h*" % h, "rm -rf /*", "rm %s/.claude/scripts/*.py" % h,
+                    "sed -i s/a/b/ %s/.claude/hooks/*.py" % h, "rm -rf %s/.claude/**" % h):
+            self.denied(cmd)
+
+    def test_wildcard_operands_elsewhere_stay_allowed(self):
+        h = self.home
+        for cmd in ("rm /tmp/a*", "rm -rf %s/.claude/commands/*" % h, "rm %s/.claude/projects/*" % h, "rm -rf %s/.claude/{commands,projects}" % h,
+                    "chmod 644 %s/.claude/commands/*.md" % h, "rm -rf %s/work/*.txt" % self.tmp):
+            self.allowed(cmd)
+
+    # HIGH: copy-target options in every form getopt accepts
+    def test_copy_target_option_forms_are_destinations(self):
+        s, hk = self.d("scripts"), self.d("hooks")
+        for cmd in ("cp -at %s /tmp/a" % s, "cp -vt %s /tmp/a" % s, "cp -avt %s /tmp/a" % hk, "cp --target %s /tmp/a" % s, "cp --targ=%s /tmp/a" % s,
+                    "cp --t=%s /tmp/a" % s, "cp --target-dir %s /tmp/a" % s, "install -vt %s /tmp/a" % s, "cp /tmp/a -t %s" % s, "cp -t%s /tmp/a" % s,
+                    "cp -aT /tmp/a %s/x.py" % s, "cp -r /tmp/empty %s" % self.d(""), "cp -a /tmp/empty/. %s/" % self.d(""),
+                    "cp /tmp/a %s/*.py" % s, "install -m 755 /tmp/a %s/new.sh" % hk):
+            self.denied(cmd)
+
+    def test_reading_guarded_files_with_copy_options_stays_allowed(self):
+        s, h = self.d("scripts"), self.home
+        for cmd in ("cp -at /tmp/dest %s/x.py" % s, "cp -vt /tmp/dest %s/x.py" % self.d("hooks"), "cp --target /tmp/dest %s/x.py" % s,
+                    "cp --targ=/tmp/dest %s/x.py" % s, "cp %s/x.py /tmp/dest/" % s, "cp %s /tmp/backup/" % self.d("settings.json"),
+                    "cp /tmp/a %s/" % self.d("commands"), "cp -r %s /tmp/backup/" % self.d("projects"), "cp -a %s/.claude/skills /tmp/b/" % h,
+                    "rsync -a %s/x.py /tmp/b/" % s):
+            self.allowed(cmd)
+
+    # MEDIUM: cp, install, rsync and ln no longer skip the folder check
+    def test_dest_last_programs_may_not_replace_or_empty_the_guarded_folders(self):
+        h = self.home
+        for cmd in ("rsync -a --delete /tmp/empty/ %s/.claude/" % h, "rsync -a --delete /tmp/empty/ %s/" % self.d("scripts"), "rsync -a /tmp/empty/ %s/.claude/" % h,
+                    "rsync -a --remove-source-files %s/x.py /tmp/b/" % self.d("hooks"), "rsync -a --delete-after /tmp/empty/ %s/" % self.d("hooks"),
+                    "ln -sfn /tmp/evil %s" % self.d("hooks"), "ln -sfn /tmp/evil %s" % self.d("scripts"), "ln -sfn /tmp/evil %s" % self.d("settings.json"),
+                    "cp --remove-destination /tmp/a %s" % self.d("settings.json"), "cp -T %s/x.py /tmp/y" % self.d("hooks"),
+                    "cp -aT /tmp/empty %s" % self.d("scripts")):
+            self.denied(cmd)
+
+    def test_find_and_fd_that_delete_or_run_commands_in_the_guarded_places_are_writes(self):
+        h = self.home
+        for cmd in ("find %s/.claude/hooks -delete" % h, "find %s/.claude -name '*.py' -delete" % h, "find %s/.claude/scripts -exec rm {} +" % h,
+                    "find %s -path '*/hooks/*' -delete" % self.d(""), "find %s/.claude/hooks -execdir sh -c 'echo > x' ;" % h,
+                    "fd -x rm . %s/.claude/scripts" % h, "find %s/.claude -fprint %s/x.py" % (h, self.d("hooks"))):
+            self.denied(cmd)
+        for cmd in ("find %s/.claude/scripts -name '*.py'" % h, "find %s -delete" % self.p("work"), "find %s/.claude/commands -delete" % h,
+                    "find %s/.claude/hooks -type f -print" % h, "fd py %s/.claude/scripts" % h):
+            self.allowed(cmd)
+
+    # follow-ups from the plugin's security review of the first push
+    def test_brace_sequences_and_oversize_braces_fail_closed(self):
+        h = self.home
+        for cmd in ("rm -rf %s/.claude/{a..z}ooks" % h, "rm %s/.claude/hooks/x{1..3}.py" % h, "rm -rf %s/.claude/hooks{,.bak}" % h,
+                    "rm %s/.claude/hooks/x{1..999999}" % h, "rm %s/.claude/{a,b,c,d,e,f,g,h}{1..60}" % h, "rm -rf %s/.claude/{x,{hooks,y}}" % h):
+            self.denied(cmd)
+        self.assertEqual(w._brace_expand("a{1..3}")[0], ["a1", "a2", "a3"])
+        self.assertEqual(w._brace_expand("{c..a}")[0], ["c", "b", "a"])
+        self.assertEqual(w._brace_expand("x{1..9..4}"), (["x1", "x5", "x9"], True))
+        self.assertFalse(w._brace_expand("x{1..9999999}")[1])
+        for cmd in ("rm /tmp/f{1..3}.txt", "rm %s/.claude/projects/p{1..3}.txt" % h, "find %s -name x -exec echo {} +" % self.p("work")):
+            self.allowed(cmd)
+
+    def test_an_option_value_after_the_operands_does_not_hide_the_destination(self):
+        s, hk = self.d("scripts"), self.d("hooks")
+        for cmd in ("cp /tmp/a %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py --suffix .bak" % s, "cp /tmp/a %s/x.py --suf .bak" % s, "install /tmp/a %s/y.sh -m 755" % hk,
+                    "install /tmp/a %s/y.sh -o root -g root" % hk, "rsync -a /tmp/empty/ %s/ --exclude x" % hk, "rsync -a /tmp/empty/ %s/ -e ssh" % hk,
+                    "ln -sf /tmp/evil %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py -v -S .bak" % s):
+            self.denied(cmd)
+        for cmd in ("cp -S .bak /tmp/a /tmp/b", "install -m 755 /tmp/a /tmp/b", "cp /tmp/a /tmp/b --suffix .bak", "rsync -a /tmp/a/ /tmp/b/ --exclude x",
+                    "cp -a /tmp/a /tmp/b -v"):
+            self.allowed(cmd)
+
+    def test_find_and_fd_with_no_root_start_in_the_working_folder(self):
+        h = self.home
+        for cmd in ("cd %s/.claude/hooks && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py' -delete" % h,
+                    "cd %s/.claude/scripts && fd -x rm" % h, "cd %s/.claude && find -L -delete" % h, "cd %s/.claude/hooks && find . -delete" % h):
+            self.denied(cmd)
+        for cmd in ("cd %s && find -delete" % self.p("work"), "cd %s/.claude/commands && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py'" % h):
+            self.allowed(cmd)
+        self.assertIsNone(self.call("Bash", cwd=self.p("work"), command="find -name x -delete"))
+        self.assertIsNotNone(self.call("Bash", cwd=self.d("hooks"), command="find -name x -delete"))
+
+    # a directory change the text cannot resolve: the working folder is unknown, so relative targets fail closed
+    def test_directory_changes_the_parser_cannot_resolve_fail_closed(self):
+        h = self.home
+        for cmd in ("cd - && rm x.py", "cd %s/.claude/hooks; cd - ; rm x.py" % h, "popd && find -delete", "cd $WHERE && rm x.py",
+                    "cd $(pwd)/../.claude/hooks && rm x.py", "cd `echo hooks` && find -delete", "builtin cd - && rm no-ai-wall-guard.py",
+                    "env -C %s/.claude/hooks rm x.py" % h, "env -C %s/.claude/hooks find -delete" % h, "cd %s/.claude && cd - && echo hi > x.py" % h,
+                    "sudo -u root rm %s/.claude/hooks/x.py" % h):
+            self.denied(cmd)
+        # known folders: a bare cd or cd ~ goes to the home folder, pushd and builtin cd work like cd
+        for cmd in ("cd && rm .claude/hooks/x.py", "cd ~ && rm .claude/hooks/x.py", "pushd %s/.claude/hooks && rm x.py" % h,
+                    "builtin cd %s/.claude/scripts && find -delete" % h, "command cd %s/.claude/hooks && rm x.py" % h):
+            self.denied(cmd)
+        for cmd in ("cd %s && cd - && ls" % self.p("work"), "cd %s/.claude/commands && rm c.md" % h, "pushd %s && rm y.txt" % self.p("work"),
+                    "env -C %s ls" % self.p("work"), "cd - && cat x.py"):
+            self.allowed(cmd)
+
+    def test_a_directory_change_behind_a_keyword_or_brace_fails_closed(self):
+        h = self.home
+        for cmd in ("if true; then cd %s/.claude/hooks; rm x.py; fi" % h, "{ cd %s/.claude/hooks; rm x.py; }" % h, "time cd %s/.claude/hooks && rm x.py" % h,
+                    "FOO=1 cd %s/.claude/hooks && rm x.py" % h, "for d in a; do cd $d; find -delete; done", "(cd %s/.claude/hooks && rm x.py)" % h):
+            self.denied(cmd)
+        self.allowed("echo hi; rm %s/.claude/commands/c.md" % h)  # no directory change: an absolute operand is judged on its own
+
+    def test_wrapper_options_do_not_hide_an_inline_interpreter_or_a_delay_value(self):
+        h = self.home
+        for cmd in ("env -C %s/.claude python3 -c 'open(\"hooks/x.py\",\"w\")'" % h, "sudo -u root bash -c 'rm %s/.claude/hooks/x.py'" % h,
+                    "timeout 5 rm %s/.claude/hooks/x.py" % h, "nice -n 5 rm %s/.claude/hooks/x.py" % h, "sudo -E node -e 'x(\"%s/.claude/scripts/x.py\")'" % h):
+            self.denied(cmd)
+        self.allowed("sudo -u root ls %s/.claude/hooks" % h)
+
+    def test_rsync_option_values_are_destinations(self):
+        h = self.home
+        for cmd in ("rsync --log-file=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --log-file %s/.claude/hooks/x.py /tmp/a /tmp/b" % h,
+                    "rsync --log=%s/.claude/scripts/x.py /tmp/a /tmp/b" % h, "rsync --backup-dir %s/.claude/hooks /tmp/a /tmp/b" % h,
+                    "rsync -T %s/.claude/hooks /tmp/a /tmp/b" % h, "rsync -aT%s/.claude/hooks /tmp/a /tmp/b" % h,
+                    "rsync --write-batch=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --partial-dir=%s/.claude/scripts /tmp/a /tmp/b" % h):
+            self.denied(cmd)
+        for cmd in ("rsync -av --log-file=/tmp/log /tmp/a /tmp/b", "rsync -av %s/.claude/hooks/x.py /tmp/b" % h,
+                    "rsync -av --exclude %s/.claude/hooks/x.py /tmp/a /tmp/b" % h):
+            self.allowed(cmd)
+
+    # MEDIUM: one normaliser for Windows drives
+    def test_windows_drive_paths_ignore_case_in_every_check(self):
+        os.environ["HOME"] = "/mnt/c/Users/Someone"
+        for cmd in ("rm -rf /mnt/C/USERS/SOMEONE/.CLAUDE", "mv /MNT/c/Users/Someone/.claude/SCRIPTS /tmp/x", "chmod 000 /mnt/c/users/someone/.Claude/Hooks",
+                    "ln -sfn /tmp/evil /mnt/c/USERS/someone/.claude/HOOKS", "rsync -a --delete /tmp/empty/ /mnt/C/Users/SOMEONE/.claude/"):
+            self.denied(cmd)
+        f = "/mnt/c/Users/Someone/.config/afa/no-ai-paths.txt"
+        self.assertTrue(w._is_protected("/MNT/C/users/someone/.config/AFA/no-ai-paths.txt", "/", [f]))
+        self.assertTrue(w._reaches("/mnt/C/USERS", "/", [f]))
+        self.assertTrue(w._reaches("/mnt/c/users/SOMEONE/.config", "/", [f]))
+        self.assertFalse(w._reaches("/mnt/d/USERS", "/", [f]))
+        self.assertFalse(w._is_protected("/home/someone/.config/afa/no-ai-paths.txt", "/", [f]))
+        self.assertFalse(w._is_protected("/Home/x/no-ai-paths.txt", "/", ["/home/x/no-ai-paths.txt"]))  # outside /mnt, case matters
+
+    # issue 233: a lane launcher is not a search
+    def test_lane_launcher_with_a_parent_of_a_listed_folder_is_allowed(self):
+        parent = self.p("wall")
+        for cmd in ("lane.sh --console --headless n %s sonnet /tmp/p.md" % parent, "~/.claude/scripts/lane.sh n %s sonnet p.md; ls -R %s" % (parent, self.p("work")),
+                    "lane.sh n %s sonnet p.md && find %s -name x" % (parent, self.p("work")), "git -C %s grep x; lane.sh n %s s p.md" % (self.p("work"), parent),
+                    "bash ~/.claude/scripts/lane.sh n %s sonnet p.md 2>&1 | tail -3; rg x %s" % (parent, self.p("work"))):
+            self.allowed(cmd)
+
+    def test_lane_launcher_still_refuses_a_listed_folder_and_hides_no_search(self):
+        wall, parent = self.p("wall/clientA"), self.p("wall")
+        self.denied("lane.sh n %s sonnet p.md" % wall, "entry 1")
+        self.denied("lane.sh n %s/docs sonnet p.md" % wall, "entry 1")
+        self.denied("lane.sh n %s sonnet p.md; find %s -name x" % (self.p("work"), parent), "entry 1")
+        self.denied("lane.sh n %s sonnet $(find %s -name x)" % (self.p("work"), parent), "entry 1")
+        self.denied("lane.sh n %s sonnet `rg x %s`" % (self.p("work"), parent), "entry 1")
+        self.denied("find %s -name x; lane.sh n /tmp s p.md" % parent, "entry 1")
+        self.denied("bash -c 'lane.sh n /tmp s p.md; find %s'" % parent, "entry 1")
+        # a wrapper option before lane.sh is not a plain launch, so no scan for a "known program" may make it one
+        self.denied("env -S 'find %s' lane.sh n /tmp s p.md" % parent, "entry 1")
+        self.denied("flock -c 'rg x %s' lane.sh n /tmp s p.md" % parent, "entry 1")
+        self.denied("timeout 5 find %s -name x; lane.sh n /tmp s p.md" % parent, "entry 1")
+
+
 if __name__ == "__main__":
     unittest.main()
