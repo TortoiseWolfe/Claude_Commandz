@@ -152,6 +152,30 @@ class Build(unittest.TestCase):
         names = {n for p in c.people for n in p["names"]}
         self.assertEqual(names, {"Mo,ra Vale"})
 
+    def test_a_row_with_only_a_name_column_is_not_a_person(self):
+        c = rb.Collector()
+        rb.read_sql("CREATE TABLE `state` (\n `id` int,\n `name` varchar(9),\n `abbreviation` varchar(3)\n);\n"
+                    "INSERT INTO `state` VALUES (1,'Tennessee Valley','TV'),(2,'Quillfeather Region','QR');\n"
+                    "CREATE TABLE `contact` (\n `id` int,\n `display_name` varchar(9),\n `first_name` varchar(9),\n `last_name` varchar(9)\n);\n"
+                    "INSERT INTO `contact` VALUES (1,'Dr. Zelda Quillfeather','Zelda','Quillfeather'),(2,'Acme Cooperative','','');\n", c)
+        names = {n for p in c.people for n in p["names"]}
+        self.assertEqual(names, {"Dr. Zelda Quillfeather", "Zelda Quillfeather"})
+
+    def test_json_object_with_only_a_name_is_not_a_person_but_csv_is_lenient(self):
+        c = rb.Collector()
+        rb.walk_json({"tags": [{"name": "Gardening Club"}], "member": {"name": "Cordelia Wexcombe", "email": "c@example.invalid"}}, c)
+        self.assertEqual({n for p in c.people for n in p["names"]}, {"Cordelia Wexcombe"})
+        c2 = rb.Collector()
+        rb.read_csv("Name\nCordelia Wexcombe\n", c2, ",")
+        self.assertEqual({n for p in c2.people for n in p["names"]}, {"Cordelia Wexcombe"})
+
+    def test_output_has_a_breakdown_by_source_and_no_names(self):
+        self.put("d.sql", SQL)
+        _, out, _ = self.build()
+        self.assertIn("records by source", out)
+        self.assertIn("sql:contact", out)
+        self.assertRegex(out, r"name shapes: 2-word \d+")
+
     def test_classify(self):
         self.assertEqual(rb.classify("First Name"), "first")
         self.assertEqual(rb.classify("last_name"), "last")

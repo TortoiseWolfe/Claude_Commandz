@@ -151,7 +151,7 @@ def normalize_phone(text):
 def name_variants(name):
     """The written forms of one name that should match: 'First Last', 'Last, First', 'Last First'."""
     name = re.sub(r"\s+", " ", (name or "").strip())
-    if len(name) < 3:
+    if len(name) < 3 or (" " not in name and "," not in name):  # a one-word "name" is a label as often as a person: Presidio's job
         return []
     out = [name]
     if "," in name:

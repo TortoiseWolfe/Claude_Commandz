@@ -66,6 +66,7 @@ class Collector:
         self.by_phone = {}
         self.files = {}
         self.skipped = 0
+        self.by_label = {}      # where records came from (a table or a file kind) -> [records, names]
 
     def add(self, names=(), emails=(), phones=()):
         names = {n for n in (clean_name(x) for x in names) if n}
@@ -89,8 +90,12 @@ class Collector:
         for p in person["phones"]:
             self.by_phone.setdefault(p, person)
 
-    def add_record(self, record):
-        """record: a dict of column -> value (strings). Returns True when it carried a recognised column."""
+    def add_record(self, record, label="?", strict=False):
+        """record: a dict of column -> value (strings). Returns True when it carried a recognised column.
+
+        strict (database rows and json objects): a lone name column (a state, a country, an option, an organisation)
+        is not a person. A full name counts only beside a first or last name, an email or a phone in the same row.
+        """
         parts = {"email": [], "phone": [], "first": [], "last": [], "full": []}
         for key, value in record.items():
             kind = classify(key)
@@ -99,8 +104,13 @@ class Collector:
         if not any(parts.values()):
             return False
         names = list(parts["full"])
+        if strict and not (parts["first"] or parts["last"] or parts["email"] or parts["phone"]):
+            names = []
         if parts["first"] and parts["last"]:
             names.append("%s %s" % (parts["first"][0], parts["last"][0]))
+        tally = self.by_label.setdefault(label, [0, 0])
+        tally[0] += 1
+        tally[1] += len([n for n in names if clean_name(n)])
         self.add(names, parts["email"], parts["phone"])
         return True
 
@@ -112,10 +122,20 @@ class Collector:
         return {"salt": salt, "people": people}
 
 
+def name_shapes(roster):
+    """Counts of names by number of words, so a roster full of one-word labels shows up without printing any name."""
+    shapes = {}
+    for p in roster["people"]:
+        for n in p["names"]:
+            k = "%d-word" % min(len(n.split()), 4) if len(n.split()) < 4 else "4+-word"
+            shapes[k] = shapes.get(k, 0) + 1
+    return ", ".join("%s %d" % kv for kv in sorted(shapes.items()))
+
+
 def clean_name(value):
     if not isinstance(value, str):
         return ""
-    v = re.sub(r"\s+", " ", value.strip().strip("\"'"))
+    v = re.sub(r"\s+", " ", value.strip().strip("\"'")).strip(" ,;")
     if len(v) < 3 or len(v) > 80 or v.lower() in NOT_A_NAME or "@" in v:
         return ""
     if not re.search(r"[A-Za-z]{2}", v) or sum(c.isdigit() for c in v) > 2:
@@ -131,13 +151,13 @@ def read_csv(text, collector, delimiter):
     if not header:
         return
     for row in reader:
-        collector.add_record({h: (row[i] if i < len(row) else "") for i, h in enumerate(header)})
+        collector.add_record({h: (row[i] if i < len(row) else "") for i, h in enumerate(header)}, "csv")
 
 
 def walk_json(obj, collector):
     if isinstance(obj, dict):
         flat = {k: v for k, v in obj.items() if isinstance(v, str)}
-        collector.add_record(flat)
+        collector.add_record(flat, "json", strict=True)
         for v in obj.values():
             if isinstance(v, (dict, list)):
                 walk_json(v, collector)
@@ -260,7 +280,7 @@ def read_sql(text, collector):
         if not cols or not any(classify(c) for c in cols):
             continue
         for row in split_tuples(text, m.end()):
-            collector.add_record({c: v for c, v in zip(cols, row) if isinstance(v, str)})
+            collector.add_record({c: v for c, v in zip(cols, row) if isinstance(v, str)}, "sql:" + m.group(1), strict=True)
 
 
 def read_text_fallback(text, collector):
@@ -362,6 +382,9 @@ def main(argv=None):
         len(roster["people"]), sum(len(p["names"]) for p in roster["people"]), sum(len(p["emails"]) for p in roster["people"]),
         sum(len(p["phones"]) for p in roster["people"]),
         ", ".join("%s %d" % kv for kv in sorted(collector.files.items())) or "none", collector.skipped))
+    print("coop roster: name shapes: %s; records by source (records/names): %s" % (
+        name_shapes(roster), ", ".join("%s %d/%d" % (k, v[0], v[1]) for k, v in sorted(
+            collector.by_label.items(), key=lambda kv: -kv[1][0])[:15])))
     return 0
 
 

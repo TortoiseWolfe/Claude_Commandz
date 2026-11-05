@@ -92,6 +92,10 @@ class RosterAndPatterns(unittest.TestCase):
         s = cs.Scrubber(cs.Roster({"people": [{"names": ["Ann Lee"]}]}), use_ner=False)
         self.assertEqual(s.scrub_strings(["Joann Leeds"])[0], "Joann Leeds")
 
+    def test_one_word_roster_names_are_not_matched(self):
+        s = cs.Scrubber(cs.Roster({"people": [{"names": ["Friends"]}, {"names": ["Smith,"]}]}), use_ner=False)
+        self.assertEqual(s.scrub_strings(["Friends of Smith"])[0], "Friends of Smith")
+
     def test_longer_name_wins_over_shorter(self):
         s = cs.Scrubber(cs.Roster({"people": [{"names": ["Ann Lee"]}, {"names": ["Ann Lee Smith"]}]}), use_ner=False)
         self.assertEqual(s.scrub_strings(["Ann Lee Smith"])[0], "[PERSON_2]")
