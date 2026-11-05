@@ -622,42 +622,41 @@ def _copy_targets(prog, args):
     return out
 
 
-_VALUED_LONG = ("suffix", "mode", "owner", "group", "strip-program", "context")  # cp, install and ln options that take a separate value
-_RSYNC_PLAIN = ("archive", "recursive", "verbose", "quiet", "dry-run", "progress", "compress", "times", "perms", "owner", "group", "links",
-                "update", "force", "checksum", "partial", "human-readable", "stats", "itemize-changes", "inplace", "whole-file", "delete",
-                "remove-source-files", "backup", "relative", "dirs", "hard-links", "numeric-ids", "protect-args", "list-only", "info")
-
-
-def _option_values_may_move_the_destination(prog, args):
-    """True when an option could take the NEXT word as its value (`-S .bak`, `-m 755`, `--suffix .bak`, rsync `-e ssh`). GNU getopt lets
-    options follow the operands, so `cp a ~/.claude/scripts/x.py -S .bak` ends in a value, not in the destination: the last-operand rule
-    cannot be trusted, and every operand is checked as a destination instead."""
+def _option_after_operand(args):
+    """True when an option follows an operand-looking word. GNU getopt lets options come after the operands, and an option may take the
+    next word as its value (`cp a ~/.claude/scripts/x.py -S .bak` ends in a value, not in the destination), so the last operand cannot be
+    trusted as the destination and every operand is checked as one instead. Fails closed for every option of every program."""
+    seen = False
     for a in args:
         if a == "--":
             break
-        if a.startswith("--"):
-            name, eq, _ = a[2:].partition("=")
-            if eq or not name:
-                continue
-            if prog == "rsync":
-                if not any(p.startswith(name) for p in _RSYNC_PLAIN):
-                    return True
-            elif any(v.startswith(name) for v in _VALUED_LONG):
+        if a.startswith("-") and len(a) > 1:
+            if seen:
                 return True
-        elif a.startswith("-") and len(a) > 1:
-            for ch in a[1:]:
-                if ch in ("eTfBM@" if prog == "rsync" else "Smog"):
-                    return True
-                if ch == "t" and prog != "rsync":
-                    break  # the target folder is read by _copy_targets
+        else:
+            seen = True
     return False
 
 
+_ALL_PROGRAMS = _WRITE_PROGRAMS | _DEST_LAST_PROGRAMS | _FIND_PROGRAMS | {"sed", "gsed", "perl", "ruby"}
+
+
 def _skip_wrappers(words):
+    """Index of the program a command really runs, past sudo, env, VAR=x and the like. A wrapper's own options (`sudo -u root rm`,
+    `env -C dir find`) are skipped too: the program is the first known one after them."""
     i = 0
     while i < len(words) and (words[i] in _WRAPPERS or re.fullmatch(r"\w+=\S*", words[i])):
         i += 1
+    if i and i < len(words) and words[i].startswith("-"):
+        for k in range(i, len(words)):
+            if os.path.basename(words[k]) in _ALL_PROGRAMS:
+                return k
     return i
+
+
+def _changes_folder(words):
+    """True for a command line that moves the working folder with a wrapper option (`env -C dir`, `env --chdir=dir`)."""
+    return "env" in words and any(w == "-C" or w == "--chdir" or w.startswith(("--chdir=", "-C")) for w in words)
 
 
 def _is_launcher(seg):
@@ -679,24 +678,45 @@ def bash_writes_guarded(command, cwd):
     redirection into one, a program that changes its arguments (rm, tee, sed -i, perl -i, mv, chmod ...), the destination of cp, install,
     rsync or ln (named by position or by any -t form), find or fd with -delete or -exec, or an inline interpreter (python -c, node -e, bash -c)
     that mentions one. Operands are read after brace and wildcard expansion. A command that only reads or runs such a file is not stopped."""
-    cur = cwd or os.getcwd()
+    start = cwd or os.getcwd()
+    cur = start  # None once a directory change cannot be worked out from the text (cd -, popd, an unset variable, a substitution)
     places = guarded_places()
+
+    def unknown(a):  # a relative operand after a directory change the text cannot resolve: it fails closed
+        return cur is None and not a.startswith(("/", "~", "$"))
+
     for seg in _segments(command.replace(">|", ">")):  # `>|` is a plain redirect; the pipe split would cut it in two
         for m in _REDIRECT.finditer(seg):
-            if _touches(m.group(1).strip("'\""), cur, []):
+            tgt = m.group(1).strip("'\"")
+            if unknown(tgt) or _touches(tgt, cur or start, []):
                 return True
         words = _words(seg)
         if not words:
             continue
-        if words[0] == "cd" and len(words) > 1:
-            cur = expand(words[1], cur)
+        w0 = words[0]
+        if w0 in ("builtin", "command") and words[1:2] == ["cd"]:
+            words, w0 = words[1:], "cd"
+        if w0 in ("cd", "pushd", "chdir", "popd"):
+            arg = next((a for a in words[1:] if a == "-" or not a.startswith("-")), None)
+            if w0 == "popd" or arg == "-" or re.search(r"`|\$\(", seg):
+                cur = None
+            elif arg is None or arg == "~":
+                cur = home()
+            else:
+                new = expand(arg, cur or start)
+                cur = None if "$" in new else new
             continue
         i = _skip_wrappers(words)
         if i >= len(words):
             continue
+        seg_cur = None if _changes_folder(words[:i]) else cur
         prog = os.path.basename(words[i])
         args = words[i + 1:]
         operands = [a for a in args if a and not (a.startswith("-") and "/" not in a)]
+        base = seg_cur or start
+
+        def lost(a):  # no known working folder for this segment, and the operand is relative
+            return seg_cur is None and not a.startswith(("/", "~", "$"))
 
         if prog in _DEST_LAST_PROGRAMS:
             flags = _short_flags(args)
@@ -707,29 +727,31 @@ def bash_writes_guarded(command, cwd):
                 dests = operands + targets
             elif targets:
                 dests = targets
-            elif _option_values_may_move_the_destination(prog, args):
+            elif _option_after_operand(args):
                 dests = operands
             else:
                 dests = operands[-1:]
             # The destination (every operand when a delete, remove or -T option is on) may not be a guarded file, lie in a guarded folder,
             # or, for a recursive copy, rsync, ln or a delete, be a folder that holds one: `rsync --delete empty/ ~/.claude/` empties the hooks.
             reach = places if (recursive or prog == "ln" or every) else [p for p in places if os.path.isfile(p) or os.path.islink(p)]
-            if any(_touches(d, cur, reach, folders=True, is_dir=bool(targets)) for d in dests):
+            if any(lost(d) or _touches(d, base, reach, folders=True, is_dir=bool(targets)) for d in dests):
                 return True
             continue  # the sources of a copy are only read
         if prog in _FIND_PROGRAMS and any(a in _FIND_WRITE_ACTIONS for a in args):
             roots = list(operands)  # a root, or the file an action writes
             if prog != "find" or not [a for a in args[:1] if not a.startswith(("-", "!", "(", ","))]:
-                roots.append(cur)  # find with no root starts in the working folder; so does fd, whose path argument is optional
-            if any(_touches(a, cur, places, folders=True) for a in roots):
+                if seg_cur is None:
+                    return True  # find with no root starts in a working folder the text cannot name
+                roots.append(seg_cur)  # find with no root starts in the working folder; so does fd, whose path argument is optional
+            if any(lost(a) or _touches(a, base, places, folders=True) for a in roots):
                 return True
         if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
-            if any(_touches(t, cur, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
+            if any(_touches(t, base, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
                 return True
-        if prog in _WRITE_PROGRAMS and any(_touches(a, cur, places) for a in operands):
+        if prog in _WRITE_PROGRAMS and any(lost(a) or _touches(a, base, places) for a in operands):
             return True  # `mv ~/.claude/hooks /tmp/x` or `rm -r ~/.claude` unguards the wall as surely as editing a file
         if prog in ("sed", "gsed", "perl", "ruby") and any(a.startswith("--in-place") or (a.startswith("-") and not a.startswith("--") and "i" in a) for a in args):
-            if any(_touches(a, cur, []) for a in operands):
+            if any(lost(a) or _touches(a, base, []) for a in operands):
                 return True
     return False
 
