@@ -35,6 +35,8 @@ Claude_Commandz/
 
 `context-warn.py` checks the hub transcript on `PostToolUse` and `UserPromptSubmit`, warning once per session at 50%, 60%, and 70% of the auto-compaction window so the session can be handed off before compaction. Register it in `settings.json` with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]` and `"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/context-warn.py"}]}]`.
 
+`coop-scrubber.py` (a `PostToolUse` hook) rewrites a tool's result in a co-op folder so every person's name, email address and phone number is a placeholder before a vendor model reads it; elsewhere it does nothing. The work is in `scripts/coop_scrubber.py`; `scripts/coop_roster_build.py` builds the private roster at run time and prints counts only; `scripts/coop_scrubber_install_presidio.sh` sets up the Presidio venv. The folder patterns, the roster and the venv are private and never come into this repo. Register it with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/coop-scrubber.py"}]}]`. Tests: `scripts/tests/test_coop_scrubber.py`, `test_coop_roster_build.py`, `test_coop_scrubber_hook.py`.
+
 **Totals:** 73 global commands + 3 dotfiles + 90 project commands across 8 repos = **166 backed-up files**.
 
 ## Restore on a new machine
