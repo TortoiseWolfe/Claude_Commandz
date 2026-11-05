@@ -480,7 +480,7 @@ _FIND_WRITE_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint
 _INLINE_PROGRAM = re.compile(r"(?:python[\d.]*|node|perl|ruby|bash|sh|zsh|php|deno|bun)\Z")
 _REDIRECT = re.compile(r"(?:\d*|&)>>?\|?\s*([^\s;|&<>()`]+)")
 _BRACES = re.compile(r"\{([^{}]*,[^{}]*)\}")
-_WRAPPERS = ("sudo", "env", "command", "nohup", "time", "exec")
+_WRAPPERS = ("sudo", "doas", "env", "command", "nohup", "time", "exec", "timeout", "nice", "ionice", "setsid", "stdbuf", "xargs", "flock")
 
 
 _SEQUENCE = re.compile(r"\{(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?\}")
@@ -639,19 +639,44 @@ def _option_after_operand(args):
 
 
 _ALL_PROGRAMS = _WRITE_PROGRAMS | _DEST_LAST_PROGRAMS | _FIND_PROGRAMS | {"sed", "gsed", "perl", "ruby"}
+_RSYNC_VALUED = ("log-file", "backup-dir", "temp-dir", "partial-dir", "write-batch", "only-write-batch", "compare-dest", "copy-dest",
+                 "link-dest", "files-from", "exclude-from", "include-from", "config", "rsh", "rsync-path", "out-format", "log-file-format")
+
+
+def _known_program(word):
+    name = os.path.basename(word)
+    return name in _ALL_PROGRAMS or bool(_INLINE_PROGRAM.match(name))
 
 
 def _skip_wrappers(words):
-    """Index of the program a command really runs, past sudo, env, VAR=x and the like. A wrapper's own options (`sudo -u root rm`,
-    `env -C dir find`) are skipped too: the program is the first known one after them."""
+    """Index of the program a command really runs, past sudo, env, VAR=x and the like. A wrapper's own options and values (`sudo -u root rm`,
+    `env -C dir find`, `timeout 5 rm`) are skipped too: the program is the first known one after them, inline interpreters included."""
     i = 0
     while i < len(words) and (words[i] in _WRAPPERS or re.fullmatch(r"\w+=\S*", words[i])):
         i += 1
-    if i and i < len(words) and words[i].startswith("-"):
+    if i and i < len(words) and not _known_program(words[i]) and re.fullmatch(r"\w+=\S*", words[i - 1]) is None:
         for k in range(i, len(words)):
-            if os.path.basename(words[k]) in _ALL_PROGRAMS:
+            if _known_program(words[k]):
                 return k
     return i
+
+
+def _rsync_values(args):
+    """The words rsync reads as a file to write or a folder to fill, besides its last operand: the value of `--log-file=F` or `--log-file F`
+    (any unambiguous prefix of the option, as rsync takes it) and `-T DIR`. Over-reading is the safe side: every word returned is checked
+    as a destination."""
+    out = []
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("--"):
+            name, eq, val = a[2:].partition("=")
+            if name and name not in ("exclude", "include", "filter") and any(v.startswith(name) for v in _RSYNC_VALUED):
+                out.append(val if eq else nxt)
+        elif a.startswith("-") and len(a) > 1 and "T" in a[1:]:
+            out.append(a[a.index("T") + 1:] or nxt)
+    return out
 
 
 def _changes_folder(words):
@@ -706,6 +731,8 @@ def bash_writes_guarded(command, cwd):
                 new = expand(arg, cur or start)
                 cur = None if "$" in new else new
             continue
+        if any(os.path.basename(x) in ("cd", "pushd", "popd", "chdir") for x in words):
+            cur = None  # a directory change behind a keyword, brace, wrapper or assignment (`then cd x`, `{ cd x; }`, `time cd x`)
         i = _skip_wrappers(words)
         if i >= len(words):
             continue
@@ -723,6 +750,7 @@ def bash_writes_guarded(command, cwd):
             recursive = prog == "rsync" or bool(flags & set("rRa")) or any(a.startswith(("--r", "--a")) for a in args)
             every = any(a.startswith(("--delete", "--del", "--remove")) for a in args) or (prog != "rsync" and "T" in flags)
             targets = _copy_targets(prog, args)
+            extra = _rsync_values(args) if prog == "rsync" else []
             if every:
                 dests = operands + targets
             elif targets:
@@ -731,6 +759,7 @@ def bash_writes_guarded(command, cwd):
                 dests = operands
             else:
                 dests = operands[-1:]
+            dests = dests + extra + [x.split("=", 1)[1] for x in args if x.startswith("--") and "=" in x]  # a file an option writes
             # The destination (every operand when a delete, remove or -T option is on) may not be a guarded file, lie in a guarded folder,
             # or, for a recursive copy, rsync, ln or a delete, be a folder that holds one: `rsync --delete empty/ ~/.claude/` empties the hooks.
             reach = places if (recursive or prog == "ln" or every) else [p for p in places if os.path.isfile(p) or os.path.islink(p)]
@@ -746,7 +775,7 @@ def bash_writes_guarded(command, cwd):
             if any(lost(a) or _touches(a, base, places, folders=True) for a in roots):
                 return True
         if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
-            if any(_touches(t, base, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
+            if (seg_cur is None and any("/" in a for a in args if not a.startswith("-"))) or any(_touches(t, base, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
                 return True
         if prog in _WRITE_PROGRAMS and any(lost(a) or _touches(a, base, places) for a in operands):
             return True  # `mv ~/.claude/hooks /tmp/x` or `rm -r ~/.claude` unguards the wall as surely as editing a file
