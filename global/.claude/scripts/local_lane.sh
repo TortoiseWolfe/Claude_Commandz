@@ -22,10 +22,8 @@ dir="$1"; hand="$2"; want="$3"; prompt_file="$4"
 LIMIT="${LOCAL_LANE_TIMEOUT:-7200}"
 URL="${LOCAL_LANE_URL:-http://127.0.0.1:11434}"
 URL="${URL%/}"
-case "$URL" in
-  http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*|http://\[::1\]|http://\[::1\]:*) ;;
-  *) echo "local: refusing LOCAL_LANE_URL $URL: a local lane talks only to this machine (127.0.0.1, localhost or ::1)" >&2; exit 69 ;;
-esac
+# Strict shape only: scheme, one of three loopback names, optional port. A glob would let http://127.0.0.1:x@other-host through (userinfo).
+[[ "$URL" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?$ ]] || { echo "local: refusing LOCAL_LANE_URL $URL: a local lane talks only to this machine (127.0.0.1, localhost or ::1), written http://host[:port] with nothing after the port" >&2; exit 69; }
 tag="${want#ollama/}"
 [ -n "$tag" ] && [ "$tag" != "$want" ] || { echo "local: model must be ollama/<tag>, got $want" >&2; exit 2; }
 

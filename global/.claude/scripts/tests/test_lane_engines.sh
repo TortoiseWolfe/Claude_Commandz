@@ -400,6 +400,15 @@ LOCAL_LANE_URL=http://example.com:11434 run_lane --engine local lo-remote "$REPO
 LO_RM="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-remote/out.log")"
 assert_contains "$LO_RM" 'a local lane talks only to this machine' 'a remote server URL is refused'
 assert_contains "$LO_RM" 'exit 69' 'a remote server URL exits 69'
+# A loopback-looking prefix does not make a URL local: userinfo, a trailing path or a look-alike host are refused, and nothing is fetched.
+: >"$TMP/curl-calls"
+for bad in 'http://127.0.0.1:11434@example.com' 'http://127.0.0.1@example.com:80' 'http://localhost.example.com:11434' 'http://127.0.0.1:11434/x?y=z' 'https://127.0.0.1:11434'; do
+  LOCAL_LANE_URL="$bad" run_lane --engine local lo-bad-url "$REPO" sonnet "$PROMPT"
+  assert_contains "$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-bad-url/out.log")" 'a local lane talks only to this machine' "refused: $bad"
+done
+[ ! -s "$TMP/curl-calls" ] || fail 'a refused server URL must not be fetched'
+LOCAL_LANE_URL=http://localhost:11435/ run_lane --engine local lo-localhost "$REPO" sonnet "$PROMPT"
+assert_contains "$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-localhost/out.log")" 'on http://localhost:11435' 'localhost with a port (and a trailing slash) is accepted'
 # Same client guard as the other engines.
 run_lane --engine local blocked-client-lo "$HOME_TEST/repos/sample-client-repo" sonnet "$PROMPT"
 assert_exit 1 "$LAST_STATUS" 'local: protected repository is refused'
