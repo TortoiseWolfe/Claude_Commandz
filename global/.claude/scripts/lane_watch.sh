@@ -12,7 +12,8 @@
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
-#   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub
+#   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub. Named ONCE per dialog: a dialog
+#     the hub was already told about is skipped by every later poll and re-armed watcher until the pane shows no dialog (then the next is named).
 #   - a watched lane's tmux window disappears
 #   - a watched lane's window is still there but its pane is a bare shell (lane.sh --pane says "dead <cmd>"): the claude process is gone.
 #     Named once per death ("dead: <lane> (pane shows <cmd>); restart it fresh from its handoff.md"); the mark is cleared when the pane runs
@@ -602,9 +603,17 @@ while :; do
     else
       pane=$(tmux capture-pane -p -t "lanes:$l" 2>/dev/null)
       if printf '%s\n' "$pane" | dialog_waiting; then
-        if rp=$(printf '%s\n' "$pane" | dialog_read_path); then echo "waiting on a dialog: $l (waiting on a read of $rp)"
-        else echo "waiting on a dialog: $l"; fi
-        hit=1; other=1
+        # Once per dialog (5 Nov 2026: a stale "Teach auto mode" nag sat in night-watch all night and every re-armed watcher exited on it at once).
+        # The mark .dialog-<lane> lives in $recycle_dir, so a re-armed watcher skips a dialog the hub has already been told about and keeps
+        # watching; it is cleared when the pane shows no dialog, so the next dialog is named again.
+        if [ ! -e "$recycle_dir/.dialog-$l" ]; then
+          : > "$recycle_dir/.dialog-$l"
+          if rp=$(printf '%s\n' "$pane" | dialog_read_path); then echo "waiting on a dialog: $l (waiting on a read of $rp)"
+          else echo "waiting on a dialog: $l"; fi
+          hit=1; other=1
+        fi
+      else
+        rm -f "$recycle_dir/.dialog-$l"
       fi
       dead_check "$l"
       high_check "$l"
