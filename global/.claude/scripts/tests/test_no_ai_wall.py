@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.dirname(HERE)
+SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "no-ai-wall")  # the wall's own folder in the repo (mirror of ~/.claude/no-ai-wall)
 sys.path.insert(0, SCRIPTS)
 import no_ai_wall as w  # noqa: E402
 
@@ -328,14 +328,14 @@ class SecurityFindingTests(Fixture):
     # 3. the list, the hook and the module cannot be changed from a session
     def test_edit_tools_refuse_the_list_the_hook_and_the_module(self):
         h = self.home
-        for f in (self.pfile, os.path.join(h, ".claude/hooks/no-ai-wall-guard.py"), os.path.join(h, ".claude/scripts/no_ai_wall.py"), os.path.join(h, ".claude/scripts/no_ai_wall.sh")):
+        for f in (self.pfile, os.path.join(h, ".claude/no-ai-wall/no-ai-wall-guard.py"), os.path.join(h, ".claude/no-ai-wall/no_ai_wall.py"), os.path.join(h, ".claude/no-ai-wall/no_ai_wall.sh")):
             for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
                 r = self.call(tool, **{key: f})
                 self.assertIsNotNone(r, (tool, f))
                 self.assertEqual(r[1], "protected file")
 
     def test_protected_file_reached_through_a_symlink_or_dots(self):
-        os.makedirs(os.path.join(self.home, ".claude/scripts"))
+        os.makedirs(os.path.join(self.home, ".claude/no-ai-wall"))
         os.symlink(self.pfile, self.p("work/shortcut.txt"))
         self.assertIsNotNone(self.call("Edit", file_path="shortcut.txt"))
         self.assertIsNotNone(self.call("Edit", file_path=self.p("work/../paths.txt")))
@@ -343,7 +343,7 @@ class SecurityFindingTests(Fixture):
     def test_bash_that_writes_a_protected_file_is_denied(self):
         h = self.home
         for cmd in ("echo x >> " + self.pfile, "sed -i 's/a/b/' " + self.pfile, "rm " + self.pfile, "mv %s /tmp/x" % self.pfile,
-                    "cp /tmp/x " + os.path.join(h, ".claude/scripts/no_ai_wall.py"), "tee " + os.path.join(h, ".claude/hooks/no-ai-wall-guard.py"),
+                    "cp /tmp/x " + os.path.join(h, ".claude/no-ai-wall/no_ai_wall.py"), "tee " + os.path.join(h, ".claude/no-ai-wall/no-ai-wall-guard.py"),
                     "python3 -c \"open('%s','w')\"" % self.pfile, "cat %s > /dev/null" % self.pfile, "truncate -s0 " + self.pfile):
             r = self.call("Bash", command=cmd)
             self.assertIsNotNone(r, cmd)
@@ -354,13 +354,13 @@ class SecurityFindingTests(Fixture):
         self.assertIsNone(self.call("Bash", command="ls -l " + self.pfile))
         self.assertIsNone(self.call("Bash", command="wc -l " + self.pfile))
         self.assertIsNone(self.call("Bash", command="python3 %s %s" % (rv, self.pfile)))
-        self.assertIsNone(self.call("Bash", command="python3 -I %s status" % os.path.join(self.home, ".claude/scripts/no_ai_wall.py")))
+        self.assertIsNone(self.call("Bash", command="python3 -I %s status" % os.path.join(self.home, ".claude/no-ai-wall/no_ai_wall.py")))
         self.assertIsNotNone(self.call("Bash", command="python3 /tmp/other.py " + self.pfile))
         self.assertIsNotNone(self.call("Bash", command="cat " + self.pfile))  # the contents stay out of the transcript
 
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))
-        self.assertIsNone(self.call("Read", file_path=os.path.join(self.home, ".claude/scripts/no_ai_wall.py")))
+        self.assertIsNone(self.call("Read", file_path=os.path.join(self.home, ".claude/no-ai-wall/no_ai_wall.py")))
 
     def test_unknown_tool_naming_a_protected_file_is_denied(self):
         self.assertIsNotNone(self.call("mcp__fs__write_file", path=self.pfile, content="x"))
@@ -492,12 +492,32 @@ class ReviewFixTests(Fixture):
 
     # finding 1: protected files, with the list full or empty
     def protected_cases(self):
+        """Everything in the wall's own folder (any name, new files too), the three places the wall lived before that folder existed, and settings."""
         h = self.home
-        return [os.path.join(h, ".claude/hooks/other-hook.py"), os.path.join(h, ".claude/hooks/x.sh"),
-                os.path.join(h, ".claude/scripts/gmail_api.py"), os.path.join(h, ".claude/scripts/lane.sh"),
-                os.path.join(h, ".claude/scripts/tests/test_x.py"), os.path.join(h, ".claude/settings.json"),
+        return [os.path.join(h, ".claude/no-ai-wall/other-hook.py"), os.path.join(h, ".claude/no-ai-wall/x.sh"),
+                os.path.join(h, ".claude/no-ai-wall/notes.md"), os.path.join(h, ".claude/no-ai-wall/tests/test_x.py"),
+                os.path.join(h, ".claude/settings.json"),
                 os.path.join(h, ".claude/settings.local.json"), self.p("work/.claude/settings.json"),
                 self.p("work/.claude/settings.local.json")]
+
+    def ordinary_cases(self):
+        """The narrow lock: other tooling under ~/.claude/scripts and ~/.claude/hooks is not guarded."""
+        h = self.home
+        return [os.path.join(h, ".claude/scripts/lane.sh"), os.path.join(h, ".claude/scripts/gmail_api.py"), os.path.join(h, ".claude/scripts/tests/test_x.py"),
+                os.path.join(h, ".claude/scripts/install_global.py"), os.path.join(h, ".claude/hooks/coop-scrubber.py"), os.path.join(h, ".claude/hooks/other-hook.py"),
+                os.path.join(h, ".claude/hooks/x.sh"), os.path.join(h, ".claude/no-ai-wall-notes/x.py")]
+
+    def test_ordinary_scripts_and_hooks_stay_writable_with_the_list_full_or_empty(self):
+        for entries in (None, "# nothing listed yet"):
+            if entries:
+                self.paths(entries)
+            for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
+                for f in self.ordinary_cases():
+                    self.assertIsNone(self.call(tool, **{key: f}), (tool, f))
+
+    def test_a_folder_that_only_starts_with_the_wall_name_is_not_the_wall(self):
+        self.assertIsNone(self.call("Write", file_path=os.path.join(self.home, ".claude/no-ai-wall-extras/x.py")))
+        self.assertIsNone(self.call("Bash", command="echo x > %s/.claude/no-ai-wall.bak" % self.home))
 
     def test_session_may_not_write_hook_script_or_settings_files(self):
         for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
@@ -523,7 +543,7 @@ class ReviewFixTests(Fixture):
 
     def test_files_that_are_not_protected_stay_writable(self):
         h = self.home
-        for f in (os.path.join(h, ".claude/hooks/notes.md"), os.path.join(h, ".claude/scripts/data.json"), os.path.join(h, ".claude/commands/x.md"),
+        for f in (os.path.join(h, ".claude/scripts/notes.md"), os.path.join(h, ".claude/hooks/data.json"), os.path.join(h, ".claude/commands/x.md"),
                   self.p("work/settings.json"), self.p("work/script.py"), self.p("work/.claude/commands/x.md"), os.path.join(h, ".claude/other.json")):
             self.assertIsNone(self.call("Write", file_path=f), f)
 
@@ -531,17 +551,17 @@ class ReviewFixTests(Fixture):
         real = self.p("work/real-scripts")
         os.makedirs(real)
         os.makedirs(os.path.join(self.home, ".claude"))
-        os.symlink(real, os.path.join(self.home, ".claude/scripts"))
+        os.symlink(real, os.path.join(self.home, ".claude/no-ai-wall"))
         self.assertIsNotNone(self.call("Write", file_path=os.path.join(real, "x.py")))
-        self.assertIsNotNone(self.call("Write", file_path=os.path.join(self.home, ".claude/scripts/x.py")))
+        self.assertIsNotNone(self.call("Write", file_path=os.path.join(self.home, ".claude/no-ai-wall/x.py")))
 
     def test_bash_writes_to_hook_script_or_settings_files_are_denied(self):
         h = self.home
-        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/scripts/x.py"), os.path.join(h, ".claude/hooks/y.sh")
+        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/no-ai-wall/x.py"), os.path.join(h, ".claude/no-ai-wall/y.sh")
         proj = self.p("work/.claude/settings.local.json")
         for cmd in ("echo '{}' > " + s, "echo x >> " + py, "cat /tmp/a >| " + sh, "sed -i 's/a/b/' " + py, "tee " + sh + " < /tmp/a", "cp /tmp/a " + py,
                     "cp -f /tmp/a /tmp/b " + os.path.dirname(py) + "/", "mv /tmp/a " + s, "mv " + py + " /tmp/gone", "rm " + sh, "truncate -s0 " + proj,
-                    "jq . /tmp/a > /tmp/b && mv /tmp/b " + s, "chmod +x " + py, "cd %s/.claude/scripts && echo x > x.py" % h, "python3 -c \"open('%s','w')\"" % s,
+                    "jq . /tmp/a > /tmp/b && mv /tmp/b " + s, "chmod +x " + py, "cd %s/.claude/no-ai-wall && echo x > x.py" % h, "python3 -c \"open('%s','w')\"" % s,
                     "install -m 755 /tmp/a " + sh, "ln -sf /tmp/evil " + py, "cp -t %s /tmp/a" % os.path.dirname(py), "perl -pi -e 's/a/b/' " + s):
             r = self.call("Bash", command=cmd)
             self.assertIsNotNone(r, cmd)
@@ -549,8 +569,8 @@ class ReviewFixTests(Fixture):
 
     def test_bash_may_not_move_or_delete_the_folders_that_hold_the_guarded_files(self):
         h = self.home
-        for cmd in ("mv %s/.claude/hooks /tmp/gone" % h, "rm -rf %s/.claude/scripts" % h, "rm -r %s/.claude" % h, "mv %s/.claude /tmp/x" % h,
-                    "chmod 000 %s/.claude/hooks" % h, "rm -rf " + h, "cd %s/.claude && rm -rf hooks" % h, "mv ../home/.claude/scripts /tmp/y"):
+        for cmd in ("mv %s/.claude/no-ai-wall /tmp/gone" % h, "rm -rf %s/.claude/no-ai-wall" % h, "rm -r %s/.claude" % h, "mv %s/.claude /tmp/x" % h,
+                    "chmod 000 %s/.claude/no-ai-wall" % h, "rm -rf " + h, "cd %s/.claude && rm -rf no-ai-wall" % h, "mv ../home/.claude/no-ai-wall /tmp/y"):
             r = self.call("Bash", command=cmd)
             self.assertIsNotNone(r, cmd)
             self.assertEqual(r[1], "protected file", cmd)
@@ -559,23 +579,23 @@ class ReviewFixTests(Fixture):
 
     def test_cp_target_directory_forms_are_destinations(self):
         h = self.home
-        d = os.path.join(h, ".claude/scripts")
+        d = os.path.join(h, ".claude/no-ai-wall")
         for cmd in ("cp --target-directory=%s /tmp/a" % d, "cp -t%s /tmp/a" % d, "cp --target-directory %s /tmp/a" % d, "install -t %s /tmp/a" % d):
             self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
-        self.assertIsNone(self.call("Bash", command="cp -t /tmp/dest %s/.claude/scripts/x.py" % h))
+        self.assertIsNone(self.call("Bash", command="cp -t /tmp/dest %s/.claude/no-ai-wall/x.py" % h))
 
     def test_guarded_files_on_a_windows_drive_ignore_case(self):
         os.environ["HOME"] = "/mnt/c/Users/Someone"
-        for f in ("/mnt/C/USERS/SOMEONE/.CLAUDE/Settings.JSON", "/mnt/c/users/someone/.claude/SCRIPTS/X.PY", "/mnt/c/Users/Someone/.Claude/hooks/y.SH"):
+        for f in ("/mnt/C/USERS/SOMEONE/.CLAUDE/Settings.JSON", "/mnt/c/users/someone/.claude/NO-AI-WALL/X.PY", "/mnt/c/Users/Someone/.Claude/no-ai-wall/y.SH"):
             r = self.call("Write", file_path=f)
             self.assertIsNotNone(r, f)
             self.assertEqual(r[1], "protected file", f)
 
     def test_bash_runs_and_reads_scripts_and_settings_freely(self):
         h = self.home
-        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/scripts/x.py"), os.path.join(h, ".claude/hooks/y.sh")
+        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/no-ai-wall/x.py"), os.path.join(h, ".claude/no-ai-wall/y.sh")
         for cmd in ("python3 " + py + " draft-create --to a", "bash " + sh, "cat " + s, "cp " + py + " /tmp/backup/", "cp -a %s %s /tmp/backup/" % (py, sh),
-                    "diff " + py + " /tmp/x.py", "echo hi > /tmp/out.txt", "ls " + os.path.dirname(py), "grep -n def " + py, "cd %s/.claude/scripts && python3 x.py" % h):
+                    "diff " + py + " /tmp/x.py", "echo hi > /tmp/out.txt", "ls " + os.path.dirname(py), "grep -n def " + py, "cd %s/.claude/no-ai-wall && python3 x.py" % h):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
     def test_bash_protected_check_runs_when_the_list_has_no_entries(self):
@@ -602,7 +622,7 @@ class ReviewFixTests(Fixture):
         self.assertIsNotNone(self.call("mcp__fs__read", path="./shortcut/docs/secret.txt"))
 
     def test_mcp_relative_path_to_a_protected_file_is_denied(self):
-        scripts = os.path.join(self.home, ".claude/scripts")
+        scripts = os.path.join(self.home, ".claude/no-ai-wall")
         os.makedirs(scripts)
         r = self.call("mcp__fs__write", cwd=scripts, path="./no_ai_wall.py", content="x")
         self.assertEqual(r[1], "protected file")
@@ -634,7 +654,7 @@ class ReviewFixTests(Fixture):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
     def test_inline_interpreter_check_matches_the_interpreter_by_name_only(self):
-        sc = os.path.join(self.home, ".claude/scripts/x.sh")
+        sc = os.path.join(self.home, ".claude/no-ai-wall/x.sh")
         for cmd in ("shellcheck -e SC1090 " + sc, "shasum -c " + sc, "bunzip2 -c " + sc, "nodemon -e js " + sc):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
@@ -662,9 +682,9 @@ class BypassGapTests(Fixture):
         super().setUp()
         self.paths(self.p("wall/clientA"))
         h = self.home
-        for d in (".claude/hooks", ".claude/scripts", ".claude/commands", ".claude/projects", "empty"):
+        for d in (".claude/no-ai-wall", ".claude/scripts", ".claude/hooks", ".claude/commands", ".claude/projects", "empty"):
             os.makedirs(os.path.join(h, d))
-        for f in (".claude/hooks/x.py", ".claude/hooks/no-ai-wall-guard.py", ".claude/scripts/x.py", ".claude/scripts/no_ai_wall.py",
+        for f in (".claude/no-ai-wall/x.py", ".claude/no-ai-wall/no-ai-wall-guard.py", ".claude/no-ai-wall/no_ai_wall.py", ".claude/scripts/x.py", ".claude/hooks/y.sh",
                   ".claude/settings.json", ".claude/commands/c.md", ".claude/projects/p.txt"):
             with open(os.path.join(h, f), "w") as fh:
                 fh.write("x")
@@ -681,10 +701,10 @@ class BypassGapTests(Fixture):
     # HIGH: wildcards in an operand
     def test_wildcard_operands_that_reach_the_guarded_places_are_writes(self):
         h = self.home
-        for cmd in ("rm -rf %s/.claude/h*" % h, "rm -rf %s/.cl*" % h, "rm -rf %s/.claude/hooks/*" % h, "chmod 000 %s/.c*/scripts" % h,
-                    "mv %s/.claude/s* /tmp/x" % h, "rm %s/.claude/hooks/no-ai-*" % h, "rm -rf %s/.claude/{hooks,junk}" % h, "rm -rf %s/.claude/ho?ks" % h,
-                    "rm -rf %s/.claude/[h]ooks" % h, "cd %s/.claude && rm -rf h*" % h, "rm -rf /*", "rm %s/.claude/scripts/*.py" % h,
-                    "sed -i s/a/b/ %s/.claude/hooks/*.py" % h, "rm -rf %s/.claude/**" % h):
+        for cmd in ("rm -rf %s/.claude/n*" % h, "rm -rf %s/.cl*" % h, "rm -rf %s/.claude/no-ai-wall/*" % h, "chmod 000 %s/.c*/no-ai-wall" % h,
+                    "mv %s/.claude/n* /tmp/x" % h, "rm %s/.claude/no-ai-wall/no-ai-*" % h, "rm -rf %s/.claude/{no-ai-wall,junk}" % h, "rm -rf %s/.claude/no-ai-w?ll" % h,
+                    "rm -rf %s/.claude/[n]o-ai-wall" % h, "cd %s/.claude && rm -rf n*" % h, "rm -rf /*", "rm %s/.claude/no-ai-wall/*.py" % h,
+                    "sed -i s/a/b/ %s/.claude/no-ai-wall/*.py" % h, "rm -rf %s/.claude/**" % h):
             self.denied(cmd)
 
     def test_wildcard_operands_elsewhere_stay_allowed(self):
@@ -693,9 +713,64 @@ class BypassGapTests(Fixture):
                     "chmod 644 %s/.claude/commands/*.md" % h, "rm -rf %s/work/*.txt" % self.tmp):
             self.allowed(cmd)
 
+    # the narrow lock: the scripts and hooks folders hold ordinary tooling, so a tooling install runs without anyone's hands
+    def test_shell_writes_to_ordinary_scripts_and_hooks_are_allowed(self):
+        h = self.home
+        for cmd in ("cp /tmp/a %s/.claude/scripts/lane.sh" % h, "cp -a /tmp/new/. %s/.claude/scripts/" % h, "cp -t %s/.claude/hooks /tmp/a" % h,
+                    "install -m 755 /tmp/a %s/.claude/hooks/coop-scrubber.py" % h, "rsync -a /tmp/new/ %s/.claude/scripts/" % h,
+                    "rsync -a --delete /tmp/new/ %s/.claude/scripts/" % h, "echo x > %s/.claude/scripts/y.sh" % h, "rm %s/.claude/scripts/x.py" % h,
+                    "rm -rf %s/.claude/hooks" % h, "mv %s/.claude/scripts /tmp/old-scripts" % h, "chmod +x %s/.claude/scripts/x.py" % h,
+                    "sed -i s/a/b/ %s/.claude/hooks/y.sh" % h, "cd %s/.claude/scripts && echo x > x.py" % h, "find %s/.claude/scripts -name '*.pyc' -delete" % h,
+                    "python3 -c \"open('%s/.claude/scripts/x.py','w')\"" % h, "tee %s/.claude/scripts/z.py" % h):
+            self.allowed(cmd)
+
+    def test_shell_writes_to_the_wall_folder_and_settings_are_still_denied(self):
+        h = self.home
+        for cmd in ("cp /tmp/a %s/.claude/no-ai-wall/no_ai_wall.py" % h, "cp -a /tmp/new/. %s/.claude/no-ai-wall/" % h, "cp -t %s/.claude/no-ai-wall /tmp/a" % h,
+                    "rsync -a --delete /tmp/new/ %s/.claude/no-ai-wall/" % h, "echo x > %s/.claude/no-ai-wall/new.txt" % h, "rm -rf %s/.claude/no-ai-wall" % h,
+                    "mv %s/.claude/no-ai-wall /tmp/gone" % h, "rm -rf %s/.claude" % h, "chmod 000 %s/.claude/no-ai-wall" % h,
+                    "cd %s/.claude/no-ai-wall && echo x > y" % h, "echo x > %s/.claude/settings.json" % h):
+            self.denied(cmd)
+
+    def test_a_machine_not_yet_moved_keeps_its_old_wall_files_protected(self):
+        """Until the install moves the wall into its own folder, the hook, module and helper still sit in hooks and scripts: they stay locked,
+        and nothing else in those folders is."""
+        h = self.home
+        old = [self.d("hooks/no-ai-wall-guard.py"), self.d("scripts/no_ai_wall.py"), self.d("scripts/no_ai_wall.sh")]
+        for f in old:
+            open(f, "w").write("x")
+            for tool in ("Edit", "Write"):
+                self.assertEqual(self.call(tool, file_path=f)[1], "protected file", (tool, f))
+            self.denied("echo x > " + f)
+            self.denied("rm " + f)
+        self.denied("rm -rf %s/.claude/scripts" % h)  # a folder that holds one of them
+        self.assertIsNone(self.call("Write", file_path=self.d("scripts/lane.sh")))
+        self.allowed("cp /tmp/a %s/.claude/scripts/lane.sh" % h)
+        for f in old:
+            os.remove(f)
+        self.allowed("rm -rf %s/.claude/scripts" % h)  # once they are gone the folder is ordinary tooling
+
+    def test_the_wall_may_be_run_from_its_folder_and_looked_at(self):
+        h = self.home
+        self.allowed("python3 -I %s/.claude/no-ai-wall/no_ai_wall.py status" % h)
+        self.allowed("ls -l %s/.claude/no-ai-wall" % h)
+        self.assertIsNone(self.call("Read", file_path=os.path.join(h, ".claude/no-ai-wall/no_ai_wall.py")))
+
+    # issue 233 (second comment): a subagent prompt is judged by what the subagent does, not by the words in it
+    def test_a_subagent_prompt_naming_protected_files_is_allowed_but_not_listed_paths(self):
+        h = self.home
+        prompt = "Read %s/.claude/no-ai-wall/no_ai_wall.py, %s/.claude/hooks/x.sh and report the scope; do not edit anything." % (h, h)
+        for tool in ("Agent", "Task"):
+            self.assertIsNone(self.call(tool, prompt=prompt, description="read-only"), tool)
+            r = self.call(tool, prompt="summarise %s/wall/clientA/docs/secret.txt" % self.tmp)
+            self.assertIsNotNone(r, tool)
+            self.assertNotEqual(r[1], "protected file")
+        self.assertIsNotNone(self.call("Agent", prompt="x", cwd=self.p("wall/clientA")))  # a session inside a listed folder is refused for every tool
+        self.assertIsNotNone(self.call("mcp__fs__write_file", path="%s/.claude/no-ai-wall/no_ai_wall.py" % h, content="x"))
+
     # HIGH: copy-target options in every form getopt accepts
     def test_copy_target_option_forms_are_destinations(self):
-        s, hk = self.d("scripts"), self.d("hooks")
+        s, hk = self.d("no-ai-wall"), self.d("no-ai-wall")
         for cmd in ("cp -at %s /tmp/a" % s, "cp -vt %s /tmp/a" % s, "cp -avt %s /tmp/a" % hk, "cp --target %s /tmp/a" % s, "cp --targ=%s /tmp/a" % s,
                     "cp --t=%s /tmp/a" % s, "cp --target-dir %s /tmp/a" % s, "install -vt %s /tmp/a" % s, "cp /tmp/a -t %s" % s, "cp -t%s /tmp/a" % s,
                     "cp -aT /tmp/a %s/x.py" % s, "cp -r /tmp/empty %s" % self.d(""), "cp -a /tmp/empty/. %s/" % self.d(""),
@@ -703,8 +778,8 @@ class BypassGapTests(Fixture):
             self.denied(cmd)
 
     def test_reading_guarded_files_with_copy_options_stays_allowed(self):
-        s, h = self.d("scripts"), self.home
-        for cmd in ("cp -at /tmp/dest %s/x.py" % s, "cp -vt /tmp/dest %s/x.py" % self.d("hooks"), "cp --target /tmp/dest %s/x.py" % s,
+        s, h = self.d("no-ai-wall"), self.home
+        for cmd in ("cp -at /tmp/dest %s/x.py" % s, "cp -vt /tmp/dest %s/x.py" % self.d("no-ai-wall"), "cp --target /tmp/dest %s/x.py" % s,
                     "cp --targ=/tmp/dest %s/x.py" % s, "cp %s/x.py /tmp/dest/" % s, "cp %s /tmp/backup/" % self.d("settings.json"),
                     "cp /tmp/a %s/" % self.d("commands"), "cp -r %s /tmp/backup/" % self.d("projects"), "cp -a %s/.claude/skills /tmp/b/" % h,
                     "rsync -a %s/x.py /tmp/b/" % s):
@@ -713,28 +788,28 @@ class BypassGapTests(Fixture):
     # MEDIUM: cp, install, rsync and ln no longer skip the folder check
     def test_dest_last_programs_may_not_replace_or_empty_the_guarded_folders(self):
         h = self.home
-        for cmd in ("rsync -a --delete /tmp/empty/ %s/.claude/" % h, "rsync -a --delete /tmp/empty/ %s/" % self.d("scripts"), "rsync -a /tmp/empty/ %s/.claude/" % h,
-                    "rsync -a --remove-source-files %s/x.py /tmp/b/" % self.d("hooks"), "rsync -a --delete-after /tmp/empty/ %s/" % self.d("hooks"),
-                    "ln -sfn /tmp/evil %s" % self.d("hooks"), "ln -sfn /tmp/evil %s" % self.d("scripts"), "ln -sfn /tmp/evil %s" % self.d("settings.json"),
-                    "cp --remove-destination /tmp/a %s" % self.d("settings.json"), "cp -T %s/x.py /tmp/y" % self.d("hooks"),
-                    "cp -aT /tmp/empty %s" % self.d("scripts")):
+        for cmd in ("rsync -a --delete /tmp/empty/ %s/.claude/" % h, "rsync -a --delete /tmp/empty/ %s/" % self.d("no-ai-wall"), "rsync -a /tmp/empty/ %s/.claude/" % h,
+                    "rsync -a --remove-source-files %s/x.py /tmp/b/" % self.d("no-ai-wall"), "rsync -a --delete-after /tmp/empty/ %s/" % self.d("no-ai-wall"),
+                    "ln -sfn /tmp/evil %s" % self.d("no-ai-wall"), "ln -sfn /tmp/evil %s" % self.d("no-ai-wall"), "ln -sfn /tmp/evil %s" % self.d("settings.json"),
+                    "cp --remove-destination /tmp/a %s" % self.d("settings.json"), "cp -T %s/x.py /tmp/y" % self.d("no-ai-wall"),
+                    "cp -aT /tmp/empty %s" % self.d("no-ai-wall")):
             self.denied(cmd)
 
     def test_find_and_fd_that_delete_or_run_commands_in_the_guarded_places_are_writes(self):
         h = self.home
-        for cmd in ("find %s/.claude/hooks -delete" % h, "find %s/.claude -name '*.py' -delete" % h, "find %s/.claude/scripts -exec rm {} +" % h,
-                    "find %s -path '*/hooks/*' -delete" % self.d(""), "find %s/.claude/hooks -execdir sh -c 'echo > x' ;" % h,
-                    "fd -x rm . %s/.claude/scripts" % h, "find %s/.claude -fprint %s/x.py" % (h, self.d("hooks"))):
+        for cmd in ("find %s/.claude/no-ai-wall -delete" % h, "find %s/.claude -name '*.py' -delete" % h, "find %s/.claude/no-ai-wall -exec rm {} +" % h,
+                    "find %s -path '*/hooks/*' -delete" % self.d(""), "find %s/.claude/no-ai-wall -execdir sh -c 'echo > x' ;" % h,
+                    "fd -x rm . %s/.claude/no-ai-wall" % h, "find %s/.claude -fprint %s/x.py" % (h, self.d("no-ai-wall"))):
             self.denied(cmd)
-        for cmd in ("find %s/.claude/scripts -name '*.py'" % h, "find %s -delete" % self.p("work"), "find %s/.claude/commands -delete" % h,
-                    "find %s/.claude/hooks -type f -print" % h, "fd py %s/.claude/scripts" % h):
+        for cmd in ("find %s/.claude/no-ai-wall -name '*.py'" % h, "find %s -delete" % self.p("work"), "find %s/.claude/commands -delete" % h,
+                    "find %s/.claude/no-ai-wall -type f -print" % h, "fd py %s/.claude/no-ai-wall" % h):
             self.allowed(cmd)
 
     # follow-ups from the plugin's security review of the first push
     def test_brace_sequences_and_oversize_braces_fail_closed(self):
         h = self.home
-        for cmd in ("rm -rf %s/.claude/{a..z}ooks" % h, "rm %s/.claude/hooks/x{1..3}.py" % h, "rm -rf %s/.claude/hooks{,.bak}" % h,
-                    "rm %s/.claude/hooks/x{1..999999}" % h, "rm %s/.claude/{a,b,c,d,e,f,g,h}{1..60}" % h, "rm -rf %s/.claude/{x,{hooks,y}}" % h):
+        for cmd in ("rm -rf %s/.claude/{a..z}o-ai-wall" % h, "rm %s/.claude/no-ai-wall/x{1..3}.py" % h, "rm -rf %s/.claude/no-ai-wall{,.bak}" % h,
+                    "rm %s/.claude/no-ai-wall/x{1..999999}" % h, "rm %s/.claude/{a,b,c,d,e,f,g,h}{1..60}" % h, "rm -rf %s/.claude/{x,{no-ai-wall,y}}" % h):
             self.denied(cmd)
         self.assertEqual(w._brace_expand("a{1..3}")[0], ["a1", "a2", "a3"])
         self.assertEqual(w._brace_expand("{c..a}")[0], ["c", "b", "a"])
@@ -744,7 +819,7 @@ class BypassGapTests(Fixture):
             self.allowed(cmd)
 
     def test_an_option_value_after_the_operands_does_not_hide_the_destination(self):
-        s, hk = self.d("scripts"), self.d("hooks")
+        s, hk = self.d("no-ai-wall"), self.d("no-ai-wall")
         for cmd in ("cp /tmp/a %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py --suffix .bak" % s, "cp /tmp/a %s/x.py --suf .bak" % s, "install /tmp/a %s/y.sh -m 755" % hk,
                     "install /tmp/a %s/y.sh -o root -g root" % hk, "rsync -a /tmp/empty/ %s/ --exclude x" % hk, "rsync -a /tmp/empty/ %s/ -e ssh" % hk,
                     "ln -sf /tmp/evil %s/x.py -S .bak" % s, "cp /tmp/a %s/x.py -v -S .bak" % s):
@@ -755,25 +830,25 @@ class BypassGapTests(Fixture):
 
     def test_find_and_fd_with_no_root_start_in_the_working_folder(self):
         h = self.home
-        for cmd in ("cd %s/.claude/hooks && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py' -delete" % h,
-                    "cd %s/.claude/scripts && fd -x rm" % h, "cd %s/.claude && find -L -delete" % h, "cd %s/.claude/hooks && find . -delete" % h):
+        for cmd in ("cd %s/.claude/no-ai-wall && find -delete" % h, "cd %s/.claude/no-ai-wall && find -name '*.py' -delete" % h,
+                    "cd %s/.claude/no-ai-wall && fd -x rm" % h, "cd %s/.claude && find -L -delete" % h, "cd %s/.claude/no-ai-wall && find . -delete" % h):
             self.denied(cmd)
-        for cmd in ("cd %s && find -delete" % self.p("work"), "cd %s/.claude/commands && find -delete" % h, "cd %s/.claude/scripts && find -name '*.py'" % h):
+        for cmd in ("cd %s && find -delete" % self.p("work"), "cd %s/.claude/commands && find -delete" % h, "cd %s/.claude/no-ai-wall && find -name '*.py'" % h):
             self.allowed(cmd)
         self.assertIsNone(self.call("Bash", cwd=self.p("work"), command="find -name x -delete"))
-        self.assertIsNotNone(self.call("Bash", cwd=self.d("hooks"), command="find -name x -delete"))
+        self.assertIsNotNone(self.call("Bash", cwd=self.d("no-ai-wall"), command="find -name x -delete"))
 
     # a directory change the text cannot resolve: the working folder is unknown, so relative targets fail closed
     def test_directory_changes_the_parser_cannot_resolve_fail_closed(self):
         h = self.home
-        for cmd in ("cd - && rm x.py", "cd %s/.claude/hooks; cd - ; rm x.py" % h, "popd && find -delete", "cd $WHERE && rm x.py",
-                    "cd $(pwd)/../.claude/hooks && rm x.py", "cd `echo hooks` && find -delete", "builtin cd - && rm no-ai-wall-guard.py",
-                    "env -C %s/.claude/hooks rm x.py" % h, "env -C %s/.claude/hooks find -delete" % h, "cd %s/.claude && cd - && echo hi > x.py" % h,
-                    "sudo -u root rm %s/.claude/hooks/x.py" % h):
+        for cmd in ("cd - && rm x.py", "cd %s/.claude/no-ai-wall; cd - ; rm x.py" % h, "popd && find -delete", "cd $WHERE && rm x.py",
+                    "cd $(pwd)/../.claude/no-ai-wall && rm x.py", "cd `echo hooks` && find -delete", "builtin cd - && rm no-ai-wall-guard.py",
+                    "env -C %s/.claude/no-ai-wall rm x.py" % h, "env -C %s/.claude/no-ai-wall find -delete" % h, "cd %s/.claude && cd - && echo hi > x.py" % h,
+                    "sudo -u root rm %s/.claude/no-ai-wall/x.py" % h):
             self.denied(cmd)
         # known folders: a bare cd or cd ~ goes to the home folder, pushd and builtin cd work like cd
-        for cmd in ("cd && rm .claude/hooks/x.py", "cd ~ && rm .claude/hooks/x.py", "pushd %s/.claude/hooks && rm x.py" % h,
-                    "builtin cd %s/.claude/scripts && find -delete" % h, "command cd %s/.claude/hooks && rm x.py" % h):
+        for cmd in ("cd && rm .claude/no-ai-wall/x.py", "cd ~ && rm .claude/no-ai-wall/x.py", "pushd %s/.claude/no-ai-wall && rm x.py" % h,
+                    "builtin cd %s/.claude/no-ai-wall && find -delete" % h, "command cd %s/.claude/no-ai-wall && rm x.py" % h):
             self.denied(cmd)
         for cmd in ("cd %s && cd - && ls" % self.p("work"), "cd %s/.claude/commands && rm c.md" % h, "pushd %s && rm y.txt" % self.p("work"),
                     "env -C %s ls" % self.p("work"), "cd - && cat x.py"):
@@ -781,34 +856,34 @@ class BypassGapTests(Fixture):
 
     def test_a_directory_change_behind_a_keyword_or_brace_fails_closed(self):
         h = self.home
-        for cmd in ("if true; then cd %s/.claude/hooks; rm x.py; fi" % h, "{ cd %s/.claude/hooks; rm x.py; }" % h, "time cd %s/.claude/hooks && rm x.py" % h,
-                    "FOO=1 cd %s/.claude/hooks && rm x.py" % h, "for d in a; do cd $d; find -delete; done", "(cd %s/.claude/hooks && rm x.py)" % h):
+        for cmd in ("if true; then cd %s/.claude/no-ai-wall; rm x.py; fi" % h, "{ cd %s/.claude/no-ai-wall; rm x.py; }" % h, "time cd %s/.claude/no-ai-wall && rm x.py" % h,
+                    "FOO=1 cd %s/.claude/no-ai-wall && rm x.py" % h, "for d in a; do cd $d; find -delete; done", "(cd %s/.claude/no-ai-wall && rm x.py)" % h):
             self.denied(cmd)
         self.allowed("echo hi; rm %s/.claude/commands/c.md" % h)  # no directory change: an absolute operand is judged on its own
 
     def test_wrapper_options_do_not_hide_an_inline_interpreter_or_a_delay_value(self):
         h = self.home
-        for cmd in ("env -C %s/.claude python3 -c 'open(\"hooks/x.py\",\"w\")'" % h, "sudo -u root bash -c 'rm %s/.claude/hooks/x.py'" % h,
-                    "timeout 5 rm %s/.claude/hooks/x.py" % h, "nice -n 5 rm %s/.claude/hooks/x.py" % h, "sudo -E node -e 'x(\"%s/.claude/scripts/x.py\")'" % h):
+        for cmd in ("env -C %s/.claude python3 -c 'open(\"hooks/x.py\",\"w\")'" % h, "sudo -u root bash -c 'rm %s/.claude/no-ai-wall/x.py'" % h,
+                    "timeout 5 rm %s/.claude/no-ai-wall/x.py" % h, "nice -n 5 rm %s/.claude/no-ai-wall/x.py" % h, "sudo -E node -e 'x(\"%s/.claude/no-ai-wall/x.py\")'" % h):
             self.denied(cmd)
-        self.allowed("sudo -u root ls %s/.claude/hooks" % h)
+        self.allowed("sudo -u root ls %s/.claude/no-ai-wall" % h)
 
     def test_rsync_option_values_are_destinations(self):
         h = self.home
-        for cmd in ("rsync --log-file=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --log-file %s/.claude/hooks/x.py /tmp/a /tmp/b" % h,
-                    "rsync --log=%s/.claude/scripts/x.py /tmp/a /tmp/b" % h, "rsync --backup-dir %s/.claude/hooks /tmp/a /tmp/b" % h,
-                    "rsync -T %s/.claude/hooks /tmp/a /tmp/b" % h, "rsync -aT%s/.claude/hooks /tmp/a /tmp/b" % h,
-                    "rsync --write-batch=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --partial-dir=%s/.claude/scripts /tmp/a /tmp/b" % h):
+        for cmd in ("rsync --log-file=%s/.claude/no-ai-wall/x.py /tmp/a /tmp/b" % h, "rsync --log-file %s/.claude/no-ai-wall/x.py /tmp/a /tmp/b" % h,
+                    "rsync --log=%s/.claude/no-ai-wall/x.py /tmp/a /tmp/b" % h, "rsync --backup-dir %s/.claude/no-ai-wall /tmp/a /tmp/b" % h,
+                    "rsync -T %s/.claude/no-ai-wall /tmp/a /tmp/b" % h, "rsync -aT%s/.claude/no-ai-wall /tmp/a /tmp/b" % h,
+                    "rsync --write-batch=%s/.claude/no-ai-wall/x.py /tmp/a /tmp/b" % h, "rsync --partial-dir=%s/.claude/no-ai-wall /tmp/a /tmp/b" % h):
             self.denied(cmd)
-        for cmd in ("rsync -av --log-file=/tmp/log /tmp/a /tmp/b", "rsync -av %s/.claude/hooks/x.py /tmp/b" % h,
-                    "rsync -av --exclude %s/.claude/hooks/x.py /tmp/a /tmp/b" % h):
+        for cmd in ("rsync -av --log-file=/tmp/log /tmp/a /tmp/b", "rsync -av %s/.claude/no-ai-wall/x.py /tmp/b" % h,
+                    "rsync -av --exclude %s/.claude/no-ai-wall/x.py /tmp/a /tmp/b" % h):
             self.allowed(cmd)
 
     # MEDIUM: one normaliser for Windows drives
     def test_windows_drive_paths_ignore_case_in_every_check(self):
         os.environ["HOME"] = "/mnt/c/Users/Someone"
-        for cmd in ("rm -rf /mnt/C/USERS/SOMEONE/.CLAUDE", "mv /MNT/c/Users/Someone/.claude/SCRIPTS /tmp/x", "chmod 000 /mnt/c/users/someone/.Claude/Hooks",
-                    "ln -sfn /tmp/evil /mnt/c/USERS/someone/.claude/HOOKS", "rsync -a --delete /tmp/empty/ /mnt/C/Users/SOMEONE/.claude/"):
+        for cmd in ("rm -rf /mnt/C/USERS/SOMEONE/.CLAUDE", "mv /MNT/c/Users/Someone/.claude/NO-AI-WALL /tmp/x", "chmod 000 /mnt/c/users/someone/.Claude/No-AI-Wall",
+                    "ln -sfn /tmp/evil /mnt/c/USERS/someone/.claude/NO-AI-WALL", "rsync -a --delete /tmp/empty/ /mnt/C/Users/SOMEONE/.claude/"):
             self.denied(cmd)
         f = "/mnt/c/Users/Someone/.config/afa/no-ai-paths.txt"
         self.assertTrue(w._is_protected("/MNT/C/users/someone/.config/AFA/no-ai-paths.txt", "/", [f]))
@@ -821,9 +896,9 @@ class BypassGapTests(Fixture):
     # issue 233: a lane launcher is not a search
     def test_lane_launcher_with_a_parent_of_a_listed_folder_is_allowed(self):
         parent = self.p("wall")
-        for cmd in ("lane.sh --console --headless n %s sonnet /tmp/p.md" % parent, "~/.claude/scripts/lane.sh n %s sonnet p.md; ls -R %s" % (parent, self.p("work")),
+        for cmd in ("lane.sh --console --headless n %s sonnet /tmp/p.md" % parent, "~/.claude/no-ai-wall/lane.sh n %s sonnet p.md; ls -R %s" % (parent, self.p("work")),
                     "lane.sh n %s sonnet p.md && find %s -name x" % (parent, self.p("work")), "git -C %s grep x; lane.sh n %s s p.md" % (self.p("work"), parent),
-                    "bash ~/.claude/scripts/lane.sh n %s sonnet p.md 2>&1 | tail -3; rg x %s" % (parent, self.p("work"))):
+                    "bash ~/.claude/no-ai-wall/lane.sh n %s sonnet p.md 2>&1 | tail -3; rg x %s" % (parent, self.p("work"))):
             self.allowed(cmd)
 
     def test_lane_launcher_still_refuses_a_listed_folder_and_hides_no_search(self):
