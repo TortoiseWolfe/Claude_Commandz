@@ -13,7 +13,8 @@
 #   4. moves the hook entry in settings.json to the new folder (a text substitution of the path; every other byte stays)
 #   5. takes the three old copies out of ~/.claude/scripts and ~/.claude/hooks
 #   6. installs the other global files the repo's usual install step installs (install_global.py: lane.sh and friends), refusing any
-#      live edit it would overwrite, which it names and leaves alone
+#      live edit it would overwrite, which it names and leaves alone (a live file equal to any earlier committed version is stale, not
+#      edited, and is brought up to date)
 #   7. runs smoke.py against the installed files, through the hook command settings.json registers
 # The last line it prints is one of:
 #   WALL OK <commit> refused <n>/<n> ordinary <n>/<n>
@@ -97,7 +98,7 @@ backup() {  # <path relative to ~/.claude>
 
 TOOLING_NOTE=""
 TOOLING=()
-TOOLING_DRY="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" --dry-run 2>&1)"
+TOOLING_DRY="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" --include-stale --dry-run 2>&1)"
 case $? in
   0|1) while IFS= read -r line; do
          case "$line" in "would copy  global/.claude/"*) TOOLING+=("${line#would copy  global/.claude/}") ;; esac
@@ -165,7 +166,7 @@ for rel in "${LEGACY[@]}"; do rm -f "$LIVE/$rel" || fail_after "cannot remove th
 # 6. The other global files, from the same commit (install_global.py reads git, never the working tree, and refuses a live edit).
 TOOLING_OUT=""
 if [ -z "$TOOLING_NOTE" ]; then
-  TOOLING_OUT="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" 2>&1)"
+  TOOLING_OUT="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" --include-stale 2>&1)"
   rc=$?
   [ "$rc" -le 1 ] || fail_after "the global install step failed ($(printf '%s' "$TOOLING_OUT" | tail -n 1 | cut -c1-160))"
   TOOLING_NOTE="$(printf '%s' "$TOOLING_OUT" | tail -n 1)"
