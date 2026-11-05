@@ -20,14 +20,14 @@ echo "tmux $*" >>"$FAKE_DIR/tmux.log"
 case "$1" in
   has-session) [ -e "$FAKE_DIR/session" ] ;;
   list-windows) cat "$FAKE_DIR/windows" 2>/dev/null ;;
-  new-session) touch "$FAKE_DIR/session"; ls -l /proc/$$/fd 2>/dev/null | grep -q 'fleet-up.run.lock' && echo "tmux new-session" >>"$FAKE_DIR/lock-leak.log"; true ;;
+  new-session) touch "$FAKE_DIR/session"; ls -l /proc/$$/fd 2>/dev/null | grep -qE 'fleet-up.run.lock|openclaw-status' && echo "tmux new-session" >>"$FAKE_DIR/lock-leak.log"; true ;;
   *) : ;;
 esac
 SH
 cat >"$T/bin/lane.sh" <<'SH'
 #!/usr/bin/env bash
 echo "lane.sh $*" >>"$FAKE_DIR/lane.log"
-ls -l /proc/$$/fd 2>/dev/null | grep -q 'fleet-up.run.lock' && echo "lane.sh" >>"$FAKE_DIR/lock-leak.log"
+ls -l /proc/$$/fd 2>/dev/null | grep -qE 'fleet-up.run.lock|openclaw-status' && echo "lane.sh" >>"$FAKE_DIR/lock-leak.log"
 [ -n "${FAKE_LANE_FAIL:-}" ] && [ "$FAKE_LANE_FAIL" = "$(printf '%s\n' "$@" | grep -m1 '^2026' )" ] && { echo "refusing: client repo" >&2; exit 1; }
 exit 0
 SH
@@ -201,9 +201,9 @@ check "a gap newer than the last full run is still acted on" '[ -n "$(ls $S/reco
 # (f) no child keeps the run lock: tmux, lane.sh and a service start all see fd 8 closed (a tmux server that kept it blocked every run for six days)
 reboot lk
 : >"$FAKE_DIR/lock-leak.log"
-printf 'svc\t1\t%s\tfalse\tls -l /proc/self/fd | grep -c run.lock >%s/svc-fds; true\n' "$HOME/work" "$HOME/work" >"$HOME/.config/afa/services.tsv"
+printf 'svc\t1\t%s\tfalse\tls -l /proc/self/fd | grep -cE "run.lock|openclaw-status" >%s/svc-fds; true\n' "$HOME/work" "$HOME/work" >"$HOME/.config/afa/services.tsv"
 rm -f "$FAKE_DIR/session" "$S/fleet-up.seen"; printf "lk\n" >"$S/lanes/live.tsv"; printf "%s\n" "$((NOW - 3000))" >"$S/heartbeat.gap"; rm -rf "$S/recovery"; : >"$FAKE_DIR/lane.log"
-run
+run 9>"$HOME/openclaw-status.run.lock"   # fd 9 is the refresh task's lock, inherited by fleet-up.sh (4 Nov 2026: the tmux server kept it for a day)
 check "lane.sh and tmux are started with the run lock closed" '[ -s $FAKE_DIR/lane.log ] && [ ! -s $FAKE_DIR/lock-leak.log ]'
 check "a service start command has the run lock closed" '[ "$(cat $HOME/work/svc-fds 2>/dev/null)" = 0 ]'
 # (g) the lock is free again once the run ends: a second full run is not turned away
