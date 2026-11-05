@@ -246,6 +246,17 @@ class InstallTests(unittest.TestCase):
         self.assertRegex(self.last(r), r"^WALL FAILED .*lane\.sh.* after undoing itself$")
         self.assertEqual(self.snapshot(), before)  # the edit is still there, and so is the old wall
 
+    def test_a_stale_lane_sh_is_brought_up_to_date(self):
+        """A live file that equals an earlier committed version (the machine missed an install) is stale, not a live edit: it is updated."""
+        self.put_live("state/install-global-commit", self.B + "\n")  # the record is ahead of the live launcher
+        self.put_live("scripts/lane.sh", OLD_LANE)                   # which still equals commit A's version
+        self.put_repo("scripts/lane.sh", NEW_LANE + "# v2\n")
+        newer = self.commit("launcher v2")
+        r = self.install(newer)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertRegex(self.last(r), r"^WALL OK ")
+        self.assertEqual(open(os.path.join(self.live, "scripts/lane.sh")).read(), NEW_LANE + "# v2\n")
+
     def test_a_launcher_that_still_reads_the_old_folder_fails_and_undoes_itself(self):
         self.put_repo("scripts/lane.sh", OLD_LANE + "# still the old path\n")
         bad = self.commit("launcher not moved")
