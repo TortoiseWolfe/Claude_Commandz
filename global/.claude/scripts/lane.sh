@@ -472,7 +472,7 @@ new_lane_session() {  # <window name> <dir>
   local -a envopt=()
   [ "$dry" = 1 ] || ! ssh_agent_ok || envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
   [ "$dry" = 0 ] || echo "# (a new session also gets -e SSH_AUTH_SOCK=<the caller's working agent>)"
-  t new-session -d -x "$SESSION_SIZE_X" -y "$SESSION_SIZE_Y" -s "$SESSION" -n "$1" -c "$2" ${envopt[@]+"${envopt[@]}"}
+  t new-session -d -x "$SESSION_SIZE_X" -y "$SESSION_SIZE_Y" -s "$SESSION" -n "$1" -c "$2" ${envopt[@]+"${envopt[@]}"} 8>&- 9>&-   # the tmux server lives on: it must not keep a caller's lock (fleet-up fd 8, the status refresh fd 9)
   t set-option -t "$SESSION" window-size manual
   t set-option -t "$SESSION" default-size "${SESSION_SIZE_X}x${SESSION_SIZE_Y}"
 }

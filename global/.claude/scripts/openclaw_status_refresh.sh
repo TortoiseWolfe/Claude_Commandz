@@ -12,12 +12,18 @@
 # Scheduling: this distro has no systemd (PID 1 is init), so the 15-minute timer is a Windows Task
 # Scheduler task, like \AFA\MuseNotesPoll: \AFA\OpenClawStatus runs
 #   conhost.exe --headless wsl.exe -d Debian -- bash -lc ~/.claude/scripts/openclaw_status_refresh.sh
+#
+# The lock (fd 9) is closed (9>&-) on every child that can outlive this script: a tmux server, lane or long job started below that kept it
+# would hold the lock after this run ends, and every later run would find it taken and exit at once, silently. 4 Nov 2026: fleet-up.sh's tmux
+# server kept it, and the hub digest was not rebuilt from 10:52 PM Wed to 3:57 PM Thu. The lock file is therefore openclaw-status.run.lock:
+# the old name is still held open by that tmux server and can only be freed by restarting it. The handoff sweep at the end keeps fd 9 on
+# purpose (it runs under this lock so sweeps never overlap).
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 state="$HOME/.claude/state"
 out="$state/openclaw-status-digest.md"
 mkdir -p "$state"
-exec 9>"$state/openclaw-status.lock"
+exec 9>"$state/openclaw-status.run.lock"
 flock -n 9 || exit 0
 
 # First, the WSL-to-Windows bridge: every wsl.exe call below needs it. The watchdog checks /proc/buddyinfo for free 512 KB blocks (what each
@@ -27,12 +33,12 @@ timeout 200 python3 "$here/wsl_bridge_watchdog.py" --probe >/dev/null 2>&1 || ec
 
 # Recovery record and restarts (fleet-up.sh): when the heartbeat shows the machine was down, write the record and bring back the lanes and long
 # jobs. Idempotent and silent when nothing happened; it reads the machine name itself, so it runs on both machines before the machine switch.
-[ -x "$here/fleet-up.sh" ] && { timeout 150 "$here/fleet-up.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: fleet-up reports a problem" >&2; }
+[ -x "$here/fleet-up.sh" ] && { timeout 150 "$here/fleet-up.sh" >/dev/null 2>&1 9>&- || echo "openclaw_status_refresh: fleet-up reports a problem" >&2; }
 
 # Recycle any lane past its own line, so recycling never depends on the hub having a watcher armed (26 Oct: between two hub sessions
 # nothing was armed and scout-run-2 went 128K to 163K and compacted on its own). The same decision as lane_watch.sh's poll loop, the same
 # thrash and queued-input guards, silent: it wakes nobody. The recycle itself runs detached (it takes minutes).
-timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 || echo "openclaw_status_refresh: lane recycle pass reports a problem" >&2
+timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 9>&- || echo "openclaw_status_refresh: lane recycle pass reports a problem" >&2
 
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
@@ -44,7 +50,7 @@ build_digest() { timeout 60 python3 "$here/hub_digest.py" "$@" --out "$state/hub
 machine=$(cat "$HOME/.config/afa/machine" 2>/dev/null || echo unknown)
 if [ "$machine" != NX-01 ]; then
   # Merged fixes reach this machine unasked, the way NX-01 gets them from its own folder (tower_claude_refresh.sh runs at most hourly).
-  timeout 600 "$here/tower_claude_refresh.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: tower refresh reports a problem (see ~/.claude/state/tower-refresh.log)" >&2
+  timeout 600 "$here/tower_claude_refresh.sh" >/dev/null 2>&1 9>&- || echo "openclaw_status_refresh: tower refresh reports a problem (see ~/.claude/state/tower-refresh.log)" >&2
   build_digest
   exit 0
 fi
@@ -62,15 +68,15 @@ timeout 150 python3 "$here/notes_check.py" --sweep --apply >/dev/null 2>&1 || ec
 # Every run: pull the calendar events that belong to a client into hours/calendar-events.tsv (hours.py calendar; read-only, its own
 # calendar-token.json, so the Gmail token is untouched). Until 26 Oct that file was a one-time copy and never refreshed. A failure
 # keeps the old file and says so in ~/.claude/state/hours-calendar.txt. Detached: it never holds this task.
-( timeout 120 python3 "$here/hours.py" calendar </dev/null >/dev/null 2>&1 & )
+( timeout 120 python3 "$here/hours.py" calendar </dev/null >/dev/null 2>&1 9>&- & )
 
 # Monday morning, once: last week's co-op and internship hours (hours.py week --if-due; Monday after 6:00 AM Eastern, one run a day, its own
 # lock, ~1 minute, so it runs detached and never holds this task). It writes ~/.claude/state/hours-week.txt, which the hub digest shows.
-( timeout 1500 python3 "$here/hours.py" week --if-due </dev/null >/dev/null 2>&1 & )
+( timeout 1500 python3 "$here/hours.py" week --if-due </dev/null >/dev/null 2>&1 9>&- & )
 
 # The hub knowledge graph (~/repos/graphify-out, private, untracked): restage the docs it is built from and, if any changed, re-extract only
 # those files with one headless Sonnet pass, at most once a day (an unchanged corpus costs about a second and no model call). Detached, own lock.
-[ -x "$HOME/repos/hub/scripts/hub-graph-refresh.sh" ] && ( timeout 1500 "$HOME/repos/hub/scripts/hub-graph-refresh.sh" </dev/null >/dev/null 2>&1 & )
+[ -x "$HOME/repos/hub/scripts/hub-graph-refresh.sh" ] && ( timeout 1500 "$HOME/repos/hub/scripts/hub-graph-refresh.sh" </dev/null >/dev/null 2>&1 9>&- & )
 
 # The hub's own status page (private, read by /prep): built here so it rides the same 15-minute task and
 # lane_watch.sh trigger. It is a different file from the OpenClaw digest and is never delivered anywhere.
