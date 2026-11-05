@@ -145,7 +145,9 @@ if [ "$mode" = heartbeat ]; then
 fi
 
 # ---- full run ----
-# fd 8 is closed (8>&-) on everything started below: a child that keeps it holds the lock after this script exits.
+# fd 8 (this script's own lock) and fd 9 (openclaw_status_refresh.sh's lock, inherited from the 15-minute task) are closed (8>&- 9>&-) on everything
+# started below: a child that keeps either holds that lock after this script exits. 4 Nov 2026: the tmux server started here kept fd 9, and
+# from then on every refresh run found the lock taken and exited silently, so the hub digest was not rebuilt for 17 hours.
 exec 8>"$STATE/fleet-up.run.lock"; flock -n 8 || exit 0
 LOGF="$STATE/fleet-up.log"
 
@@ -284,7 +286,7 @@ restart_lane() {  # <name>: start it fresh from its hand-off, when the hand-off 
     for ad in "${adl[@]}"; do [ -d "$ad" ] && args+=(--add-dir "$ad"); done
   fi
   if [ "$dry" = 1 ]; then echo "would run: $LANE_SH ${args[*]} $name $dir $model $note"; rm -f "$note"; return; fi
-  if out=$("$LANE_SH" "${args[@]}" "$name" "$dir" "$model" "$note" 2>&1 8>&-); then
+  if out=$("$LANE_SH" "${args[@]}" "$name" "$dir" "$model" "$note" 2>&1 8>&- 9>&-); then
     note_back "lane $name restarted fresh from its hand-off (model $model)"
   else
     note_back "lane $name: lane.sh refused: $(printf '%s' "$out" | tail -1 | cut -c1-160)"
@@ -305,7 +307,7 @@ if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
 elif [ "$dry" = 1 ]; then echo "would create tmux session $SESSION at ${SIZE_X}x${SIZE_Y}"
 else
   envopt=(); [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1 && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
-  "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" ${envopt[@]+"${envopt[@]}"} 8>&- \
+  "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" ${envopt[@]+"${envopt[@]}"} 8>&- 9>&- \
     && "$TMUX_BIN" set-option -t "$SESSION" window-size manual \
     && "$TMUX_BIN" set-option -t "$SESSION" default-size "${SIZE_X}x${SIZE_Y}" \
     && note_back "tmux session $SESSION created at ${SIZE_X}x${SIZE_Y}, window-size manual" \
@@ -316,10 +318,10 @@ if [ -r "$CONF/services.tsv" ]; then   # name, enabled (1 or 0), working folder,
   while IFS=$'\t' read -r sname senabled sdir scheck sstart; do
     case "$sname" in ''|'#'*) continue ;; esac
     sdir=${sdir/#\~/$HOME}
-    if [ -n "$scheck" ] && (cd "$sdir" 2>/dev/null && bash -c "$scheck" >/dev/null 2>&1 8>&-); then note_back "service $sname: already running"; continue; fi
+    if [ -n "$scheck" ] && (cd "$sdir" 2>/dev/null && bash -c "$scheck" >/dev/null 2>&1 8>&- 9>&-); then note_back "service $sname: already running"; continue; fi
     if [ "$senabled" != 1 ]; then note_back "service $sname: down, left alone (disabled in services.tsv; it waits for Jonathan's word)"; continue; fi
     if [ "$dry" = 1 ]; then echo "would start service $sname in $sdir: $sstart"; continue; fi
-    if (cd "$sdir" 2>&1 && bash -c "$sstart") >>"$LOGF" 2>&1 8>&-; then note_back "service $sname started"; else note_back "service $sname: start command failed (see fleet-up.log)"; fi
+    if (cd "$sdir" 2>&1 && bash -c "$sstart") >>"$LOGF" 2>&1 8>&- 9>&-; then note_back "service $sname started"; else note_back "service $sname: start command failed (see fleet-up.log)"; fi
   done <"$CONF/services.tsv"
 fi
 
