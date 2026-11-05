@@ -337,7 +337,7 @@ if grep -q '^waiting on a dialog: late' "$out"; then
 else
   echo "FAIL late lane dialog: out=$(cat "$out")"; failures=$((failures + 1))
 fi
-rm -f "$PANE_DIR/late"
+rm -f "$PANE_DIR/late" "$auto/.claude/state/lanes/.dialog-late"
 
 # A lane stuck on the read dialog: the wake-up line names the path (the prefix is unchanged, so greps on it still match).
 : > "$out"; echo early > "$LIVE_FILE"
@@ -351,7 +351,31 @@ if grep -q '^waiting on a dialog: late (waiting on a read of /home/u/x/ep7/a.txt
 else
   echo "FAIL read dialog line: out=$(cat "$out")"; failures=$((failures + 1))
 fi
-rm -f "$PANE_DIR/late"
+rm -f "$PANE_DIR/late" "$auto/.claude/state/lanes/.dialog-late"
+
+# A dialog already named (5 Nov: a stale nag in night-watch woke every re-armed watcher at once): the next watcher skips that lane and keeps
+# watching the rest, so another lane's report still wakes it. The mark is cleared once the pane shows no dialog, and the next dialog is named.
+: > "$out"; echo "early" > "$LIVE_FILE"; echo late >> "$LIVE_FILE"; rm -f "$auto/.claude/state/lanes/2026-10-18-late/report.md"
+printf '%s\n' 'Teach auto mode?' '❯ 1. Yes' 'Enter to confirm · Esc to cancel' > "$PANE_DIR/late"
+: > "$auto/.claude/state/lanes/.dialog-late"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" POSTED_MARK="$TMP/posted-mark" LANE_WATCH_SETTLE=0 LANE_WATCH_POLL=1 timeout 25 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+watcher=$!
+sleep 3; mkdir -p "$auto/.claude/state/lanes/2026-10-18-early"; echo "Done." > "$auto/.claude/state/lanes/2026-10-18-early/report.md"
+wait "$watcher" || true
+if grep -q '^report: early ' "$out" && ! grep -q 'waiting on a dialog' "$out"; then
+  echo "ok   a dialog already named is skipped: the watcher keeps watching and wakes on another lane's report"
+else
+  echo "FAIL repeat dialog woke the watcher: out=$(cat "$out")"; failures=$((failures + 1))
+fi
+rm -f "$auto/.claude/state/lanes/2026-10-18-early/report.md"
+: > "$out"; rm -f "$PANE_DIR/late"
+( HOME="$auto" PATH="$TMP/fakebin:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 4 bash "$SCRIPT" --max-min 5 > "$out" 2>&1 ) &
+wait $! || true
+if [ ! -e "$auto/.claude/state/lanes/.dialog-late" ]; then
+  echo "ok   the dialog mark is cleared when the pane shows no dialog"
+else
+  echo "FAIL dialog mark not cleared"; failures=$((failures + 1))
+fi
 
 # Dead lanes are not watched: a report from the dead row's lane wakes nothing.
 : > "$out"; echo early > "$LIVE_FILE"
