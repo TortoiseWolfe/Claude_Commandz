@@ -236,7 +236,7 @@ lane_env_prefix() {
 usage() {
   cat <<'USAGE'
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--clean-room <scratch-dir>] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -252,6 +252,10 @@ Codex, Copilot, agy and opencode refuse repositories listed in client-senders.ts
 and folders under ~/repos/CD (opencode also refuses ~/repos itself: its free APIs train on input). client-repos.txt has one path per line. Blank lines
 and lines starting with # are ignored. Both list files must be regular readable files; pass --allow-client to continue.
 --headless is only for Claude with --console.
+No-AI wall (issue 228): every engine, claude and --console included, is refused when the folder, any --add-dir or the prompt file sits under a path in
+~/.config/afa/no-ai-paths.txt (private list; a missing list means the wall is off, an unreadable one refuses everything). --allow-client does not
+override it. --clean-room <scratch-dir> starts the lane in that scratch folder instead of <dir>, and only when the scratch folder and the prompt file
+match nothing on the list and the prompt text names no listed path.
 --ask <oc-id> claims an OpenClaw ask for this lane (its result then reaches Jonathan's OpenClaw chat).
 Claude lanes default to --effort high on sonnet, opus and fable, none on haiku;
 they are recycled at their own line (--recycle-at <K>, default by kind of work) and compact in place only as a backstop above it.
@@ -271,7 +275,12 @@ USAGE
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-add_dirs_opt=(); full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
+# The no-AI wall's bash helper (reads the same private lists as the hook, the poller and the digest). A lane launcher that cannot load it must not
+# start lanes: with no helper the wall would silently be off.
+[ -r "$SCRIPT_DIR/no_ai_wall.sh" ] || { echo "refusing: $SCRIPT_DIR/no_ai_wall.sh is missing, so the no-AI wall cannot be checked" >&2; exit 1; }
+# shellcheck source=no_ai_wall.sh
+. "$SCRIPT_DIR/no_ai_wall.sh"
+add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -306,6 +315,10 @@ while [ $# -gt 0 ]; do
       ask_id="$2"; shift 2 ;;
     --ask=*) ask_id="${1#*=}"; shift ;;
     --allow-client) allow_client=1; shift ;;
+    --clean-room)
+      [ $# -ge 2 ] || { echo "--clean-room requires a scratch folder" >&2; exit 1; }
+      clean_room="$2"; shift 2 ;;
+    --clean-room=*) clean_room="${1#*=}"; shift ;;
     --allow-low-tier) allow_low_tier=1; shift ;;
     --allow-high-tier)
       [ $# -ge 2 ] && [ -n "${2// /}" ] || { echo "--allow-high-tier needs a reason in words, e.g. --allow-high-tier \"a claim-check pass\"" >&2; exit 1; }
@@ -403,6 +416,7 @@ if [ "${#deny_opt[@]}" -gt 0 ]; then
 fi
 [ -z "$ask_id" ] || [[ "$ask_id" =~ ^oc-[0-9a-f]{8}$ ]] || { echo "--ask needs an id like oc-1a2b3c4d, got: $ask_id" >&2; exit 1; }
 [ -z "$ask_id" ] || [ "$mode" = start ] || { echo "--ask only applies when starting a lane" >&2; exit 1; }
+[ -z "$clean_room" ] || [ "$mode" = start ] || { echo "--clean-room only applies when starting a lane" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$console" = 1 ] || { echo "--headless is only valid with --console" >&2; exit 1; }
 [ "$headless" = 0 ] || [ "$mode" = start ] || { echo "--headless only applies when starting a lane" >&2; exit 1; }
 
@@ -635,6 +649,37 @@ check_external_target_path() {
       return 1
     fi
   done <<<"$repo_paths"
+}
+
+# The no-AI wall (issue 228). Some clients require that their information never reaches a proprietary AI provider, Claude included, so unlike
+# guard_external_engine this one applies to every engine, --console and --headless too, and --allow-client cannot override it. A lane is refused
+# when its folder, any --add-dir or its prompt file sits under a path on ~/.config/afa/no-ai-paths.txt. --clean-room <scratch-dir> is the way
+# to do work about such a client without being in its folder: the lane runs in the scratch folder, and only when the scratch folder and the
+# prompt file match nothing on the list and the prompt text names no listed path. The refusal names no list entry (the lane's own transcript
+# is a model's context); the list's entry number is enough to find it.
+no_ai_wall_guard() {  # <dir> <prompt-file> [extra folders...]
+  local d="$1" pf="$2"; shift 2
+  if no_ai_wall_paths_hit "$d" "$pf" "$@"; then
+    echo "refusing engine $engine: the folder, an --add-dir or the prompt file is on the no-AI list (~/.config/afa/no-ai-paths.txt); no engine may start there, and --allow-client does not apply. Use --clean-room <scratch-dir> for work that must not touch it" >&2
+    return 1
+  fi
+  return 0
+}
+
+no_ai_clean_room() {  # <scratch-dir> <prompt-file> [extra folders...]: sets dir to the canonical scratch folder, or refuses
+  local sc="$1" pf="$2" cr; shift 2
+  [ -d "$sc" ] || { echo "--clean-room: no such folder: $sc" >&2; return 1; }
+  cr="$(cd "$sc" && pwd -P)"
+  if no_ai_wall_paths_hit "$cr" "$pf" "$@"; then
+    echo "refusing --clean-room: the scratch folder, the prompt file or an --add-dir is on the no-AI list" >&2
+    return 1
+  fi
+  if no_ai_wall_text_hit "$pf"; then
+    echo "refusing --clean-room: the prompt text names a path on the no-AI list; a clean room's prompt describes the task without naming the client's folders" >&2
+    return 1
+  fi
+  dir="$cr"
+  echo "clean room: the lane works in $cr, away from the folders on the no-AI list"
 }
 
 guard_external_engine() {
@@ -1766,6 +1811,10 @@ if [ "$mode" = resume ]; then
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "no session id recorded for $name; find it under $PROJ and add it to $INDEX" >&2; exit 1; }
   id="$(follow_session "$name" "$dir" "$id" "${st:-0}")"  # a /clear since the row was written moved the lane to a newer transcript
   [ -d "$dir" ] || { echo "no such folder: $dir" >&2; exit 1; }
+  # The wall again on a resume: the list may have grown since the lane started. The recorded add-dirs are a colon list ("-" = none).
+  IFS=: read -r -a _rad <<<"${ad:--}"
+  _rad=("${_rad[@]/#-/}")
+  no_ai_wall_guard "$dir" "${p:-/nonexistent}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} "${_rad[@]}" || exit 1
   if [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
     echo "$name is a headless lane (out.log beside its report); there is no interactive session to resume. Read $(dirname "$rep")/out.log" >&2; exit 1
   fi
@@ -1859,6 +1908,11 @@ name="$1"; dir="$2"; model="$3"; prompt="$4"
 dir="$(cd "$dir" && pwd -P)"
 prompt="$(cd "$(dirname "$prompt")" && pwd -P)/$(basename "$prompt")"
 
+if [ -n "$clean_room" ]; then
+  no_ai_clean_room "$clean_room" "$prompt" ${add_dirs_opt[@]+"${add_dirs_opt[@]}"} || exit 1
+else
+  no_ai_wall_guard "$dir" "$prompt" ${add_dirs_opt[@]+"${add_dirs_opt[@]}"} || exit 1
+fi
 if [ "$engine" != claude ] && [ "$console" = 1 ]; then
   echo "--console applies only to the Claude engine" >&2
   exit 1
