@@ -7,6 +7,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -37,7 +38,9 @@ class Build(unittest.TestCase):
         self.src = os.path.join(self.tmp, "src")
         os.makedirs(self.src)
         self.out = os.path.join(self.tmp, "cfg", "roster.json")
-        self.addCleanup(lambda: os.environ.pop("COOP_ROSTER_FILE", None))
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         os.environ["COOP_ROSTER_FILE"] = self.out
 
     def put(self, name, text):

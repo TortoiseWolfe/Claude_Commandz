@@ -4,6 +4,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -12,12 +13,19 @@ import coop_scrubber as cs  # noqa: E402
 import coop_fixtures as fx  # noqa: E402
 
 
+def patch_env(case):
+    """Every environment change a test makes is undone when it ends."""
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 class CoopFolder(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)
+        patch_env(self)
         os.environ["HOME"] = self.home
-        self.addCleanup(os.environ.__setitem__, "HOME", os.environ.get("HOME"))
 
     def test_match_covers_everything_under_a_folder(self):
         pats = ["~/repos/Acme-Co*", "/srv/shared/**/ops"]
@@ -110,9 +118,9 @@ class PresidioStandIn(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         py, worker = fx.write_fake_presidio(self.tmp)
+        patch_env(self)
         os.environ["COOP_SCRUBBER_PRESIDIO_PYTHON"] = py
         os.environ["COOP_SCRUBBER_PRESIDIO_WORKER"] = worker
-        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("COOP_SCRUBBER_PRESIDIO_PYTHON", "COOP_SCRUBBER_PRESIDIO_WORKER")])
 
     def test_presidio_spans_are_used_and_roster_wins_overlap(self):
         s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
@@ -152,7 +160,7 @@ class ConfigFiles(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("COOP_SCRUBBER_CONFIG", "COOP_ROSTER_FILE")])
+        patch_env(self)
 
     def test_missing_config_is_off(self):
         os.environ["COOP_SCRUBBER_CONFIG"] = os.path.join(self.tmp, "none.json")
