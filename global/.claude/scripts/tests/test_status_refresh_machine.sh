@@ -62,4 +62,16 @@ grep -q 'ncc-test-wsl2' "$ARGS" || fail "the tower looks up its own runner name:
 HOME="$H" PATH="$H/bin:$PATH" bash "$S/he_runner_watch.sh" >/dev/null 2>&1 || fail "no runner folder on the tower is not an error"; ok
 ! grep -q 'registration-token' "$ARGS" || fail "the tower never asks for a registration token without a runner folder"; ok
 
+
+# 5. A long-lived child of fleet-up.sh (a tmux server) must not keep the refresh lock: the next run is not turned away (4 Nov 2026: the digest
+# was not rebuilt for 17 hours because the tmux server fleet-up started held the lock).
+setup NCC-TEST
+printf '#!/usr/bin/env bash\necho fleet-up.sh >>"%s"\nsleep 40 </dev/null >/dev/null 2>&1 &\necho $! >"%s/child.pid"\n' "$CALLS" "$H" >"$S/fleet-up.sh"
+run_refresh
+child=$(cat "$H/child.pid" 2>/dev/null || true)
+: >"$CALLS"
+run_refresh
+[ -n "$child" ] && kill "$child" 2>/dev/null || true   # exact PID, never by pattern
+grep -qx hub_digest.py "$CALLS" || fail "a child of fleet-up.sh kept the refresh lock: the next run did nothing (ran: $(tr '\n' ' ' <"$CALLS"))"; ok
+
 printf 'ok: %s checks\n' "$checks"
