@@ -1,6 +1,7 @@
 """The no-AI wall's PreToolUse hook, run as Claude Code runs it: JSON on stdin, deny = exit 2 with the reason on stderr. Fake folders only."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -92,6 +93,86 @@ class HookTests(unittest.TestCase):
         for _ in range(10):
             self.run_hook("Bash", command="ls -la; git status && echo done")
         self.assertLess((time.time() - start) / 10, 0.5)  # a Python start-up and two small files, no network
+
+
+class HookIsolationTests(unittest.TestCase):
+    """The hook must not run code planted in a folder the user can write: not a stdlib name, not the wall module."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = os.path.realpath(self._tmp.name)
+        self.home = os.path.join(self.tmp, "home")
+        self.hooks = os.path.join(self.home, ".claude", "hooks")
+        self.scripts = os.path.join(self.home, ".claude", "scripts")
+        for d in (self.hooks, self.scripts, os.path.join(self.tmp, "wall/clientA"), os.path.join(self.tmp, "work"), os.path.join(self.tmp, "evil")):
+            os.makedirs(d)
+        src = os.path.dirname(HOOK)
+        shutil.copy(HOOK, os.path.join(self.hooks, "no-ai-wall-guard.py"))
+        shutil.copy(os.path.join(src, "..", "scripts", "no_ai_wall.py"), os.path.join(self.scripts, "no_ai_wall.py"))
+        self.hook = os.path.join(self.hooks, "no-ai-wall-guard.py")
+        self.pfile = os.path.join(self.tmp, "paths.txt")
+        open(self.pfile, "w").write(os.path.join(self.tmp, "wall", "clientA") + "\n")
+        self.marker = os.path.join(self.tmp, "planted-code-ran")
+        self.env = dict(os.environ, HOME=self.home, NO_AI_PATHS_FILE=self.pfile, NO_AI_REFUSAL_LOG=os.path.join(self.tmp, "r.log"))
+        self.env.pop("PYTHONPATH", None)
+
+    def plant(self, folder, name):
+        with open(os.path.join(folder, name), "w") as fh:
+            fh.write("open(%r, 'w').write('ran')\nimport sys\nsys.exit(0)\n" % self.marker)
+
+    def run_hook(self, tool="Read", env=None, **ti):
+        payload = {"tool_name": tool, "tool_input": ti, "cwd": os.path.join(self.tmp, "work")}
+        return subprocess.run([sys.executable, self.hook], input=json.dumps(payload), capture_output=True, text=True, env=env or self.env)
+
+    def listed_read(self):
+        return dict(file_path=os.path.join(self.tmp, "wall/clientA/x.txt"))
+
+    def lone_hook(self):
+        lone = os.path.join(self.tmp, "lone")
+        os.makedirs(lone)
+        shutil.copy(HOOK, os.path.join(lone, "no-ai-wall-guard.py"))
+        self.hook = os.path.join(lone, "no-ai-wall-guard.py")
+
+    def test_baseline_installed_copy_denies(self):
+        self.assertEqual(self.run_hook(**self.listed_read()).returncode, 2)
+
+    def test_a_stdlib_name_planted_beside_the_hook_does_not_run(self):
+        for name in ("json.py", "re.py", "shlex.py", "glob.py", "datetime.py"):
+            self.plant(self.hooks, name)
+        r = self.run_hook(**self.listed_read())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_a_stdlib_name_planted_in_the_scripts_folder_does_not_run(self):
+        for name in ("json.py", "re.py", "shlex.py", "glob.py", "datetime.py"):
+            self.plant(self.scripts, name)
+        r = self.run_hook(**self.listed_read())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_a_module_planted_on_pythonpath_does_not_run(self):
+        for name in ("json.py", "re.py", "no_ai_wall.py"):
+            self.plant(os.path.join(self.tmp, "evil"), name)
+        env = dict(self.env, PYTHONPATH=os.path.join(self.tmp, "evil"))
+        r = self.run_hook(env=env, **self.listed_read())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_the_hook_finds_the_module_in_the_home_scripts_folder_when_run_from_elsewhere(self):
+        self.lone_hook()
+        self.assertEqual(self.run_hook(**self.listed_read()).returncode, 2)
+
+    def test_no_module_and_a_list_present_stays_closed(self):
+        os.remove(os.path.join(self.scripts, "no_ai_wall.py"))
+        self.lone_hook()
+        self.assertEqual(self.run_hook("Bash", command="echo hi").returncode, 2)
+
+    def test_settings_and_scripts_cannot_be_edited_even_with_an_empty_list(self):
+        open(self.pfile, "w").write("# nothing yet\n")
+        for f in (os.path.join(self.home, ".claude/settings.json"), os.path.join(self.scripts, "any.py"), os.path.join(self.hooks, "any.sh")):
+            self.assertEqual(self.run_hook("Edit", file_path=f).returncode, 2, f)
+        self.assertEqual(self.run_hook("Read", file_path=os.path.join(self.home, ".claude/settings.json")).returncode, 0)
 
 
 if __name__ == "__main__":

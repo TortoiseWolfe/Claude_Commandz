@@ -21,6 +21,7 @@ Command line (used by the bash helper no_ai_wall.sh):
 Environment overrides (tests): NO_AI_PATHS_FILE, NO_AI_REFUSAL_LOG.
 """
 import datetime
+import fnmatch
 import glob as _glob
 import os
 import re
@@ -395,6 +396,93 @@ def _is_protected(path, cwd, which):
     return False
 
 
+def _reaches(path, cwd, files):
+    """True when path is one of files or a folder above one (a search rooted there would read the file). Symlinks count."""
+    cand = PathList()._candidates(path, cwd)
+    for f in files:
+        for form in {os.path.normpath(f), os.path.realpath(f)}:
+            for c in cand:
+                if form == c or form.startswith(c.rstrip("/") + "/"):
+                    return True
+    return False
+
+
+_CODE_SUFFIXES = (".py", ".sh")
+
+
+def _is_guarded_config(path, cwd):
+    """True for a file a session could use to switch the wall off without touching the wall's own files: any .py or .sh under
+    ~/.claude/hooks or ~/.claude/scripts (a script the hook imports, or one a hook runs), and the settings*.json files that register the
+    hook, in ~/.claude and in any project's .claude folder. Writes only; reading and running them stays open."""
+    base = os.path.join(home(), ".claude")
+    folders = set()
+    for sub in ("hooks", "scripts"):
+        d = os.path.join(base, sub)
+        folders.update({os.path.normpath(d), os.path.realpath(d)})
+    for c in PathList()._candidates(path, cwd):
+        name = os.path.basename(c)
+        if name.endswith(_CODE_SUFFIXES) and any(c.startswith(d.rstrip("/") + "/") for d in folders):
+            return True
+        if fnmatch.fnmatchcase(name, "settings*.json") and os.path.basename(os.path.dirname(c)) == ".claude":
+            return True
+    return False
+
+
+_WRITE_PROGRAMS = {"rm", "unlink", "shred", "truncate", "tee", "touch", "chmod", "chown", "chgrp", "mv", "dd", "patch", "sponge"}
+_DEST_LAST_PROGRAMS = {"cp", "install", "rsync", "ln"}
+_INLINE_PROGRAM = re.compile(r"(?:python[\d.]*|node|perl|ruby|bash|sh|zsh|php|deno|bun)\Z")
+_REDIRECT = re.compile(r"(?:\d*|&)>>?\|?\s*([^\s;|&<>()`]+)")
+
+
+def bash_writes_guarded(command, cwd):
+    """True when a shell command (best effort, from its text) writes a file _is_guarded_config names: a redirection into it, a
+    program that changes its arguments (rm, tee, sed -i, perl -i, mv, chmod ...), the destination of cp, install, rsync or ln, or an
+    inline interpreter (python -c, node -e, bash -c) that mentions one. A command that only reads or runs such a file is not stopped."""
+    cur = cwd or os.getcwd()
+    for seg in _segments(command.replace(">|", ">")):  # `>|` is a plain redirect; the pipe split would cut it in two
+        for m in _REDIRECT.finditer(seg):
+            if _is_guarded_config(m.group(1).strip("'\""), cur):
+                return True
+        words = _words(seg)
+        if not words:
+            continue
+        if words[0] == "cd" and len(words) > 1:
+            cur = expand(words[1], cur)
+            continue
+        i = 0
+        while i < len(words) and (words[i] in ("sudo", "env", "command", "nohup", "time", "exec") or re.fullmatch(r"\w+=\S*", words[i])):
+            i += 1
+        if i >= len(words):
+            continue
+        prog = os.path.basename(words[i])
+        args = words[i + 1:]
+        operands = [a for a in args if a and not (a.startswith("-") and "/" not in a)]
+
+        def guarded(arg):
+            return _is_guarded_config(arg.split("=")[-1], cur) or _is_guarded_config(arg, cur)
+
+        def into_guarded_folder(arg):  # a copy into the hooks or scripts folder, whatever the file is called
+            return (arg.endswith("/") or os.path.isdir(expand(arg, cur))) and _is_guarded_config(os.path.join(arg, "x.py"), cur)
+
+        if prog in _DEST_LAST_PROGRAMS:
+            into = [nxt for a, nxt in zip(args, args[1:]) if a in ("-t", "--target-directory")]  # always a folder
+            if any(_is_guarded_config(os.path.join(d, "x.py"), cur) for d in into):
+                return True
+            if not into and operands[-1:] and (guarded(operands[-1]) or into_guarded_folder(operands[-1])):
+                return True
+            continue
+        if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
+            if any(guarded(t) for a in args for t in text_paths(a)):  # code in the command line that names one of them
+                return True
+        if not any(guarded(a) for a in operands):
+            continue
+        if prog in _WRITE_PROGRAMS:
+            return True
+        if prog in ("sed", "gsed", "perl", "ruby") and any(a.startswith("--in-place") or (a.startswith("-") and not a.startswith("--") and "i" in a) for a in args):
+            return True
+    return False
+
+
 def _segments(command):
     return [seg for seg in re.split(r"\|\||&&|[;|&\n]", command) if seg.strip()]
 
@@ -431,6 +519,27 @@ def _command_tokens(command, cwd):
     return out
 
 
+def _path_shaped(text):
+    """A string an MCP tool could mean as a file: it has a slash, or starts with a dot or a ~ or $HOME. Short, one-line strings only."""
+    return bool(text) and len(text) < 4096 and "\n" not in text and ("/" in text or text.startswith((".", "~", "$HOME", "${HOME}")))
+
+
+def reads_content_recursively(words):
+    """True for a shell command that reads or copies the CONTENT of every file under the folders it is given (a name-only listing such
+    as `find -name`, `tree` or `du` is not one)."""
+    for i, w in enumerate(words):
+        base = os.path.basename(w)
+        rest = words[i + 1:]
+        if base in ("rg", "ag", "ack", "tar", "zip", "rsync", "scp"):
+            return True
+        if base in ("find", "fd", "fdfind") and any(x in ("-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fls", "-x", "--exec", "-X", "--exec-batch") for x in rest):
+            return True
+        if base in _GREPS or base in ("cp", "mv") or base == "git":
+            if _is_recursive(words[i:i + 1] + rest) and (base != "git" or "grep" in rest[:3]):
+                return True
+    return False
+
+
 def _strings(value, depth=0):
     """Every string inside a tool's input, however deeply nested (an MCP tool's arguments have no fixed shape)."""
     if depth > 6:
@@ -449,7 +558,7 @@ def evaluate(payload, paths=None):
     """The hook's decision for one tool call. -> None to allow, else (tool, entry, message) to deny. `entry` is "entry N" (the list
     position), never the listed path: the refusal reaches a model's context and the log is a file a model could open."""
     paths = paths or load_paths()
-    if not paths.entries and paths.status != "bad":
+    if not paths.on:  # no list at all: the wall is off. A list with no entries is still a wall, and still guards its own files.
         return None
     tool = payload.get("tool_name") or ""
     ti = payload.get("tool_input") or {}
@@ -476,7 +585,16 @@ def evaluate(payload, paths=None):
         return (tool, label(entry), "no-ai wall: this search would walk into a folder on the no-AI list (%s). Narrow the search root so it leaves that folder out." % label(entry))
 
     def deny_protected():
-        return (tool, "protected file", "no-ai wall: the no-AI list, its hook and its module cannot be changed from a session. Edit them outside the model.")
+        return (tool, "protected file", "no-ai wall: the no-AI list, its hook and its module, the hook and script files beside them and the settings files cannot be changed from a session. Edit them outside the model.")
+
+    def deny_list_search():
+        return (tool, "protected file", "no-ai wall: the no-AI list is private config and this search would read it. Narrow the search root to the folder you need.")
+
+    def reads_list(root):
+        return _reaches(root, cwd, [paths_file()])
+
+    def is_guarded(path):
+        return _is_protected(path, cwd, protected_files()) or _is_guarded_config(path, cwd)
 
     def check_pattern(pat, root):
         start = pattern_start(pat, root, cwd)
@@ -488,6 +606,8 @@ def evaluate(payload, paths=None):
         h = paths.contains(start, cwd)
         if h:
             return deny_root(h)
+        if reads_list(start):
+            return deny_list_search()
         return None
 
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
@@ -496,7 +616,7 @@ def evaluate(payload, paths=None):
             h = paths.match(str(p), cwd)
             if h:
                 return deny_path(h)
-            if tool in _WRITE_TOOLS and _is_protected(str(p), cwd, protected_files()):
+            if tool in _WRITE_TOOLS and is_guarded(str(p)):
                 return deny_protected()
             if tool == "Read" and _is_protected(str(p), cwd, [paths_file()]):
                 return deny_protected()
@@ -509,6 +629,8 @@ def evaluate(payload, paths=None):
         h = paths.contains(root, cwd)
         if h:
             return deny_root(h)
+        if reads_list(root):  # the list is private config: a search rooted on it, or on a folder above it, would read it
+            return deny_list_search()
         base = expand(root, cwd)
         for pat in (ti.get("pattern") if tool == "Glob" else None, ti.get("glob")):
             if pat:
@@ -523,17 +645,31 @@ def evaluate(payload, paths=None):
             return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
         if any(_is_protected(t, cwd, protected_files()) for t in _command_tokens(command, cwd)) and not _read_only_listing(command):
             return deny_protected()
+        if bash_writes_guarded(command, cwd):
+            return deny_protected()
+        words = _words(command)
+        if reads_content_recursively(words):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
+            roots = _command_tokens(command, cwd) or [cwd]
+            if any(reads_list(t) for t in roots):
+                return deny_list_search()
         return None
 
     # An MCP tool or any tool this module does not know: its arguments could name a listed path in any field, so every string
     # in them is read as a path or as text that names one.
     for text in _strings(ti):
-        h = paths.match(text, cwd) if text.startswith(("/", "~", "$HOME")) else None
-        if not h:
-            h = text_names_listed_path(text, paths)
+        pieces = [text] + [t.strip("'\"`,;:()[]{}<>") for t in text[:20000].split()[:400]]  # a sentence naming a relative path; capped
+        for piece in pieces:
+            if not _path_shaped(piece):
+                continue
+            h = paths.match(piece, cwd)  # a relative one is joined with the session folder, as the shell tools do
+            if h:
+                return deny_path(h)
+            if is_guarded(piece):
+                return deny_protected()
+        h = text_names_listed_path(text, paths)
         if h:
             return deny_path(h)
-        if any(_is_protected(t, cwd, protected_files()) for t in text_paths(text)):
+        if any(is_guarded(t) for t in text_paths(text)):
             return deny_protected()
     return None
 

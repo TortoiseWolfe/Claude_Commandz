@@ -2,8 +2,10 @@
 """Claude Code PreToolUse hook: the no-AI wall, tier 1 (member personal data). Denies a tool call that names a path under an
 entry of ~/.config/afa/no-ai-paths.txt: Read, Edit, Write, MultiEdit, NotebookEdit, Grep, Glob and Bash by the paths they name (or any
 path-looking word in a Bash command), an MCP or unknown tool by any string in its arguments, and EVERY tool when the session's working
-folder is listed. A Grep, Glob or recursive shell search whose root CONTAINS a listed folder is denied too. The list, this hook and
-no_ai_wall.py cannot be changed from a session. Nothing else is blocked.
+folder is listed. A Grep, Glob or recursive shell search whose root CONTAINS a listed folder is denied too, and so is a Grep or Glob
+rooted on the list file or a folder above it. Relative paths in any tool's arguments are joined with the session folder first.
+The list, this hook, no_ai_wall.py, every .py and .sh under ~/.claude/hooks and ~/.claude/scripts and the settings*.json files
+cannot be written from a session (reading and running them stays open), with the list full or empty. Nothing else is blocked.
 
 stdin: {"tool_name": ..., "tool_input": {...}, "cwd": ...}
 deny: reason on stderr (it names the list entry by number, never by path), exit 2, one line in ~/.claude/state/no-ai-refusals.log
@@ -12,13 +14,39 @@ allow: exit 0. A missing list means the wall is off; a list that exists but cann
 Fast by design: it runs on every tool call, so no network, no model, nothing but one small file and a few stat calls.
 The decisions live in no_ai_wall.py (scripts/), shared with lane.sh.
 """
-import json
 import os
 import sys
 
+# Nothing but `os` and `sys` (both already loaded by Python itself) is imported before this point. A hook that imported anything else
+# from a search path holding a folder a session can write (this script's own folder, ~/.claude/scripts, PYTHONPATH, the user's site
+# folder) would run a planted json.py or re.py inside the wall. Isolated mode (-I) drops the script folder, the working folder,
+# PYTHONPATH and the user site from the search path; the standard library is all that is left. Register the hook as
+# `python3 -I <this file>` as well, so the first start-up is isolated too.
+if not sys.flags.isolated:
+    try:
+        os.execv(sys.executable, [sys.executable, "-I", os.path.realpath(__file__)] + sys.argv[1:])
+    except (OSError, ValueError):  # cannot re-start: keep going, with the search path cut down to the standard library
+        _here = os.path.dirname(os.path.realpath(__file__))
+        sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != _here and "site-packages" not in p and "dist-packages" not in p]
+
+import importlib.util  # noqa: E402  (standard library, imported only after the search path is safe)
+import json  # noqa: E402
+
 HERE = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
-sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".claude", "scripts"))
+
+
+def load_wall():
+    """The shared module, loaded by its absolute path (beside the hook, else ~/.claude/scripts): never found by a search of sys.path,
+    so a look-alike elsewhere cannot stand in for it."""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    for folder in (os.path.join(HERE, "..", "scripts"), os.path.join(home, ".claude", "scripts")):
+        path = os.path.realpath(os.path.join(folder, "no_ai_wall.py"))
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("no_ai_wall", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise ImportError("no_ai_wall.py not found")
 
 
 def main():
@@ -27,7 +55,7 @@ def main():
     except (ValueError, OSError):
         payload = {}
     try:
-        import no_ai_wall as w
+        w = load_wall()
     except Exception:  # the shared module is gone: stay closed only when a list exists to protect
         home = os.environ.get("HOME") or os.path.expanduser("~")
         lists = [os.environ.get("NO_AI_PATHS_FILE") or os.path.join(home, ".config", "afa", "no-ai-paths.txt")]

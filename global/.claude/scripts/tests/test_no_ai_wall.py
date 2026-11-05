@@ -445,5 +445,188 @@ class CliTests(Fixture):
         self.assertNotIn("wall", r.stdout.replace("wall is", ""))
 
 
+class ReviewFixTests(Fixture):
+    """The three findings of the automated security review of PR 230 (fake folders only)."""
+
+    def call(self, tool, cwd=None, **ti):
+        return w.evaluate({"tool_name": tool, "tool_input": ti, "cwd": cwd or self.p("work")}, w.load_paths())
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+
+    def move_list(self):
+        """The list lives in its own folder, away from every listed folder, as it does under ~/.config/afa."""
+        cfg = self.p("home/.config/afa")
+        os.makedirs(cfg)
+        self.pfile = os.path.join(cfg, "no-ai-paths.txt")
+        os.environ["NO_AI_PATHS_FILE"] = self.pfile
+        self.paths(self.p("wall/clientA"))
+        return cfg
+
+    # finding 2: the list itself is not readable through Grep or Glob
+    def test_grep_and_glob_refuse_the_list_and_every_folder_above_it(self):
+        cfg = self.move_list()
+        for root in (self.pfile, cfg, self.p("home/.config"), self.p("home"), self.tmp, "../home/.config", "../home/.config/afa/../afa"):
+            for tool, extra in (("Grep", {"pattern": "x"}), ("Glob", {"pattern": "*"})):
+                r = self.call(tool, path=root, **extra)
+                self.assertIsNotNone(r, (tool, root))
+                self.assertNotIn("no-ai-paths", r[2])
+        self.assertIsNone(self.call("Grep", pattern="x", path=self.p("work")))
+        self.assertIsNone(self.call("Grep", pattern="x", path=self.p("home/.cache")))
+        self.assertIsNone(self.call("Glob", pattern="*", path=self.p("home/.config/other")))
+
+    def test_grep_with_no_path_refuses_when_the_session_folder_holds_the_list(self):
+        cfg = self.move_list()
+        self.assertIsNotNone(self.call("Grep", cwd=cfg, pattern="x"))
+        self.assertIsNotNone(self.call("Grep", cwd=self.p("home"), pattern="x"))
+
+    def test_grep_and_glob_refuse_the_list_through_a_symlink_and_a_pattern(self):
+        cfg = self.move_list()
+        os.symlink(cfg, self.p("work/link"))
+        self.assertIsNotNone(self.call("Grep", pattern="x", path="link"))
+        self.assertIsNotNone(self.call("Glob", pattern=cfg + "/*"))
+        self.assertIsNotNone(self.call("Glob", pattern="../home/.config/afa/no-ai-*.txt"))
+        self.assertIsNotNone(self.call("Grep", pattern="x", path=self.p("work"), glob="../home/.config/afa/*"))
+        self.assertIsNone(self.call("Glob", pattern="*.txt", path=self.p("work")))
+
+    # finding 1: protected files, with the list full or empty
+    def protected_cases(self):
+        h = self.home
+        return [os.path.join(h, ".claude/hooks/other-hook.py"), os.path.join(h, ".claude/hooks/x.sh"),
+                os.path.join(h, ".claude/scripts/gmail_api.py"), os.path.join(h, ".claude/scripts/lane.sh"),
+                os.path.join(h, ".claude/scripts/tests/test_x.py"), os.path.join(h, ".claude/settings.json"),
+                os.path.join(h, ".claude/settings.local.json"), self.p("work/.claude/settings.json"),
+                self.p("work/.claude/settings.local.json")]
+
+    def test_session_may_not_write_hook_script_or_settings_files(self):
+        for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
+            for f in self.protected_cases():
+                r = self.call(tool, **{key: f})
+                self.assertIsNotNone(r, (tool, f))
+                self.assertEqual(r[1], "protected file", (tool, f))
+
+    def test_protected_check_runs_when_the_list_has_no_entries(self):
+        self.paths("# nothing listed yet")
+        self.assertEqual(w.load_paths().entries, [])
+        for f in self.protected_cases():
+            r = self.call("Write", file_path=f)
+            self.assertIsNotNone(r, f)
+            self.assertEqual(r[1], "protected file", f)
+        self.assertIsNone(self.call("Write", file_path=self.p("work/a.py")))
+        self.assertIsNone(self.call("Read", file_path=self.p("home/.claude/settings.json")))
+
+    def test_a_missing_list_leaves_everything_open(self):
+        os.remove(self.pfile)
+        for f in self.protected_cases():
+            self.assertIsNone(self.call("Write", file_path=f), f)
+
+    def test_files_that_are_not_protected_stay_writable(self):
+        h = self.home
+        for f in (os.path.join(h, ".claude/hooks/notes.md"), os.path.join(h, ".claude/scripts/data.json"), os.path.join(h, ".claude/commands/x.md"),
+                  self.p("work/settings.json"), self.p("work/script.py"), self.p("work/.claude/commands/x.md"), os.path.join(h, ".claude/other.json")):
+            self.assertIsNone(self.call("Write", file_path=f), f)
+
+    def test_protected_script_reached_through_a_symlinked_folder(self):
+        real = self.p("work/real-scripts")
+        os.makedirs(real)
+        os.makedirs(os.path.join(self.home, ".claude"))
+        os.symlink(real, os.path.join(self.home, ".claude/scripts"))
+        self.assertIsNotNone(self.call("Write", file_path=os.path.join(real, "x.py")))
+        self.assertIsNotNone(self.call("Write", file_path=os.path.join(self.home, ".claude/scripts/x.py")))
+
+    def test_bash_writes_to_hook_script_or_settings_files_are_denied(self):
+        h = self.home
+        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/scripts/x.py"), os.path.join(h, ".claude/hooks/y.sh")
+        proj = self.p("work/.claude/settings.local.json")
+        for cmd in ("echo '{}' > " + s, "echo x >> " + py, "cat /tmp/a >| " + sh, "sed -i 's/a/b/' " + py, "tee " + sh + " < /tmp/a", "cp /tmp/a " + py,
+                    "cp -f /tmp/a /tmp/b " + os.path.dirname(py) + "/", "mv /tmp/a " + s, "mv " + py + " /tmp/gone", "rm " + sh, "truncate -s0 " + proj,
+                    "jq . /tmp/a > /tmp/b && mv /tmp/b " + s, "chmod +x " + py, "cd %s/.claude/scripts && echo x > x.py" % h, "python3 -c \"open('%s','w')\"" % s,
+                    "install -m 755 /tmp/a " + sh, "ln -sf /tmp/evil " + py, "cp -t %s /tmp/a" % os.path.dirname(py), "perl -pi -e 's/a/b/' " + s):
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+
+    def test_bash_runs_and_reads_scripts_and_settings_freely(self):
+        h = self.home
+        s, py, sh = os.path.join(h, ".claude/settings.json"), os.path.join(h, ".claude/scripts/x.py"), os.path.join(h, ".claude/hooks/y.sh")
+        for cmd in ("python3 " + py + " draft-create --to a", "bash " + sh, "cat " + s, "cp " + py + " /tmp/backup/", "cp -a %s %s /tmp/backup/" % (py, sh),
+                    "diff " + py + " /tmp/x.py", "echo hi > /tmp/out.txt", "ls " + os.path.dirname(py), "grep -n def " + py, "cd %s/.claude/scripts && python3 x.py" % h):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
+    def test_bash_protected_check_runs_when_the_list_has_no_entries(self):
+        self.paths("# nothing listed yet")
+        self.assertIsNotNone(self.call("Bash", command="echo x > " + os.path.join(self.home, ".claude/settings.json")))
+        self.assertIsNone(self.call("Bash", command="echo hi"))
+
+    # finding 3: relative paths in MCP and unknown tools
+    def test_mcp_relative_path_into_the_wall_is_denied(self):
+        for cwd, val in ((self.p("wall"), "clientA/docs/secret.txt"), (self.p("wall"), "./clientA"), (self.p("work"), "../wall/clientA/docs"),
+                         (self.p("work"), "../wall/clientB/../clientA"), (self.p("wall/open"), "../clientB/notes.md")):
+            r = self.call("mcp__fs__read", cwd=cwd, path=val)
+            self.assertIsNotNone(r, (cwd, val))
+            self.assertEqual(r[1], "entry 1" if "clientA" in val else "entry 2", val)
+
+    def test_mcp_relative_path_nested_or_in_a_sentence_is_denied(self):
+        self.assertIsNotNone(self.call("mcp__x__ask", args={"files": [{"p": "../wall/clientA/docs/secret.txt"}]}))
+        self.assertIsNotNone(self.call("mcp__x__ask", prompt="please summarise ../wall/clientB/notes.md for me"))
+        self.assertIsNotNone(self.call("mcp__x__ask", prompt="open './../wall/clientA' now"))
+        self.assertIsNotNone(self.call("Agent", cwd=self.p("wall"), prompt="read clientA/docs/secret.txt"))
+
+    def test_mcp_relative_path_through_a_symlink_is_denied(self):
+        os.symlink(self.p("wall/clientA"), self.p("work/shortcut"))
+        self.assertIsNotNone(self.call("mcp__fs__read", path="./shortcut/docs/secret.txt"))
+
+    def test_mcp_relative_path_to_a_protected_file_is_denied(self):
+        scripts = os.path.join(self.home, ".claude/scripts")
+        os.makedirs(scripts)
+        r = self.call("mcp__fs__write", cwd=scripts, path="./no_ai_wall.py", content="x")
+        self.assertEqual(r[1], "protected file")
+        r = self.call("mcp__fs__write", cwd=self.p("work"), path="../home/.claude/settings.json", content="x")
+        self.assertEqual(r[1], "protected file")
+
+    # follow-ups found in the review of the fixes
+    def test_a_search_that_reaches_the_list_says_so_and_not_that_a_file_was_changed(self):
+        cfg = self.move_list()
+        r = self.call("Grep", pattern="x", path=cfg)
+        self.assertIn("search", r[2])
+        self.assertNotIn("changed", r[2])
+        self.assertNotIn("no-ai-paths", r[2])
+
+    def test_bash_recursive_content_search_over_the_lists_folder_is_denied(self):
+        cfg = self.move_list()
+        for cmd in ("grep -r x " + cfg, "grep -rn x %s/../" % cfg, "rg x " + self.p("home"), "tar cf /tmp/a.tar " + self.p("home/.config"),
+                    "find %s -type f -exec cat {} +" % self.p("home/.config"), "git grep x -- " + cfg, "cp -r %s /tmp/copy" % self.p("home/.config"),
+                    "cd %s && rg x" % cfg, "cd %s && grep -r x ." % cfg):
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+            self.assertNotIn("no-ai-paths", r[2])
+
+    def test_bash_names_only_listing_and_other_searches_stay_allowed(self):
+        cfg = self.move_list()
+        for cmd in ("find %s -name '*.json'" % self.p("home/.config"), "tree " + self.p("home"), "du -sh " + self.p("home"), "ls -R " + self.p("home"),
+                    "grep -r x " + self.p("work"), "rg x " + self.p("home/.cache"), "grep x %s/other.txt" % self.p("work")):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
+    def test_inline_interpreter_check_matches_the_interpreter_by_name_only(self):
+        sc = os.path.join(self.home, ".claude/scripts/x.sh")
+        for cmd in ("shellcheck -e SC1090 " + sc, "shasum -c " + sc, "bunzip2 -c " + sc, "nodemon -e js " + sc):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
+    def test_a_huge_string_in_an_mcp_call_is_still_judged_quickly(self):
+        import time
+        text = ("see ./a/b and c/d.txt " * 40000) + " ../wall/clientA/docs"
+        t0 = time.time()
+        self.call("mcp__x__send", body=text)
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertIsNotNone(self.call("mcp__x__send", body="line one\n../wall/clientA/docs\nline three"))
+
+    def test_mcp_relative_paths_outside_the_wall_stay_allowed(self):
+        for val in ("../work/a.txt", "./a.txt", "application/json", "src/index.ts", "../wall/open/ok.txt", ".", "..", "https://example.com/a/b", "just words"):
+            self.assertIsNone(self.call("mcp__fs__read", path=val), val)
+        self.assertIsNone(self.call("mcp__x__ask", prompt="compare work/a.txt with ../wall/open/ok.txt"))
+
+
 if __name__ == "__main__":
     unittest.main()
