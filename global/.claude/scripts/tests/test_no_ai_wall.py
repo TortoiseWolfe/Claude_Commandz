@@ -779,6 +779,31 @@ class BypassGapTests(Fixture):
                     "env -C %s ls" % self.p("work"), "cd - && cat x.py"):
             self.allowed(cmd)
 
+    def test_a_directory_change_behind_a_keyword_or_brace_fails_closed(self):
+        h = self.home
+        for cmd in ("if true; then cd %s/.claude/hooks; rm x.py; fi" % h, "{ cd %s/.claude/hooks; rm x.py; }" % h, "time cd %s/.claude/hooks && rm x.py" % h,
+                    "FOO=1 cd %s/.claude/hooks && rm x.py" % h, "for d in a; do cd $d; find -delete; done", "(cd %s/.claude/hooks && rm x.py)" % h):
+            self.denied(cmd)
+        self.allowed("echo hi; rm %s/.claude/commands/c.md" % h)  # no directory change: an absolute operand is judged on its own
+
+    def test_wrapper_options_do_not_hide_an_inline_interpreter_or_a_delay_value(self):
+        h = self.home
+        for cmd in ("env -C %s/.claude python3 -c 'open(\"hooks/x.py\",\"w\")'" % h, "sudo -u root bash -c 'rm %s/.claude/hooks/x.py'" % h,
+                    "timeout 5 rm %s/.claude/hooks/x.py" % h, "nice -n 5 rm %s/.claude/hooks/x.py" % h, "sudo -E node -e 'x(\"%s/.claude/scripts/x.py\")'" % h):
+            self.denied(cmd)
+        self.allowed("sudo -u root ls %s/.claude/hooks" % h)
+
+    def test_rsync_option_values_are_destinations(self):
+        h = self.home
+        for cmd in ("rsync --log-file=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --log-file %s/.claude/hooks/x.py /tmp/a /tmp/b" % h,
+                    "rsync --log=%s/.claude/scripts/x.py /tmp/a /tmp/b" % h, "rsync --backup-dir %s/.claude/hooks /tmp/a /tmp/b" % h,
+                    "rsync -T %s/.claude/hooks /tmp/a /tmp/b" % h, "rsync -aT%s/.claude/hooks /tmp/a /tmp/b" % h,
+                    "rsync --write-batch=%s/.claude/hooks/x.py /tmp/a /tmp/b" % h, "rsync --partial-dir=%s/.claude/scripts /tmp/a /tmp/b" % h):
+            self.denied(cmd)
+        for cmd in ("rsync -av --log-file=/tmp/log /tmp/a /tmp/b", "rsync -av %s/.claude/hooks/x.py /tmp/b" % h,
+                    "rsync -av --exclude %s/.claude/hooks/x.py /tmp/a /tmp/b" % h):
+            self.allowed(cmd)
+
     # MEDIUM: one normaliser for Windows drives
     def test_windows_drive_paths_ignore_case_in_every_check(self):
         os.environ["HOME"] = "/mnt/c/Users/Someone"
