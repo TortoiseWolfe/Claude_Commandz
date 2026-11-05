@@ -102,9 +102,19 @@ def _segment_regex(seg):
     return "".join(out)
 
 
+def _is_mnt(path):
+    return path[:5].lower() == "/mnt/"
+
+
+def _fold(path):
+    """The one normaliser for Windows drives. /mnt/ is a drvfs mount, where /mnt/c/Users and /mnt/C/USERS are one folder, so every
+    comparison of two paths runs both through here (_is_protected, _reaches, _is_guarded_config, the guarded-place checks)."""
+    return path.lower() if _is_mnt(path) else path
+
+
 def _flags(pattern):
-    """/mnt/ is a Windows drive (drvfs), where /mnt/c/Users and /mnt/C/USERS are one folder: those patterns ignore case."""
-    return re.DOTALL | (re.IGNORECASE if pattern.lower().startswith("/mnt/") else 0)
+    """Patterns under /mnt/ ignore case, for the same reason as _fold."""
+    return re.DOTALL | (re.IGNORECASE if _is_mnt(pattern) else 0)
 
 
 def _pattern_regex(pattern):
@@ -271,9 +281,15 @@ def text_names_listed_path(text, paths):
 def _words(command):
     cleaned = re.sub(r"[;|&<>()`]", " ", command.replace("$(", " "))
     try:
-        return shlex.split(cleaned)
+        words = shlex.split(cleaned)
     except ValueError:
         return cleaned.split()
+    out = []
+    for w in words:  # `bash -c 'find /x'` is one quoted word: its own words count too, so a search inside it is still a search
+        out.append(w)
+        if any(ch.isspace() for ch in w):
+            out.extend(_words(w))
+    return out
 
 
 def _is_recursive(words):
@@ -292,22 +308,42 @@ def _is_recursive(words):
     return False
 
 
-def _expand_globs(path):
+def _expand_globs(path, limit=20000):
+    """What a wildcard path matches on disk. The cap is far above any real folder: a short cap could cut a guarded file off the list."""
     if not any(ch in GLOB_CHARS for ch in path):
         return []
+    out = []
     try:
-        return _glob.glob(path)[:300]
+        for hit in _glob.iglob(path):
+            out.append(hit)
+            if len(out) >= limit:
+                break
     except OSError:
-        return []
+        pass
+    return out
 
 
 def bash_hits(command, cwd, paths):
     """-> (entry, kind) for the first listed path a shell command touches or the first listed folder its recursive search would
     walk into; kind is "path" or "root". None when clean. Best effort on text: a path built at run time is out of reach, which is why
-    the folder the session starts in is checked too."""
+    the folder the session starts in is checked too.
+
+    A segment that only starts a lane (lane.sh) is not a search (issue 233): its folder argument is a working folder, which the launcher
+    itself refuses when it is listed and whose tool calls the lane's own hook guards. Such a segment still counts for listed paths, but
+    it neither makes the command a search nor has its operands walked as search roots."""
     cwd = cwd or os.getcwd()
+    segs = _segments(command)
+    if any(_is_launcher(seg) for seg in segs):
+        r = _bash_hits(command, cwd, paths, searching=False)
+        if r:
+            return r
+        command = " ; ".join(seg for seg in segs if not _is_launcher(seg))
+    return _bash_hits(command, cwd, paths)
+
+
+def _bash_hits(command, cwd, paths, searching=True):
     words = _words(command)
-    recursive = _is_recursive(words)
+    recursive = searching and _is_recursive(words)
     seen = []
 
     def check(tok, base):
@@ -388,9 +424,9 @@ def protected_files():
 
 
 def _is_protected(path, cwd, which):
-    cand = PathList()._candidates(path, cwd)
+    cand = [_fold(c) for c in PathList()._candidates(path, cwd)]
     for f in which:
-        forms = {os.path.normpath(f), os.path.realpath(f)}
+        forms = {_fold(os.path.normpath(f)), _fold(os.path.realpath(f))}
         if any(c in forms for c in cand):
             return True
     return False
@@ -398,9 +434,9 @@ def _is_protected(path, cwd, which):
 
 def _reaches(path, cwd, files):
     """True when path is one of files or a folder above one (a search rooted there would read the file). Symlinks count."""
-    cand = PathList()._candidates(path, cwd)
+    cand = [_fold(c) for c in PathList()._candidates(path, cwd)]
     for f in files:
-        for form in {os.path.normpath(f), os.path.realpath(f)}:
+        for form in {_fold(os.path.normpath(f)), _fold(os.path.realpath(f))}:
             for c in cand:
                 if form == c or form.startswith(c.rstrip("/") + "/"):
                     return True
@@ -419,11 +455,9 @@ def _is_guarded_config(path, cwd):
     for sub in ("hooks", "scripts"):
         d = os.path.join(base, sub)
         folders.update({os.path.normpath(d), os.path.realpath(d)})
+    folders_c = {_fold(d) for d in folders}
     for c in PathList()._candidates(path, cwd):
-        if c.lower().startswith("/mnt/"):  # a Windows drive: /mnt/c/Users/X/.CLAUDE/Settings.JSON is the same file
-            c, folders_c = c.lower(), {d.lower() for d in folders}
-        else:
-            folders_c = folders
+        c = _fold(c)  # a Windows drive: /mnt/c/Users/X/.CLAUDE/Settings.JSON is the same file
         name = os.path.basename(c)
         if name.endswith(_CODE_SUFFIXES) and any(c.startswith(d.rstrip("/") + "/") for d in folders_c):
             return True
@@ -441,18 +475,147 @@ def guarded_places():
 
 _WRITE_PROGRAMS = {"rm", "unlink", "shred", "truncate", "tee", "touch", "chmod", "chown", "chgrp", "mv", "dd", "patch", "sponge"}
 _DEST_LAST_PROGRAMS = {"cp", "install", "rsync", "ln"}
+_FIND_PROGRAMS = {"find", "fd", "fdfind"}
+_FIND_WRITE_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls", "-x", "-X", "--exec", "--exec-batch")
 _INLINE_PROGRAM = re.compile(r"(?:python[\d.]*|node|perl|ruby|bash|sh|zsh|php|deno|bun)\Z")
 _REDIRECT = re.compile(r"(?:\d*|&)>>?\|?\s*([^\s;|&<>()`]+)")
+_BRACES = re.compile(r"\{([^{}]*,[^{}]*)\}")
+_WRAPPERS = ("sudo", "env", "command", "nohup", "time", "exec")
+
+
+def _brace_expand(word, limit=64):
+    """The words the shell makes of `a{b,c}d` (never more than `limit`)."""
+    out = [word]
+    for _ in range(8):
+        nxt, changed = [], False
+        for x in out:
+            m = _BRACES.search(x)
+            if not m:
+                nxt.append(x)
+                continue
+            changed = True
+            nxt.extend(x[:m.start()] + alt + x[m.end():] for alt in m.group(1).split(","))
+        out = nxt[:limit]
+        if not changed:
+            break
+    return out
+
+
+def _glob_matches(pattern, path):
+    """Whole-path match of a wildcard pattern: `*`, `?` and `[..]` stay inside one segment, a segment that is `**` crosses segments."""
+    ps = [x for x in _fold(pattern).split("/") if x]
+    xs = [x for x in _fold(path).split("/") if x]
+
+    def go(i, j):
+        if i == len(ps):
+            return j == len(xs)
+        if ps[i] == "**":
+            return any(go(i + 1, k) for k in range(j, len(xs) + 1))
+        return j < len(xs) and fnmatch.fnmatchcase(xs[j], ps[i]) and go(i + 1, j + 1)
+    return go(0, 0)
+
+
+def _glob_reaches(pattern, files):
+    """True when a wildcard pattern could name one of files or a folder above one, whether or not anything matches on disk now: the
+    pattern is checked against every ancestor of every file, so a wildcard that is only a prefix of a guarded name still counts."""
+    for f in files:
+        for form in {os.path.normpath(f), os.path.realpath(f)}:
+            segs = [x for x in form.split("/") if x]
+            for k in range(1, len(segs) + 1):
+                if _glob_matches(pattern, "/" + "/".join(segs[:k])):
+                    return True
+    return False
+
+
+def _guarded_folders():
+    base = os.path.join(home(), ".claude")
+    return [os.path.join(base, "hooks"), os.path.join(base, "scripts")]
+
+
+def _operand_forms(arg, cur):
+    """-> [(path, pattern)]: every absolute path an operand could mean. Brace alternatives and the part after `=` (--opt=PATH) are tried,
+    and a wildcard gives its pattern plus what it matches on disk (pattern is the wildcard form the hit came from)."""
+    out = []
+    for b in _brace_expand(arg):
+        for piece in ([b, b.split("=")[-1]] if "=" in b else [b]):
+            full = expand(piece, cur)
+            out.append((full, full))
+            out.extend((hit, full) for hit in _expand_globs(full))
+    return out
+
+
+def _touches(arg, cur, places, folders=False, is_dir=False):
+    """True when an operand is, lies above, or (a wildcard) could be a guarded file or one of `places`. `folders` also asks whether it is
+    a folder that holds guarded files (a copy lands inside it); `is_dir` says the operand is known to be a folder (a -t target)."""
+    for path, pattern in _operand_forms(arg, cur):
+        if _is_guarded_config(path, cur) or (places and _reaches(path, cur, places)):
+            return True
+        if folders and (is_dir or arg.endswith("/") or os.path.isdir(path)) and _is_guarded_config(os.path.join(path, "x.py"), cur):
+            return True
+        if path == pattern and any(ch in GLOB_CHARS for ch in path):
+            if (places and _glob_reaches(path, places)) or any(_glob_matches(path, os.path.join(f, n)) for f in _guarded_folders() for n in ("x.py", "x.sh")):
+                return True
+    return False
+
+
+def _short_flags(args):
+    return {ch for a in args if a.startswith("-") and not a.startswith("--") for ch in a[1:]}
+
+
+def _copy_targets(prog, args):
+    """The folders named by -t / --target-directory in every form GNU getopt takes: `-t D`, `-tD`, `-at D`, `-vtD`, `--target-directory D`,
+    `--target-directory=D` and any prefix of it (`--targ=D`, `--t D`). None of them is a last operand, so a last-operand rule misses them."""
+    out = []
+    if prog == "rsync":  # rsync has no such option: its -t means "keep times"
+        return out
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a.startswith("--"):
+            name, eq, val = a[2:].partition("=")
+            if name and "target-directory".startswith(name):
+                out.append(val if eq else nxt)
+        elif a.startswith("-") and len(a) > 1:
+            for j, ch in enumerate(a[1:], 1):
+                if ch in "tSmog":  # these take a value: the rest of the word, or the next word
+                    if ch == "t":
+                        out.append(a[j + 1:] or nxt)
+                    break
+    return out
+
+
+def _skip_wrappers(words):
+    i = 0
+    while i < len(words) and (words[i] in _WRAPPERS or re.fullmatch(r"\w+=\S*", words[i])):
+        i += 1
+    return i
+
+
+def _is_launcher(seg):
+    """True for one shell segment that only starts a lane with lane.sh (which applies the wall itself and gives the lane its own hook). No
+    substitution or grouping, so no search can hide in it."""
+    if re.search(r"`|\$\(|[()<]", seg):
+        return False
+    words = _words(seg)
+    i = _skip_wrappers(words)
+    if i < len(words) and os.path.basename(words[i]) in ("bash", "sh"):
+        i += 1
+        if i < len(words) and words[i].startswith("-"):
+            return False
+    return i < len(words) and os.path.basename(words[i]) == "lane.sh"
 
 
 def bash_writes_guarded(command, cwd):
-    """True when a shell command (best effort, from its text) writes a file _is_guarded_config names: a redirection into it, a
-    program that changes its arguments (rm, tee, sed -i, perl -i, mv, chmod ...), the destination of cp, install, rsync or ln, or an
-    inline interpreter (python -c, node -e, bash -c) that mentions one. A command that only reads or runs such a file is not stopped."""
+    """True when a shell command (best effort, from its text) writes a file _is_guarded_config names or empties a folder that holds them: a
+    redirection into one, a program that changes its arguments (rm, tee, sed -i, perl -i, mv, chmod ...), the destination of cp, install,
+    rsync or ln (named by position or by any -t form), find or fd with -delete or -exec, or an inline interpreter (python -c, node -e, bash -c)
+    that mentions one. Operands are read after brace and wildcard expansion. A command that only reads or runs such a file is not stopped."""
     cur = cwd or os.getcwd()
+    places = guarded_places()
     for seg in _segments(command.replace(">|", ">")):  # `>|` is a plain redirect; the pipe split would cut it in two
         for m in _REDIRECT.finditer(seg):
-            if _is_guarded_config(m.group(1).strip("'\""), cur):
+            if _touches(m.group(1).strip("'\""), cur, []):
                 return True
         words = _words(seg)
         if not words:
@@ -460,40 +623,36 @@ def bash_writes_guarded(command, cwd):
         if words[0] == "cd" and len(words) > 1:
             cur = expand(words[1], cur)
             continue
-        i = 0
-        while i < len(words) and (words[i] in ("sudo", "env", "command", "nohup", "time", "exec") or re.fullmatch(r"\w+=\S*", words[i])):
-            i += 1
+        i = _skip_wrappers(words)
         if i >= len(words):
             continue
         prog = os.path.basename(words[i])
         args = words[i + 1:]
         operands = [a for a in args if a and not (a.startswith("-") and "/" not in a)]
 
-        def guarded(arg):
-            return _is_guarded_config(arg.split("=")[-1], cur) or _is_guarded_config(arg, cur)
-
-        def into_guarded_folder(arg):  # a copy into the hooks or scripts folder, whatever the file is called
-            return (arg.endswith("/") or os.path.isdir(expand(arg, cur))) and _is_guarded_config(os.path.join(arg, "x.py"), cur)
-
         if prog in _DEST_LAST_PROGRAMS:
-            into = [nxt for a, nxt in zip(args, args[1:]) if a in ("-t", "--target-directory")]  # always a folder
-            into += [a.split("=", 1)[1] for a in args if a.startswith("--target-directory=")] + [a[2:] for a in args if a.startswith("-t") and len(a) > 2 and not a.startswith("--")]
-            if any(_is_guarded_config(os.path.join(d, "x.py"), cur) for d in into):
+            flags = _short_flags(args)
+            recursive = prog == "rsync" or bool(flags & set("rRa")) or any(a.startswith(("--r", "--a")) for a in args)
+            every = any(a.startswith(("--delete", "--del", "--remove")) for a in args) or (prog != "rsync" and "T" in flags)
+            targets = [] if every else _copy_targets(prog, args)
+            dests = operands if every else (targets or operands[-1:])
+            # The destination (every operand when a delete, remove or -T option is on) may not be a guarded file, lie in a guarded folder,
+            # or, for a recursive copy, rsync, ln or a delete, be a folder that holds one: `rsync --delete empty/ ~/.claude/` empties the hooks.
+            reach = places if (recursive or prog == "ln" or every) else [p for p in places if os.path.isfile(p) or os.path.islink(p)]
+            if any(_touches(d, cur, reach, folders=True, is_dir=bool(targets)) for d in dests):
                 return True
-            if not into and operands[-1:] and (guarded(operands[-1]) or into_guarded_folder(operands[-1])):
+            continue  # the sources of a copy are only read
+        if prog in _FIND_PROGRAMS and any(a in _FIND_WRITE_ACTIONS for a in args):
+            if any(_touches(a, cur, places, folders=True) for a in operands):  # a root, or the file an action writes
                 return True
-            continue
         if _INLINE_PROGRAM.match(prog) and any(a in ("-c", "-e", "-r", "-E", "--eval") for a in args):
-            if any(guarded(t) for a in args for t in text_paths(a)):  # code in the command line that names one of them
+            if any(_touches(t, cur, []) for a in args for t in text_paths(a)):  # code in the command line that names one of them
                 return True
-        if prog in _WRITE_PROGRAMS and any(_reaches(a, cur, guarded_places()) for a in operands):
+        if prog in _WRITE_PROGRAMS and any(_touches(a, cur, places) for a in operands):
             return True  # `mv ~/.claude/hooks /tmp/x` or `rm -r ~/.claude` unguards the wall as surely as editing a file
-        if not any(guarded(a) for a in operands):
-            continue
-        if prog in _WRITE_PROGRAMS:
-            return True
         if prog in ("sed", "gsed", "perl", "ruby") and any(a.startswith("--in-place") or (a.startswith("-") and not a.startswith("--") and "i" in a) for a in args):
-            return True
+            if any(_touches(a, cur, []) for a in operands):
+                return True
     return False
 
 
