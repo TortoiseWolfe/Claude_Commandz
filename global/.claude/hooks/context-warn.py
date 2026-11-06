@@ -6,6 +6,9 @@ The line comes with the UserPromptSubmit event; a PostToolUse call prints it onl
 (a resumed session's first tool call), because every print lands in the hub's own context (issue 224, 5 Nov 2026: it printed after
 every tool call). A tier warning still arrives on whichever event first sees the crossing, with the line above it.
 All come from absolute token counts, not percentages of an auto-compaction window:
+  - AFA_HANDOFF_FRESH_K (default 200): from this size on, a warning that no hub-handoff-*.md newer than 30 minutes exists in the state
+    folder (silent when one does), repeated at most every 10 minutes until the file is there (issue 227: three sessions on 4 Nov reached
+    the hand-off line with no running file);
   - AFA_HANDOFF_START_K (default 250): "start the running hand-off file now", once per session;
   - hand-off line minus 20K (310K by default): "start wrapping up", once per session;
   - AFA_HANDOFF_K (default 330): "hand off and end, no new work" with the marker to touch,
@@ -22,10 +25,14 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 
 READ_LIMIT = 512 * 1024
 DEFAULT_HANDOFF_K = 330
 DEFAULT_HANDOFF_START_K = 250
+DEFAULT_HANDOFF_FRESH_K = 200
+FRESH_HANDOFF_SECS = 30 * 60   # a hand-off file touched within this long counts as the running one
+NAG_EVERY_SECS = 10 * 60       # the no-file warning repeats at most this often
 EARLY_MARGIN_K = 20  # the early warning comes this many thousand tokens before the hand-off line
 
 
@@ -36,6 +43,19 @@ def get_setting(env_var, default):
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def has_fresh_handoff(state_dir, now):
+    try:
+        for path in state_dir.glob("hub-handoff-*.md"):
+            try:
+                if now - path.stat().st_mtime <= FRESH_HANDOFF_SECS:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
 
 
 def latest_context_size(transcript_path):
@@ -118,15 +138,34 @@ def main():
                 line_mark.write_text("1", encoding="ascii")
             except OSError:
                 pass
+        # No running hand-off file yet: say so from the fresh-file point on, at most every 10 minutes (the 330K tier already says it past that).
+        note = None
+        fresh_k = get_setting("AFA_HANDOFF_FRESH_K", DEFAULT_HANDOFF_FRESH_K)
+        if fresh_k * 1000 <= size < handoff_k * 1000 and not has_fresh_handoff(state_dir, time.time()):
+            nag = state_dir / ("context-nohandoff." + session_id)
+            try:
+                due = time.time() - nag.stat().st_mtime >= NAG_EVERY_SECS
+            except OSError:
+                due = True
+            if due:
+                try:
+                    state_dir.mkdir(parents=True, exist_ok=True)
+                    nag.write_text("1", encoding="ascii")
+                except OSError:
+                    pass
+                note = (
+                    f"Hub context {tokens_k}K and no hub-handoff-*.md newer than 30 minutes: start this session's running hand-off file now "
+                    "(copy the open items from the newest ~/.claude/state/hub-handoff-*.md into hub-handoff-<date>-<HHMM>.md)."
+                )
         # Reset the stamp when below the lowest warning point
         if size < min(thresholds_k) * 1000:
             stamp.unlink(missing_ok=True)
-            if not show_line:
+            if not show_line and not note:
                 return 0
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": payload.get("hook_event_name"),
-                    "additionalContext": message,
+                    "additionalContext": message + ("\n" + note if note else ""),
                 }
             }))
             return 0
@@ -161,6 +200,9 @@ def main():
                 f"Hub context {tokens_k}K: hand off and end, no new work. "
                 f"When the hand-off file is written: touch ~/.claude/state/hub-handed-off.{session_id}"
             )
+
+        if note:
+            extra = (extra + "\n" + note) if extra else note
 
         if extra:
             message += "\n" + extra
