@@ -30,7 +30,9 @@ set -u
 [ $# -eq 4 ] || { echo "usage: opencode_lane.sh <dir> <hand-off-folder> <model> <prompt-file>" >&2; exit 2; }
 dir="$1"; hand="$2"; want="$3"; prompt_file="$4"
 
-DEFAULT_MODELS=(google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)
+# The third is OpenCode's own free tier (Zen): it needs no key, so a day on which the Gemini key (20 requests a day) and OpenRouter's free models
+# (a daily cap) are both spent still has a provider left (proved 6 Nov 2026: with both out, opencode/big-pickle answered and edited a file).
+DEFAULT_MODELS=(google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free opencode/big-pickle)
 LIMIT="${OPENCODE_LANE_TIMEOUT:-7200}"
 
 # nvm's node is not always on PATH in a bare tmux window.
@@ -63,7 +65,7 @@ export OPENCODE_CONFIG="$conf"
 
 # Order: the requested model, then the defaults not already tried.
 models=()
-case "$want" in google/*|openrouter/*) models+=("$want") ;; esac  # only providers whose key is loaded above
+case "$want" in google/*|openrouter/*|opencode/*) models+=("$want") ;; esac  # the keyed providers loaded above, and OpenCode's keyless free tier
 for m in "${DEFAULT_MODELS[@]}"; do
   seen=0; for x in "${models[@]:-}"; do [ "$x" = "$m" ] && seen=1; done
   [ "$seen" = 1 ] || models+=("$m")
