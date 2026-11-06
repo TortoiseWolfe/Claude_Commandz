@@ -860,11 +860,25 @@ agy_model() {
 }
 
 # OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads, or opencode/ (its keyless free tier); anything else (a Claude alias) is the free default.
-opencode_model() {
+# A model whose provider has no key on this machine is swapped for the first one that does (opencode_lane.sh would leave it out anyway; this keeps the
+# lane's recorded model honest): google needs the key file under ~/.config/gemini, openrouter the one under ~/.config/openrouter, opencode/ needs none.
+opencode_key_ok() {  # <model>
   case "$1" in
-    google/*|openrouter/*|opencode/*) printf '%s' "$1" ;;
-    *) printf 'google/gemini-3-flash-preview' ;;
+    google/*) [ -s "$HOME/.config/gemini/api-key" ] ;;
+    openrouter/*) [ -s "$HOME/.config/openrouter/api-key" ] ;;
+    *) return 0 ;;
   esac
+}
+opencode_model() {
+  local m
+  case "$1" in
+    google/*|openrouter/*|opencode/*) m="$1" ;;
+    *) m='google/gemini-3-flash-preview' ;;
+  esac
+  if ! opencode_key_ok "$m"; then
+    for m in google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free opencode/big-pickle; do opencode_key_ok "$m" && break; done
+  fi
+  printf '%s' "$m"
 }
 
 # A local lane's model is an Ollama tag, written ollama/<tag>; anything else (a Claude alias) is the default.
