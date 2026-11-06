@@ -264,7 +264,7 @@ Usage:
   lane.sh [--dry-run] --model <name> <model>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] [--allow-high-tier "<reason>"] --resume <name>
   lane.sh [--dry-run] --recycle <name>
-  lane.sh [--dry-run] --update <name>
+  lane.sh [--dry-run] [--claude-because "<reason>"] [--add-dir <path>]... --update <name>
   lane.sh --behind
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
@@ -433,7 +433,7 @@ fi
 # --add-dir folders: each must be an existing folder; a path is stored in index column 15 as a colon list, so it may hold no colon, tab or newline.
 add_dirs_new=()
 if [ "${#add_dirs_opt[@]}" -gt 0 ]; then
-  case "$mode" in start|resume) ;; *) echo "--add-dir only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+  case "$mode" in start|resume|update) ;; *) echo "--add-dir only applies when starting or resuming a lane (or updating one)" >&2; exit 1 ;; esac
   for _ad in "${add_dirs_opt[@]}"; do
     case "$_ad" in *:*|*"$TAB"*|*$'\n'*) echo "--add-dir path may not hold a colon, tab or newline: $_ad" >&2; exit 1 ;; esac
     [ -d "$_ad" ] || { echo "--add-dir: no such folder: $_ad" >&2; exit 1; }
@@ -1885,6 +1885,7 @@ fi
 #                     (--restart carries the last three over from the row). The new process's version is checked at the end.
 #   A lane the own-repo tier rule would refuse is restarted with the --claude-because reason given before --update, else the reason last logged
 #   for it in tier-overrides.log (an update continues the same lane; a brand-new lane still needs its own reason).
+#   --add-dir <path> before --update adds a folder to the lane's allowed folders in the same restart (kept in the index row afterwards).
 #   The restart is first run as a --dry-run, so a lane that would be refused (the no-AI wall, a tier rule) is refused while it is still alive.
 #   The running version is `readlink /proc/<pid>/exe` (Claude Code keeps each version as ~/.local/share/claude/versions/<n>); the installed one is
 #   `claude --version`. LANE_UPDATE_WAIT_SECS (600) bounds the wait for handoff.md; LANE_UPDATE_TERM_SECS (30) the wait for the process to exit.
@@ -1972,6 +1973,9 @@ if [ "$mode" = update ]; then
   if [ -n "${ad:-}" ] && [ "$ad" != - ]; then
     IFS=: read -r -a _uad <<<"$ad"; for _a in "${_uad[@]}"; do [ -d "$_a" ] && ra+=(--add-dir "$_a"); done
   fi
+  # Folders named with --add-dir before --update are added to the lane's own (hub, 6 Nov: a lane stopped on a "read outside the working
+  # directories" dialog for a folder it reads every time); --restart merges them with the recorded ones and checks the no-AI wall.
+  for _a in ${add_dirs_new[@]+"${add_dirs_new[@]}"}; do ra+=(--add-dir "$_a"); done
   [[ "${rk:-}" =~ ^[0-9]+$ ]] && ra+=(--recycle-at "$rk")
   note="$(mktemp "${TMPDIR:-/tmp}/lane-update-note.XXXXXX")"
   trap 'rm -f "$note"' EXIT

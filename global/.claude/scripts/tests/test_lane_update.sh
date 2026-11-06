@@ -156,6 +156,13 @@ assert_contains "$LAST_OUT" '--claude-because agy out until Sun --add-dir' "a re
 # A new lane (a start, not an update) is still refused without its own reason, even though another lane has a logged one.
 lane --dry-run newbie "$REPO" sonnet "$HAND/prompt.md"
 [ "$LAST_RC" = 1 ] || fail "a brand-new own-repo lane still needs its own reason ($LAST_OUT)"; assert_contains "$LAST_OUT" '--claude-because' "the refusal names the override"
+# --add-dir before --update adds a folder to the restart (the lane's recorded folders stay); a missing folder is refused.
+EXTRA2="$TMP/showcase"; mkdir -p "$EXTRA2"
+lane --dry-run --add-dir "$EXTRA2" --update up-lane
+[ "$LAST_RC" = 0 ] || fail "--add-dir with --update is accepted ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "--add-dir $ADD --add-dir $EXTRA2 --recycle-at 120 up-lane" "the new folder is added after the recorded one"
+lane --dry-run --add-dir "$TMP/nowhere" --update up-lane
+[ "$LAST_RC" = 1 ] || fail "--add-dir with a missing folder is refused ($LAST_OUT)"; assert_contains "$LAST_OUT" "no such folder" "says why"
 rm -f "$TLOG" "$HOME_T/repos/hub/client-senders.tsv" "$HOME_T/repos/hub/client-repos.txt"
 
 # A lane that never writes handoff.md is left running.
