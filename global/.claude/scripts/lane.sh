@@ -84,6 +84,8 @@
 #                                       lane passes its own recycle line.
 #   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
 #                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
+#   lane.sh [--dry-run] --unlock-gone   free the worktree locks lane.sh made (it locks a lane's linked worktree at start/--resume so `git worktree remove`
+#                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
@@ -268,6 +270,7 @@ Usage:
   lane.sh [--dry-run] --recycle <name>
   lane.sh [--dry-run] [--claude-because "<reason>"] [--add-dir <path>]... --update <name>
   lane.sh --behind
+  lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
@@ -372,6 +375,7 @@ while [ $# -gt 0 ]; do
     --recycle) mode=recycle; shift ;;
     --update) mode=update; shift ;;
     --behind) mode=behind; shift ;;
+    --unlock-gone) mode=unlock_gone; shift ;;
     --ctx) mode=ctx; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
@@ -1961,6 +1965,44 @@ lane_screen_state() {  # <name>: idle, working or dialog
   else echo idle; fi
 }
 
+# A lane's worktree is locked while the lane runs (hub, 6 Nov 2026: a tidy of merged branches ran `git worktree remove` on
+# grand-daze--red-main one minute after grand-daze-red started in it; the lane lost its working folder and froze). `git worktree lock` makes
+# `git worktree remove` (even with --force) and `git worktree prune` refuse, and its reason names the way out. A lane only locks a linked worktree
+# (not a main checkout); a lock somebody else made is left alone. lane.sh --unlock-gone frees the locks whose lane has no window left; the
+# every-minute fleet-up.sh --heartbeat runs it.
+lock_lane_worktree() {  # <dir> <lane name>
+  [ "$dry" = 0 ] || return 0
+  local top gd
+  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  gd="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  case "$gd" in */.git/worktrees/*) ;; *) return 0 ;; esac
+  [ ! -e "$gd/locked" ] || return 0
+  git -C "$top" worktree lock --reason "lane.sh: lane $2 runs in this worktree. Close the lane's window first, then run: lane.sh --unlock-gone (it also runs every minute)" "$top" 2>/dev/null || true
+}
+unlock_gone_worktrees() {  # frees each worktree lock made by lane.sh whose lane has no window and no pane inside the worktree
+  local f gd wt reason lane w pp keep
+  local -a wins=() paths=()
+  if command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null; then
+    mapfile -t wins < <(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)
+    mapfile -t paths < <(tmux list-panes -s -t "$SESSION" -F '#{pane_current_path}' 2>/dev/null)
+  fi
+  for f in "$HOME"/repos/*/.git/worktrees/*/locked; do
+    [ -e "$f" ] || continue
+    reason="$(head -c 400 "$f" 2>/dev/null)"
+    case "$reason" in "lane.sh: lane "*) ;; *) continue ;; esac
+    lane="${reason#lane.sh: lane }"; lane="${lane%% *}"
+    gd="$(dirname "$f")"; wt="$(head -1 "$gd/gitdir" 2>/dev/null)"; wt="${wt%/.git}"
+    [ -n "$wt" ] || continue
+    keep=0
+    for w in ${wins[@]+"${wins[@]}"}; do [ "$w" = "$lane" ] && keep=1; done
+    for pp in ${paths[@]+"${paths[@]}"}; do case "$pp/" in "$wt/"*) keep=1 ;; esac; done
+    if [ "$keep" = 1 ]; then echo "kept: $wt (lane $lane is running)"; continue; fi
+    if [ "$dry" = 1 ]; then echo "would unlock: $wt (lane $lane has no window)"; continue; fi
+    git --git-dir="$(cd "$gd/../.." && pwd -P)" worktree unlock "$wt" 2>/dev/null && echo "unlocked: $wt (lane $lane has no window)"
+  done
+  return 0
+}
+
 if [ "$mode" = behind ]; then
   [ $# -eq 0 ] || { echo "usage: lane.sh --behind" >&2; exit 1; }
   inst="$(claude_installed_version)"
@@ -1973,6 +2015,12 @@ if [ "$mode" = behind ]; then
     rv="$(proc_claude_version "$pid")"; [ -n "$rv" ] && [ "$rv" != "$inst" ] || continue
     echo "$w $rv $inst $(lane_screen_state "$w")"
   done < <(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)
+  exit 0
+fi
+
+if [ "$mode" = unlock_gone ]; then
+  [ $# -eq 0 ] || { echo "usage: lane.sh [--dry-run] --unlock-gone" >&2; exit 1; }
+  unlock_gone_worktrees
   exit 0
 fi
 
@@ -2158,6 +2206,7 @@ if [ "$mode" = resume ]; then
     share_ssh_agent
     t new-window -t "$SESSION:" -n "$name" -c "$dir"
   fi
+  lock_lane_worktree "$dir" "$name"
   pane_ready_for_start "$SESSION:$name" || exit 1
   t send-keys -t "$SESSION:$name" "$cmd" Enter
   echo "resumed: $name  ($m, effort ${eff:--}, connectors $conn, $dir, session $id, billing $([ "$console" = 1 ] && echo console || echo subscription))"
@@ -2298,6 +2347,7 @@ else
   share_ssh_agent
   tmux new-window -t "$SESSION:" -n "$name" -c "$dir"
 fi
+lock_lane_worktree "$dir" "$name"
 
 lane_t0=$(date +%s)
 target="$SESSION:$name"
