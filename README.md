@@ -128,7 +128,10 @@ Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `
 
 The wall's three files live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
 commit (it reads git, never the working tree or the network), backs up every live file it replaces, moves the hook entry in
-`settings.json`, also runs the usual install step for the other global files, and proves the result:
+`settings.json`, removes the three old copies, and proves the result. It moves only the wall. The usual install step for the other
+global files (`install_global.py --include-stale`) runs only if you add `--with-tooling` before the commit; a copy of every stale
+file at once is how lane.sh was broken on 6 Nov, so use `install_scripts.py` (above) for those. If the live lane.sh still reads the
+old wall folder, the default run refuses and undoes itself:
 
 ```bash
 bash <(git -C ~/repos/Claude_Commandz show <commit>:global/.claude/no-ai-wall/install.sh) <commit>

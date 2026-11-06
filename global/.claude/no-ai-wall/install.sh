@@ -4,6 +4,9 @@
 #
 #   bash <(git -C ~/repos/Claude_Commandz show <commit>:global/.claude/no-ai-wall/install.sh) <commit>
 #
+# By default it moves the wall and nothing else (steps 1 to 5 and 7). Step 6 copies every other stale global file at once, which is how
+# lane.sh was broken on 6 Nov 2026, so it runs only when asked: put --with-tooling before the commit.
+#
 # (Running the script out of the commit it installs means the file you run is the file that was reviewed.)
 #
 # What it does, in order. Nothing touches the network or the working tree: every file comes out of the commit with git archive.
@@ -12,7 +15,7 @@
 #   3. installs the wall's three files (module, bash helper, hook) into ~/.claude/no-ai-wall/, a folder that holds only those
 #   4. moves the hook entry in settings.json to the new folder (a text substitution of the path; every other byte stays)
 #   5. takes the three old copies out of ~/.claude/scripts and ~/.claude/hooks
-#   6. installs the other global files the repo's usual install step installs (install_global.py: lane.sh and friends), refusing any
+#   6. ONLY WITH --with-tooling: installs the other global files the repo's usual install step installs (install_global.py: lane.sh and friends), refusing any
 #      live edit it would overwrite, which it names and leaves alone (a live file equal to any earlier committed version is stale, not
 #      edited, and is brought up to date)
 #   7. runs smoke.py against the installed files, through the hook command settings.json registers
@@ -57,7 +60,9 @@ fail_after() {  # a problem after the first change: run the undo, then say so
 }
 
 [ -n "${HOME:-}" ] || no_change "HOME is not set"
-[ $# -eq 1 ] || no_change "usage: install.sh <commit>"
+WITH_TOOLING=0
+if [ "${1:-}" = "--with-tooling" ]; then WITH_TOOLING=1; shift; fi
+[ $# -eq 1 ] || no_change "usage: install.sh [--with-tooling] <commit>"
 command -v git >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null || no_change "git, tar and python3 are needed"
 [ -e "$REPO/.git" ] || no_change "$REPO is not a git checkout"
 SHA="$(git -C "$REPO" rev-parse --verify --quiet "$1^{commit}")" || no_change "unknown commit $1"
@@ -98,13 +103,17 @@ backup() {  # <path relative to ~/.claude>
 
 TOOLING_NOTE=""
 TOOLING=()
-TOOLING_DRY="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" --include-stale --dry-run 2>&1)"
-case $? in
-  0|1) while IFS= read -r line; do
-         case "$line" in "would copy  global/.claude/"*) TOOLING+=("${line#would copy  global/.claude/}") ;; esac
-       done <<<"$TOOLING_DRY" ;;
-  *) TOOLING_NOTE="the other global files were not installed ($(printf '%s' "$TOOLING_DRY" | tail -n 1 | cut -c1-160))" ;;
-esac
+if [ "$WITH_TOOLING" = 1 ]; then
+  TOOLING_DRY="$(python3 -I "$SRC/scripts/install_global.py" --repo "$REPO" --home "$LIVE" --to "$SHA" --include-stale --dry-run 2>&1)"
+  case $? in
+    0|1) while IFS= read -r line; do
+           case "$line" in "would copy  global/.claude/"*) TOOLING+=("${line#would copy  global/.claude/}") ;; esac
+         done <<<"$TOOLING_DRY" ;;
+    *) TOOLING_NOTE="the other global files were not installed ($(printf '%s' "$TOOLING_DRY" | tail -n 1 | cut -c1-160))" ;;
+  esac
+else
+  TOOLING_NOTE="the other global files were not installed (only the wall was asked for; add --with-tooling before the commit to include them)"
+fi
 
 for rel in "${LEGACY[@]}"; do backup "$rel" || no_change "cannot back up $rel"; done
 backup settings.json || no_change "cannot back up settings.json"
@@ -172,9 +181,10 @@ if [ -z "$TOOLING_NOTE" ]; then
   TOOLING_NOTE="$(printf '%s' "$TOOLING_OUT" | tail -n 1)"
   REFUSED="$(printf '%s\n' "$TOOLING_OUT" | grep '^REFUSED' || true)"
 fi
-# lane.sh must now read the wall from its own folder; a live edit that kept the old lane.sh would start no lane at all.
-if [ -f "$LIVE/scripts/lane.sh" ] && ! grep -q 'no-ai-wall/no_ai_wall.sh' "$LIVE/scripts/lane.sh"; then
-  fail_after "lane.sh was not updated (a live edit blocked it), and the old one reads the wall from the folder it just left"
+# A live lane.sh that reads the wall must read it from the new folder; one that still reads the old folder would start no lane at all now
+# that step 5 has emptied it. (A lane.sh that does not mention the wall is left alone.)
+if [ -f "$LIVE/scripts/lane.sh" ] && grep -q 'no_ai_wall\.sh' "$LIVE/scripts/lane.sh" && ! grep -q 'no-ai-wall/no_ai_wall.sh' "$LIVE/scripts/lane.sh"; then
+  fail_after "lane.sh still reads the wall from the folder it just left (run with --with-tooling to bring lane.sh up to date, or update it first)"
 fi
 
 # 7. Prove it, through the hook command settings.json registers.
