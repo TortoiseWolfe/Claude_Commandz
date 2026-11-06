@@ -140,6 +140,10 @@ if [ "$mode" = heartbeat ]; then
   fi
   printf '%s\n%s\n' "$now" "$(date -d "@$now" -Is)" | atomic_write "$STATE/heartbeat"
   if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then lane_windows | atomic_write "$LANES/live.tsv"; fi
+  # Free the worktree locks lane.sh put on lanes that have no window any more (a running lane's worktree stays locked against `git worktree remove`).
+  if compgen -G "$HOME/repos/*/.git/worktrees/*/locked" >/dev/null && [ -x "$LANE_SH" ]; then
+    timeout 30 bash "$LANE_SH" --unlock-gone >/dev/null 2>&1 8>&- 9>&- || true
+  fi
   [ -e "$STATE/battery.present" ] && battery_check
   exit 0
 fi
