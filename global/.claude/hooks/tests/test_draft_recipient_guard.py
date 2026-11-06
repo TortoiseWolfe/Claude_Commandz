@@ -105,7 +105,8 @@ class Cli(unittest.TestCase):
 
 class Wiring(unittest.TestCase):
     """The live ~/.claude/hooks/block-outbound.sh (private, so not in this repo) must hand the draft tools to the guard.
-    No skip: if the hook or the installed guard is missing, the wiring is broken and this fails."""
+    No skip: if the hook or the installed guard is missing, the wiring is broken and this fails.
+    CI deselects this class (a runner has no live install); run it on the tower: python3 -m pytest global/.claude/hooks/tests."""
 
     HOOK = Path.home() / ".claude" / "hooks" / "block-outbound.sh"
 
