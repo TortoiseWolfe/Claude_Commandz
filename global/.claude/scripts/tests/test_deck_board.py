@@ -43,6 +43,13 @@ class Marks(unittest.TestCase):
         heads = [l for l in self.run_main() if l.startswith("## ")]
         self.assertEqual(heads, ["## Next (3)", "## Review (0) [done column]", "## Done (0)"])
 
+    def test_a_due_date_with_an_offset_shows_as_its_eastern_day(self):
+        self.assertEqual(db.when("2026-11-11T02:00:00+00:00"), "2026-11-10")   # 9 PM on the 10th, Eastern
+        self.assertEqual(db.when("2026-10-31T04:00:00+00:00"), "2026-10-31")
+        self.assertEqual(db.when("2026-10-31"), "2026-10-31")
+        self.assertEqual(db.when("2026-10-31T09:00:00"), "2026-10-31")   # no offset: the text's own day
+        self.assertEqual(db.when(None), "")
+
 
 if __name__ == "__main__":
     unittest.main()

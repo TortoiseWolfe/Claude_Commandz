@@ -4,10 +4,12 @@
     deck_write.py --env <env file> --prefix NEXTCLOUD_PROD --board <id> <action> ...
 
 Actions:
-    show     --card N                          print one card's title, stack and full description
+    show     --card N                          print one card's title, stack, due date (Eastern) and full description
     replace  --card N --old TEXT --new TEXT    swap TEXT in the description (must match exactly once)
     append   --card N --text LINE              add a line to the end of the description
     move     --card N --stack "Stack title"    move the card to the end of another stack
+    title    --card N --text "New title"       change the card's title
+    due      --card N --date YYYY-MM-DDTHH:MM  set the due date (Eastern time; stored with its offset)
     create   --stack "Stack title" --title T [--description D] [--assign UID ...]
     comment  --card N --text MESSAGE           add a comment after a strict chat voice check
 
@@ -25,11 +27,36 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from deck_board import NoRedirect, read_env  # noqa: E402
 
 API = "/index.php/apps/deck/api/v1.0"
+EASTERN = ZoneInfo("America/New_York")
+
+
+def eastern_due(text):
+    """'YYYY-MM-DDTHH:MM' read as Eastern time -> ISO 8601 with its offset (what the Deck API accepts and stores)."""
+    try:
+        when = datetime.strptime(text, "%Y-%m-%dT%H:%M")
+    except ValueError:
+        sys.exit(f"deck_write: --date must look like 2026-11-10T21:00, got {text!r}")
+    return when.replace(tzinfo=EASTERN).isoformat(timespec="seconds")
+
+
+def show_due(value):
+    """The Deck's stored due date (ISO text or None) -> '-' or e.g. 'Tue 10 Nov 2026 9:00 PM' in Eastern."""
+    if not value:
+        return "-"
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=EASTERN)
+    return when.astimezone(EASTERN).strftime("%a %-d %b %Y %-I:%M %p")
 
 
 def call(c, method, path, body=None, api=API):
@@ -100,6 +127,12 @@ def main(argv=None):
     p = sub.add_parser("move")
     p.add_argument("--card", type=int, required=True)
     p.add_argument("--stack", required=True)
+    p = sub.add_parser("title")
+    p.add_argument("--card", type=int, required=True)
+    p.add_argument("--text", required=True)
+    p = sub.add_parser("due")
+    p.add_argument("--card", type=int, required=True)
+    p.add_argument("--date", required=True, help="YYYY-MM-DDTHH:MM, Eastern time")
     p = sub.add_parser("create")
     p.add_argument("--stack", required=True)
     p.add_argument("--title", required=True)
@@ -111,12 +144,15 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.action == "comment":
         require_chat_voice(a.text)
+    if a.action == "title" and not a.text.strip():
+        sys.exit("deck_write: --text is empty; a card needs a title")
+    new_due = eastern_due(a.date) if a.action == "due" else None   # a bad date stops here, before credentials or requests
     c = read_env(a.env, a.prefix)
     b = a.board
 
     if a.action == "show":
         s, cd = find_card(c, b, a.card)
-        print(f"#{cd['id']} {cd['title']} [{s['title']}]\n---\n{cd.get('description') or ''}")
+        print(f"#{cd['id']} {cd['title']} [{s['title']}]\ndue: {show_due(cd.get('duedate'))}\n---\n{cd.get('description') or ''}")
     elif a.action == "comment":
         find_card(c, b, a.card)
         call(c, "POST", f"/cards/{a.card}/comments", {"message": a.text}, api="/ocs/v2.php/apps/deck/api/v1.0")  # comments exist only on the OCS route; the REST route answers 405
@@ -142,6 +178,14 @@ def main(argv=None):
         print(f"#{a.card} {cd['title']}: {s['title']} -> {s2['title']}")
         if s2["id"] != dest["id"]:
             sys.exit("deck_write: the move reported success but the card is still in the old stack")
+    elif a.action in ("title", "due"):
+        s, cd = find_card(c, b, a.card)
+        save(c, b, s["id"], cd, **({"title": a.text} if a.action == "title" else {"duedate": new_due}))
+        s2, after = find_card(c, b, a.card)
+        if a.action == "title":
+            print(f"#{a.card} title: {cd['title']} -> {after['title']} [{s2['title']}]")
+        else:
+            print(f"#{a.card} {after['title']} [{s2['title']}] due: {show_due(cd.get('duedate'))} -> {show_due(after.get('duedate'))}")
     elif a.action == "create":
         dest = find_stack(c, b, a.stack)
         cd = call(c, "POST", f"/boards/{b}/stacks/{dest['id']}/cards",
