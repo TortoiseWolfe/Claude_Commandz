@@ -3,7 +3,8 @@
 
 Why: anthropics/claude-code#107757 reports the signed-in account's email address going out in User-Agent headers to
 third-party sites. Nothing in the harness stops a command from doing the same on purpose or by accident, so this hook refuses
-any Bash, WebFetch or WebSearch call that would carry the address to a server.
+any Bash, WebFetch or WebSearch call, and any MCP tool call (browser_navigate, transcript tools, code run in the browser),
+that would carry the address to a server.
 
 stdin: {"tool_name": ..., "tool_input": {...}, "cwd": ...}
 deny: reason on stderr, exit 2.  allow: exit 0.  An internal error (unreadable payload, no address known) allows and logs,
@@ -244,6 +245,39 @@ def check_bash(cmd, cwd, addrs, allowed):
     return None
 
 
+# MCP tools (the browser, video transcripts, search) reach websites with whatever they are given. A field that holds a web
+# address or a search is judged like a WebFetch URL; a field that holds code is refused when it holds the address at all.
+MCP_URL_KEYS = {"url", "uri", "href", "link", "src", "query", "q", "search", "term", "address", "endpoint", "videoid", "video_id"}
+MCP_CODE_KEYS = {"code", "script", "function", "expression", "js", "javascript"}
+
+
+def mcp_strings(value, key="", depth=0):
+    """Yield (lower-cased key, string) for every string in a tool input, however deeply nested."""
+    if depth > 8:  # too deep to walk: judge the whole thing as one string instead of skipping it
+        yield "url", json.dumps(value, default=str)  # a deep value is treated like a URL: refused when it holds the address
+        return
+    if isinstance(value, str):
+        yield key, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from mcp_strings(v, str(k).lower(), depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from mcp_strings(v, key, depth + 1)
+
+
+def check_mcp(tool, args, addrs):
+    short = tool.split("__")[-1]
+    for key, text in mcp_strings(args):
+        if not has_address(text, addrs):
+            continue
+        if key in MCP_URL_KEYS or "url" in key:
+            return "an MCP %s call carries the address in its %s" % (short, key)
+        if key in MCP_CODE_KEYS:  # any code that holds the address: it could send it by a route this list does not name
+            return "an MCP %s call runs code that would send the address to a website" % short
+    return None
+
+
 def check(payload, addrs=None, allowed=None):
     """Return a deny reason, or None to allow."""
     if addrs is None:
@@ -262,6 +296,8 @@ def check(payload, addrs=None, allowed=None):
         why = "a WebFetch URL carries the address" if has_address(str(args.get("url", "")), addrs) else None
     elif tool == "WebSearch":
         why = "a WebSearch query carries the address" if has_address(str(args.get("query", "")), addrs) else None
+    elif isinstance(tool, str) and tool.startswith("mcp__"):
+        why = check_mcp(tool, args, addrs)
     else:
         return None
     return "%s. %s" % (why, WHY) if why else None
