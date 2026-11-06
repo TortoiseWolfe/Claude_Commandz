@@ -246,14 +246,15 @@ def check_bash(cmd, cwd, addrs, allowed):
 
 
 # MCP tools (the browser, video transcripts, search) reach websites with whatever they are given. A field that holds a web
-# address or a search is judged like a WebFetch URL; a field that holds code is judged like an inline script.
+# address or a search is judged like a WebFetch URL; a field that holds code is refused when it holds the address at all.
 MCP_URL_KEYS = {"url", "uri", "href", "link", "src", "query", "q", "search", "term", "address", "endpoint", "videoid", "video_id"}
 MCP_CODE_KEYS = {"code", "script", "function", "expression", "js", "javascript"}
 
 
 def mcp_strings(value, key="", depth=0):
     """Yield (lower-cased key, string) for every string in a tool input, however deeply nested."""
-    if depth > 8:
+    if depth > 8:  # too deep to walk: judge the whole thing as one string instead of skipping it
+        yield "url", json.dumps(value, default=str)  # a deep value is treated like a URL: refused when it holds the address
         return
     if isinstance(value, str):
         yield key, value
@@ -272,7 +273,7 @@ def check_mcp(tool, args, addrs):
             continue
         if key in MCP_URL_KEYS or "url" in key:
             return "an MCP %s call carries the address in its %s" % (short, key)
-        if key in MCP_CODE_KEYS and (NETWORK_CODE.search(text) or "http" in text.lower()):
+        if key in MCP_CODE_KEYS:  # any code that holds the address: it could send it by a route this list does not name
             return "an MCP %s call runs code that would send the address to a website" % short
     return None
 
