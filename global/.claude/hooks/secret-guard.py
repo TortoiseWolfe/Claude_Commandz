@@ -464,6 +464,9 @@ def prints_sensitive(cmd):
 # (path or query), or in a request body (curl -d/--data/-F/--json, wget --post-data, python
 # requests/httpx/urllib, node fetch/axios). Allowed: git, gh and our own gmail_api.py (they talk
 # to GitHub and Gmail, which already know the address); the Gmail connector is not a Bash call.
+# The exemptions fail closed: a git or gh call is plain only if, after shell quote removal, every URL, scp
+# remote and --repo host is GitHub and nothing sets config (-c), a proxy, GIT_*/GH_* or a substitution.
+# A remote given by name (git fetch origin) is trusted, as its URL lives in the repo's own config.
 # Limit: it sees the address only when it is written in the call, not when a script reads it itself.
 # The hook's matcher in settings.json must list WebFetch for the WebFetch half to run.
 F_CONFIG = os.environ.get("SECRET_GUARD_CLAUDE_CONFIG")
@@ -516,13 +519,18 @@ def _has(text, email):
 
 F_TRUSTED_GMAIL = os.path.realpath(os.path.expanduser("~/.claude/scripts/gmail_api.py"))
 F_GITHUB_HOSTS = ("github.com", "githubusercontent.com")
-# A git or gh call that changes where it talks, what it sends, or how it connects is not the plain GitHub call.
-F_GIT_RISKY = re.compile(r"insteadof|sshcommand|gitproxy|(?<![\w/])http\.|--hostname|GH_HOST|GIT_[A-Z_]+=|"
-                         r"--(?:upload|receive)-pack|ext::|--exec", re.I)
 F_SUBST = re.compile(r"\$\(|`|<\(|>\(")
 F_SCHEME_URL = re.compile(r"(?:https?|ssh|git|ftps?|rsync)://[^\s'\"]*", re.I)
 F_SCP_REMOTE = re.compile(r"(?<![\w.%+-])(?:[\w.-]+@)?([\w.-]+\.[a-z]{2,}):(?!//)[\w~./-]", re.I)
 F_PY_FLAGS = {"-u", "-B", "-I", "-E", "-s", "-S"}
+F_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A proxy, GIT_*/GH_*/SSH_* or interpreter setting anywhere in a command that holds the address is refused.
+F_ENV_RISKY = re.compile(r"(?<![\w-])(?:export\s+|env\s+)?(?:[A-Za-z0-9_]*proxy|GIT_\w+|GH_\w+|SSH_\w+|PYTHON\w*|NODE_\w+)=",
+                         re.I)
+# git or gh options that change where it talks, what it sends or what it runs.
+F_GIT_OPTS = re.compile(r"^(?:-c.*|--config-env.*|--exec-path.*|--upload-pack.*|--receive-pack.*|--exec|--hostname.*)$")
+F_GIT_TEXT = re.compile(r"insteadof|sshcommand|gitproxy|ext::|core\.(?:pager|editor|fsmonitor|hookspath|askpass)"
+                        r"|(?<![\w/])(?:http|credential|alias|diff|url)\.", re.I)
 
 
 def _host_is_github(host):
@@ -530,30 +538,59 @@ def _host_is_github(host):
     return any(host == h or host.endswith("." + h) for h in F_GITHUB_HOSTS)
 
 
-def _f_non_github_remote(seg, email):
-    """True when a git/gh segment names a remote on a host that is not GitHub."""
-    for u in F_SCHEME_URL.findall(seg):
-        try:
-            host = urllib.parse.urlsplit(u).hostname
-        except ValueError:
-            return True
-        if not _host_is_github(host):
-            return True
-    bare = seg
-    for f in _forms(email):
-        bare = re.sub(re.escape(f), " ", bare, flags=re.I)
-    bare = F_SCHEME_URL.sub(" ", bare)
-    return any(not _host_is_github(m.group(1)) for m in F_SCP_REMOTE.finditer(bare))
+def _f_tokens(segment):
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return None
+
+
+def _f_plain_github_call(segment, email):
+    """True only for a git or gh call that is plainly GitHub's: quotes removed first, every URL,
+    scp-style remote and -R/--repo value on a GitHub host, and no config, proxy or env setting."""
+    toks = _f_tokens(segment)
+    if toks is None or F_SUBST.search(blank_quotes(segment)) or F_HTTP_WORD.search(blank_quotes(segment)):
+        return False
+    tokens, i = _process_command(segment)
+    if any(F_ENV_ASSIGN.match(t) for t in tokens[:i]):
+        return False                      # an env assignment before the program
+    if i >= len(tokens) or os.path.basename(tokens[i]) not in ("git", "gh"):
+        return False
+    args = tokens[i + 1:]
+    if any(F_GIT_OPTS.match(a) for a in args) or F_GIT_TEXT.search(" ".join(args)):
+        return False
+    for n, a in enumerate(args):
+        if a in ("-R", "--repo") and n + 1 < len(args):
+            repo = args[n + 1]
+        elif a.startswith("--repo="):
+            repo = a[7:]
+        else:
+            repo = None
+        if repo is not None and repo.count("/") >= 2 and not _host_is_github(repo.split("/")[0]):
+            return False
+        for u in F_SCHEME_URL.findall(a):
+            try:
+                if not _host_is_github(urllib.parse.urlsplit(u).hostname):
+                    return False
+            except ValueError:
+                return False
+        bare = F_SCHEME_URL.sub(" ", a)
+        for f in _forms(email):
+            bare = re.sub(re.escape(f), " ", bare, flags=re.I)
+        if any(not _host_is_github(m.group(1)) for m in F_SCP_REMOTE.finditer(bare)):
+            return False
+    return True
 
 
 def _f_program(segment):
     """Program a segment runs; 'gmail_api.py' only for our installed copy run straight by an
-    interpreter (no -c/-m/-e, no command or process substitution, no web client word)."""
+    interpreter (no env assignment, no -c/-m, no substitution, no web client word)."""
     toks, i = _process_command(segment)
     if i >= len(toks):
         return ""
     prog = os.path.basename(toks[i])
-    if F_SCRIPT_RUNNER.fullmatch(prog) and not F_SUBST.search(blank_quotes(segment)):
+    if F_SCRIPT_RUNNER.fullmatch(prog) and not F_SUBST.search(blank_quotes(segment)) \
+            and not any(F_ENV_ASSIGN.match(t) for t in toks[:i]):
         j = i + 1
         while j < len(toks) and toks[j] in F_PY_FLAGS:
             j += 1
@@ -570,20 +607,22 @@ def _f_runs_client(seg, prog):
 def email_leak(cmd, email):
     """Where in a Bash command the account email would go to a website, else None.
     One command that holds the address and runs a web client anywhere is refused, so the address
-    cannot be carried over in a variable, a pipe or a file between segments."""
+    cannot be carried over in a variable, a pipe or a file between segments. The git, gh and
+    gmail_api.py exemptions fail closed: anything unusual about the call voids them."""
     cmd = cmd.replace("\\\n", " ")
     if not _has(cmd, email):
         return None
     segs = split_segments(cmd)
     progs = [_f_program(s) for s in segs]
+    if F_ENV_RISKY.search(cmd):
+        return "a proxy or environment setting that changes how the call connects"
     for seg, prog in zip(segs, progs):
         if prog == "gmail_api.py":
             continue
-        if prog in ("git", "gh") and not F_SUBST.search(blank_quotes(seg)) and not F_HTTP_WORD.search(blank_quotes(seg)):
-            # GitHub already knows the address; another host, or a header/proxy/host setting, is not GitHub.
-            if F_GIT_RISKY.search(seg) or _f_non_github_remote(seg, email):
-                return "a User-Agent header or a host that is not GitHub"
+        if prog in ("git", "gh") and _f_plain_github_call(seg, email):
             continue
+        if prog in ("git", "gh") and not _f_runs_client(seg, prog):
+            return "a git or gh call that is not plainly GitHub's"
         if _has(seg, email) and UA_HEADER.search(seg):
             return "a User-Agent header"
         if _f_runs_client(seg, prog):
