@@ -70,6 +70,7 @@ cp ~/.claude/scripts/jev_precheck.py ~/.claude/scripts/openclaw_tray.py global/.
 cp ~/.claude/scripts/class_resolver.py ~/.claude/scripts/route_log.py ~/.claude/scripts/learning_baseline.py global/.claude/scripts/
 cp ~/.claude/scripts/panel_review.py ~/.claude/scripts/panel_gate.py ~/.claude/scripts/panel_scoreboard.py global/.claude/scripts/  # tests in tests/test_panel_review.py, tests/test_panel_gate.py and tests/test_panel_scoreboard.py
 cp ~/.claude/scripts/muse_poll.sh global/.claude/scripts/
+cp ~/.claude/scripts/peer_poll.sh ~/.claude/scripts/peer_poll.check.prompt ~/.claude/scripts/peer_poll.handle.prompt ~/.claude/scripts/peer_poll_record.sh global/.claude/scripts/   # the second tower's notes poller; authored here, tests in tests/test_peer_poll.sh. Edit the repo copy, then install: cp global/.claude/scripts/peer_poll.sh global/.claude/scripts/peer_poll.check.prompt global/.claude/scripts/peer_poll.handle.prompt global/.claude/scripts/peer_poll_record.sh ~/.claude/scripts/. ~/.config/afa/show-windows.tsv (private) holds the show windows
 cp ~/.claude/scripts/openclaw_status_digest.py ~/.claude/scripts/openclaw_status_refresh.sh ~/.claude/scripts/he_runner_watch.sh global/.claude/scripts/
 cp ~/.claude/scripts/hub_digest.py ~/.claude/scripts/session_prime_facts.py global/.claude/scripts/
 cp ~/.claude/scripts/session_to_md.py global/.claude/scripts/   # authored here; tests in tests/test_session_to_md.py. Edit the repo copy, then install: cp global/.claude/scripts/session_to_md.py ~/.claude/scripts/
