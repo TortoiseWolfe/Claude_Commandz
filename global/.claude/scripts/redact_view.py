@@ -47,6 +47,10 @@ BARE_KEY_ASSIGN = re.compile(r"(?<![A-Za-z0-9_.-])(?P<name>(?:--)?(?:[A-Za-z0-9_
 FLAGWORD = r"--?(?:password|passwd|pass|pwd|token|api-?key|secret|auth-token|access-token|client-secret)"
 FLAG_SP = re.compile(r"(?<![\w-])(?P<flag>" + FLAGWORD + r"|-p)(?P<sp>\s+)(?P<val>" + VAL + ")", re.I)
 FLAG_ONLY = re.compile(r"^(?:" + FLAGWORD + r"|-p)$", re.I)
+# "Password: value" inside a line of prose or a list ("Email: x / Password: `y`"), where the line as a whole
+# is not a key: value pair for LINE below to catch.
+PROSE_PASS = re.compile(r"(?P<pre>\b(?:pass(?:word|wd|code)?|pwd)\b\**\s*[:=]\s*\**\s*)"
+                        r"(?P<val>`[^`\n]+`|\"[^\"\n]*\"|'[^'\n]*'|[^\s`\"',;|)]+)", re.I)
 MASKED = re.compile(r"^(?:<redacted:\d+>|\w{3,4}…\[\d+\])$")
 NUMERIC = re.compile(r"^-?\d+(?:\.\d+)?$")
 
@@ -58,6 +62,9 @@ def red(n):
 def unquote(v):
     v = v.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    # A markdown code span (`value`) holds a literal; docs write "- Password: `value`" this way.
+    if len(v) >= 3 and v[0] == v[-1] == "`" and "`" not in v[1:-1]:
         return v[1:-1]
     return v
 
@@ -87,6 +94,13 @@ def scrub(s):
         return m.group("flag") + m.group("sp") + red(len(unquote(m.group("val"))))
 
     s = FLAG_SP.sub(f, ASSIGN.sub(a, s))
+
+    def prose(m):
+        if not is_literal(m.group("val")):
+            return m.group(0)
+        return m.group("pre") + red(len(unquote(m.group("val"))))
+
+    s = PROSE_PASS.sub(prose, s)
 
     def key_assignment(m):
         if not is_literal(m.group("val")):
