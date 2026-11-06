@@ -696,6 +696,10 @@ printf '%s %s' "$done_epoch" "$(( $(date +%s) - 5 * 60 ))" > "$rl_dir/.idleremin
 LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/rm-out4"
 if ! grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/rm-out4"; then echo "ok   5 minutes after the last naming, it is not named yet"; else echo "FAIL remind too soon: $(cat "$TMP/rm-out4")"; failures=$((failures + 1)); fi
 remind_case "QUEUE EMPTY on line 1 is left alone" no 90 "QUEUE EMPTY: nothing left in the queue"
+remind_case "EMPTY <time> on line 1 (the lane prompts' own wording) is left alone" no 90 "EMPTY 1:30 PM | done: 12 | nothing ready left"
+remind_case "a bare EMPTY on line 1 is left alone" no 90 "EMPTY"
+remind_case "EMPTY: on line 1 is left alone" no 90 "EMPTY: nothing ready"
+remind_case "a word that only starts with EMPTY is still named" yes 90 "EMPTYING the cache now"
 remind_case "BLOCKED on line 1 is left alone" no 90 "BLOCKED (hub: needs the Deck token)"
 remind_case "an empty report.md counts as no QUEUE EMPTY, so the lane is named" yes 40 ""
 remind_case "idle only 10 minutes is left alone" no 10 "MERGE Claude_Commandz #1"
