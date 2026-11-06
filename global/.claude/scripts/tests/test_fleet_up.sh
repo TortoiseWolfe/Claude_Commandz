@@ -64,6 +64,14 @@ check "heartbeat is the new time" '[ "$(head -1 $S/heartbeat)" = 1793201200 ]'
 NOW=$((NOW + 1260)) run --heartbeat
 check "a second gap does not overwrite the first gap" '[ "$(head -1 $S/heartbeat.gap)" = 1793200000 ]'
 
+# 1b. heartbeat frees worktree locks lane.sh made (lane.sh --unlock-gone), but only when some worktree lock exists
+setup NCC-74656
+run --heartbeat
+check "no worktree lock: heartbeat does not call lane.sh --unlock-gone" '! grep -q -- "--unlock-gone" "$FAKE_DIR/lane.log" 2>/dev/null'
+mkdir -p "$HOME/repos/proj/.git/worktrees/feat"; echo "lane.sh: lane x runs here" >"$HOME/repos/proj/.git/worktrees/feat/locked"
+run --heartbeat
+check "a worktree lock exists: heartbeat runs lane.sh --unlock-gone" 'grep -qx "lane.sh --unlock-gone" "$FAKE_DIR/lane.log"'
+
 # 2. quiet machine: a fresh heartbeat and an unchanged boot do nothing
 setup NCC-74656
 printf '%s\n' "BOOT=2026-10-28T08:00:00" >"$FAKE_WIN"
