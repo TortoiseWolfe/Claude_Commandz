@@ -27,6 +27,8 @@ Allowed: the address in grep, echo, git, local files, and the mail tools gmail_a
   with the same name somewhere else is judged like any other script.
 Known gaps: an address assembled at run time from pieces, an address held in a variable set elsewhere, and a sink reached
 through ssh, docker exec or a language this hook does not list.
+This is a guard against accidents and plain mistakes, not a sandbox: a line written on purpose to defeat a text reading of the
+command can still win. A mail tool is trusted only in its plainest form, so anything odd falls to the stricter script judging.
 """
 import html
 import json
@@ -46,6 +48,9 @@ NOT_A_FILE = ("-", "<", "$", "(", ">", "|", ";", "&")
 SEPARATOR = re.compile(r"\|\||&&|[;|&]")
 # Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
 INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+|DENO_\w+|LD_\w+|DYLD_\w+)\b|(?:^|[\s;&|(])(?:env|source|export|declare|typeset)\s|(?:^|[;&|(]\s*)\.\s")
+# Anything that can make the word "python3" mean something else on the same line: PATH changes, aliases, functions, hash.
+SHADOWING = re.compile(r"\bPATH\w*=|\b(?:alias|hash|enable|function|command_not_found_handle)\b|\w+\s*\(\s*\)\s*\{")
+SYSTEM_INTERPRETER_DIRS = ("/usr/bin/", "/usr/local/bin/", "/bin/", "/opt/homebrew/bin/")
 CHANGES_FOLDER = re.compile(r"\b(?:cd|pushd|popd|chdir)\b")
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
 INLINE_PREFIXES = ("-c", "-m", "-e", "-E", "-p", "-r", "--eval", "--print", "--require", "--import", "--loader", "--input-type")
@@ -63,7 +68,7 @@ WRAPPERS = r"(?:sudo|doas|env|time|nice|nohup|xargs|exec|command|builtin|timeout
 START = r"(?:^|[;&|(`\n{\"']|\$\(|\b(?:then|do|else|elif|if|while)\s)\s*"
 PREFIX = (r"(?:\w+=\S*\s+)*(?:" + WRAPPERS + r"\s+(?:(?:-\S+|\d+[smhd]?|\w+=\S*)\s+)*)*")
 CLIENT_RE = re.compile(START + PREFIX + r"(?:\S*/)?(?:" + "|".join(NET_CLIENTS) + r")(?=\s|$)", re.M)
-INTERP_RE = re.compile(START + PREFIX + r"(?:\S*/)?(?P<name>" + INTERPRETERS + r")(?=\s|$)(?P<rest>[^\n]*)", re.M)
+INTERP_RE = re.compile(START + PREFIX + r"(?P<dir>\S*/)?(?P<name>" + INTERPRETERS + r")(?=\s|$)(?P<rest>[^\n]*)", re.M)
 
 # Code that can reach the network. A bare URL in a comment does not count; a library or a fetch call does.
 NETWORK_CODE = re.compile(
@@ -189,8 +194,10 @@ def sinks(cmd, cwd, allowed):
     if CLIENT_RE.search(cmd):
         found.append("network client")
     # A mail tool is trusted only when nothing in the line can change what runs: no folder change, no interpreter settings.
-    hijackable = bool(INTERPRETER_ENV.search(cmd) or CHANGES_FOLDER.search(cmd))
+    hijackable = bool(INTERPRETER_ENV.search(cmd) or CHANGES_FOLDER.search(cmd) or SHADOWING.search(cmd))
     for m in INTERP_RE.finditer(cmd):
+        # The interpreter itself must be a bare name or a system path; one at any other path is a program like any other.
+        odd_interpreter = bool(m.group("dir")) and not m.group("dir").startswith(SYSTEM_INTERPRETER_DIRS)
         toks = SEPARATOR.split(m.group("rest"))[0].split()
         words = [t.strip("'\"") for t in toks if not t.startswith(NOT_A_FILE)]
         inline = any(t.startswith(INLINE_PREFIXES) for t in toks) or not words
@@ -207,7 +214,7 @@ def sinks(cmd, cwd, allowed):
             continue
         first = words[0] if words and not inline else None
         for tok, path in files:
-            if tok == first and toks and toks[0].strip("'\"") == first and os.path.isabs(os.path.expanduser(first)) \
+            if tok == first and not odd_interpreter and toks and toks[0].strip("'\"") == first and os.path.isabs(os.path.expanduser(first)) \
                     and not hijackable and is_allowed_tool(path, allowed):
                 continue
             try:

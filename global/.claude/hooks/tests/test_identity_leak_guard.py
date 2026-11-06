@@ -171,6 +171,13 @@ class Refuses(unittest.TestCase):
         self.deny("source /tmp/x.sh; python3 %s/gmail_api.py --to %s" % (TOOLS, ME))
         self.deny("FOO=1 declare -x PYTHONPATH=/tmp/e; python3 %s/gmail_api.py --to %s" % (TOOLS, ME))
 
+    def test_a_mail_tool_is_not_trusted_when_the_interpreter_can_be_swapped(self):
+        for cmd in ("PATH=/tmp/evil:$PATH python3 %s/gmail_api.py --to %s", "alias python3=/tmp/evil; python3 %s/gmail_api.py --to %s",
+                    "python3() { /tmp/evil \"$@\"; }; python3 %s/gmail_api.py --to %s", "hash -p /tmp/evil python3; python3 %s/gmail_api.py --to %s",
+                    "/tmp/evil/python3 %s/gmail_api.py --to %s", "./python3 %s/gmail_api.py --to %s"):
+            with self.subTest(cmd=cmd):
+                self.deny(cmd % (TOOLS, ME))
+
     def test_a_mail_tool_is_not_trusted_beside_settings_that_load_other_code(self):
         for pre in ("PYTHONPATH=/tmp/evil ", "PYTHONSTARTUP=/tmp/x.py ", "NODE_OPTIONS=--require=/tmp/x.js ", "LD_PRELOAD=/tmp/x.so ",
                     "env PYTHONPATH=/tmp/evil ", "env -i "):
