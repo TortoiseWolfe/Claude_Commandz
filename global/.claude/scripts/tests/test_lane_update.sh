@@ -140,6 +140,31 @@ assert_contains "$LAST_OUT" "by exact PID" "dry run says the stop is by PID"
 assert_contains "$LAST_OUT" "the restart passes its own --dry-run" "the restart is pre-checked"
 [ ! -e "$ST/sent.log" ] && alive "$OLDPID" || fail "--dry-run changed something"; ok
 
+# The own-repo tier rule (agy default) must not stop an update: an update continues the same lane, so the restart reuses the reason last
+# logged for it, or the one given before --update. A lane with no logged reason and none given is still refused while it is alive.
+mkdir -p "$HOME_T/repos/hub"; printf 'id\trepo_dir\nacme\t~/repos/client-app\n' >"$HOME_T/repos/hub/client-senders.tsv"; printf '# clients\n' >"$HOME_T/repos/hub/client-repos.txt"
+TLOG="$LANES/tier-overrides.log"; rm -f "$TLOG"
+lane --dry-run --update up-lane
+[ "$LAST_RC" = 1 ] || fail "an own-repo lane with no logged reason is refused by the tier rule ($LAST_OUT)"; assert_contains "$LAST_OUT" "REFUSED" "says the restart would be refused"
+printf '2026-11-04T11:49:01-05:00\tup-lane\tsonnet\tagy-default\told reason\t%s\n2026-11-05T15:59:13-05:00\tother-lane\tsonnet\tagy-default\tsomeone else\t%s\n2026-11-05T16:00:00-05:00\tup-lane\tsonnet\tagy-default\tneeds a live service \t%s\n' "$REPO" "$REPO" "$REPO" >"$TLOG"
+lane --dry-run --update up-lane
+[ "$LAST_RC" = 0 ] || fail "an update reuses the lane's last logged reason ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" '--claude-because needs a live service --add-dir' "the newest reason for this lane is passed to the restart, trailing space trimmed"
+assert_not_contains "$LAST_OUT" 'someone else' "another lane's reason is not used"
+lane --dry-run --claude-because 'agy out until Sun' --update up-lane
+assert_contains "$LAST_OUT" '--claude-because agy out until Sun --add-dir' "a reason given on the command line wins over the logged one"
+# A new lane (a start, not an update) is still refused without its own reason, even though another lane has a logged one.
+lane --dry-run newbie "$REPO" sonnet "$HAND/prompt.md"
+[ "$LAST_RC" = 1 ] || fail "a brand-new own-repo lane still needs its own reason ($LAST_OUT)"; assert_contains "$LAST_OUT" '--claude-because' "the refusal names the override"
+# --add-dir before --update adds a folder to the restart (the lane's recorded folders stay); a missing folder is refused.
+EXTRA2="$TMP/showcase"; mkdir -p "$EXTRA2"
+lane --dry-run --add-dir "$EXTRA2" --update up-lane
+[ "$LAST_RC" = 0 ] || fail "--add-dir with --update is accepted ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "--add-dir $ADD --add-dir $EXTRA2 --recycle-at 120 up-lane" "the new folder is added after the recorded one"
+lane --dry-run --add-dir "$TMP/nowhere" --update up-lane
+[ "$LAST_RC" = 1 ] || fail "--add-dir with a missing folder is refused ($LAST_OUT)"; assert_contains "$LAST_OUT" "no such folder" "says why"
+rm -f "$TLOG" "$HOME_T/repos/hub/client-senders.tsv" "$HOME_T/repos/hub/client-repos.txt"
+
 # A lane that never writes handoff.md is left running.
 export LANE_UPDATE_WAIT_SECS=3
 lane --update up-lane

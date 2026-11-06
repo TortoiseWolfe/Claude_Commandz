@@ -312,7 +312,13 @@ mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 mcp__claude_ai_Gmail__label_message,\
 Bash($S/muse_poll_record.sh:*),Bash($S/muse_poll_roadmap.sh),Bash(python3 $S/openclaw_tray.py notify:*),Bash(python3 $S/muse_jev.py request),Edit(/$JEV_REQ)"
-timeout 1200 "$CLAUDE" -p "$(cat "$S/muse_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
+# The handler is told the exact ids the check called NEW (they passed the id-shape filter above). Without them it searched on its own, and on
+# 6 Nov 2026 (#251) it never searched for a tower note the check had found, exited 0 with "No new notes", and the note was given up on.
+HANDLE_PROMPT="$(cat "$S/muse_poll.handle.prompt")
+
+THE CHECK JUST FOUND THESE NOTE IDS: ${ids[*]}
+Read each one by its id (get_draft for an id starting r, otherwise get_message), whatever tag its subject starts with, and handle it by the rules above. Every id in this list must be recorded with muse_poll_record.sh processed <id> before you finish, even a receipt or a note with nothing to answer. If one is a note written by this machine (subject starts with \"[NX-01>\"), record it and do nothing else with it."
+timeout 1200 "$CLAUDE" -p "$HANDLE_PROMPT" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 handler_exit=$?
 echo "$(ts) handler finished (exit $handler_exit)" >>"$LOG"
@@ -343,8 +349,10 @@ else
     fi
     # Log and queue the hub-inbox line only on the run where the count first reaches 2.
     if ((count == 2)); then
-      echo "$(ts) GAVE-UP $id after 2 failed handler runs" >>"$LOG"
-      "$S/muse_poll_record.sh" inbox "Hub: notes poller gave up on $id after 2 failed handler runs; read it by hand"
+      # A handler that exited 0 ran fine and recorded nothing; a nonzero exit crashed or timed out. The hub needs to know which.
+      if ((handler_exit == 0)); then why="ran without error but recorded nothing"; else why="exited $handler_exit"; fi
+      echo "$(ts) GAVE-UP $id after 2 failed handler runs (last: $why)" >>"$LOG"
+      "$S/muse_poll_record.sh" inbox "Hub: notes poller gave up on $id after 2 failed handler runs (last: $why); read it by hand"
     fi
   done
 fi
