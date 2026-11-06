@@ -525,12 +525,47 @@ F_SCP_REMOTE = re.compile(r"(?<![\w.%+-])(?:[\w.-]+@)?([\w.-]+\.[a-z]{2,}):(?!//
 F_PY_FLAGS = {"-u", "-B", "-I", "-E", "-s", "-S"}
 F_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # A proxy, GIT_*/GH_*/SSH_* or interpreter setting anywhere in a command that holds the address is refused.
-F_ENV_RISKY = re.compile(r"(?<![\w-])(?:export\s+|env\s+)?(?:[A-Za-z0-9_]*proxy|GIT_\w+|GH_\w+|SSH_\w+|PYTHON\w*|NODE_\w+)=",
+F_ENV_NAME = re.compile(r"^(?:[A-Za-z0-9_]*proxy|GIT_\w+|GH_\w+|SSH_\w+|PYTHON\w*|NODE_\w+|HOME|XDG_\w+|PATH|LD_\w+)$", re.I)
+F_ENV_RISKY = re.compile(r"(?<![\w-])(?:[A-Za-z0-9_]*proxy|GIT_\w+|GH_\w+|SSH_\w+|PYTHON\w*|NODE_\w+|HOME|XDG_\w+|LD_\w+)=",
                          re.I)
+
+
+def _f_env_risky(cmd):
+    """A risky variable set anywhere in the command, seen in the text and again after shell quote removal."""
+    if F_ENV_RISKY.search(cmd):
+        return True
+    for seg in split_segments(cmd):
+        toks = _f_tokens(seg)
+        if toks is None:
+            return True
+        if any("=" in t and F_ENV_NAME.match(t.split("=", 1)[0]) for t in toks):
+            return True
+    return False
 # git or gh options that change where it talks, what it sends or what it runs.
 F_GIT_OPTS = re.compile(r"^(?:-c.*|--config-env.*|--exec-path.*|--upload-pack.*|--receive-pack.*|--exec|--hostname.*)$")
 F_GIT_TEXT = re.compile(r"insteadof|sshcommand|gitproxy|ext::|core\.(?:pager|editor|fsmonitor|hookspath|askpass)"
                         r"|(?<![\w/])(?:http|credential|alias|diff|url)\.", re.I)
+
+
+F_GIT_SUB = {"add", "commit", "log", "status", "diff", "show", "fetch", "pull", "push", "clone", "checkout",
+             "switch", "branch", "merge", "rebase", "tag", "remote", "stash", "worktree", "rev-parse", "rev-list",
+             "ls-files", "ls-remote", "blame", "reset", "restore", "cherry-pick", "describe", "shortlog",
+             "submodule", "mv", "rm", "init", "config"}
+F_GH_SUB = {"api", "issue", "pr", "repo", "run", "release", "workflow", "search", "gist", "label", "browse"}
+F_GIT_CONFIG_OK = {"user.email", "user.name", "--get", "--get-all", "--list", "-l"}
+
+
+def _f_subcommand(prog, args):
+    """First subcommand word of a git or gh call, skipping -C <dir> and -R <repo> style options."""
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in ("-C", "-R", "--repo", "--git-dir", "--work-tree", "--namespace"):
+            skip = True
+        elif not a.startswith("-"):
+            return a
+    return ""
 
 
 def _host_is_github(host):
@@ -557,6 +592,16 @@ def _f_plain_github_call(segment, email):
     if i >= len(tokens) or os.path.basename(tokens[i]) not in ("git", "gh"):
         return False
     args = tokens[i + 1:]
+    prog = os.path.basename(tokens[i])
+    sub = _f_subcommand(prog, args)
+    if sub not in (F_GIT_SUB if prog == "git" else F_GH_SUB):
+        return False                      # an unknown subcommand, a user alias or a gh extension
+    if sub == "config":
+        keys = [a for a in args[args.index("config") + 1:] if not a.startswith("-") or a in F_GIT_CONFIG_OK]
+        if not keys or any(k not in F_GIT_CONFIG_OK and k != args[-1] for k in keys[:1]):
+            return False
+        if keys[0] not in F_GIT_CONFIG_OK:
+            return False
     if any(F_GIT_OPTS.match(a) for a in args) or F_GIT_TEXT.search(" ".join(args)):
         return False
     for n, a in enumerate(args):
@@ -614,7 +659,7 @@ def email_leak(cmd, email):
         return None
     segs = split_segments(cmd)
     progs = [_f_program(s) for s in segs]
-    if F_ENV_RISKY.search(cmd):
+    if _f_env_risky(cmd):
         return "a proxy or environment setting that changes how the call connects"
     for seg, prog in zip(segs, progs):
         if prog == "gmail_api.py":
