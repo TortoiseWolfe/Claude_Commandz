@@ -74,6 +74,11 @@
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
 export AFA_BIG_OUT=0
 set -u
+# Where this script lives, found before any cd (a relative $0 stops resolving once the folder changes).
+_lw_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+# Leave the folder the watcher was started from. 6 Nov 2026: the hub started it inside a lane worktree, the lane removed the worktree after
+# its merge, and the watcher died with "getcwd: cannot access parent directories". Nothing here needs the starting folder.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then cd "${HOME:-/}" 2>/dev/null || cd / || true; fi
 
 # Does this pane text show a dialog that waits on the hub? Reads the pane on stdin.
 # Claude Code menus say "Enter to select"; its permission prompts say "Do you want to proceed"
@@ -219,9 +224,15 @@ stamp_ahead_check() {
   local l=$1 rep first tok h m ap sm mt now_h now_m now_min diff sum mark slack=${LANE_WATCH_STAMP_SLACK:-2} wrote
   rep=$(report_of "$l"); [ -n "$rep" ] || return 0
   first=$(head -n 1 "$rep" 2>/dev/null)
-  tok=$(grep -oEm1 '(^|[^0-9:])(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$first") || return 0
+  # The first time on the line that is not a target ("deadline 7:00 PM", "by 7:00 PM", until/due/before/till): that is the status time. (6 Nov
+  # 2026: grep -o prints every time on the line and the last one's AM/PM was read, so "WORKING 11:17 AM deadline 7:00 PM" was 463 minutes ahead.)
+  tok=""
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    if grep -qiE '^(by|until|till|deadline|due|before)[: ]' <<<"$cand"; then continue; fi
+    tok=$(grep -oE '(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$cand" | head -n 1); break
+  done < <(grep -oiE '([A-Za-z]+[: ]+)?(^|[^0-9:])?(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$first")
   [ -n "$tok" ] || return 0
-  tok=$(grep -oE '(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$tok")
   h=${tok%%:*}; h=$((10#$h)); m=${tok#*:}; m=$((10#${m:0:2})); ap=${tok: -2}
   case "$ap" in [Pp][Mm]) [ "$h" -eq 12 ] || h=$((h + 12)) ;; *) [ "$h" -ne 12 ] || h=0 ;; esac
   sm=$((h * 60 + m))
@@ -359,7 +370,7 @@ dead_check() {
 spend_limit=${LANE_SPEND_LIMIT:-25}
 hub_limit=${HUB_SPEND_LIMIT:-75}
 spend_every=${LANE_WATCH_SPEND_SECS:-300}
-spend_cmd=${LANE_SPEND_CMD:-"python3 $(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_spend.py"}
+spend_cmd=${LANE_SPEND_CMD:-"python3 $_lw_dir/lane_spend.py"}
 spend_check() {
   local now last f out hub_out usd n fam col1 col2 col3
   spend_out=''
@@ -486,7 +497,7 @@ watcher_running() {
   if [ -n "${LANE_WATCH_PROCLIST+x}" ]; then
     out=$LANE_WATCH_PROCLIST
   else
-    out=$("$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/ps_redacted.sh" pgrep -af 'lane_watch\.sh' 2>/dev/null) || out=
+    out=$("$_lw_dir/ps_redacted.sh" pgrep -af 'lane_watch\.sh' 2>/dev/null) || out=
   fi
   printf '%s\n' "$out" | sed -E 's/^[0-9]+ //' | command grep -E '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' | command grep -v -- '--recycle-once' | command grep -q .
 }
@@ -505,8 +516,8 @@ hub_watcher_check() {
   [ ! -e "$named" ] || return 0
   : > "$named"
   mins=$(( age / 60 ))
-  "${LANE_WATCH_RECORD:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/muse_poll_record.sh}" inbox "Hub: no lane_watch.sh watcher has been running for ${mins} min while ${n} lane(s) are open, so a report, a stuck dialog or a dead lane will not wake the hub. Arm one (lane_watch.sh, in the background). Named once per gap." >/dev/null 2>&1 || true
-  timeout 30 python3 "${LANE_WATCH_TRAY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/openclaw_tray.py}" notify "Hub watcher is not running" "${n} lane(s) open, no watcher for ${mins} min" >/dev/null 2>&1 || true
+  "${LANE_WATCH_RECORD:-$_lw_dir/muse_poll_record.sh}" inbox "Hub: no lane_watch.sh watcher has been running for ${mins} min while ${n} lane(s) are open, so a report, a stuck dialog or a dead lane will not wake the hub. Arm one (lane_watch.sh, in the background). Named once per gap." >/dev/null 2>&1 || true
+  timeout 30 python3 "${LANE_WATCH_TRAY:-$_lw_dir/openclaw_tray.py}" notify "Hub watcher is not running" "${n} lane(s) open, no watcher for ${mins} min" >/dev/null 2>&1 || true
 }
 # A client line open in the hub's inbox: the heartbeat is not stretched while one is.
 client_line_open() {
