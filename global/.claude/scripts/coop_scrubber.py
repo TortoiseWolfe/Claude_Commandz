@@ -17,6 +17,9 @@ Private config, never in a repo (a missing file means that part is off):
       folders  patterns (`*` inside one segment, `**` across segments, `~/` is home). A session whose working folder
                sits under a match is a co-op session. No file or no folders: the scrubber is off everywhere.
       allow    words that must never become a placeholder (the operator's own name, for example).
+      products extra product, project or board words (on top of the built-in list: Nextcloud, CiviCRM, Collabora, Traefik ...). A
+               name Presidio guesses that is only a product word plus plain words ("Standard Nextcloud") is not a person and stays readable (issue 239: the card title
+               "Standard Nextcloud images" showed as [PERSON_...]). A roster person is still always replaced.
       ner      false turns Presidio off.
   ~/.config/afa/coop-roster.json   {"salt": "...", "people": [{"names": [...], "emails": [...], "phones": [...]}]}
 
@@ -39,6 +42,23 @@ MAX_NER_CHARS = 200_000     # a longer string skips Presidio (roster and pattern
 MAX_NER_TOTAL = 1_000_000   # characters sent to Presidio in one call
 NER_TIMEOUT = 25
 BUILTIN_ALLOW = {"claude", "anthropic"}
+# Product and project words the co-op's own cards and chat are full of. Presidio sometimes reads a capitalised phrase containing one as a
+# person ("Standard Nextcloud images"); a guessed name that holds one of these words stays readable. Roster people never do.
+BUILTIN_PRODUCTS = {
+    "nextcloud", "civicrm", "collabora", "traefik", "hubzilla", "deck", "docker", "portainer", "wordpress", "postgres",
+    "postgresql", "mariadb", "mysql", "redis", "grafana", "prometheus", "keycloak", "authentik", "listmonk", "mautic", "matomo",
+    "github", "gitea", "cloudflare", "letsencrypt", "ubuntu", "debian", "linux", "windows", "paypal", "jitsi",
+    "onlyoffice", "libreoffice", "thunderbird", "roundcube", "dovecot", "postfix", "nginx", "tailscale",
+    "wireguard", "vaultwarden", "bitwarden", "backblaze", "restic", "ansible", "terraform", "kubernetes",
+}
+# Plain words that can sit beside a product word in a card title or a chat line. A guessed name stays readable only when it holds a product
+# word and EVERY other word in it is one of these, so "Wendell Nextcloud" is still replaced: a failed guess here would leak a name.
+COMMON_WORDS = {
+    "standard", "custom", "default", "new", "old", "shared", "public", "private", "main", "base", "official", "latest", "test", "demo",
+    "production", "staging", "admin", "user", "users", "group", "groups", "team", "board", "card", "cards", "image", "images", "server",
+    "servers", "app", "apps", "backup", "backups", "cloud", "file", "files", "setup", "install", "update", "updates", "config", "plugin",
+    "plugins", "site", "sites", "stack", "container", "containers", "the", "a", "an", "and", "for", "of", "on", "in", "to", "with",
+}
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 # a phone number must show separators or a leading + (a bare run of digits is an id, a timestamp or a size)
@@ -84,13 +104,14 @@ def load_json(path):
 def load_config():
     cfg = load_json(config_file())
     if cfg is None:
-        return {"folders": [], "allow": [], "ner": True}
+        return {"folders": [], "allow": [], "ner": True, "products": []}
     if not isinstance(cfg, dict):
         raise ValueError("config is not an object")
     return {
         "folders": [str(x) for x in cfg.get("folders", []) if isinstance(x, str)],
         "allow": [str(x) for x in cfg.get("allow", []) if isinstance(x, str)],
         "ner": cfg.get("ner", True) is not False,
+        "products": [str(x) for x in cfg.get("products", []) if isinstance(x, str)],
     }
 
 
@@ -255,8 +276,9 @@ def presidio_spans(texts):
 # ---------------------------------------------------------------- the scrubber
 
 class Scrubber:
-    def __init__(self, roster=None, allow=(), use_ner=True):
+    def __init__(self, roster=None, allow=(), use_ner=True, products=()):
         self.roster = roster or Roster()
+        self.products = {w.strip().lower() for w in products if w.strip()} | BUILTIN_PRODUCTS
         self.allow = {a.strip().lower() for a in allow if a.strip()} | BUILTIN_ALLOW
         self.use_ner = use_ner
         self.counts = {"PERSON": 0, "EMAIL": 0, "PHONE": 0}
@@ -268,9 +290,17 @@ class Scrubber:
         h = hashlib.sha256((self.roster.salt + "|" + written.strip().lower()).encode("utf-8")).hexdigest()[:4]
         return "[%s_x%s]" % (kind, h)
 
+    def _product_guess(self, written, span):
+        """True for a PERSON span only Presidio guessed (no roster index) made of a product word plus plain common words: not a person."""
+        if span[2] != "PERSON" or span[3] is not None:
+            return False
+        words = re.findall(r"[a-z0-9]+", written.lower())
+        return any(w in self.products for w in words) and all(w in self.products or w in COMMON_WORDS for w in words)
+
     def _merge(self, text, spans):
         # roster spans (index set) first, then longer, then earlier
-        spans = [s for s in spans if s[1] > s[0] and text[s[0]:s[1]].strip().lower() not in self.allow]
+        spans = [s for s in spans if s[1] > s[0] and text[s[0]:s[1]].strip().lower() not in self.allow
+                 and not self._product_guess(text[s[0]:s[1]], s)]
         spans.sort(key=lambda s: (s[3] is None, -(s[1] - s[0]), s[0]))
         kept = []
         for s in spans:
@@ -371,7 +401,7 @@ def main(argv):
             "yes" if os.path.exists(presidio_python()) else "no"))
         return 0
     if cmd == "scrub":
-        s = Scrubber(roster, cfg["allow"], cfg["ner"])
+        s = Scrubber(roster, cfg["allow"], cfg["ner"], cfg["products"])
         sys.stdout.write(s.scrub_strings([sys.stdin.read()])[0])
         return 0
     sys.stderr.write("usage: coop_scrubber.py status | scrub\n")
