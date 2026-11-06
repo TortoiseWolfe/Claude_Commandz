@@ -95,6 +95,8 @@
 #   lane.sh --add-dir <path> ...        at start, --restart or --resume, repeatable: a folder outside the lane's own that it may read and write
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
+#                                       Claude lanes also get ~/.claude/state, Claude's temp folder and (in a worktree) the repo's main checkout as --add-dir,
+#                                       computed at each start and resume, never recorded (see shared_read_flags).
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
 #                                       --headless), "dead <cmd>" when the pane shows a bare shell or nothing; lane_watch.sh wakes the hub on dead
@@ -616,6 +618,30 @@ own_checkouts() {  # <lane folder>: one existing checkout folder per line
     printf '%s\n' "$c"
   done
   return 0
+}
+# Claude Code's "Read outside the working directories" dialog freezes a lane on any file outside its folders, and an allow rule (Read(//path/**))
+# does not lift it: only a working directory does. So a claude lane gets these shared folders as --add-dir as well (6 Nov 2026), which grants
+# edit as well as read there (the hub accepted that): ~/.claude/state (hub-inbox.md, peer-inbox.md), Claude's own temp folder
+# ${TMPDIR:-/tmp}/claude-<uid> (CI logs a lane saved there), and, for a lane in a worktree ~/repos/.worktrees/<repo>--<topic>, the main checkout
+# ~/repos/<repo>. Only plain existing folders (no symlink, no colon, tab or newline in the name), none already given, none on the no-AI list.
+# Computed at every start, resume and update and never written to index column 15, so the recorded list stays the explicit one.
+shared_read_flags() {  # <lane folder> <colon list already given>: "--add-dir 'path' " for each, claude lanes only
+  local d="$1" given=":${2:--}:" c rel repo root out="" seen=":"
+  local -a cand=("$HOME/.claude/state" "${TMPDIR:-/tmp}/claude-$(id -u)")
+  root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || root=""
+  case "$d/" in "$root/.worktrees/"*)
+    if [ -n "$root" ]; then rel="${d#"$root"/.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"
+      case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) ;; *) cand+=("$root/$repo") ;; esac
+    fi ;; esac
+  for c in "${cand[@]}"; do
+    case "$c" in *:*|*"$TAB"*|*$'\n'*) continue ;; esac
+    [ -d "$c" ] && [ ! -L "$c" ] || continue
+    case "$given$seen" in *":$c:"*) continue ;; esac
+    if no_ai_wall_paths_hit "$c"; then continue; fi
+    seen+="$c:"
+    out+="--add-dir $(printf %q "$c") "
+  done
+  printf '%s' "$out"
 }
 # Latest index row for a lane name (tab-separated line), or nothing.
 index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)print r}' "$INDEX" || true; }
@@ -2099,7 +2125,7 @@ if [ "$mode" = resume ]; then
     ad="$(ad_merge "${ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
     [ "$dry" = 1 ] || [ "$ad" = "$_ad_old" ] || index_set "$name" 15 "$ad"
   fi
-  adf="$(ad_flags "${ad:--}")"
+  adf="$(ad_flags "${ad:--}")$(shared_read_flags "$dir" "${ad:--}")"
   flags="$(claude_lane_flags "$eff" "$conn" "$name" "$rk" "$dir" "$pm" "$(deny_rules "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" write)" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")" "${p:-}" 1)"
   uenv="$(lane_env_prefix "$name" "$(dirname "${rep:-$HOME/.claude/state/lanes/$d-$name/report.md}")")"
   if [ "$console" = 1 ]; then
@@ -2261,6 +2287,7 @@ target="$SESSION:$name"
 mapfile -t _own < <(own_checkouts "$dir")
 ad_start="$(ad_merge "${prev_ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
 adsf="$(ad_flags "$ad_start")"
+adsf_claude="$adsf$(shared_read_flags "$dir" "$ad_start")"  # claude only: the shared read folders; the other engines keep $adsf
 # Project MCP servers: --project-mcp wins; on a restart (same folder) the previous row's value carries over.
 if [ -n "$project_mcp_opt" ]; then
   pm_start="$project_mcp_opt"
@@ -2317,12 +2344,12 @@ elif [ "$headless" = 1 ]; then
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
   # Print mode stops background jobs 10 minutes after the last turn and exits 0 (#260: two backlog lanes waiting on a build and on a pull request's checks
   # ended that way, silently). A headless lane waits up to an hour instead; a value the caller already set is kept.
-  cmd="{ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-3600000}; $(lane_docker_env | sed 's/^/export /; s/ $/; /')$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; lane_rc=\$?; echo \"exit \$lane_rc\" >>$(printf %q "$out"); python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $(printf %q "$out") \"\$lane_rc\" claude $(printf %q "$HOME/.claude/state"); }"
+  cmd="{ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-3600000}; $(lane_docker_env | sed 's/^/export /; s/ $/; /')$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf_claude$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; lane_rc=\$?; echo \"exit \$lane_rc\" >>$(printf %q "$out"); python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $(printf %q "$out") \"\$lane_rc\" claude $(printf %q "$HOME/.claude/state"); }"
 elif [ "$console" = 1 ]; then
-  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
+  cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf_claude$flags $(printf %q "$lane_msg")"
 else
   # --add-dir: same 28 Oct 2026 reason as on --resume (hand-off folder is outside the cwd).
-  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
+  cmd="$(lane_env_prefix "$name" "$hand")claude --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf_claude$flags $(printf %q "$lane_msg")"
 fi
 pane_ready_for_start "$target" || exit 1
 t send-keys -t "$target" "$cmd" Enter

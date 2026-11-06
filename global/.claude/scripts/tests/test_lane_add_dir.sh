@@ -164,4 +164,48 @@ rm -rf "$WT"
 lane nowt "$WORK" sonnet "$TMP/p1.md"
 [ "$LAST_RC" = 0 ] && [ "$(ad_of nowt)" = - ] || fail "no .worktrees folder: nothing added"; ok
 
+# 11. A claude lane also gets the shared read folders (Claude Code's read block is lifted only by a working directory): ~/.claude/state, the Claude temp
+# folder, and the main checkout of the repo when the lane runs in a worktree. Computed at each start/resume, never written to column 15; other engines get none.
+TMPC="$TMP/tmpdir"; mkdir -p "$TMPC/claude-$(id -u)" "$WT/proj--topic-a" "$WORK"
+shared() { set +e; LAST_OUT="$(HOME="$HOME_T" TMPDIR="$TMPC" PATH="$BIN:$PATH" FAKE_KEYS="$KEYS" bash "$SCRIPT" "$@" 2>&1)"; LAST_RC=$?; set -e; }
+shared sh1 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+[ "$LAST_RC" = 0 ] || fail "start in a worktree works ($LAST_OUT)"; ok
+c="$(last_cmd)"
+has "$c" "--add-dir $HOME_T/.claude/state " "the state folder (hub and peer inboxes) is added"
+has "$c" "--add-dir $TMPC/claude-$(id -u) " "Claude's temp folder is added"
+has "$c" "--add-dir $WORK " "a lane in a worktree gets the repo's main checkout"
+[ "$(ad_of sh1)" = "$WT/proj--topic-a" ] || fail "column 15 holds only the checkouts, got $(ad_of sh1)"; ok
+shared sh2 "$WORK" sonnet "$TMP/p1.md"
+c="$(last_cmd)"
+has "$c" "--add-dir $HOME_T/.claude/state " "a lane in the main checkout gets the state folder"
+hasnt "$c" "--add-dir $WORK " "...but not its own folder again"
+shared --add-dir "$HOME_T/.claude/state" sh3 "$WORK" sonnet "$TMP/p1.md"
+c="$(last_cmd)"
+[ "$(printf '%s' "$c" | grep -o -- "--add-dir $HOME_T/.claude/state " | wc -l)" = 1 ] || fail "a folder already given is not added twice ($c)"; ok
+# --resume adds them too, and still records nothing
+printf '2026-11-04\tsh4\t%s\tsonnet\tsubscription\t%s\t%s\tsess-4\t1700000000\thigh\toff\t100\t-\t-\t-\n' "$WT/proj--topic-a" "$LANES/sh4/prompt.md" "$LANES/sh4/report.md" >>"$LANES/index.tsv"
+shared --resume sh4
+[ "$LAST_RC" = 0 ] || fail "--resume works ($LAST_OUT)"; ok
+has "$(last_cmd)" "--add-dir $HOME_T/.claude/state " "--resume adds the state folder"
+has "$(last_cmd)" "--add-dir $WORK " "--resume adds the main checkout"
+[ "$(ad_of sh4)" = "-" ] || [ "$(ad_of sh4)" = "$WT/proj--topic-a" ] || fail "--resume leaves column 15 to the checkouts, got $(ad_of sh4)"; ok
+# the other engines get none of them
+for eng in codex agy copilot; do
+  shared --dry-run --allow-client --engine "$eng" "sh5-$eng" "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+  [ "$LAST_RC" = 0 ] || fail "$eng dry run works ($LAST_OUT)"; ok
+  hasnt "$LAST_OUT" "--add-dir $HOME_T/.claude/state " "$eng gets no state folder"; hasnt "$LAST_OUT" "claude-$(id -u)" "$eng gets no temp folder"
+done
+# a symlink, a missing folder and a folder on the no-AI list are left out
+mkdir -p "$HOME_T/.claude/no-ai-wall"
+printf 'no_ai_wall_paths_hit() { case "$1" in *claude-*) return 0 ;; *) return 1 ;; esac; }\nno_ai_wall_text_hit() { return 1; }\n' >"$HOME_T/.claude/no-ai-wall/no_ai_wall.sh"
+shared sh6 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+c="$(last_cmd)"; hasnt "$c" "claude-$(id -u)" "a folder on the no-AI list is left out"; has "$c" "--add-dir $HOME_T/.claude/state " "...the others stay"
+rm -rf "$HOME_T/.claude/no-ai-wall"
+rm -rf "$TMPC/claude-$(id -u)"; ln -s "$TMP/outside" "$TMPC/claude-$(id -u)"
+shared sh7 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+hasnt "$(last_cmd)" "claude-$(id -u)" "a symlinked temp folder is left out"
+rm -f "$TMPC/claude-$(id -u)"
+shared sh8 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+hasnt "$(last_cmd)" "claude-$(id -u)" "a missing temp folder is left out"
+
 printf 'ok: %s checks\n' "$checks"
