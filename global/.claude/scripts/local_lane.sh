@@ -39,6 +39,10 @@ names={m.get("name") for m in json.load(sys.stdin).get("models",[])}
 sys.exit(0 if want in names or want+":latest" in names else 1)' "$tag" || { echo "local: model $tag is not on the server at $URL (ollama pull $tag)" >&2; exit 69; }
 
 repo_name="$(basename -- "$dir")"
+# A lane started inside a linked worktree (<repo>--<topic>) names the repo, not the worktree: the rule below lets the lane use that repo's
+# OTHER worktrees, and a rule built from the worktree's own name (<repo>--<topic>--*) matches none of them (issue 285).
+_common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || _common=""
+[ "$(basename -- "$_common")" = .git ] && repo_name="$(basename -- "$(dirname -- "$_common")")"
 mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 python3 -I - "$conf" "$hand" "$HOME" "$repo_name" "$URL" "$tag" <<'PY' || exit 2
