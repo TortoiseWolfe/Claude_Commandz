@@ -107,6 +107,22 @@ class LaneWatchGuardTests(unittest.TestCase):
         self.handoff(5)
         self.assertEqual(json.loads(self.run_hook())["decision"], "block")
 
+    def test_block_names_this_sessions_marker_when_handoff_is_fresh_but_marker_missing(self):
+        self.marker("other-session")
+        self.handoff(5)
+        reason = json.loads(self.run_hook(session_id="hub-1"))["reason"]
+        self.assertIn(f"touch {self.state}/hub-handed-off.hub-1", reason)
+        self.assertIn("lane_watch.sh", reason)
+
+    def test_block_without_a_fresh_handoff_does_not_offer_the_marker(self):
+        self.handoff(45)
+        self.assertNotIn("hub-handed-off", json.loads(self.run_hook(session_id="hub-1"))["reason"])
+
+    def test_the_named_marker_then_allows_the_stop(self):
+        self.handoff(5)
+        self.marker("hub-1")
+        self.assertEqual(self.run_hook(session_id="hub-1"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
