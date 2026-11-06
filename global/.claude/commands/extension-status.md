@@ -206,6 +206,41 @@ else
 fi
 ```
 
+**Branch protection** (the command computes this; the report never guesses it):
+
+```bash
+# true / false for main. `gh api` writes error bodies to stdout on a non-2xx answer (see #5), so anything
+# other than a bare true or false is treated as unknown instead of being printed.
+PROTECTED=$(gh api repos/<REPO>/branches/main -q '.protected' 2>/dev/null)
+case "$PROTECTED" in true|false) ;; *) PROTECTED=unknown ;; esac
+
+# Only when PROTECTED is true: are status checks and reviews required? (needs admin; degrade gracefully)
+if [ "$PROTECTED" = "true" ]; then
+  if gh api repos/<REPO>/branches/main/protection --silent 2>/dev/null; then
+    gh api repos/<REPO>/branches/main/protection \
+      -q '{checks: (.required_status_checks.contexts // []), reviews: (.required_pull_request_reviews.required_approving_review_count // 0)}'
+  else
+    echo "(no protection access)"
+  fi
+fi
+```
+
+**Render the protection line**:
+
+- `PROTECTED=false` → `⚠ main is unprotected: a force-push could rewrite the history users installed from`, then print this remediation for the user to run themselves (it keeps force-pushes and deletions off and nothing else):
+
+  ```
+  gh api -X PUT repos/<REPO>/branches/main/protection --input - <<'JSON'
+  {"required_status_checks": null, "enforce_admins": false, "required_pull_request_reviews": null,
+   "restrictions": null, "allow_force_pushes": false, "allow_deletions": false}
+  JSON
+  ```
+
+- `PROTECTED=true` → `✓ main is protected`. If the second call worked and `required_status_checks` is empty, add `⚠ no required status checks`; if `required_pull_request_reviews` is 0 and the repo has other contributors, add `⚠ no required reviewers` (a solo repo with 0 reviewers is fine, so say nothing there).
+- `PROTECTED=unknown` or `(no protection access)` → `(no protection access)`.
+
+Never auto-apply protection: the PUT is text for the user to run, and no step of this command runs it.
+
 **Render**: flag any branch other than `main` or release branches (`release/*`, `v*`) as a cleanup candidate. Flag last-commit age >30d as `⚠ stale main`.
 
 ### 7. Render report
