@@ -615,6 +615,38 @@ class WeekStart(unittest.TestCase):
             self.assertEqual(hd.lane_spend_command(self.BUDGET, now)[-1], "--json")
 
 
+class CalibrationNote(unittest.TestCase):
+    """Issue 273: the budget figure says whether claude.ai was read lately, so a stale gauge can't pass as measured."""
+    ET = ZoneInfo("America/New_York")
+
+    def cal(self, at):
+        d = fresh_dir("cal")
+        f = Path(d) / "limit-calibration.json"
+        f.write_text(json.dumps({"pct": 53.0, "at": at}))
+        return str(f)
+
+    def test_a_reading_under_a_day_old_says_when_it_was_checked(self):
+        now = datetime(2026, 11, 6, 9, 0, tzinfo=self.ET)
+        n = hd.calibration_note(self.cal("2026-11-06T07:30:01-05:00"), now.timestamp())
+        self.assertEqual(n, " | checked against claude.ai 7:30 AM")
+
+    def test_an_old_reading_is_marked_unchecked_with_its_time(self):
+        now = datetime(2026, 11, 6, 9, 0, tzinfo=self.ET)
+        n = hd.calibration_note(self.cal("2026-10-30T19:21:57-04:00"), now.timestamp())
+        self.assertEqual(n, " | UNCHECKED: no claude.ai reading since Fri 30 Oct 7:21 PM")
+
+    def test_a_missing_or_unreadable_file_is_unchecked(self):
+        now = datetime(2026, 11, 6, 9, 0, tzinfo=self.ET).timestamp()
+        self.assertEqual(hd.calibration_note("/nonexistent/x.json", now), " | UNCHECKED: no claude.ai reading on record")
+        bad = Path(fresh_dir("cal")) / "x.json"
+        bad.write_text("not json")
+        self.assertEqual(hd.calibration_note(str(bad), now), " | UNCHECKED: no claude.ai reading on record")
+
+    def test_the_note_goes_after_the_reset_text_so_the_reset_still_parses(self):
+        line = "Week resets Wed 2026-11-11 12:00 PM: used 41%" + hd.calibration_note("/nonexistent/x.json", 0)
+        self.assertTrue(hd.BUDGET_RESET_RE.match(line))
+
+
 class PublishBudget(unittest.TestCase):
     def test_value_is_one_line_with_a_stamp_the_figure_and_the_phase(self):
         v = hd.budget_published_value("Week resets Wed: used 1.5%", "Phase 1 of 3", datetime(2026, 10, 28, 14, 5))
