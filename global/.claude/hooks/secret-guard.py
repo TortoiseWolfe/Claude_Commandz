@@ -513,42 +513,58 @@ def _has(text, email):
     return any(f in low for f in _forms(email))
 
 
+F_TRUSTED_GMAIL = os.path.realpath(os.path.expanduser("~/.claude/scripts/gmail_api.py"))
+F_GITHUB_HOST = re.compile(r"^https?://(?:[\w.-]+\.)?(?:github\.com|githubusercontent\.com)(?:[:/]|$)", re.I)
+F_GIT_UA = re.compile(r"http\.(?:extraheader|useragent)|--hostname|GH_HOST", re.I)
+
+
 def _f_program(segment):
-    """Program a segment runs, with 'gmail_api.py' when an interpreter runs that script."""
+    """Program a segment runs; 'gmail_api.py' only when an interpreter runs our installed copy."""
     toks, i = _process_command(segment)
     if i >= len(toks):
         return ""
     prog = os.path.basename(toks[i])
     if F_SCRIPT_RUNNER.fullmatch(prog) or prog in ("bash", "sh"):
         script = next((t for t in toks[i + 1:] if not t.startswith("-")), "")
-        if os.path.basename(script) == "gmail_api.py":
+        if script and os.path.realpath(os.path.expanduser(script)) == F_TRUSTED_GMAIL:
             return "gmail_api.py"
     return prog
 
 
+def _f_runs_client(seg, prog):
+    return prog in F_HTTP_PROGS or bool(F_HTTP_WORD.search(blank_quotes(seg)))
+
+
 def email_leak(cmd, email):
-    """Where in a Bash command the account email would go to a website, else None."""
+    """Where in a Bash command the account email would go to a website, else None.
+    One command that holds the address and runs a web client anywhere is refused, so the address
+    cannot be carried over in a variable, a pipe or a file between segments."""
     cmd = cmd.replace("\\\n", " ")
     if not _has(cmd, email):
         return None
-    for seg in split_segments(cmd):
-        if not _has(seg, email):
+    segs = split_segments(cmd)
+    progs = [_f_program(s) for s in segs]
+    for seg, prog in zip(segs, progs):
+        if prog == "gmail_api.py":
             continue
-        prog = _f_program(seg)
-        if prog in ("git", "gh", "gmail_api.py"):
+        if prog in ("git", "gh"):
+            # GitHub knows the address; another host, or a header/user-agent setting, does not count.
+            if _has(seg, email) and (F_GIT_UA.search(seg) or any(
+                    not F_GITHUB_HOST.match(u) for u in re.findall(r"https?://[^\s'\"]*", seg))):
+                return "a User-Agent header or a host that is not GitHub"
             continue
-        if UA_HEADER.search(seg):
+        if _has(seg, email) and UA_HEADER.search(seg):
             return "a User-Agent header"
-        if prog in F_HTTP_PROGS or F_HTTP_WORD.search(blank_quotes(seg)):
+        if _f_runs_client(seg, prog):
             if F_UA_FLAG.search(seg):
                 return "a User-Agent header"
             if any(_has(u, email) for u in re.findall(r"https?://[^\s'\"]*", seg)):
                 return "the URL"
             if F_BODY_FLAG.search(seg):
                 return "a request body"
-            return "a web request"
-    if (F_SCRIPT_RUNNER.search(cmd) and F_HTTP_LIB.search(cmd)
-            and not any(_f_program(s) == "gmail_api.py" for s in split_segments(cmd))):
+            return "a web request in the same command"
+    rest = "\n".join(s for s, pr in zip(segs, progs) if pr != "gmail_api.py")
+    if F_SCRIPT_RUNNER.search(rest) and F_HTTP_LIB.search(rest) and _has(rest, email):
         return "a request made from a script"
     return None
 
