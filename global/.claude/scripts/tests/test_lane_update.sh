@@ -88,7 +88,7 @@ lane() {
   set -e
 }
 alive() { kill -0 "$1" 2>/dev/null; }
-claude_of() { pgrep -P "$(cat "$ST/pid-$1")" | head -1; }
+claude_of() { pgrep -P "$(cat "$ST/pid-$1")" | head -1 || true; }
 idle_pane() { printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"; }
 row() {  # row <name> <billing>
   printf '2026-11-05\t%s\t%s\tsonnet\t%s\t%s\t%s\told-sess\t1700000000\thigh\toff\t120\t-\t-\t%s\n' "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$ADD" >>"$INDEX"
@@ -99,7 +99,11 @@ touch -d '10 minutes ago' "$HAND/report.md" "$HAND/handoff.md"
 row up-lane subscription; row cur-lane subscription; row cx-lane codex
 printf 'up-lane\ncur-lane\n' >"$ST/windows"
 bash "$TMP/spawn.sh" up-lane p318 "$ST" "$TMP"; bash "$TMP/spawn.sh" cur-lane p319 "$ST" "$TMP"
-OLDPID="$(claude_of up-lane)"; CURPID="$(claude_of cur-lane)"
+OLDPID="$(claude_of up-lane || true)"; CURPID="$(claude_of cur-lane || true)"
+if [ -z "$OLDPID" ] || [ -z "$CURPID" ]; then  # say why a fake lane has no claude child (seen in CI on 6 Nov)
+  { echo "diag: TMP=$TMP shell pids: $(cat "$ST"/pid-* 2>/dev/null | tr '\n' ' ')"; ls -l "$TMP/p318/" "$VER" 2>&1; mount | grep -E ' (/tmp|/home)[ /]' || true
+    "$TMP/p318/claude" 0.1; echo "direct run rc=$?"; ps -eo pid,ppid,stat,comm,args | tail -25; } >&2 || true
+fi
 [ -n "$OLDPID" ] && [ -n "$CURPID" ] || fail "the fake lanes did not start"; ok
 
 # --behind names the lane on the older version, with its screen state, and not the current one.
