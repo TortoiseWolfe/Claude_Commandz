@@ -14,6 +14,7 @@ Reads out.log only (it is the engine's own output); prints nothing. Exit 0 alway
 """
 import os
 import re
+import stat
 import sys
 import time
 
@@ -54,9 +55,18 @@ def main(argv):
     except OSError:
         text = ""
     try:
-        if not os.path.exists(report) or os.path.getsize(report) == 0:
-            with open(report, "w") as f:
-                f.write("FAILED exit %s | %s\n" % (code, last_error_line(text)))
+        # Never write through a symlink or into anything but a regular file (the lane folder is the lane's own, but the check is cheap).
+        try:
+            st = os.lstat(report)
+            writable = stat.S_ISREG(st.st_mode) and st.st_size == 0
+            flags = os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW
+        except FileNotFoundError:
+            writable = True
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        if writable:
+            fd = os.open(report, flags, 0o644)
+            with os.fdopen(fd, "w") as f:
+                f.write("FAILED exit %s | %s\n" % (re.sub(r"\D", "", code) or "?", last_error_line(text)))
     except OSError:
         pass
     secs = reset_seconds(text)

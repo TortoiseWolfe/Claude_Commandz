@@ -49,6 +49,12 @@ rm -f "$H/report.md"
 python3 -I "$HELPER" "$H/report.md" "$H/missing.log" 2 codex "$STATE"
 assert_eq "$(cat "$H/report.md")" 'FAILED exit 2 | no output' 'no output at all still gives the watcher something'
 
+# A report.md that is a symlink is never written through.
+rm -f "$H/report.md"; echo keep >"$TMP/target"; ln -s "$TMP/target" "$H/report.md"
+python3 -I "$HELPER" "$H/report.md" "$H/out.log" 1 codex "$STATE"
+assert_eq "$(cat "$TMP/target")" keep 'a symlinked report.md is not written through'
+rm -f "$H/report.md"
+
 # ---- lane.sh --------------------------------------------------------------------------------------------------------------------------------
 lane() { set +e; LAST_OUT="$(HOME="$HOME_T" PATH="$BIN:$PATH" bash "$SCRIPT" "$@" 2>&1)"; LAST_RC=$?; set -e; }
 P="$TMP/p.md"; echo 'Fix the lint errors.' >"$P"
