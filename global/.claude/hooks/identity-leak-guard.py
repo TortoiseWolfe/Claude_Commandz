@@ -20,7 +20,11 @@ What counts as sending (Bash): the address appears anywhere in the command AND t
     uses a network library. A script file is read, so a script an agent wrote earlier is judged by what it contains.
   That covers a header (-H, -A, --user-agent), the URL (plain or percent-encoded), and a body (-d, a pipe into -d @-).
   Reading the address from git config or an environment variable into a sink counts as well.
-Allowed: the address in grep, echo, git, local files, and the mail tools (gmail_api.py, calendar_api.py).
+  A script this hook can't find, can't read or can't read in full counts as a sink; it is never assumed safe. Every token
+  after the interpreter is tried as a file, in the working folder and in any folder a cd in the line moves to.
+Allowed: the address in grep, echo, git, local files, and the mail tools gmail_api.py and calendar_api.py (plus names under
+  allow_scripts). A mail tool is allowed by its real path in ~/.claude/scripts, never by file name alone, so a copy or a link
+  with the same name somewhere else is judged like any other script.
 Known gaps: an address assembled at run time from pieces, an address held in a variable set elsewhere, and a sink reached
 through ssh, docker exec or a language this hook does not list.
 """
@@ -36,7 +40,8 @@ CONFIG = "~/.config/afa/identity-guard.json"
 CLAUDE_JSON = "~/.claude.json"
 LOG = "~/.claude/state/identity-guard.log"
 DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
-MAX_SCRIPT_BYTES = 512 * 1024
+MAX_SCRIPT_BYTES = 4 * 1024 * 1024
+SCRIPTS_DIR = "~/.claude/scripts"
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
 
 WHY = (
@@ -126,46 +131,65 @@ def has_address(text, addrs):
     return False
 
 
-def script_path(token, cwd):
-    token = token.strip("'\"")
-    if not token or token.startswith(("-", "<", "$", "(")):
-        return None
-    p = os.path.expanduser(token)
-    if not os.path.isabs(p):
-        p = os.path.join(cwd, p)
-    return p if os.path.isfile(p) else None
+def scripts_dir():
+    return os.path.realpath(os.path.expanduser(os.environ.get("IDENTITY_GUARD_SCRIPTS_DIR") or SCRIPTS_DIR))
+
+
+def is_allowed_tool(path, allowed):
+    """A mail tool is allowed by where it really lives (the installed scripts folder), never by its file name alone."""
+    real = os.path.realpath(path)
+    return any(real == os.path.join(scripts_dir(), name) for name in allowed)
+
+
+def candidate_files(tokens, cwd, cmd):
+    """Every token after an interpreter that names an existing file. Looks in the working folder and in any folder the
+    command cd's into, so an option that takes a value (python -W ignore x.py) or a cd earlier in the line hides nothing."""
+    dirs = [cwd]
+    for d in re.findall(r"\bcd\s+([^\s;&|]+)", cmd):
+        d = os.path.expanduser(d.strip("'\""))
+        dirs.append(d if os.path.isabs(d) else os.path.join(cwd, d))
+    out = []
+    for tok in tokens:
+        tok = tok.strip("'\"")
+        if not tok or tok.startswith(("-", "<", "$", "(", ">", "|", ";", "&")):
+            continue
+        p = os.path.expanduser(tok)
+        for base in ([""] if os.path.isabs(p) else dirs):
+            q = os.path.join(base, p) if base else p
+            if os.path.isfile(q) and q not in out:
+                out.append(q)
+    return out
 
 
 def sinks(cmd, cwd, allowed):
-    """Names of network sinks in the command. A script file is judged by its own text."""
+    """Network sinks in the command: names as strings, or ("script file", text) for a script that uses the network.
+    A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink."""
     found = []
     if CLIENT_RE.search(cmd):
         found.append("network client")
     for m in INTERP_RE.finditer(cmd):
         toks = m.group("rest").split()
-        i, inline = 0, False
-        while i < len(toks) and toks[i].startswith("-"):
-            if toks[i] in INLINE_FLAGS:
-                inline = True
-            i += 1
-        if inline or i >= len(toks) or toks[i].startswith(("<", "-")):
+        if any(t in INLINE_FLAGS for t in toks) or not [t for t in toks if not t.startswith(("-", "<", "$", "(", ">", "|", ";", "&"))]:
             if NETWORK_CODE.search(cmd):
                 found.append("inline code that uses the network")
             continue
-        path = script_path(toks[i], cwd)
-        if path is None:
-            if NETWORK_CODE.search(cmd):
-                found.append("code that uses the network")
+        files = candidate_files(toks, cwd, cmd)
+        if not files:
+            found.append("a script this hook can't find")
             continue
-        if os.path.basename(path) in allowed:
-            continue
-        try:
-            with open(path, errors="replace") as f:
-                body = f.read(MAX_SCRIPT_BYTES)
-        except OSError:
-            continue
-        if NETWORK_CODE.search(body):
-            found.append(("script file", body))
+        for path in files:
+            if is_allowed_tool(path, allowed):
+                continue
+            try:
+                with open(path, errors="replace") as f:
+                    body = f.read(MAX_SCRIPT_BYTES + 1)
+            except OSError:
+                found.append("a script this hook can't read")
+                continue
+            if len(body) > MAX_SCRIPT_BYTES:
+                found.append("a script too large to read in full")
+            elif NETWORK_CODE.search(body):
+                found.append(("script file", body))
     return found
 
 

