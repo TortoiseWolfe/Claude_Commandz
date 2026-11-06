@@ -12,6 +12,8 @@ stop and says to re-arm the watcher.
 One exemption: once the hub has written its hand-off (a ~/.claude/state/hub-handoff-*.md
 changed in the last 30 minutes) and touched ~/.claude/state/hub-handed-off.<session id>,
 it may stop, so it stops answering wakes and growing. AFA_STATE_DIR moves the state folder.
+The marker must carry the id of the session that is stopping (a marker for another session does not count). When a fresh hand-off
+file exists but this session's marker does not, the block message names the exact marker path to touch.
 """
 import glob
 import json
@@ -92,6 +94,19 @@ def main():
             "is running, so lane reports will not wake this session. Re-arm it now: "
             "run ~/.claude/scripts/lane_watch.sh with run_in_background, then finish the turn."
         )
+        if marker is not None:
+            # 6 Nov 2026: the hub wrote its hand-off and touched hub-handed-off.<an id of another session>, so this guard kept blocking.
+            # The marker has to carry the id of the session that is stopping; say exactly which one, so it is never a guess.
+            fresh = any(
+                time.time() - os.path.getmtime(f) < 30 * 60
+                for f in glob.glob(str(state_path / "hub-handoff-*.md"))
+            )
+            if fresh and not marker.exists():
+                reason += (
+                    " If this session has already handed off (a hand-off file from the last 30 minutes exists), "
+                    f"its marker is missing: this session's id is {session_id}, so run "
+                    f"touch {marker} instead of re-arming, and finish the turn."
+                )
         print(json.dumps({"decision": "block", "reason": reason}))
     except Exception:
         return 0
