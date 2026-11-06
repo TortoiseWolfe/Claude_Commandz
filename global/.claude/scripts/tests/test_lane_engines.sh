@@ -23,6 +23,8 @@ mkdir -p "$BIN" "$HOME_TEST/repos/hub" "$HOME_TEST/repos/sample-client-repo" \
   "$HOME_TEST/repos/listed-only-repo/nested" "$HOME_TEST/repos/commented-client-repo" \
   "$HOME_TEST/repos/CD/nested" "$REPO" "$TMP/repo_dir" "$PROTECTED_REPO" \
   "$UNPROTECTED_REPO" "$TMP/worktrees"
+# The opencode cases run with both provider keys present (placeholders); the keyless ones below move them away.
+mkdir -p "$HOME_TEST/.config/gemini" "$HOME_TEST/.config/openrouter"; printf 'placeholder\n' >"$HOME_TEST/.config/gemini/api-key"; printf 'placeholder\n' >"$HOME_TEST/.config/openrouter/api-key"
 printf 'id\trepo_dir\n# ignored\t~/repos/commented-client-repo\nblank\t\nexample\t~/repos/sample-client-repo\n' >"$HOME_TEST/repos/hub/client-senders.tsv"
 printf '# Client repositories\n~/repos/listed-only-repo\n\n# ~/repos/commented-client-repo\n' >"$HOME_TEST/repos/hub/client-repos.txt"
 
@@ -324,6 +326,22 @@ for pair in opencode/big-pickle=opencode/big-pickle google/gemini-3.8-flash=goog
   assert_exit 0 "$LAST_STATUS" "opencode accepts model ${pair%%=*}"
   case "$LAST_OUTPUT" in *"$(printf %q "${pair#*=}")"*) checks=$((checks + 1)) ;; *) fail "opencode model ${pair%%=*} should map to ${pair#*=}: $LAST_OUTPUT" ;; esac
 done
+# A model whose provider has no key on this machine is swapped for the first provider that has one (stw-117-ci, 6 Nov 2026: google/* with no key
+# died with "Unexpected server error"): no Gemini key -> OpenRouter's free model; neither key -> OpenCode's keyless free tier. A named model on a
+# keyed provider is not touched.
+GEM_KEY="$HOME_TEST/.config/gemini/api-key"; OR_KEY="$HOME_TEST/.config/openrouter/api-key"
+mv "$GEM_KEY" "$GEM_KEY.off"
+run_lane --dry-run --engine opencode oc-nokey "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_OUTPUT" "$(printf %q openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)" 'no Gemini key: the default becomes the OpenRouter free model'
+assert_not_contains "$LAST_OUTPUT" 'google/gemini' 'no Gemini key: no Gemini model is passed'
+mv "$OR_KEY" "$OR_KEY.off"
+run_lane --dry-run --engine opencode oc-nokey "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_OUTPUT" "$(printf %q opencode/big-pickle)" 'no keys: the default becomes the keyless OpenCode model'
+run_lane --dry-run --engine opencode oc-nokey "$REPO" google/gemini-3.8-flash "$PROMPT"
+assert_contains "$LAST_OUTPUT" "$(printf %q opencode/big-pickle)" 'no keys: a named Gemini model is swapped too'
+run_lane --dry-run --engine opencode oc-nokey "$REPO" opencode/big-pickle "$PROMPT"
+assert_contains "$LAST_OUTPUT" "$(printf %q opencode/big-pickle)" 'the keyless model is kept as asked'
+mv "$GEM_KEY.off" "$GEM_KEY"; mv "$OR_KEY.off" "$OR_KEY"
 # Groq's free tier (8000 tokens/minute) is smaller than OpenCode's own prompt, so it is never passed through.
 run_lane --dry-run --engine opencode oc-free "$REPO" groq/openai/gpt-oss-120b "$PROMPT"
 assert_not_contains "$(grep 'send-keys' <<<"$LAST_OUTPUT")" 'groq' 'opencode never runs on Groq'
