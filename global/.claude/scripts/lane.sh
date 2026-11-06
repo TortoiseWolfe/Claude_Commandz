@@ -801,10 +801,10 @@ agy_model() {
   esac
 }
 
-# OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads; anything else (a Claude alias) is the free default.
+# OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads, or opencode/ (its keyless free tier); anything else (a Claude alias) is the free default.
 opencode_model() {
   case "$1" in
-    google/*|openrouter/*) printf '%s' "$1" ;;
+    google/*|openrouter/*|opencode/*) printf '%s' "$1" ;;
     *) printf 'google/gemini-3-flash-preview' ;;
   esac
 }
