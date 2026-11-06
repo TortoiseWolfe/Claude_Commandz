@@ -460,12 +460,17 @@ fi
 # Lanes never auto-compact (his rule, 20 Oct): past LANE_RECYCLE_K thousand tokens, with the turn ended, the watcher starts
 # `lane.sh --recycle` in the background and wakes nobody. A fake lane.sh stands in for the real one (tests/test_lane_recycle.sh has the real).
 rc_home="$TMP/rchome"; mkdir -p "$rc_home/.claude/scripts" "$rc_home/.claude/state/lanes"
-export POINT_FILE="$TMP/rc-point" TURN_FILE="$TMP/rc-turn" CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane"
+export POINT_FILE="$TMP/rc-point" TURN_FILE="$TMP/rc-turn" CTX_FILE="$TMP/rc-ctx" RC_CALLS="$TMP/rc-calls" RC_FAIL="$TMP/rc-fail" RC_PANE="$TMP/rc-pane" JOB_FILE="$TMP/rc-job"
 cat > "$rc_home/.claude/scripts/lane.sh" <<'SH'
 #!/usr/bin/env bash
 lanes="$HOME/.claude/state/lanes"
 case "$1" in
-  --status) echo "rl  report:no  idle"; echo "    dir:/x model:sonnet" ;;
+  --status)
+    case "$(cat "${JOB_FILE:-/dev/null}" 2>/dev/null)" in
+      job)   echo "rl  report:stale  idle"; echo "    report stale: a background job it started has not finished"; echo "    dir:/x model:sonnet" ;;
+      input) echo "rl  report:stale  idle"; echo "    report stale: the lane got input after report.md was written; the report is not its last word"; echo "    dir:/x model:sonnet" ;;
+      *)     echo "rl  report:no  idle"; echo "    dir:/x model:sonnet" ;;
+    esac ;;
   --ctx) cat "$CTX_FILE" ;;
   --turn) cat "${TURN_FILE:-/dev/null}" ;;
   --recycle-point) cat "${POINT_FILE:-/dev/null}" ;;
@@ -638,6 +643,34 @@ orphan_case "no handoff.md, nothing to name" no 95 none "$ready_pane"
 orphan_case "over its line the recycle path takes it, not the orphan check" no 130 20 "$ready_pane"
 echo "ok   (orphan cases done)"
 rm -rf "$rl_hand"; rm -f "$rl_log" "$rl_dir"/.thrash-* "$rl_dir"/.orphan-*; : > "$TURN_FILE"
+
+# 5 Nov 2026 (inbox triage item 39): a lane idle 30+ minutes with a background job still running wakes the hub once; before this a running job
+# made a lane fine indefinitely. Idle time comes from the pane's "· done H:MM" line.
+job_pane() { printf '%s\n' '⏺ Waiting on CI.' "✻ Worked for 1m 9s · done $(date -d "-$1 min" '+%-I:%M %p')" '❯ '; }
+job_case() { # job_case <label> <want yes|no> <job|input|none> <idle min> [pane]
+  local label=$1 want=$2 got=no
+  rl_reset; rm -f "$rl_dir"/.jobidle-*; printf '%s' "$3" > "$JOB_FILE"
+  if [ -n "${5:-}" ]; then printf '%s\n' "$5" > "$RC_PANE"; else job_pane "$4" > "$RC_PANE"; fi
+  rl_watch 95 5 "$TMP/jb-out"
+  grep -q '^idle: rl has been idle [0-9]* min with a background job still running' "$TMP/jb-out" && got=yes
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got: $(cat "$TMP/jb-out")"; failures=$((failures + 1)); fi
+}
+job_case "idle 45 minutes with a background job running wakes the hub" yes job 45
+grep -q 'idle 4[4-6] min' "$TMP/jb-out" && echo "ok   the line names the idle minutes" || { echo "FAIL idle minutes: $(cat "$TMP/jb-out")"; failures=$((failures + 1)); }
+rl_watch 95 5 "$TMP/jb-out2"
+if ! grep -q 'background job still running' "$TMP/jb-out2"; then echo "ok   the same idle stretch is named once, across a re-armed watcher"; else echo "FAIL job idle named twice: $(cat "$TMP/jb-out2")"; failures=$((failures + 1)); fi
+job_case "idle only 10 minutes with a job running is left alone" no job 10
+job_case "idle 45 minutes with no job is left alone" no none 45
+job_case "idle 45 minutes because it got input (no job) is left alone" no input 45
+job_case "a lane still working (spinner) is left alone" no job 0 "$(printf '%s\n' '⏺ Waiting' '✻ Thinking… (12s · esc to interrupt)' '✻ Worked for 1m 9s · done 1:09 AM' '❯ ')"
+job_case "a lane stuck on a dialog is left to the dialog check" no job 0 "$(printf '%s\n' '✻ Worked for 1m 9s · done 1:09 AM' 'Do you want to proceed?' 'Esc to cancel')"
+job_case "first idle stretch named" yes job 45
+job_pane 40 > "$RC_PANE"
+rl_watch 95 5 "$TMP/jb-out3"
+if grep -q 'background job still running' "$TMP/jb-out3"; then echo "ok   a later idle stretch (new done time) is named again"; else echo "FAIL new stretch not named: $(cat "$TMP/jb-out3")"; failures=$((failures + 1)); fi
+LANE_WATCH_JOB_IDLE_MIN=90 job_case "LANE_WATCH_JOB_IDLE_MIN raises the line (45 min is under 90)" no job 45
+rm -f "$rl_dir"/.jobidle-*; : > "$JOB_FILE"; rl_reset
+echo "ok   (job-idle cases done)"
 
 # Spend alarm: a lane past the limit today wakes the hub once per lane per day; the ledger is asked no more than every few minutes.
 sp_home="$TMP/sp-home"; mkdir -p "$sp_home/.claude/state/lanes"

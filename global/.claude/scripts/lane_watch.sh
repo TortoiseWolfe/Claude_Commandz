@@ -56,6 +56,13 @@
 # A lane that wrote handoff.md, said "ready to recycle" and was not recycled (its context is under its line, so nothing else will) wakes the hub
 # once per handoff.md after LANE_ORPHAN_SECS (default 600) of sitting idle. 26 Oct 1:30 AM: a queued copy of the request reached a freshly
 # primed lane at 95K; it wrote handoff.md, stopped, and sat idle until 8:28 AM.
+# A lane that has sat idle LANE_WATCH_JOB_IDLE_MIN (default 30) minutes with a background job still running wakes the hub ONCE per idle stretch
+# (job_idle_check): "idle: <lane> has been idle N min with a background job still running". A job counts when lane.sh --status --full says so
+# ("report stale: a background job it started has not finished", from lane_report_state.py; a job with no word back after 12 hours is
+# treated as lost and does not count). Before 5 Nov 2026 (inbox triage item 39) a running job made a lane "fine" indefinitely, so a download or
+# CI wait that hung, or a job whose finish notice never arrived, kept the lane idle with nobody asked. The idle time is read from the pane's
+# "· done H:MM" line; the mark .jobidle-<lane> in the lane state folder keeps a re-armed watcher from naming the same stretch twice, and a lane
+# with no job is not looked up more than once every 5 minutes.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
@@ -194,6 +201,38 @@ step_url_check() {
   echo "step without URL: $l (line 1 of $rep starts STEP-FOR-JONATHAN and has no https:// link); asked the lane to rewrite it"
   "$lane_sh" --send "$l" "Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link. Rewrite line 1 so it carries the full https:// URL of the exact page, says which browser (the fleet Chromium and its tab title, or his own) and how he will know it is done; bring the fleet tab to the front first. He cannot act on a step without the URL." >/dev/null 2>&1 || true
   hit=1; other=1
+}
+
+# job_idle_check <lane> <pane>: names a lane idle for LANE_WATCH_JOB_IDLE_MIN minutes or more whose background job is still running. Idle
+# means no dialog, no spinner, no recycle under way, and a "· done H:MM" line that old (a time of day later than now is yesterday's).
+job_idle_check() {
+  local l=$1 pane=$2 dl t de now mark prev note mins limit=${LANE_WATCH_JOB_IDLE_MIN:-30}
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=30
+  recycle_locked "$l" && return 0
+  printf '%s\n' "$pane" | dialog_waiting && return 0
+  command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 0   # still working
+  dl=$(printf '%s\n' "$pane" | turn_done_line)
+  t=$(printf '%s\n' "$dl" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}( [AP]M)?).*/\1/p')
+  [ -n "$t" ] || return 0
+  now=$(date +%s)
+  de=$(date -d "$t" +%s 2>/dev/null) || return 0
+  [ "$de" -le "$now" ] || de=$(( de - 86400 ))
+  mins=$(( (now - de) / 60 ))
+  [ "$mins" -ge "$limit" ] || return 0
+  mark="$recycle_dir/.jobidle-$l"
+  prev=$(cat "$mark" 2>/dev/null)   # "<done epoch> named" or "<done epoch> nojob <checked epoch>"
+  case "$prev" in
+    "$de named") return 0 ;;
+    "$de nojob "*) [ $(( now - ${prev##* } )) -ge 300 ] || return 0 ;;
+  esac
+  note=$(stale_note "$l")
+  case "$note" in
+    *"background job"*)
+      printf '%s named' "$de" > "$mark"
+      echo "idle: $l has been idle ${mins} min with a background job still running; check the job (read the lane's last screen) and ask it or stop it. Named once for this idle stretch."
+      hit=1; other=1 ;;
+    *) printf '%s nojob %s' "$de" "$now" > "$mark" ;;
+  esac
 }
 
 # The recycle decision for one lane, shared by the poll loop and the scheduled pass (--recycle-once). recycle_pass <lane> <pane> [quiet]
@@ -627,6 +666,7 @@ while :; do
         # turn nearly every poll, so almost every pass took a turn branch and skipped it.)
         if ! recycle_pass "$l" "$pane"; then
           orphan_check "$l" "$pane"
+          job_idle_check "$l" "$pane"
         fi
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
           seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
