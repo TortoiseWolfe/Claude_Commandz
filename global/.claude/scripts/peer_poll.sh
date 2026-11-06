@@ -23,7 +23,7 @@
 #      NEVER answers a [MUSE>CC] note: the handler only reads it and queues one line in peer-inbox.md for the hub, which is what was
 #      missing on 29 Oct (triage item 99). peer-muse-cc-seen.txt keeps it from queueing the same note twice.
 #   2. Only if there is one, a Sonnet pass HANDLES it: answers read-only with a
-#      [NCC-74656>NX-01] or [NCC-74656>MUSE] draft, records the note (no labels: the hosted connector refuses them on drafts), and queues
+#      [NCC-74656>NX-01] or "[CC>MUSE] NCC-74656: <topic>" (Hatch) draft, records the note (no labels: the hosted connector refuses them on drafts), and queues
 #      anything needing work or approval in ~/.claude/state/peer-inbox.md.
 #
 # It cannot send mail, push, deploy, delete, or change settings: the allow and deny lists below
