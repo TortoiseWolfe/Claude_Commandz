@@ -9,7 +9,7 @@ Actions:
     append   --card N --text LINE              add a line to the end of the description
     move     --card N --stack "Stack title"    move the card to the end of another stack
     title    --card N --text "New title"       change the card's title
-    due      --card N --date YYYY-MM-DDTHH:MM  set the due date (Eastern time; stored with its offset)
+    due      --card N --date YYYY-MM-DDTHH:MM  set the due date (Eastern time; sent to the Deck as UTC)
     create   --stack "Stack title" --title T [--description D] [--assign UID ...]
     comment  --card N --text MESSAGE           add a comment after a strict chat voice check
 
@@ -27,7 +27,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,12 +38,13 @@ EASTERN = ZoneInfo("America/New_York")
 
 
 def eastern_due(text):
-    """'YYYY-MM-DDTHH:MM' read as Eastern time -> ISO 8601 with its offset (what the Deck API accepts and stores)."""
+    """'YYYY-MM-DDTHH:MM' read as Eastern time -> the same moment in UTC, ISO 8601. The Deck API drops any offset it is sent and reads the
+    clock time as UTC (found live: 9 PM Eastern sent with -05:00 came back as 4 PM), so the offset is applied here, not left to it."""
     try:
         when = datetime.strptime(text, "%Y-%m-%dT%H:%M")
     except ValueError:
         sys.exit(f"deck_write: --date must look like 2026-11-10T21:00, got {text!r}")
-    return when.replace(tzinfo=EASTERN).isoformat(timespec="seconds")
+    return when.replace(tzinfo=EASTERN).astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def show_due(value):

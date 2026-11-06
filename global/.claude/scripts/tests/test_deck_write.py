@@ -68,16 +68,16 @@ class DeckTitleAndDue(unittest.TestCase):
         self.assertEqual((body["title"], body["duedate"], body["owner"]), ("Made up new title", self.CARD["duedate"], "someone"))
         self.assertIn("Made up old title -> Made up new title [In progress]", out)
 
-    def test_due_reads_eastern_time_and_sends_the_offset(self):
+    def test_due_reads_eastern_time_and_sends_the_same_moment_in_utc(self):
         request, out = self.run_action("due", "--card", "9", "--date", "2026-11-10T21:00",
-                                       after=dict(self.CARD, duedate="2026-11-10T21:00:00-05:00"))
+                                       after=dict(self.CARD, duedate="2026-11-11T02:00:00+00:00"))
         body = request.call_args[0][3]
-        self.assertEqual(body["duedate"], "2026-11-10T21:00:00-05:00")
+        self.assertEqual(body["duedate"], "2026-11-11T02:00:00+00:00")
         self.assertEqual(body["title"], "Made up old title")
         self.assertIn("Sat 31 Oct 2026 12:00 AM -> Tue 10 Nov 2026 9:00 PM", out)
 
-    def test_summer_dates_get_the_daylight_offset(self):
-        self.assertEqual(deck_write.eastern_due("2026-07-01T09:30"), "2026-07-01T09:30:00-04:00")
+    def test_summer_dates_use_daylight_time(self):
+        self.assertEqual(deck_write.eastern_due("2026-07-01T09:30"), "2026-07-01T13:30:00+00:00")
 
     def test_a_bad_date_stops_before_credentials_or_requests(self):
         with (mock.patch.object(deck_write, "read_env") as read_env,
