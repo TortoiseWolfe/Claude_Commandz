@@ -411,6 +411,24 @@ class WallHome(Base):
         self.assertIsNone(self.live("lane.sh"))
 
 
+class UnsafePaths(Base):
+    def test_the_path_check(self):
+        for bad in ("a\nb.py", "a\tb.py", "../x.py", "a/../x.py", "/etc/x", "a//b.py", "", "./x.py"):
+            self.assertTrue(ins.unsafe_path(bad), repr(bad))
+        for good in ("a.py", "tests/test_a.py", "dir/sub/b.sh"):
+            self.assertFalse(ins.unsafe_path(good), repr(good))
+
+    def test_a_file_with_a_newline_in_its_name_is_skipped_not_installed(self):
+        self.publish({"ok.py": "o1", "evil\nremove\tx.py": "e1"})
+        p = self.run_ins("--yes")
+        self.assertEqual(self.live("ok.py"), "o1")
+        self.assertIn("skipped", p.stdout)
+        self.assertNotIn("\nremove\tx", p.stdout)
+        manifests = list((self.home / "state").rglob("manifest.tsv"))
+        self.assertEqual(len(manifests), 1)
+        self.assertEqual(manifests[0].read_text().splitlines(), ["remove\tscripts/ok.py"])
+
+
 class Docs(unittest.TestCase):
     def test_the_readme_gives_the_command(self):
         text = (HERE.parent.parent.parent.parent / "README.md").read_text()

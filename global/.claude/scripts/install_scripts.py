@@ -64,6 +64,13 @@ def is_wall_file(rel):
     return base.startswith("settings") and base.endswith(".json")
 
 
+def unsafe_path(rel):
+    """A path that could not be written into the tab-separated undo manifest or could climb out of the scripts folder."""
+    if not rel or rel.startswith("/") or any(c in rel for c in "\n\r\t\0"):
+        return True
+    return any(part in ("", ".", "..") for part in rel.split("/"))
+
+
 def skip_junk(rel):
     return "__pycache__" in rel.split("/") or rel.endswith(".pyc")
 
@@ -128,6 +135,9 @@ def classify(repo, ref, home):
     missing = wall_home_missing(home)
     for rel, (mode, kind, sha) in sorted(tree_files(repo, ref).items()):
         if skip_junk(rel):
+            continue
+        if unsafe_path(rel):
+            plan["other"].append(rel.encode("unicode_escape").decode())  # never copied, never written to the undo manifest
             continue
         if is_wall_file(rel):
             plan["wall"].append(rel)
