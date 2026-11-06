@@ -45,18 +45,23 @@ _common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/de
 [ "$(basename -- "$_common")" = .git ] && repo_name="$(basename -- "$(dirname -- "$_common")")"
 mkdir -p -- "$hand"
 conf="$hand/opencode.json"
-python3 -I - "$conf" "$hand" "$HOME" "$repo_name" "$URL" "$tag" <<'PY' || exit 2
-import json, sys
-conf, hand, home, repo, url, tag = sys.argv[1:7]
+python3 -I - "$conf" "$hand" "$HOME" "$repo_name" "$URL" "$tag" "$dir" <<'PY' || exit 2
+import fnmatch, json, sys
+conf, hand, home, repo, url, tag, workdir = sys.argv[1:8]
 cfg = {
     "$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
     "enabled_providers": ["ollama"],  # no hosted provider is even listed
     "provider": {"ollama": {"npm": "@ai-sdk/openai-compatible", "name": "Ollama (this machine)",
                             "options": {"baseURL": url + "/v1"}, "models": {tag: {"name": tag}}}},
     "permission": {"*": "allow", "external_directory": {
-        "*": "deny", f"{hand}/**": "allow",
+        "*": "deny", f"{hand}/**": "allow", f"{workdir}/**": "allow",
         f"{home}/repos/.worktrees/{repo}--*/**": "allow", f"{home}/repos/.worktrees/{repo}-wf-*/**": "allow"}},
 }
+# A lane must be able to edit its own folder: refuse to start when no rule in the config covers the folder it was given
+# (issue 285: the rule named <repo>--<topic>--*, the folder was <repo>--<topic>, and the first edit was refused).
+rules = [k for k, v in cfg["permission"]["external_directory"].items() if v == "allow"]
+if not any(fnmatch.fnmatchcase(workdir.rstrip("/") + "/x", r) for r in rules):
+    sys.stderr.write(f"local: no permission rule covers the lane's own folder {workdir}; refusing to start\n"); sys.exit(1)
 json.dump(cfg, open(conf, "w"))
 PY
 export OPENCODE_CONFIG="$conf"

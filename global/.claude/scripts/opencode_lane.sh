@@ -63,7 +63,7 @@ mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 cat >"$conf" <<JSON
 {"\$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
- "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
+ "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
 

@@ -405,6 +405,19 @@ assert_contains "$WT_CONF" "$HOME_TEST/repos/.worktrees/$(basename "$UNPROTECTED
 assert_not_contains "$WT_CONF" "$(basename "$UNPROTECTED_WORKTREE")--*" 'local rule is not built from the worktree name'
 [ ! -e "$REPO/injected" ] || fail 'local prompt contents are not executed by the shell'
 case "$(grep -P '\tlo-lane\t' "$HOME_TEST/.claude/state/lanes/index.tsv")" in *$'\tlocal\t'*) checks=$((checks + 1)) ;; *) fail 'the index row says billing local' ;; esac
+# Issue 285 (the repo-name half is fixed and tested above): both free engines must also allow the lane's own folder outright.
+for eng in opencode local; do
+  WT="$HOME_TEST/repos/.worktrees/Some_Repo--issue-4"; mkdir -p "$WT"
+  : >"$TMP/opencode-calls"; : >"$TMP/curl-calls"
+  run_lane --engine "$eng" "wt-$eng" "$WT" sonnet "$PROMPT"
+  assert_exit 0 "$LAST_STATUS" "$eng lane starts in a worktree folder"
+  WT_CONF="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-wt-$eng/opencode.json")"
+  assert_contains "$WT_CONF" "$WT/**" "$eng may edit inside its own worktree"
+  WT_OK="$(python3 -I -c 'import fnmatch,json,sys
+c=json.loads(sys.argv[1])["permission"]["external_directory"]
+sys.exit(0 if any(v=="allow" and fnmatch.fnmatchcase(sys.argv[2]+"/global/.claude/scripts/lane.sh",k) for k,v in c.items()) else 1)' "$WT_CONF" "$WT" && echo yes || echo no)"
+  assert_contains "$WT_OK" yes "$eng: a file inside the worktree is allowed by some rule"
+done
 # A model named ollama/<tag> passes through; a hosted name does not.
 run_lane --dry-run --engine local lo-map "$REPO" ollama/gpt-oss:20b "$PROMPT"
 case "$LAST_OUTPUT" in *'ollama/gpt-oss:20b'*) checks=$((checks + 1)) ;; *) fail "ollama/gpt-oss:20b should pass through: $LAST_OUTPUT" ;; esac
