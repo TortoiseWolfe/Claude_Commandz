@@ -49,10 +49,12 @@ USER_NAME=${USER_NAME//[[:cntrl:]]/}
 HOST_NAME=${HOST_NAME//[[:cntrl:]]/}
 
 # ONE jq call for everything. Fields are joined with 0x1f; control characters are stripped from every value.
-IFS=$'\x1f' read -r model_name current_dir output_style ctx_used ctx_limit session_id resp_in resp_out < <(
+IFS=$'\x1f' read -r model_name current_dir output_style ctx_used ctx_limit session_id resp_in resp_out rl7_pct rl7_reset rl5_pct rl5_reset < <(
     jq -r '
         def clean: tostring | gsub("[\u0000-\u001f\u007f-\u009f]"; "");
         def num: if type == "number" then floor else 0 end;
+        def pct1: if type == "number" then ((. * 10 | round) / 10) else "" end;   # "" = the field is absent
+        def secs: if type == "number" then floor else "" end;
         (.context_window.current_usage // null) as $u
         | [ (.model.display_name // "Claude"),
             (.workspace.current_dir // .cwd // "unknown"),
@@ -62,7 +64,9 @@ IFS=$'\x1f' read -r model_name current_dir output_style ctx_used ctx_limit sessi
             (.context_window.context_window_size | num),
             (.session_id // "unknown"),
             ( if $u then (($u.input_tokens | num) + ($u.cache_creation_input_tokens | num)) else 0 end ),
-            ( if $u then ($u.output_tokens | num) else (.context_window.total_output_tokens | num) end )
+            ( if $u then ($u.output_tokens | num) else (.context_window.total_output_tokens | num) end ),
+            (.rate_limits.seven_day.used_percentage | pct1), (.rate_limits.seven_day.resets_at | secs),
+            (.rate_limits.five_hour.used_percentage | pct1), (.rate_limits.five_hour.resets_at | secs)
           ] | map(clean) | join("\u001f")
     ' <<<"$input"
 )
@@ -74,7 +78,7 @@ IFS=$'\x1f' read -r model_name current_dir output_style ctx_used ctx_limit sessi
 [[ "$resp_in" =~ ^[0-9]+$ ]] || resp_in=0
 [[ "$resp_out" =~ ^[0-9]+$ ]] || resp_out=0
 
-now=${EPOCHSECONDS:-$(printf '%(%s)T' -1)}
+now=${STATUSLINE_NOW:-${EPOCHSECONDS:-$(printf '%(%s)T' -1)}}   # STATUSLINE_NOW: tests only
 
 # ---------- state dirs (all under ~/.claude/.statusline) ----------
 SDIR="$HOME_DIR/.claude/.statusline"
@@ -82,6 +86,31 @@ SESS_DIR="$SDIR/s"     # one small file per session; only that session writes it
 USAGE_DIR="$SDIR/u"    # one append-only file per day: "session_id input output" per new response
 [ -d "$SESS_DIR" ] || mkdir -p "$SESS_DIR" "$USAGE_DIR"
 [ -d "$USAGE_DIR" ] || mkdir -p "$USAGE_DIR"
+
+# ---------- rate limits (the weekly budget, with no claude.ai page to read) ----------
+# Claude Code hands the status line the 5-hour and 7-day used percentages and their reset times (Unix seconds) once a
+# session has had its first reply; a key paid by the token gets none. Save them for the budget reader and the hub digest
+# to read: $STATUSLINE_RATE_LIMITS_FILE, default ~/.config/ledger/statusline-rate-limits.json, replaced by write-to-unique-tmp
+# + mv (many sessions run this at once). Written when a figure changed or the last write is 5 minutes old, so a quiet
+# session still refreshes "saved". Nothing is written when the 7-day figure is absent. Failures here never touch the line.
+if [[ "$rl7_pct" =~ ^[0-9]+(\.[0-9])?$ && "$rl7_reset" =~ ^[0-9]+$ ]]; then
+    [[ "$rl5_pct" =~ ^[0-9]+(\.[0-9])?$ ]] || { rl5_pct=null; rl5_reset=null; }
+    [[ "$rl5_reset" =~ ^([0-9]+|null)$ ]] || rl5_reset=null
+    RL_FILE="${STATUSLINE_RATE_LIMITS_FILE:-$HOME_DIR/.config/ledger/statusline-rate-limits.json}"
+    RL_MARK="$SDIR/rl-last"
+    rl_now="$rl7_pct $rl7_reset $rl5_pct $rl5_reset"
+    rl_prev="" rl_at=0
+    [ -f "$RL_MARK" ] && IFS='|' read -r rl_prev rl_at < "$RL_MARK"
+    [[ "$rl_at" =~ ^[0-9]+$ ]] || rl_at=0
+    if [ "$rl_prev" != "$rl_now" ] || [ ! -f "$RL_FILE" ] || [ $(( now - rl_at )) -ge 300 ]; then
+        mkdir -p "${RL_FILE%/*}" "$SDIR"
+        printf '{"version":1,"seven_day":{"used_percentage":%s,"resets_at":%s},"five_hour":{"used_percentage":%s,"resets_at":%s},"saved_at":%s}\n' \
+            "$rl7_pct" "$rl7_reset" "$rl5_pct" "$rl5_reset" "$now" > "$RL_FILE.$$" \
+            && mv -f "$RL_FILE.$$" "$RL_FILE" \
+            && { printf '%s|%s\n' "$rl_now" "$now" > "$RL_MARK.$$" && mv -f "$RL_MARK.$$" "$RL_MARK"; }
+        rm -f "$RL_FILE.$$" "$RL_MARK.$$"
+    fi
+fi
 
 # ---------- auto-compact window ----------
 # 1) CLAUDE_CODE_AUTO_COMPACT_WINDOW  2) autoCompactWindow in settings.json (cached until settings.json changes)
