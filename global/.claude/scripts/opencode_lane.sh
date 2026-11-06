@@ -54,12 +54,15 @@ load_key GOOGLE_GENERATIVE_AI_API_KEY "$HOME/.config/gemini/api-key" || true
 load_key OPENROUTER_API_KEY "$HOME/.config/openrouter/api-key" || true
 
 # One config for the run: allow everything, deny paths outside the checkout except the ones this lane is told to use.
+# The repo a worktree belongs to: its folder is <repo>--<topic> (git worktree) or <repo>-wf-<id> (director); a plain checkout is its own repo.
+# (The rules below name sibling worktrees as <repo>--*; using the worktree's own name there gave <repo>--<topic>--*, which matched nothing.)
 repo_name="$(basename -- "$dir")"
+case "$repo_name" in *--*) repo_name="${repo_name%%--*}" ;; *-wf-*) repo_name="${repo_name%%-wf-*}" ;; esac
 mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 cat >"$conf" <<JSON
 {"\$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
- "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
+ "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
 
