@@ -7,6 +7,10 @@ import os
 import sys
 from pathlib import Path
 
+# 5 Nov 2026: with the dispatcher choosing wsl.exe or `docker exec` by what wsl.exe lists, a test whose fake wsl.exe listed nothing sent a real
+# "hello" through docker into his Main chat. Tests always take the wsl route (which they fake or mock); the route's own tests set it themselves.
+os.environ["AFA_OC_GATEWAY"] = "wsl"
+
 LIVE = os.path.realpath(os.path.join(os.path.expanduser("~"), ".claude", "state"))
 tried = []
 _WRITE = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
