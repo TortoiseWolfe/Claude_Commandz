@@ -59,7 +59,7 @@ case "$1" in
       printf '%s\n' "$4" >"$TMUX_SENT"
       if [ "${5:-}" = Enter ] && [ "${RUN_LANE_COMMANDS:-0}" = 1 ]; then
         case "$4" in
-          'codex exec '*|'GIT_SSH_COMMAND='*'codex exec '*|'cd '* ) (cd "$TEST_CWD" && bash -c "$4") ;;
+          'codex exec '*|'GIT_SSH_COMMAND='*'codex exec '*|'cd '*|'export DOCKER_CONFIG='* ) (cd "$TEST_CWD" && bash -c "$4") ;;
         esac
       fi
     fi
@@ -714,6 +714,24 @@ assert_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED=1 AFA_LANE_HAND=' 'the env 
 run_lane hub-lane "$REPO" sonnet "$PROMPT"
 assert_not_contains "$LAST_COMMAND" 'AFA_LANE_UNATTENDED' 'a hub lane is not marked unattended'
 assert_contains "$LAST_COMMAND" 'AFA_LANE=1 ' 'every Claude lane is marked a lane, so the guard denies fixable holds instead of asking'
+# Public image pulls: Docker's own config names a Windows credential helper, and every pull (public images too) calls it over the WSL link, which
+# timed out on 17 Oct 2026 and failed a lane (issue 46). Each lane gets an empty Docker config so public pulls skip the helper; AFA_LANE_DOCKER_CONFIG=host opts back in.
+run_lane docker-env-lane "$REPO" sonnet "$PROMPT"
+assert_contains "$LAST_COMMAND" 'DOCKER_CONFIG=' 'a Claude lane gets its own Docker config'
+assert_contains "$LAST_COMMAND" 'docker-empty' 'the lane Docker config is the empty folder'
+[ -d "$HOME_TEST/.cache/afa/docker-empty" ] || fail 'the empty Docker config folder is made'
+[ -z "$(ls -A "$HOME_TEST/.cache/afa/docker-empty")" ] || fail 'the empty Docker config folder stays empty'
+checks=$((checks + 1))
+run_lane --allow-client --engine copilot docker-env-copilot "$REPO" fable "$PROMPT"
+assert_contains "$LAST_COMMAND" 'DOCKER_CONFIG=' 'a Copilot lane gets the empty Docker config too'
+run_lane --allow-client --engine codex docker-env-codex "$REPO" opus "$PROMPT"
+assert_contains "$LAST_COMMAND" 'DOCKER_CONFIG=' 'a Codex lane gets the empty Docker config too'
+AFA_LANE_DOCKER_CONFIG=host run_lane docker-host-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'the opted-out Claude lane starts'
+assert_not_contains "$LAST_COMMAND" 'DOCKER_CONFIG=' 'AFA_LANE_DOCKER_CONFIG=host leaves the real Docker config (a private registry)'
+AFA_LANE_DOCKER_CONFIG=host run_lane --allow-client --engine copilot docker-host-copilot "$REPO" fable "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'the opted-out Copilot lane starts'
+assert_not_contains "$LAST_COMMAND" 'DOCKER_CONFIG=' 'the opt-out holds for a Copilot lane too'
 # An unattended lane may make one roadmap post, and its settings carry a narrow rule for exactly that; a hub lane's do not.
 # bash printf %q escapes the characters of the JSON, so the settings are compared after the escapes are dropped.
 plain() { printf '%s' "$1" | tr -d '\\'; }
