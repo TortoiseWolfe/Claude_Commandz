@@ -12,6 +12,7 @@
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
+#   - a watched lane's report.md line 1 holds a time more than 2 minutes ahead of the file's modification time (stamp_ahead_check; the lane is sent the correction)
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub. Named ONCE per dialog: a dialog
 #     the hub was already told about is skipped by every later poll and re-armed watcher until the pane shows no dialog (then the next is named).
 #   - a watched lane's tmux window disappears
@@ -200,6 +201,37 @@ step_url_check() {
   printf '%s' "$sum" > "$mark"
   echo "step without URL: $l (line 1 of $rep starts STEP-FOR-JONATHAN and has no https:// link); asked the lane to rewrite it"
   "$lane_sh" --send "$l" "Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link. Rewrite line 1 so it carries the full https:// URL of the exact page, says which browser (the fleet Chromium and its tab title, or his own) and how he will know it is done; bring the fleet tab to the front first. He cannot act on a step without the URL." >/dev/null 2>&1 || true
+  hit=1; other=1
+}
+
+# A report time that is ahead of the clock. stamp_ahead_check <lane> (no subshell: it sets hit and other) takes the first H:MM AM|PM on line 1 of
+# the lane's report.md and compares it with the file's own modification time (the clock when the lane wrote it). More than
+# LANE_WATCH_STAMP_SLACK minutes (default 2) ahead, within the next 12 hours: it names the lane to the hub ("stamp ahead: <lane> wrote <stamp>
+# at <mtime>") and types the correction into the lane through lane.sh --send, so the hub does not have to. A stamp that is behind the clock is
+# left alone (a lane may report work that finished earlier). Once per distinct line 1. 6 Nov 2026: a lane wrote "WORKING 8:30 AM" at 8:13 AM and
+# another "WORKING 8:40 AM" at 8:29 AM; the rule (every time comes from date at the moment of writing) was already in every lane's rules.
+stamp_ahead_check() {
+  local l=$1 rep first tok h m ap sm mt now_h now_m now_min diff sum mark slack=${LANE_WATCH_STAMP_SLACK:-2} wrote
+  rep=$(report_of "$l"); [ -n "$rep" ] || return 0
+  first=$(head -n 1 "$rep" 2>/dev/null)
+  tok=$(grep -oEm1 '(^|[^0-9:])(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$first") || return 0
+  [ -n "$tok" ] || return 0
+  tok=$(grep -oE '(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$tok")
+  h=${tok%%:*}; h=$((10#$h)); m=${tok#*:}; m=$((10#${m:0:2})); ap=${tok: -2}
+  case "$ap" in [Pp][Mm]) [ "$h" -eq 12 ] || h=$((h + 12)) ;; *) [ "$h" -ne 12 ] || h=0 ;; esac
+  sm=$((h * 60 + m))
+  mt=$(stat -c %Y "$rep" 2>/dev/null) || return 0
+  read -r now_h now_m < <(date -d "@$mt" '+%-H %-M')
+  now_min=$((now_h * 60 + now_m))
+  diff=$(( (sm - now_min + 1440) % 1440 ))
+  [ "$diff" -gt "$slack" ] && [ "$diff" -lt 720 ] || return 0
+  sum=$(printf '%s' "$first" | cksum | cut -d' ' -f1)
+  mark="$recycle_dir/.stampahead-$l"
+  [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
+  printf '%s' "$sum" > "$mark"
+  wrote=$(date -d "@$mt" '+%-I:%M %p')
+  echo "stamp ahead: $l wrote $tok at $wrote (line 1 of $rep is $diff minutes ahead of the clock); sent the lane its correction"
+  "$lane_sh" --send "$l" "Hub: line 1 of your report.md says $tok, but the clock read $wrote when you wrote it. Run date '+%-I:%M %p' at the moment you write a time and rewrite line 1 with that. Every time in a report, hand-off or note comes from date, never from memory or an estimate." >/dev/null 2>&1 || true
   hit=1; other=1
 }
 
@@ -632,6 +664,7 @@ while :; do
       note=$(stale_note "$l")
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       step_url_check "$l"
+      stamp_ahead_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
