@@ -891,6 +891,25 @@ su_again "$TMP/sa-out6"
 if grep -q '^stamp ahead' "$TMP/sa-out5" && ! grep -q '^stamp ahead' "$TMP/sa-out6" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same ahead-of-clock line is named once, across a re-armed watcher"; else echo "FAIL repeated stamp naming: first=$(cat "$TMP/sa-out5") second=$(cat "$TMP/sa-out6")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
 
+# 6 Nov 2026: the budget reader's Windows task hid its exit code, so a Cloudflare check left the gauge stale with nothing to say so. usage_calibrate.js now
+# writes usage-calibrate-status.json; a failed outcome wakes the hub once per distinct failure, and a later success clears the mark.
+cal_dir="$rc_home/.config/ledger"; mkdir -p "$cal_dir"; cal_file="$cal_dir/usage-calibrate-status.json"
+cal_watch() { # cal_watch <out>: a watcher started with the status file as it stands
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 timeout 6 bash "$SCRIPT" --max-min 5 rl > "$1" 2>&1 ) || true
+}
+rm -f "$rl_dir"/.calibrate-failed "$rl_dir"/.reportseen-*
+printf '{"at":"2026-11-06T07:30:01-04:00","code":6,"ok":false,"reason":"Cloudflare security verification did not clear; nothing changed"}\n' > "$cal_file"
+cal_watch "$TMP/cal-out1"
+if grep -q '^budget reading failed: exit 6 (Cloudflare security verification did not clear; nothing changed) at 2026-11-06T07:30:01-04:00' "$TMP/cal-out1"; then echo "ok   a failed budget reading wakes the hub with the exit code, reason and time"; else echo "FAIL budget failure not named: $(cat "$TMP/cal-out1")"; failures=$((failures + 1)); fi
+cal_watch "$TMP/cal-out2"
+if ! grep -q '^budget reading failed' "$TMP/cal-out2"; then echo "ok   the same budget failure is named once, across a re-armed watcher"; else echo "FAIL budget failure repeated: $(cat "$TMP/cal-out2")"; failures=$((failures + 1)); fi
+printf '{"at":"2026-11-06T12:05:01-04:00","code":0,"ok":true,"reason":"ok"}\n' > "$cal_file"
+cal_watch "$TMP/cal-out3"
+printf '{"at":"2026-11-07T07:30:01-04:00","code":6,"ok":false,"reason":"Cloudflare security verification did not clear; nothing changed"}\n' > "$cal_file"
+cal_watch "$TMP/cal-out4"
+if ! grep -q '^budget reading failed' "$TMP/cal-out3" && grep -q '^budget reading failed: exit 6' "$TMP/cal-out4"; then echo "ok   a success is silent and a failure after it is named again"; else echo "FAIL success/failure sequence: out3=$(cat "$TMP/cal-out3") out4=$(cat "$TMP/cal-out4")"; failures=$((failures + 1)); fi
+rm -f "$cal_file" "$rl_dir"/.calibrate-failed
+
 # 28 Oct 2026: a lane killed its own claude and sat at a bash prompt for 3 hours; nothing woke the hub. lane.sh --pane says "dead <cmd>" for such a
 # lane and the watcher names it once per death ("dead: <lane> (pane shows <cmd>)"), clears the mark when claude runs again, and skips headless lanes.
 dd_home="$TMP/dd-home"; mkdir -p "$dd_home/.claude/state/lanes" "$TMP/dd-bin"

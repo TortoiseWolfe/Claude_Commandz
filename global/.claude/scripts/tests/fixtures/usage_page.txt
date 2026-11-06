@@ -1,0 +1,57 @@
+Settings
+
+Preferences
+
+General
+
+Account
+
+Privacy
+
+Billing
+
+Usage
+
+Capabilities
+
+Memory
+
+Claude Code
+
+Settings
+
+Your usage
+Max (20x)
+Heads up. At this pace you’ll run out tomorrow morning, before the 12:00 PM reset.
+Buy usage credits
+Current session
+Resets at 10:00 PM
+8% used
+This week
+
+Resets Wednesday 12:00 PM
+94% used
+Limit resets
+
+No resets right now
+
+When you get one, it shows up here with its expiry date.
+
+Usage credits
+Available for any task. Promotional credits are used before purchased credits.
+$2.46
+
+Monthly spend limit
+
+$0.00 of $20 this month · Auto-reload off
+
+This week’s usage by product
+Claude Code
+100%
+Chats
+0%
+Cowork
+0%
+Other
+0%
+Last updated: just now
