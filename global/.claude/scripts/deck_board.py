@@ -18,6 +18,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 def read_env(path, prefix):
@@ -60,6 +61,13 @@ def when(v):
     try:
         if isinstance(v, (int, float)):
             return datetime.fromtimestamp(v, timezone.utc).strftime("%Y-%m-%d")
+        if isinstance(v, str) and len(v) > 10:
+            try:   # an ISO due date with an offset is shown as its Eastern calendar day, the day the co-op means by it
+                d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                if d.tzinfo is not None:
+                    return d.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
         return str(v)[:10]
     except Exception:
         return ""

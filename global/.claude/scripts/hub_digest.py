@@ -17,7 +17,7 @@ No model calls and no Gmail (the client pollers queue mail and chat lines in the
   - the mail index (hub/scripts/mail_index.py keeps ~/.claude/state/mail-index.tsv): metadata counts by class for the last 2 days,
     unhandled person, job and client-alert rows, and one-time plain-rule reply results (client rows already show as client lines);
   - Jonathan's open co-op Deck cards (boards 2 and 8, read-only through deck_board.py, cached an hour in ~/.claude/state/deck-cards-cache.json):
-    the count, and the card numbers no open inbox line names ("uncovered"); a failed read prints "Deck read failed: ...", never a gap.
+    the count, and the card numbers no open inbox line names or whose due day has passed ("uncovered: 23 (due 31 Oct, passed)"); a failed read prints "Deck read failed: ...", never a gap.
     Only NX-01 holds the Nextcloud sign-in: any other machine skips the read and prints "NX-01 reads the co-op cards ...";
   - git log -10 of ~/repos, hub/scripts/tidy-report.sh, and the week's budget headline from
     hub/scripts/model_quality_report.py (cached for an hour: the report takes ~15 s).
@@ -691,6 +691,7 @@ DECK_CACHE = HOME / ".claude/state/deck-cards-cache.json"
 DECK_TTL = 3600
 DECK_ENV = "~/repos/Chattanooga-Digital/.env"   # read by deck_board.py inside its own process; never printed here
 DECK_CARD_LINE = re.compile(r"^- #(\d+) ")
+DECK_DUE_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DECK_STACK_LINE = re.compile(r"^## (.*) \(\d+\)( \[done column\])?$")
 DECK_DONE_STACK = re.compile(r"(?i)^(?:done|finished)\b")   # a stack of finished cards; the boards have no flag on it, only the name
 DECK_REASON_LIMIT = 90
@@ -702,14 +703,21 @@ CARD_URL = re.compile(r"deck/(?:#/)?board/\d+/card/(\d+)", re.I)
 
 
 def deck_read(board, script=None, env=DECK_ENV, timeout=60):
-    """-> (ids of the OPEN cards assigned to DECK_USER on one board, None) or (None, why it failed). Open = not in a Done or Finished stack
+    """-> (ids of the OPEN cards assigned to DECK_USER on one board, None) or (None, why it failed). deck_read_dues has the due dates too."""
+    res = deck_read_dues(board, script=script, env=env, timeout=timeout)
+    return (res[0], res[1])
+
+
+def deck_read_dues(board, script=None, env=DECK_ENV, timeout=60):
+    """-> (ids, None, {id: 'YYYY-MM-DD' due day} for the ids that have one) or (None, why it failed, {}).
+    ids are the OPEN cards assigned to DECK_USER on one board. Open = not in a Done or Finished stack
     and not marked done. Only numbers leave this function: card titles are member-written text and never reach the page."""
     script = script or str(HOME / ".claude/scripts/deck_board.py")
     try:
         r = subprocess.run([sys.executable, script, "--env", os.path.expanduser(env), "--prefix", "NEXTCLOUD_PROD", "--board", str(board)],
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, type(exc).__name__
+        return None, type(exc).__name__, {}
     lines = (r.stdout or "").splitlines()
     first = lines[0] if lines else ""
     if "__DECK=ok__" not in first:
@@ -718,8 +726,8 @@ def deck_read(board, script=None, env=DECK_ENV, timeout=60):
         else:
             tail = (r.stderr or "").strip().splitlines()
             why = tail[-1] if tail else "no answer"
-        return None, one_line(re.sub(r"[^\x20-\x7e]", " ", scrub(why)).strip(), DECK_REASON_LIMIT)
-    ids, closed_stack = [], False
+        return None, one_line(re.sub(r"[^\x20-\x7e]", " ", scrub(why)).strip(), DECK_REASON_LIMIT), {}
+    ids, dues, closed_stack = [], {}, False
     for line in lines[1:]:
         h = DECK_STACK_LINE.match(line)
         if h:
@@ -740,11 +748,15 @@ def deck_read(board, script=None, env=DECK_ENV, timeout=60):
             continue
         if DECK_USER.lower() in [u.strip().lower() for u in users[3:].split(",")]:
             ids.append(int(m.group(1)))
-    return sorted(set(ids)), None
+            day = tail[-2][4:] if tail[-2].startswith("due ") else ""   # "due 2026-10-31" or "due -"
+            if DECK_DUE_DAY.match(day):
+                dues[int(m.group(1))] = day
+    return sorted(set(ids)), None, dues
 
 
-def deck_cards(now_ts, cache=None, reader=deck_read, ttl=DECK_TTL):
-    """-> ({board: [card ids]}, [failure lines]). Each board is read at most once an hour (the cache keeps the last good read per board);
+def deck_cards(now_ts, cache=None, reader=deck_read_dues, ttl=DECK_TTL, dues=None):
+    """-> ({board: [card ids]}, [failure lines]); when a dict is passed as dues it is filled with {card id: 'YYYY-MM-DD' due day}.
+    A reader may return (ids, why) or (ids, why, dues). Each board is read at most once an hour (the cache keeps the last good read per board);
     a board whose read fails gets a failure line and is left out of the counts, never a silent gap."""
     cache = Path(cache or DECK_CACHE)
     try:
@@ -757,15 +769,21 @@ def deck_cards(now_ts, cache=None, reader=deck_read, ttl=DECK_TTL):
     for b in DECK_BOARDS:
         ent = saved.get(str(b))
         if isinstance(ent, dict) and isinstance(ent.get("t"), (int, float)) and isinstance(ent.get("ids"), list) \
-                and 0 <= now_ts - ent["t"] < ttl and all(isinstance(i, int) for i in ent["ids"]):
+                and isinstance(ent.get("due"), dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in ent["due"].items()) \
+                and 0 <= now_ts - ent["t"] < ttl and all(isinstance(i, int) for i in ent["ids"]):   # an entry saved before due days were kept is read again
             boards[b] = ent["ids"]
+            if dues is not None:
+                dues.update({int(k): v for k, v in ent["due"].items() if k.isdigit()})
             continue
-        ids, why = reader(b)
+        res = reader(b)
+        ids, why, due = res[0], res[1], (res[2] if len(res) > 2 else {})
         if ids is None:
             fails.append(f"Deck read failed: board {b}: {why}")
             continue
         boards[b] = ids
-        saved[str(b)] = {"t": now_ts, "ids": ids}
+        saved[str(b)] = {"t": now_ts, "ids": ids, "due": {str(k): v for k, v in due.items()}}
+        if dues is not None:
+            dues.update(due)
         dirty = True
     if dirty:
         try:
@@ -794,15 +812,21 @@ def covered_cards(inbox_text):
     return out
 
 
-def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read):
-    boards, fails = deck_cards(now_ts, cache=cache, reader=reader)
+def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read_dues):
+    """A card is uncovered when no open inbox line names it, or when its due day (Eastern) has passed: a hub-list line is not the
+    record, and a stale card is not covered by one (5 Nov 2026, card 23 sat six days past its date). Printed 'N (due 31 Oct, passed)'."""
+    dues = {}
+    boards, fails = deck_cards(now_ts, cache=cache, reader=reader, dues=dues)
     lines = []
     if boards:
         per = ", ".join(f"board {b}: {len(ids)}" for b, ids in sorted(boards.items()))
         every = {i for ids in boards.values() for i in ids}
         lines.append(f"- open assigned to {DECK_USER}: {len(every)} ({per})")
-        unc = sorted(every - covered_cards(inbox_text))
-        lines.append("- uncovered: " + (", ".join(str(i) for i in unc) if unc else "none"))
+        today = datetime.fromtimestamp(now_ts, ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+        late = {i for i in every if dues.get(i, "9999") < today}
+        unc = sorted((every - covered_cards(inbox_text)) | late)
+        shown = [f"{i} (due {datetime.strptime(dues[i], '%Y-%m-%d').strftime('%-d %b')}, passed)" if i in late else str(i) for i in unc]
+        lines.append("- uncovered: " + (", ".join(shown) if shown else "none"))
     lines.extend(f"- {f}" for f in fails)
     return lines
 
@@ -810,7 +834,7 @@ def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read):
 DECK_ELSEWHERE = "- NX-01 reads the co-op cards (this machine holds no Nextcloud sign-in)"
 
 
-def coop_cards_for(machine, inbox_text, now_ts, cache=None, reader=deck_read):
+def coop_cards_for(machine, inbox_text, now_ts, cache=None, reader=deck_read_dues):
     """The Co-op cards lines for this machine. Only NX-01 holds the Nextcloud sign-in (4 Nov 2026: the tower's /prep stopped on a "Deck read failed"
     that could never pass there), so any other named machine prints one plain line and never calls the reader. A missing machine file ("unknown")
     reads the Deck, the way this file already treats it for the inbox; a real failure on NX-01 still prints "Deck read failed"."""
@@ -1061,7 +1085,7 @@ def main(argv=None):
     hours = hours_lines(a.hours_file) if a.hours_file else (hours_lines() if not a.roadmap_file else None)
     mail = mail_index_lines(a.mail_index, now) if a.mail_index else (mail_index_lines(now=now) if not a.roadmap_file else None)
     if a.deck_fake:
-        coop_cards = coop_cards_for(machine, inbox, now.timestamp(), cache=a.deck_cache, reader=lambda b: deck_read(b, script=a.deck_fake))
+        coop_cards = coop_cards_for(machine, inbox, now.timestamp(), cache=a.deck_cache, reader=lambda b: deck_read_dues(b, script=a.deck_fake))
     elif not a.roadmap_file:
         coop_cards = coop_cards_for(machine, inbox, now.timestamp(), cache=a.deck_cache)
     else:

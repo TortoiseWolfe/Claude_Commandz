@@ -1008,6 +1008,58 @@ class CoopCards(unittest.TestCase):
         self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 8 (board 2: 4, board 8: 4)")
         self.assertEqual(lines[1], "- uncovered: 103, 110, 303, 310, 801")
 
+    def dated_reader(self, d, rows):
+        """A reader over a canned board whose cards carry the given due fields: rows = [(id, 'due 2026-10-31' or 'due -')]."""
+        body = "".join(f"- #{i} Made up title | by greg | to TurtleWolfe | - | {due} | changed 2026-10-30\n" for i, due in rows)
+        script = Path(d) / "dated_deck_board.py"
+        script.write_text("import sys\nprint('__DECK=ok__ board ' + sys.argv[sys.argv.index('--board') + 1] + ' at https://deck.example')\n"
+                          f"print('## Doing (1)')\nprint({body!r}, end='')\n")
+        return lambda b: hd.deck_read_dues(b, script=str(script)) if b == 2 else ([], None, {})
+
+    NOV5 = datetime(2026, 11, 5, 16, 0, tzinfo=timezone.utc).timestamp()   # noon on 5 Nov, Eastern
+
+    def test_deck_read_dues_returns_each_cards_due_day(self):
+        d = fresh_dir(self)
+        ids, why, dues = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -"), (25, "due 2026-11-10")])(2)
+        self.assertEqual((ids, why, dues), ([23, 24, 25], None, {23: "2026-10-31", 25: "2026-11-10"}))
+
+    def test_a_past_due_card_is_uncovered_even_when_the_inbox_names_it(self):
+        d = fresh_dir(self)
+        inbox = "- [ ] 2026-11-05 07:00 | Job: cards 23, 24 and 25 | x\n"
+        reader = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -"), (25, "due 2026-11-10")])
+        lines = hd.coop_cards_lines(inbox, self.NOV5, cache=Path(d) / "c.json", reader=reader)
+        self.assertEqual(lines[1], "- uncovered: 23 (due 31 Oct, passed)")
+
+    def test_a_card_due_today_or_later_is_not_passed(self):
+        d = fresh_dir(self)
+        inbox = "- [ ] 2026-11-05 07:00 | Job: cards 24 and 25 | x\n"
+        reader = self.dated_reader(d, [(24, "due 2026-11-05"), (25, "due 2026-11-10")])
+        lines = hd.coop_cards_lines(inbox, self.NOV5, cache=Path(d) / "c.json", reader=reader)
+        self.assertEqual(lines[1], "- uncovered: none")
+
+    def test_an_uncovered_card_that_is_also_past_due_is_listed_once_with_its_date(self):
+        d = fresh_dir(self)
+        reader = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -")])
+        lines = hd.coop_cards_lines("", self.NOV5, cache=Path(d) / "c.json", reader=reader)
+        self.assertEqual(lines[1], "- uncovered: 23 (due 31 Oct, passed), 24")
+
+    def test_the_due_days_survive_the_cache_and_an_old_cache_entry_is_read_again(self):
+        d = fresh_dir(self)
+        cache, calls = Path(d) / "c.json", []
+        inner = self.dated_reader(d, [(23, "due 2026-10-31")])
+
+        def counting(b):
+            calls.append(b)
+            return inner(b)
+
+        hd.coop_cards_lines("", self.NOV5, cache=cache, reader=counting)
+        again = hd.coop_cards_lines("", self.NOV5 + 60, cache=cache, reader=counting)
+        self.assertEqual(calls, [2, 8])
+        self.assertEqual(again[1], "- uncovered: 23 (due 31 Oct, passed)")
+        cache.write_text(json.dumps({"2": {"t": self.NOV5, "ids": [23]}, "8": {"t": self.NOV5, "ids": []}}))   # saved before due days were kept
+        hd.coop_cards_lines("", self.NOV5 + 60, cache=cache, reader=counting)
+        self.assertEqual(calls, [2, 8, 2, 8])
+
     def test_everything_covered_says_none(self):
         d = fresh_dir(self)
         inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 103, 110, 201, 301, 303, 310 and 801 | x\n"
