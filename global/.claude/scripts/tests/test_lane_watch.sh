@@ -706,6 +706,61 @@ REMIND_MIN=60 remind_case "LANE_WATCH_IDLE_REMIND_MIN raises the line (25 minute
 rm -f "$rl_dir"/.idleremind-*; : > "$rl_hand/report.md"; rl_reset
 echo "ok   (idle-reminder cases done)"
 
+# Issue 278: a pull request listed under "## Hub merges" in a lane's report, in one of his own repos, whose checks all passed, wakes the hub
+# once with a "green:" line. The watcher never merges, and a client repo, a foreign owner or unreadable client lists get no line at all.
+# A fake gh answers from $GH_MODE (pass, pending, fail, closed) and logs every call to $GH_LOG.
+export GH_MODE="$TMP/gh-mode" GH_LOG="$TMP/gh-log"
+cat > "$TMP/fakebin-rc/gh" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+mode=$(cat "$GH_MODE" 2>/dev/null)
+case "$1 $2" in
+  "pr view") [ "$mode" = closed ] && echo MERGED || echo OPEN ;;
+  "pr checks")
+    case "$mode" in
+      pending) printf 'pytest\tpass\t3m\thttps://x/1\nshell\tpending\t0\thttps://x/2\n' ;;
+      fail)    printf 'pytest\tfail\t3m\thttps://x/1\nshell\tpass\t9m\thttps://x/2\n' ;;
+      none)    echo "no checks reported on the 'x' branch" ;;
+      *)       printf 'pytest\tpass\t3m\thttps://x/1\nshell\tpass\t9m\thttps://x/2\nlint\tskipping\t0\thttps://x/3\n' ;;
+    esac ;;
+esac
+SH
+chmod +x "$TMP/fakebin-rc/gh"
+gr_hub="$rc_home/repos/hub"; mkdir -p "$gr_hub"
+printf '# clients\n~/repos/Acme-Client\n' > "$gr_hub/client-repos.txt"
+printf 'a@x.test\tBeta-Client\n' > "$gr_hub/client-senders.tsv"
+green_case() { # green_case <label> <want yes|no> <mode> <report line> [skip-lists]
+  local label=$1 want=$2 got=no
+  mkdir -p "$rl_hand"; rl_reset; rm -f "$rl_dir"/.green-*; : > "$GH_LOG"; printf '%s' "$3" > "$GH_MODE"; printf '%s' none > "$JOB_FILE"
+  printf 'WORKING 1:00 PM | done: 1\n\n## Hub merges\n%s\n\n## Notes\n- gh pr merge 99 -R TortoiseWolfe/Notes-Only --squash\n' "$4" > "$rl_hand/report.md"
+  [ "${5:-}" = nolists ] && mv "$gr_hub/client-repos.txt" "$gr_hub/client-repos.off"
+  LANE_WATCH_GREEN_EVERY="${GR_EVERY:-0}" rl_watch 95 5 "$TMP/gr-out"
+  [ "${5:-}" = nolists ] && mv "$gr_hub/client-repos.off" "$gr_hub/client-repos.txt"
+  grep -q "^green: rl's pull request ${GR_PR:-12} in ${GR_REPO:-TortoiseWolfe/Claude_Commandz} has every check passed" "$TMP/gr-out" && got=yes
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got: $(cat "$TMP/gr-out")"; failures=$((failures + 1)); fi
+}
+green_case "all checks passed on his own repo's PR wakes the hub" yes pass '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash --delete-branch'
+grep -q '3 checks, 1 skipped' "$TMP/gr-out" && grep -q -- '--squash --delete-branch (the watcher does not merge)' "$TMP/gr-out" \
+  && echo "ok   the line counts the checks and skips, and says the watcher does not merge" || { echo "FAIL green line text: $(cat "$TMP/gr-out")"; failures=$((failures + 1)); }
+if ! grep -qE '^pr merge' "$GH_LOG"; then echo "ok   the watcher never ran gh pr merge"; else echo "FAIL watcher merged: $(cat "$GH_LOG")"; failures=$((failures + 1)); fi
+LANE_WATCH_GREEN_EVERY=0 rl_watch 95 5 "$TMP/gr-out2"
+if ! grep -q '^green:' "$TMP/gr-out2"; then echo "ok   the same PR is named once, across a re-armed watcher"; else echo "FAIL green named twice: $(cat "$TMP/gr-out2")"; failures=$((failures + 1)); fi
+green_case "a check still pending is left alone" no pending '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash --delete-branch'
+green_case "a failed check is left alone" no fail '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash --delete-branch'
+green_case "a PR with no checks is left alone" no none '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash --delete-branch'
+green_case "a PR that is no longer open is left alone" no closed '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash --delete-branch'
+GR_REPO=TortoiseWolfe/Acme-Client GR_PR=12 green_case "a client repo gets no line, and gh is not even asked" no pass '- gh pr merge 12 -R TortoiseWolfe/Acme-Client --squash'
+if [ ! -s "$GH_LOG" ]; then echo "ok   gh was not called for the client repo"; else echo "FAIL gh called for client: $(cat "$GH_LOG")"; failures=$((failures + 1)); fi
+GR_REPO=TortoiseWolfe/beta-client green_case "a client named in client-senders.tsv gets no line (case ignored)" no pass '- gh pr merge 12 -R TortoiseWolfe/beta-client --squash'
+GR_REPO=PM-Beer/scout-connector green_case "a repo owned by someone else gets no line" no pass '- gh pr merge 12 -R PM-Beer/scout-connector --squash'
+green_case "unreadable client lists get no line (fails closed)" no pass '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash' nolists
+green_case "a line outside the Hub merges section is ignored" no pass '- nothing refused so far'
+GR_PR=7 green_case "the PR number is found when the flags come first" yes pass '- `gh pr merge -R TortoiseWolfe/Claude_Commandz --squash 7`'
+GR_PR=12 GR_REPO=TurtleWolfe/Claude_Commandz green_case "the older account's repos count as his own" yes pass '- gh pr merge #12 --repo TurtleWolfe/Claude_Commandz'
+GR_EVERY=off green_case "LANE_WATCH_GREEN_EVERY=off turns it off" no pass '- gh pr merge 12 -R TortoiseWolfe/Claude_Commandz --squash'
+rm -f "$rl_dir"/.green-* "$TMP/fakebin-rc/gh"; : > "$rl_hand/report.md"; rl_reset
+echo "ok   (green-PR cases done)"
+
 # Spend alarm: a lane past the limit today wakes the hub once per lane per day; the ledger is asked no more than every few minutes.
 sp_home="$TMP/sp-home"; mkdir -p "$sp_home/.claude/state/lanes"
 sp_cmd="$TMP/fake-spend.sh"; sp_calls="$TMP/spend-calls"; sp_args="$TMP/spend-args"; : > "$sp_calls"
