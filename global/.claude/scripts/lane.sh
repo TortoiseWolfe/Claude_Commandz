@@ -1883,6 +1883,8 @@ fi
 #                     name or pattern), its window is closed by window id, and the lane starts again through `lane.sh --restart` with the model,
 #                     effort, connectors, high-tier reason, console setting, project servers, add-dirs and recycle line from its index row
 #                     (--restart carries the last three over from the row). The new process's version is checked at the end.
+#   A lane the own-repo tier rule would refuse is restarted with the --claude-because reason given before --update, else the reason last logged
+#   for it in tier-overrides.log (an update continues the same lane; a brand-new lane still needs its own reason).
 #   The restart is first run as a --dry-run, so a lane that would be refused (the no-AI wall, a tier rule) is refused while it is still alive.
 #   The running version is `readlink /proc/<pid>/exe` (Claude Code keeps each version as ~/.local/share/claude/versions/<n>); the installed one is
 #   `claude --version`. LANE_UPDATE_WAIT_SECS (600) bounds the wait for handoff.md; LANE_UPDATE_TERM_SECS (30) the wait for the process to exit.
@@ -1959,6 +1961,14 @@ if [ "$mode" = update ]; then
   [ "${conn:-}" = off ] && ra+=(--no-connectors) || ra+=(--connectors)
   [ -n "${ent:-}" ] && [ "$ent" != - ] && ra+=(--allow-high-tier "$ent")
   [ -n "${pm:-}" ] && [ "$pm" != - ] && ra+=(--project-mcp "$pm")
+  # An update continues the same lane on the same work, so the own-repo tier rule (agy_default_ok) is not asked again: the reason given on the
+  # command line (--claude-because "<reason>" --update <name>) is passed on, else the reason last logged for this lane in tier-overrides.log.
+  # A brand-new lane still needs its own reason; this only reaches a lane that is already running.
+  upd_because="$claude_because"
+  if [ -z "$upd_because" ] && [ -r "$LANE_TIER_LOG" ]; then
+    upd_because="$(awk -F'\t' -v n="$name" '$2 == n && $4 == "agy-default" { r = $5 } END { print r }' "$LANE_TIER_LOG" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  fi
+  [ -n "${upd_because// /}" ] && ra+=(--claude-because "$upd_because")
   if [ -n "${ad:-}" ] && [ "$ad" != - ]; then
     IFS=: read -r -a _uad <<<"$ad"; for _a in "${_uad[@]}"; do [ -d "$_a" ] && ra+=(--add-dir "$_a"); done
   fi
