@@ -5,26 +5,26 @@
 #   openclaw_ask_install.sh verify     show whether the gateway lists hub-ask as ready (changes nothing)
 #   openclaw_ask_install.sh rollback   disable hub-ask and move it aside (nothing is deleted)
 #
-# Runs from the hub; the only thing it does inside the OpenClawGateway distro is write that one folder as the
+# Runs from the hub; the only thing it does inside the OpenClaw gateway is write that one folder as the
 # openclaw user. No model, channel, key or config value is touched. The hook is trusted gateway code, not a
 # tool: read handler.js before applying.
 set -u
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 src="$here/openclaw_ask_hook"
-# -e, not --: after "--" wsl.exe re-parses the command line through a shell, which empties "$d" and friends.
-oc() { timeout 90 wsl.exe -d OpenClawGateway -u openclaw -e "$@"; }
+. "$here/openclaw_gateway.sh"  # Docker first, the WSL distro only as the fallback
+oc() { timeout 90 python3 "$oc_gateway_py" exec -- "$@"; }
 
 case "${1:-}" in
   apply)
     [ -f "$src/HOOK.md" ] && [ -f "$src/handler.js" ] || { echo "hook files missing in $src"; exit 1; }
-    tar -C "$src" -c HOOK.md handler.js | oc bash -c 'set -e; d=/home/openclaw/.openclaw/hooks/hub-ask; mkdir -p "$d"; tar -x -C "$d" -f -; ls -l "$d"' || exit 1
-    oc bash -c 'cd /home/openclaw; openclaw hooks list 2>&1 | grep -E "hub-ask|Hooks \("'
+    tar -C "$src" -c HOOK.md handler.js | oc bash -c 'set -e; d=$HOME/.openclaw/hooks/hub-ask; mkdir -p "$d"; tar -x -C "$d" -f -; ls -l "$d"' || exit 1
+    oc bash -c 'cd "$HOME"; openclaw hooks list 2>&1 | grep -E "hub-ask|Hooks \("'
     ;;
   verify)
-    oc bash -c 'cd /home/openclaw; openclaw hooks list 2>&1 | grep -E "hub-ask|Hooks \("; ls /home/openclaw/.openclaw/hooks 2>&1'
+    oc bash -c 'cd "$HOME"; openclaw hooks list 2>&1 | grep -E "hub-ask|Hooks \("; ls $HOME/.openclaw/hooks 2>&1'
     ;;
   rollback)
-    oc bash -c 'cd /home/openclaw; openclaw hooks disable hub-ask 2>&1 | tail -1; d=/home/openclaw/.openclaw/hooks; [ -d "$d/hub-ask" ] && mv "$d/hub-ask" "$d/../hub-ask.removed-$(date +%Y%m%d%H%M%S)"; ls "$d"'
+    oc bash -c 'cd "$HOME"; openclaw hooks disable hub-ask 2>&1 | tail -1; d=$HOME/.openclaw/hooks; [ -d "$d/hub-ask" ] && mv "$d/hub-ask" "$d/../hub-ask.removed-$(date +%Y%m%d%H%M%S)"; ls "$d"'
     ;;
   *) echo "usage: openclaw_ask_install.sh apply|verify|rollback" >&2; exit 2 ;;
 esac

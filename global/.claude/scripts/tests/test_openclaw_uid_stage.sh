@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Staged proof for openclaw_uid.sh. Runs from the main distro; does its work inside OpenClawGateway as root
+# Staged proof for openclaw_uid.sh. Runs from the main distro; does its work inside the OpenClawGateway WSL distro (never the Docker container) as root
 # on a THROWAWAY user (octest, uid 51900), a stub gateway (a python http.server on 127.0.0.1:18999 in a user
 # unit) and a throwaway drop folder. It never touches the real openclaw user, unit, port or folder.
 #
@@ -10,16 +10,17 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/../openclaw_uid.sh"
+GW="$HERE/../openclaw_gateway.py"  # --wsl: this work only means something inside the distro
 KEEP="${1:-}"
 W() { # W: the snippet comes on stdin (arguments through wsl.exe mangle quotes); it runs as a function with stdin closed
-  { echo 'snippet() {'; cat; echo '}'; echo 'snippet </dev/null'; } | timeout "${WSL_TIMEOUT:-300}" wsl.exe -d OpenClawGateway -u root -- bash -s 2>&1 | tr -d '\r' | grep -v 'screen size is bogus'
+  { echo 'snippet() {'; cat; echo '}'; echo 'snippet </dev/null'; } | timeout "${WSL_TIMEOUT:-300}" python3 "$GW" exec --wsl -u root -- bash -s 2>&1 | tr -d '\r' | grep -v 'screen size is bogus'
   return "${PIPESTATUS[1]}"
 }
 
 ENVLINES='export OC_USER=octest OC_NEW_UID=52900 OC_NEW_GID=52900 OC_DROP_GROUP=octestdrop OC_DROP_GID=52901
 export OC_UNIT=octest-gateway OC_PORT=18999 OC_DROP_DIR=/mnt/wsl/octest-drop OC_BACKUP_ROOT=/var/backups/openclaw-uid-stage OC_LIVE=0
 export OC_SHIM=/usr/local/bin/octest-systemctl'
-run_script() { { echo "$ENVLINES"; cat "$SCRIPT"; } | timeout 900 wsl.exe -d OpenClawGateway -u root -- bash -s -- "$@" 2>&1 | tr -d '\r' | grep -v 'screen size is bogus'; return "${PIPESTATUS[1]}"; }
+run_script() { { echo "$ENVLINES"; cat "$SCRIPT"; } | timeout 900 python3 "$GW" exec --wsl -u root -- bash -s -- "$@" 2>&1 | tr -d '\r' | grep -v 'screen size is bogus'; return "${PIPESTATUS[1]}"; }
 
 ok=0
 expect() { # expect NAME 0|1

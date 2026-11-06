@@ -6,11 +6,11 @@ The receptionist (OpenClaw, agent "main") calls the Anthropic API on its own Con
 his chat messages, and the gateway's heartbeat, a turn every 30 minutes that carries the whole chat (about 40K tokens) to a model whose
 5-minute prompt cache has long gone cold, so each one writes the full prompt again. On 19 Oct 11 of the day's 18 turns were heartbeats.
 
-Runs INSIDE the OpenClawGateway distro as user openclaw (python3 stdlib only):
-  wsl.exe -d OpenClawGateway -u openclaw -e python3 - report [--days N]  < THIS_FILE
-  wsl.exe -d OpenClawGateway -u openclaw -e python3 - heartbeat apply    < THIS_FILE
-  wsl.exe -d OpenClawGateway -u openclaw -e python3 - heartbeat verify   < THIS_FILE
-  wsl.exe -d OpenClawGateway -u openclaw -e python3 - heartbeat rollback < THIS_FILE
+Runs INSIDE the OpenClaw gateway (its Docker container, or the WSL gateway distro where NX-01 still has one) as the gateway user (python3 stdlib only):
+  python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - report [--days N]  < THIS_FILE
+  python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - heartbeat apply    < THIS_FILE
+  python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - heartbeat verify   < THIS_FILE
+  python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - heartbeat rollback < THIS_FILE
 
   report              per day, model and kind of turn (heartbeat or chat): turns, prompt tokens, and the cost at list prices.
                       Reads the agent database read-only; prints numbers only, never a prompt, a message or a key.

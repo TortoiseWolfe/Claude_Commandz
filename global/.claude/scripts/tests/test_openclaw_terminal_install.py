@@ -2,9 +2,11 @@
 opens the existing chat by key (never a new session), and comes out again on rollback."""
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_terminal_install as ti  # noqa: E402
@@ -25,10 +27,16 @@ class Profile(unittest.TestCase):
 
     def test_opens_the_existing_main_chat_in_the_gateway_distro(self):
         c = json.loads(ti.add_profile(SETTINGS))["profiles"]["list"][-1]["commandline"]
-        self.assertIn("-d OpenClawGateway -u openclaw", c)
+        self.assertEqual(c, "wsl.exe -d OpenClawGateway -u openclaw -- openclaw tui --session agent:main:main")  # tests force the wsl route
         self.assertIn("openclaw tui --session agent:main:main", c)
         for word in ("--local", "/new", "--deliver"):
             self.assertNotIn(word, c)
+
+    def test_on_docker_it_opens_the_container_with_a_terminal(self):
+        with mock.patch.dict(os.environ, {"AFA_OC_GATEWAY": "docker"}):
+            c = json.loads(ti.add_profile(SETTINGS))["profiles"]["list"][-1]["commandline"]
+        self.assertEqual(c, "docker exec -it -w /home/node openclaw-openclaw-gateway-1 openclaw tui --session agent:main:main")
+        self.assertNotIn("wsl.exe", c)
 
     def test_rollback_removes_only_ours(self):
         back = json.loads(ti.remove_profile(ti.add_profile(SETTINGS)))

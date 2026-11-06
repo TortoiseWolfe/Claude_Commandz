@@ -239,8 +239,8 @@ added, no paid provider, no secrets (the `ollama-local` apiKey is Ollama's docum
 ```bash
 docker compose -p openclaw-local -f openclaw-local/docker-compose.yml up -d
 docker exec openclaw-local-ollama ollama pull qwen2.5:1.5b-instruct
-wsl.exe -d OpenClawGateway -u openclaw -e python3 - apply < global/.claude/scripts/openclaw_local.py   # one config write, hot-applies
-wsl.exe -d OpenClawGateway -u openclaw -e python3 - verify < global/.claude/scripts/openclaw_local.py
+python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - apply < global/.claude/scripts/openclaw_local.py   # one config write, hot-applies
+python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - verify < global/.claude/scripts/openclaw_local.py
 ```
 
 A config write can make the gateway reload the google plugin and close the OpenClaw app: after any apply, reopen

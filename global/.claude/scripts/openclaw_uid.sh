@@ -18,9 +18,9 @@
 # (61184-65519) and nobody (65534), and below the 100000+ subuid block. Preflight proves it unused here and
 # as an owner of every entry under the shared Docker mounts.
 #
-# Runs INSIDE the OpenClawGateway distro as root. The gateway user keeps the name "openclaw", so
-# `wsl.exe -d OpenClawGateway -u openclaw -- openclaw ...` and openclaw_harden.sh keep working.
-#   wsl.exe -d OpenClawGateway -u root -- bash -s -- apply < THIS_FILE
+# Runs INSIDE the WSL gateway distro as root (distro-only work: the Docker container is never the target). The gateway user keeps the
+# name "openclaw", so `openclaw_gateway.py exec -- openclaw ...` and openclaw_harden.sh keep working.
+#   python3 ~/.claude/scripts/openclaw_gateway.py exec --wsl -u root -- bash -s -- apply < THIS_FILE
 # Piped through `bash -s`, bash reads this file from stdin line by line, and any program started on the way
 # would swallow what is left of it. So the file holds function definitions and one last line only: main runs
 # after the whole file is read, with stdin pointed at /dev/null.
@@ -63,7 +63,7 @@ init() {
   SYSUNIT="/etc/systemd/system/$UNIT.service"
   TMPF="/etc/tmpfiles.d/$UNIT-dropdir.conf"
   SHIM="${OC_SHIM:-/usr/local/bin/systemctl}"
-  [ "$(id -u)" = 0 ] || die "run this as root: wsl.exe -d OpenClawGateway -u root -- bash -s -- MODE < THIS_FILE"
+  [ "$(id -u)" = 0 ] || die "run this as root: python3 ~/.claude/scripts/openclaw_gateway.py exec --wsl -u root -- bash -s -- MODE < THIS_FILE"
   case "$NEW_UID$NEW_GID$DROP_GID$HUB_UID" in *[!0-9]*|"") die "uid/gid settings must be numbers" ;; esac
   define_py
 }

@@ -266,12 +266,12 @@ class ReplyRules(unittest.TestCase):
                     return 0, box["text"]
                 box["text"] = stdin
                 return 0, "written\n"
-            real, ag._wsl = ag._wsl, fake
+            real, ag._gateway = ag._gateway, fake
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(ag.main([state]), 0)
             finally:
-                ag._wsl = real
+                ag._gateway = real
             self.assertEqual("## Reply rules" in box["text"], want, state)
 
     def test_the_reply_rules_name_no_engine_and_no_card_field(self):
@@ -292,12 +292,12 @@ class Write(unittest.TestCase):
             state["text"] = stdin
             return 0, "written\n"
 
-        real, ag._wsl = ag._wsl, fake
+        real, ag._gateway = ag._gateway, fake
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ag.main(["notlive"]), 0)
         finally:
-            ag._wsl = real
+            ag._gateway = real
         writes = [c for c in calls if c[0][:1] == ["bash"]]
         self.assertEqual(len(writes), 1)
         args, stdin = writes[0]

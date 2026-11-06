@@ -7,7 +7,7 @@
 
 It replaces the block between the hub-ask markers (or inserts it before "## Card rules"), and removes the two
 promises in the card rules that no tool could keep. The change is read back and compared; a backup copy of
-AGENTS.md is written first. Hub -> OpenClaw only, as the openclaw user, through wsl.exe with a timeout.
+AGENTS.md is written first. Hub -> OpenClaw only, as the openclaw user, through the gateway helper (openclaw_gateway.py) with a timeout.
 """
 import re
 import subprocess
@@ -16,8 +16,9 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
 SECTIONS = {"live": HERE / "openclaw_ask_hook/agents_live.md", "notlive": HERE / "openclaw_ask_hook/agents_notlive.md"}
-AGENTS = "/home/openclaw/.openclaw/workspace/AGENTS.md"
 BLOCK = re.compile(r"<!-- hub-ask:begin -->.*?<!-- hub-ask:end -->\n?", re.S)
 
 OLD_TOP = ("- **Top layer, always:** one or two plain sentences saying what will happen, who does it, and when or where he will see the result; "
@@ -89,8 +90,8 @@ def apply_reply_rules(text):
     return CARD_SECTION.sub(lambda _m: rules, text, count=1)
 
 
-def _wsl(args, stdin=None):
-    r = subprocess.run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e"] + args, input=stdin, capture_output=True, text=True, timeout=60)
+def _gateway(args, stdin=None):
+    r = subprocess.run(gw.argv(args), input=stdin, capture_output=True, text=True, timeout=60)
     return r.returncode, r.stdout.replace("\r", "")
 
 
@@ -100,16 +101,21 @@ WRITE_SCRIPT = (
 )
 
 
-def write_argv(stamp):
+def write_argv(stamp, agents):
     """A fixed command; the new file content travels on stdin and is never part of any shell text."""
-    return ["bash", "-c", WRITE_SCRIPT, "_", AGENTS, stamp]
+    return ["bash", "-c", WRITE_SCRIPT, "_", agents, stamp]
 
 
 def main(argv):
     if len(argv) != 1 or argv[0] not in ("live", "notlive", "show"):
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
-    rc, text = _wsl(["cat", AGENTS])
+    ws = gw.workspace()
+    if not ws:  # Docker: the tower's front desk keeps no AGENTS.md the hub edits (see openclaw_gateway.py)
+        print("this machine's OpenClaw gateway has no front-desk workspace the hub edits; nothing changed", file=sys.stderr)
+        return 1
+    AGENTS = ws + "/AGENTS.md"
+    rc, text = _gateway(["cat", AGENTS])
     if rc != 0 or not ("## Card rules" in text or "## Reply rules" in text):
         print("could not read AGENTS.md", file=sys.stderr)
         return 1
@@ -128,8 +134,8 @@ def main(argv):
         return 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     body = new if new.endswith("\n") else new + "\n"
-    rc, out = _wsl(write_argv(stamp), stdin=body)
-    _, back = _wsl(["cat", AGENTS])
+    rc, out = _gateway(write_argv(stamp, AGENTS), stdin=body)
+    _, back = _gateway(["cat", AGENTS])
     if rc != 0 or "written" not in out or back.rstrip("\n") != new.rstrip("\n"):
         print("write or read-back failed; the backup AGENTS.md.bak-ask-%s is beside it" % stamp, file=sys.stderr)
         return 1
