@@ -216,7 +216,7 @@ class Replay(td.Base):
         real = subprocess.run
 
         def local(cmd, **kw):
-            self.assertEqual(cmd[:6], ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--"])
+            self.assertEqual(cmd[:6], ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e"])
             self.assertNotIn("$HOME", " ".join(cmd), "the text never reaches the command line")
             return real(cmd[6:], **kw)
         dp.queue_add(self.box, "It's `done`; $HOME and \"quotes\" stay as typed.", NOW)

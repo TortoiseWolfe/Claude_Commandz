@@ -58,6 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import openclaw_dispatch as dispatch  # noqa: E402
+import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
 
 MAX_BYTES = 16 * 1024
 MAX_TEXT = 4000
@@ -368,9 +369,12 @@ class Host(dispatch.LaneHost):
 
     def deliver_reply(self, lines):
         """Put the last few result lines into OpenClaw's MEMORY.md between markers. Hub -> OpenClaw only."""
+        ws = gw.workspace()
+        if not ws:  # Docker: the tower's front desk has no workspace the hub writes MEMORY.md into (see openclaw_gateway.py)
+            return False
         body = "\n".join([REPLY_BEGIN, "Hub replies (what the hub did with Jonathan's asks, newest last):"] + ["- " + l for l in lines] + [REPLY_END])
         script = (
-            "set -eu\nW=/home/openclaw/.openclaw/workspace\nf=$W/MEMORY.md\n"
+            "set -eu\nW=" + ws + "\nf=$W/MEMORY.md\n"
             'blk=$(mktemp "$W/.ask-block.XXXXXX"); tmp=$(mktemp "$W/.ask-new.XXXXXX")\ntrap \'rm -f "$blk" "$tmp"\' EXIT\n'
             "cat > \"$blk\" <<'__OCASK_EOF__'\n" + body + "\n__OCASK_EOF__\n"
             '[ -f "$f" ] || : > "$f"\n'
@@ -380,14 +384,13 @@ class Host(dispatch.LaneHost):
             "else { cat \"$blk\"; echo; cat \"$tmp.base\"; } > \"$tmp\"; fi\n"
             'rm -f "$tmp.base"; chmod --reference="$f" "$tmp"; mv "$tmp" "$f"\necho ok\n'
         )
-        r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "--", "bash", "-s"], 60, stdin=script)
+        r = self._run(gw.argv(["bash", "-s"], via_shell=True), 60, stdin=script)
         return bool(r and r.returncode == 0 and "ok" in r.stdout)
 
     def main_history(self, limit=HISTORY_WINDOW):
         """The newest messages of Main session, oldest first, via the gateway's chat.history (a read: it creates nothing). None if unreadable."""
         params = json.dumps({"sessionKey": dispatch.MAIN_SESSION, "limit": limit}, ensure_ascii=True)
-        r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c",
-                       'cd /home/openclaw && read -r P && openclaw gateway call chat.history --json --params "$P"'], 90, stdin=params + "\n")
+        r = self._run(gw.argv(["bash", "-c", 'cd "$HOME" && read -r P && openclaw gateway call chat.history --json --params "$P"']), 90, stdin=params + "\n")
         if not r or r.returncode != 0:
             return None
         try:
@@ -401,7 +404,7 @@ class Host(dispatch.LaneHost):
         """The text of one file the gateway saved from his chat, read as the openclaw user (a read). None if it cannot be read."""
         if not MEDIA_NAME_RE.fullmatch(name or ""):
             return None
-        r = self._run(["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c", 'head -c %d "%s/%s"' % (int(max_bytes), INBOUND, name)], 60)
+        r = self._run(gw.argv(["bash", "-c", 'head -c %d "%s/%s"' % (int(max_bytes), inbound(), name)]), 60)
         return r.stdout if r and r.returncode == 0 else None
 
     def sleep(self, s):
@@ -426,7 +429,11 @@ def normalize_history(obj):
 
 # 21 Oct 7:00 PM: he pasted a 6 KB text file into the chat; the gateway saved it (media/inbound) and the history row names it under
 # __openclaw.media, but the intake copy kept only the typed line, so the hub got "absorb this ... ::" and nothing else.
-INBOUND = "/home/openclaw/.openclaw/media/inbound"
+def inbound():
+    """Where the gateway saves what he attaches, as its own user sees the path."""
+    return gw.home() + "/.openclaw/media/inbound"
+
+
 MEDIA_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 ATTACH_FETCH_MAX = 2_000_000  # a text attachment bigger than this stays in the gateway's folder; the hub gets its path
 ATTACH_INLINE_MAX = 2000  # characters of a text attachment carried inside his message; a longer one is a saved copy and its path
@@ -456,7 +463,7 @@ def resolve_attachments(host, media):
     else (a picture, a huge file) keeps only its path in the gateway's folder."""
     out, dest = [], getattr(host, "intake_dir", None)
     for m in media:
-        a = dict(m, path="%s/%s (in the OpenClawGateway distro)" % (INBOUND, m["name"]))
+        a = dict(m, path="%s/%s (in %s)" % (inbound(), m["name"], gw.name()))
         if m["type"].startswith(TEXT_TYPES) and (m["size"] is None or m["size"] <= ATTACH_FETCH_MAX) and hasattr(host, "fetch_media"):
             data = host.fetch_media(m["name"], ATTACH_FETCH_MAX)
             if isinstance(data, str) and not NOT_TEXT_RE.search(data):
