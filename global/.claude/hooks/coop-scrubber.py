@@ -51,7 +51,7 @@ def main():
         return 0
     response = payload["tool_response"]
     try:
-        scrubber = cs.Scrubber(cs.Roster.load(), cfg["allow"], cfg["ner"])
+        scrubber = cs.Scrubber(cs.Roster.load(), cfg["allow"], cfg["ner"], cfg["products"])
         new = scrubber.scrub(response)
         if scrubber.ner_state == "unavailable":
             sys.stderr.write("coop scrubber: Presidio is not available, so only the roster and patterns ran\n")
