@@ -251,6 +251,13 @@ assert_exit 0 "$LAST_STATUS" 'agy dry run works'
 assert_contains "$LAST_OUTPUT" 'agy\ -p\ ' 'agy dry run prints the command'
 assert_not_contains "$LAST_OUTPUT" 'dangerously-skip-permissions' 'agy dry run never skips permissions'
 
+# 6 Nov 2026: every lane is told the standing rule at start (start the next queue item at once; end a turn only with QUEUE EMPTY or BLOCKED).
+run_lane --dry-run claude-rule-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'a claude start dry run works'
+plain_start="$(printf '%s' "$LAST_OUTPUT" | tr -d '\\')"   # a dry run shell-quotes the command more than once: drop the backslashes
+assert_contains "$plain_start" 'Standing rule: when a step finishes, start the next item in your queue at once.' 'the start message carries the standing rule'
+assert_contains "$plain_start" 'End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1.' 'the start message names QUEUE EMPTY and BLOCKED'
+
 # Sending follow-up text to one-shot lanes must stop before touching their tmux window.
 run_lane --send codex-lane 'echo should-not-be-sent'
 assert_exit 1 "$LAST_STATUS" 'Codex lane refuses --send'

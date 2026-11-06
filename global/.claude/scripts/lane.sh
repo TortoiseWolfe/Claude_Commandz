@@ -178,6 +178,9 @@ LANE_SKILLS_KEEP="
 # The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
+# The standing rule every lane is told at start and at every re-prime (6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke
+# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1.
+LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs."
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 
@@ -1659,7 +1662,7 @@ if [ "$mode" = recycle ]; then
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
-    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one."
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. $LANE_STANDING_RULE"
   }
   msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
@@ -2088,7 +2091,7 @@ fi
 eff="-"; flags=""; conn="-"; rk=""
 # Claude gets a short fixed message naming the prompt file, never the prompt text: the text would sit on claude's command line, and a lane
 # that ran pgrep -f with words from its own prompt killed itself (28 Oct 2026). The hand-off folder is already an --add-dir.
-lane_msg="Your task is in $lprompt. Read that whole file now and follow it. report.md line 1 changes only when the hub must act (done, blocked, a step for Jonathan); routine status goes to status.md in the same folder, or a line starting HOURLY or STATUS."
+lane_msg="Your task is in $lprompt. Read that whole file now and follow it. report.md line 1 changes only when the hub must act (done, blocked, a step for Jonathan); routine status goes to status.md in the same folder, or a line starting HOURLY or STATUS. $LANE_STANDING_RULE"
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).

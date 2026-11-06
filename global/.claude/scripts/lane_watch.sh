@@ -65,6 +65,10 @@
 # CI wait that hung, or a job whose finish notice never arrived, kept the lane idle with nobody asked. The idle time is read from the pane's
 # "· done H:MM" line; the mark .jobidle-<lane> in the lane state folder keeps a re-armed watcher from naming the same stretch twice, and a lane
 # with no job is not looked up more than once every 5 minutes.
+# A lane idle LANE_WATCH_IDLE_REMIND_MIN (default 20) minutes whose report.md line 1 is not QUEUE EMPTY or BLOCKED is named AGAIN every that many
+# minutes while it stays idle (idle_remind_check; 6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke breaks"). Before, the
+# "ended a turn without a new report" line came once per ended turn and a lane with a backlog could then sit idle for hours. The standing rule
+# every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
@@ -266,6 +270,40 @@ job_idle_check() {
       hit=1; other=1 ;;
     *) printf '%s nojob %s' "$de" "$now" > "$mark" ;;
   esac
+}
+
+# idle_remind_check <lane> <pane>: a lane idle LANE_WATCH_IDLE_REMIND_MIN (default 20) minutes whose report.md line 1 is not QUEUE EMPTY or
+# BLOCKED is named again, and again every LANE_WATCH_IDLE_REMIND_MIN minutes while it stays idle. 6 Nov 2026 (Jonathan: "we have to big of a
+# backlog to idle on smoke breaks"): the "ended a turn without a new report" line above comes once per ended turn, so a lane that stopped with
+# a backlog still queued sat idle for hours after that one line. A lane may end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1
+# (the standing rule lane.sh puts in the start and re-prime text); those two are left alone. Idle means what job_idle_check means: no dialog,
+# no spinner, no recycle under way, and a "· done H:MM" line that old. The mark .idleremind-<lane> holds "<done epoch> <last named epoch>",
+# so a re-armed watcher keeps the spacing and a new turn (new done time) starts a new stretch. LANE_WATCH_IDLE_REMIND_MIN=0 turns it off.
+idle_remind_check() {
+  local l=$1 pane=$2 dl t de now mins limit=${LANE_WATCH_IDLE_REMIND_MIN:-20} mark prev rep first
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=20
+  [ "$limit" -gt 0 ] || return 0
+  recycle_locked "$l" && return 0
+  printf '%s\n' "$pane" | dialog_waiting && return 0
+  command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$pane" && return 0   # still working
+  dl=$(printf '%s\n' "$pane" | turn_done_line)
+  t=$(printf '%s\n' "$dl" | sed -nE 's/.*· done ([0-9]{1,2}:[0-9]{2}( [AP]M)?).*/\1/p')
+  [ -n "$t" ] || return 0
+  now=$(date +%s)
+  de=$(date -d "$t" +%s 2>/dev/null) || return 0
+  [ "$de" -le "$now" ] || de=$(( de - 86400 ))
+  mins=$(( (now - de) / 60 ))
+  [ "$mins" -ge "$limit" ] || return 0
+  rep=$(report_of "$l")
+  first=$(head -n 1 "$rep" 2>/dev/null)
+  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*) return 0 ;; esac
+  mark="$recycle_dir/.idleremind-$l"
+  prev=$(cat "$mark" 2>/dev/null)   # "<done epoch> <named epoch>"
+  if [ "${prev%% *}" = "$de" ] && [ -n "${prev##* }" ] && [ $(( now - ${prev##* } )) -lt $(( limit * 60 )) ]; then return 0; fi
+  mkdir -p "$recycle_dir" 2>/dev/null
+  printf '%s %s' "$de" "$now" > "$mark" 2>/dev/null || true
+  echo "idle: $l has been idle ${mins} min and its report line 1 is not QUEUE EMPTY or BLOCKED, so it should have a next item; tell it to start the next item in its queue (or to write QUEUE EMPTY or BLOCKED (who/what) on line 1). Named again every ${limit} min while it stays idle."
+  hit=1; other=1
 }
 
 # The recycle decision for one lane, shared by the poll loop and the scheduled pass (--recycle-once). recycle_pass <lane> <pane> [quiet]
@@ -725,6 +763,7 @@ while :; do
         if ! recycle_pass "$l" "$pane"; then
           orphan_check "$l" "$pane"
           job_idle_check "$l" "$pane"
+          idle_remind_check "$l" "$pane"
         fi
         if [ -n "$done_line" ] && [ "$done_line" != "${seen_turn[$l]}" ] && [ "$("$lane_sh" --turn "$l" 2>/dev/null)" = monitor ]; then
           seen_turn[$l]=$done_line   # a Monitor progress event answered with no question: news to nobody (19 Oct 11:59 PM)
