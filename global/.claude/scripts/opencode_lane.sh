@@ -8,6 +8,13 @@
 # quota or rate limit (an "Error:" line about quota, 429 or tokens per minute) the run is stopped and the next provider takes the same prompt
 # against whatever the first one already changed. When none is left the last line says "opencode: free quota exhausted", which is what the
 # dispatcher reads (AGY_QUOTA_RE) to stop routing to this engine for a while.
+# A per-minute refusal is not an exhausted quota (issue 267, 6 Nov 2026: five lanes sharing one Gemini key each fell through to OpenRouter's
+# daily cap within 20 minutes, exit 75, when Gemini had only asked for six seconds): when the refusal carries a retry delay ("retry in 6.01s",
+# Retry-After) the wrapper waits that long plus 1 to 3 seconds of jitter (one wait is capped at 90 s) and retries the same provider, up to 5 times
+# in a row. Only a per-day refusal ("per-day", "PerDay", "free-models-per-day"), a refusal with no retry delay, or five retries used up moves on to
+# the next provider. A per-day refusal also writes a stamp file, <provider>-<date>, in OPENCODE_QUOTA_DIR (default ~/.claude/state/opencode-quota),
+# and a stamped provider is skipped for the rest of that day, so later lanes do not spend a start on it. OPENCODE_RETRY_SCALE multiplies every
+# wait (tests use 0.01); OPENCODE_BIN names the opencode program (default: opencode on PATH).
 #
 # Keys are read from their files here, at run time, into this process's environment only: they never appear in a command line, a tmux window
 # or a log. Both free APIs train on free-tier input (see ~/.config/panel/free-limits.json), so lane.sh refuses client repos and ~/repos.
@@ -27,8 +34,12 @@ DEFAULT_MODELS=(google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra
 LIMIT="${OPENCODE_LANE_TIMEOUT:-7200}"
 
 # nvm's node is not always on PATH in a bare tmux window.
-command -v opencode >/dev/null 2>&1 || for d in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$d/opencode" ] && PATH="$d:$PATH"; done
-command -v opencode >/dev/null 2>&1 || { echo "opencode is not installed (npm install -g opencode-ai)" >&2; exit 127; }
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+MAX_RETRIES=5
+MAX_WAIT=90
+QUOTA_DIR="${OPENCODE_QUOTA_DIR:-$HOME/.claude/state/opencode-quota}"
+command -v "$OPENCODE_BIN" >/dev/null 2>&1 || for d in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$d/opencode" ] && PATH="$d:$PATH"; done
+command -v "$OPENCODE_BIN" >/dev/null 2>&1 || { echo "opencode is not installed (npm install -g opencode-ai)" >&2; exit 127; }
 
 load_key() {  # <env var> <file>...
   local var="$1" f; shift
@@ -59,8 +70,29 @@ for m in "${DEFAULT_MODELS[@]}"; do
 done
 
 # A quota or rate limit shows up as an "Error:" line; the lane's own output (test logs that say "rate limit") is not scanned.
+quota_lines() {  # <log file>: the matching Error lines, colour codes removed
+  sed -E 's/\x1b\[[0-9;]*m//g' -- "$1" | grep -E '^Error: ' | grep -iE 'quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|tokens per (minute|day)|Request too large|free-models-per-day|insufficient credits'
+}
 quota_hit() {  # <log file>
-  sed -E 's/\x1b\[[0-9;]*m//g' -- "$1" | grep -E '^Error: ' | grep -qiE 'quota|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b|tokens per (minute|day)|Request too large|free-models-per-day|insufficient credits'
+  quota_lines "$1" | grep -q .
+}
+
+# What kind of refusal is it? Prints "day" (give up on this provider for today), or "wait <seconds>" (a per-minute limit that said when to retry),
+# or "none" (a refusal that names neither: treated like a daily one for this run, but not stamped).
+classify() {  # <log file>
+  local text n
+  text="$(quota_lines "$1")"
+  if grep -qiE 'per[ _-]?day|tokens per day|daily' <<<"$text"; then echo day; return; fi
+  n="$(grep -oiE 'retry in [0-9]+(\.[0-9]+)?s?|retry[ _-]?after[^0-9]{0,6}[0-9]+(\.[0-9]+)?|retryDelay[^0-9]{0,6}[0-9]+(\.[0-9]+)?' <<<"$text" | head -n 1 | grep -oE '[0-9]+(\.[0-9]+)?' | head -n 1)"
+  if [ -n "$n" ]; then echo "wait $n"; else echo none; fi
+}
+
+stamp_file() { echo "$QUOTA_DIR/$1-$(date +%F)"; }  # <provider>
+is_stamped() { [ -e "$(stamp_file "$1")" ]; }
+write_stamp() {  # <provider>: a per-day refusal; yesterday's stamps for it are removed
+  mkdir -p -- "$QUOTA_DIR" 2>/dev/null || return 0
+  local f; for f in "$QUOTA_DIR/$1"-*; do [ -e "$f" ] && [ "$f" != "$(stamp_file "$1")" ] && rm -f -- "$f"; done
+  date '+%F %T' >"$(stamp_file "$1")" 2>/dev/null || true
 }
 
 prompt="$(cat -- "$prompt_file")" || exit 2
@@ -68,21 +100,49 @@ cd -- "$dir" || exit 2
 log="$hand/.opencode-run.log"
 last=0
 for m in "${models[@]}"; do
-  echo "opencode: model $m"
-  : >"$log"
-  # In the background so a loop on a rate-limit error (OpenCode retries and compacts forever) is caught while it runs, not after the time limit.
-  timeout "$LIMIT" opencode run --model "$m" --auto --dir "$dir" "$prompt" >"$log" 2>&1 &
-  pid=$!
-  hit=0
-  while kill -0 "$pid" 2>/dev/null; do
-    sleep "${OPENCODE_LANE_POLL:-10}"
-    if quota_hit "$log"; then hit=1; kill "$pid" 2>/dev/null; break; fi
+  provider="${m%%/*}"
+  if is_stamped "$provider"; then
+    echo "opencode: $provider hit its daily limit earlier today (stamp $(stamp_file "$provider")); skipping $m"
+    last=75; continue
+  fi
+  retries=0
+  while :; do
+    echo "opencode: model $m"
+    : >"$log"
+    # In the background so a loop on a rate-limit error (OpenCode retries and compacts forever) is caught while it runs, not after the time limit.
+    timeout "$LIMIT" "$OPENCODE_BIN" run --model "$m" --auto --dir "$dir" "$prompt" >"$log" 2>&1 &
+    pid=$!
+    hit=0
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep "${OPENCODE_LANE_POLL:-10}"
+      if quota_hit "$log"; then hit=1; kill "$pid" 2>/dev/null; break; fi
+    done
+    wait "$pid" 2>/dev/null; last=$?
+    cat -- "$log"
+    if [ "$hit" = 0 ] && quota_hit "$log"; then hit=1; fi
+    [ "$hit" = 1 ] || exit "$last"
+    kind="$(classify "$log")"
+    case "$kind" in
+      wait\ *)
+        if [ "$retries" -lt "$MAX_RETRIES" ]; then
+          retries=$((retries + 1))
+          wait_s="$(awk -v d="${kind#wait }" -v r="$RANDOM" -v cap="$MAX_WAIT" 'BEGIN{w=d+1+(r%2001)/1000; if(w>cap)w=cap; printf "%.2f", w}')"
+          echo "opencode: $provider per-minute limit; retrying in $(awk -v w="$wait_s" 'BEGIN{printf "%.0f", w}')s ($retries/$MAX_RETRIES)"
+          sleep "$(awk -v w="$wait_s" -v k="${OPENCODE_RETRY_SCALE:-1}" 'BEGIN{printf "%.3f", w*k}')"
+          continue
+        fi
+        echo "opencode: $provider still rate limited after $MAX_RETRIES retries; trying the next provider"
+        ;;
+      day)
+        write_stamp "$provider"
+        echo "opencode: $provider daily limit; stamped $(stamp_file "$provider"), skipping it for the rest of today"
+        ;;
+      *) echo "opencode: $provider refused with no retry delay; trying the next provider" ;;
+    esac
+    echo "opencode: $m is out of free quota or rate limit; trying the next provider"
+    last=75
+    break
   done
-  wait "$pid" 2>/dev/null; last=$?
-  cat -- "$log"
-  if [ "$hit" = 0 ] && quota_hit "$log"; then hit=1; fi
-  if [ "$hit" = 1 ]; then echo "opencode: $m is out of free quota or rate limit; trying the next provider"; last=75; continue; fi
-  exit "$last"
 done
 echo "opencode: free quota exhausted on every provider (${models[*]})"
 exit "$last"
