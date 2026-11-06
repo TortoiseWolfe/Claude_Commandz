@@ -456,6 +456,120 @@ def prints_sensitive(cmd):
     return None
 
 
+# Rule F: the account email never goes to a website. Claude Code can put it in a User-Agent
+# header when a site asks scripted visitors for a contact (anthropics/claude-code issue 107757).
+# The address is read from the Claude config at run time, never written here, and never echoed.
+# Refused: a Bash or WebFetch call that holds the address with a User-Agent header, in the URL
+# (path or query), or in a request body (curl -d/--data/-F/--json, wget --post-data, python
+# requests/httpx/urllib, node fetch/axios). Allowed: git, gh and our own gmail_api.py (they talk
+# to GitHub and Gmail, which already know the address); the Gmail connector is not a Bash call.
+# Limit: it sees the address only when it is written in the call, not when a script reads it itself.
+# The hook's matcher in settings.json must list WebFetch for the WebFetch half to run.
+F_CONFIG = os.environ.get("SECRET_GUARD_CLAUDE_CONFIG")
+_account_email = False
+UA_HEADER = re.compile(r"user[-_ ]?agent", re.I)
+F_HTTP_PROGS = {"curl", "wget", "http", "https", "xh", "httpie", "nc", "ncat", "socat", "lwp-request"}
+F_HTTP_WORD = re.compile(r"(?<![\w./-])(?:curl|wget|xh|lwp-request|Invoke-WebRequest|Invoke-RestMethod)(?![\w-])", re.I)
+F_UA_FLAG = re.compile(r"(?<!\S)(?:-[AU]|--user-?agent)(?![\w-])")
+F_BODY_FLAG = re.compile(r"(?<!\S)(?:-d|-F|-T|--data[\w-]*|--form[\w-]*|--json|--post-data|--post-file"
+                         r"|--body-data|--body-file|--upload-file)(?![\w-])|(?<!\S)-d\S|--(?:data|post-data|json)[\w-]*=")
+F_HTTP_LIB = re.compile(r"\b(?:requests\.(?:get|post|put|patch|delete|request|Session)|httpx|urllib|aiohttp"
+                        r"|http\.client|urlopen|pycurl|fetch\s*\(|axios|node-fetch|got\s*\(|XMLHttpRequest"
+                        r"|Net::HTTP|open-uri|LWP|WebClient|HttpClient)", re.I)
+F_SCRIPT_RUNNER = re.compile(r"(?<![\w.-])(?:python[\d.]*|node|deno|bun|ruby|perl|php)(?![\w.-])")
+F_REASON = ("secret-guard: rule F, this call would send the account email address to a website (%s). "
+            "Sites may ask scripted visitors for a contact; use a generic client name instead "
+            "(a User-Agent of \"claude-code\", say) or ask Jonathan. git, gh and gmail_api.py are exempt.")
+
+
+def account_email():
+    """The account email (lower case) from the Claude config, or None. Read on first use."""
+    global _account_email
+    if _account_email is not False:
+        return _account_email
+    _account_email = None
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    for path in ([F_CONFIG] if F_CONFIG else [cfg_dir and os.path.join(cfg_dir, ".claude.json"),
+                                              os.path.expanduser("~/.claude.json")]):
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            em = (json.load(open(path)).get("oauthAccount") or {}).get("emailAddress")
+        except (OSError, ValueError, AttributeError) as e:
+            log_error("secret-guard rule F could not read the Claude config: %s" % type(e).__name__)
+            continue
+        if isinstance(em, str) and "@" in em:
+            _account_email = em.strip().lower()
+            break
+    return _account_email
+
+
+def _forms(email):
+    return (email, email.replace("@", "%40"))
+
+
+def _has(text, email):
+    low = text.lower()
+    return any(f in low for f in _forms(email))
+
+
+def _f_program(segment):
+    """Program a segment runs, with 'gmail_api.py' when an interpreter runs that script."""
+    toks, i = _process_command(segment)
+    if i >= len(toks):
+        return ""
+    prog = os.path.basename(toks[i])
+    if F_SCRIPT_RUNNER.fullmatch(prog) or prog in ("bash", "sh"):
+        script = next((t for t in toks[i + 1:] if not t.startswith("-")), "")
+        if os.path.basename(script) == "gmail_api.py":
+            return "gmail_api.py"
+    return prog
+
+
+def email_leak(cmd, email):
+    """Where in a Bash command the account email would go to a website, else None."""
+    cmd = cmd.replace("\\\n", " ")
+    if not _has(cmd, email):
+        return None
+    for seg in split_segments(cmd):
+        if not _has(seg, email):
+            continue
+        prog = _f_program(seg)
+        if prog in ("git", "gh", "gmail_api.py"):
+            continue
+        if UA_HEADER.search(seg):
+            return "a User-Agent header"
+        if prog in F_HTTP_PROGS or F_HTTP_WORD.search(blank_quotes(seg)):
+            if F_UA_FLAG.search(seg):
+                return "a User-Agent header"
+            if any(_has(u, email) for u in re.findall(r"https?://[^\s'\"]*", seg)):
+                return "the URL"
+            if F_BODY_FLAG.search(seg):
+                return "a request body"
+            return "a web request"
+    if (F_SCRIPT_RUNNER.search(cmd) and F_HTTP_LIB.search(cmd)
+            and not any(_f_program(s) == "gmail_api.py" for s in split_segments(cmd))):
+        return "a request made from a script"
+    return None
+
+
+def account_email_rule(tool, ti):
+    """(rule, reason) when this call sends the account email to a website, else None."""
+    if tool == "Bash":
+        text = ti.get("command")
+    elif tool == "WebFetch" or (isinstance(tool, str) and tool.endswith("browser_navigate")):
+        text = ti.get("url")
+    else:
+        return None
+    if not isinstance(text, str) or ("@" not in text and "%40" not in text.lower()):
+        return None
+    email = account_email()
+    if not email:
+        return None
+    where = email_leak(text, email) if tool == "Bash" else ("the URL" if _has(text, email) else None)
+    return ("F", F_REASON % where) if where else None
+
+
 def evaluate(payload):
     """Return (rule, reason) to block, or None to allow."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tool_input", {}), dict):
@@ -471,6 +585,9 @@ def evaluate(payload):
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "
                          "Never put secrets inline in commands; read them from a file or env var "
                          "inside a script, and reference them as $VAR." % s)
+        f = account_email_rule(tool, ti)
+        if f:
+            return f
         p = prints_sensitive(cmd)
         if p:
             return "B", ("secret-guard: this would print a credential-bearing file (%s). %s" % (p, HINT))
@@ -478,6 +595,8 @@ def evaluate(payload):
             where = secret_in_file(f)
             if where:
                 return "E", RULE_E % (f, where)
+    elif tool == "WebFetch" or (isinstance(tool, str) and tool.endswith("browser_navigate")):
+        return account_email_rule(tool, ti)
     elif tool == "Read" and isinstance(ti.get("file_path"), str):
         p = sensitive_in(ti["file_path"])
         if p:
