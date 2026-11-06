@@ -68,7 +68,7 @@ jobs:
             # Needs wsl.exe and the OpenClawGateway distro: it only runs inside that distro, so a runner cannot.
             [ "$t" = tests/test_openclaw_uid_stage.sh ] && { echo "excluded (WSL only): $t"; continue; }
             echo "::group::$t"
-            if timeout 300 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
+            if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
             echo "::endgroup::"
           done
           exit "$failed"

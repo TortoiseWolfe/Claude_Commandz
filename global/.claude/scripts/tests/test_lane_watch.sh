@@ -820,7 +820,7 @@ if grep -q '^step without URL: rl' "$TMP/su-out1" && [ "$(wc -l < "$SEND_LOG")" 
 else echo "FAIL step without URL: out=$(cat "$TMP/su-out1") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 su_watch 'STEP-FOR-JONATHAN open https://vercel.com/acme/site/deployments (fleet Chromium tab "Deployments"), approve; done when it says Ready' "$TMP/su-out2"
 if ! grep -q 'step without URL' "$TMP/su-out2" && [ ! -s "$SEND_LOG" ]; then echo "ok   a STEP-FOR-JONATHAN report with an https:// URL is left alone"; else echo "FAIL step with URL flagged: out=$(cat "$TMP/su-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
-su_watch 'DONE 11:00 AM shipped, see the page at none' "$TMP/su-out3"
+su_watch "DONE $(date -d '30 min ago' '+%-I:%M %p') shipped, see the page at none" "$TMP/su-out3"   # a time behind the clock, so this case does not depend on the hour it runs
 if ! grep -q 'step without URL' "$TMP/su-out3" && [ ! -s "$SEND_LOG" ]; then echo "ok   an ordinary report with no URL is left alone"; else echo "FAIL ordinary report flagged: out=$(cat "$TMP/su-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 # The same bad line 1 is named once, even across a re-armed watcher (the mark is a file); a rewrite that still has no URL is a new line.
 su_again() { # su_again <out>: another watcher, the report touched after it starts
@@ -836,6 +836,26 @@ su_again "$TMP/su-out6"
 # su_again touches the report after the rewrite, so the new line 1 is the one checked
 if grep -q '^step without URL' "$TMP/su-out6" && [ "$(wc -l < "$SEND_LOG")" = 1 ]; then echo "ok   a rewrite that still has no URL is named again"; else echo "FAIL rewrite not re-checked: $(cat "$TMP/su-out6")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-*
+
+# 6 Nov 2026: lanes wrote report times ahead of the clock ("WORKING 8:30 AM" at 8:13 AM) and the hub corrected each by hand. The watcher compares the
+# first time on line 1 with the report file's modification time: more than 2 minutes ahead is named ("stamp ahead: <lane> wrote <stamp> at <mtime>")
+# and the lane is sent its correction; a time that is 1 minute ahead, or behind the clock, is left alone. Reuses su_watch (the report is written
+# 1.5 s into the run, so the clock when it is written is the clock now).
+mkdir -p "$su_dir"
+# .reportseen-rl keeps the last stamp across watchers; with no report yet the stamp reads "none" and the watcher would exit on that, so clear it too
+sa_watch() { rm -f "$rl_dir"/.stampahead-* "$rl_dir"/.reportseen-*; su_watch "$1" "$2"; }
+sa_watch "WORKING $(date -d '+11 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out1"
+if grep -q '^stamp ahead: rl wrote ' "$TMP/sa-out1" && [ "$(wc -l < "$SEND_LOG")" = 1 ] && grep -q "^rl	Hub: line 1 of your report.md says " "$SEND_LOG" && grep -q "date '+%-I:%M %p'" "$SEND_LOG"; then
+  echo "ok   a report time 11 minutes ahead of the clock is named and the lane is sent its correction"
+else echo "FAIL stamp ahead 11 min: out=$(cat "$TMP/sa-out1") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+sa_watch "WORKING $(date -d '+1 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out2"
+if ! grep -q '^stamp ahead' "$TMP/sa-out2" && [ ! -s "$SEND_LOG" ]; then echo "ok   a report time 1 minute ahead is within the slack and left alone"; else echo "FAIL stamp 1 min ahead flagged: out=$(cat "$TMP/sa-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+sa_watch "WORKING $(date -d '30 min ago' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out3"
+if ! grep -q '^stamp ahead' "$TMP/sa-out3" && [ ! -s "$SEND_LOG" ]; then echo "ok   a report time behind the clock is left alone"; else echo "FAIL stamp behind flagged: out=$(cat "$TMP/sa-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+sa_watch "WORKING $(date -d '+11 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out5"
+su_again "$TMP/sa-out6"
+if grep -q '^stamp ahead' "$TMP/sa-out5" && ! grep -q '^stamp ahead' "$TMP/sa-out6" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same ahead-of-clock line is named once, across a re-armed watcher"; else echo "FAIL repeated stamp naming: first=$(cat "$TMP/sa-out5") second=$(cat "$TMP/sa-out6")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
 
 # 28 Oct 2026: a lane killed its own claude and sat at a bash prompt for 3 hours; nothing woke the hub. lane.sh --pane says "dead <cmd>" for such a
 # lane and the watcher names it once per death ("dead: <lane> (pane shows <cmd>)"), clears the mark when claude runs again, and skips headless lanes.
