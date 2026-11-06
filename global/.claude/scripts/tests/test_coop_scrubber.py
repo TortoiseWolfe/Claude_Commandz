@@ -132,6 +132,23 @@ class PresidioStandIn(unittest.TestCase):
         self.assertRegex(out, r"^\[PERSON_x[0-9a-f]{4}\] met \[PERSON_1\]$")
         self.assertEqual(s.ner_state, "on")
 
+    def test_a_product_phrase_is_not_a_person(self):
+        # Issue 239: the card title "Standard Nextcloud images" showed as [PERSON_...] in what a lane saw.
+        s = cs.Scrubber(cs.Roster(), use_ner=True)
+        out = s.scrub_strings(["Standard Nextcloud images", "Wendell Fogbottom asked about Standard Nextcloud images"])
+        self.assertEqual(out[0], "Standard Nextcloud images")
+        self.assertRegex(out[1], r"^\[PERSON_x[0-9a-f]{4}\] asked about Standard Nextcloud images$")
+        self.assertEqual(s.counts["PERSON"], 1)
+
+    def test_products_setting_adds_words_and_roster_people_are_still_replaced(self):
+        s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
+        self.assertRegex(s.scrub_strings(["Zephyr Lantern"])[0], r"^\[PERSON_x")
+        s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True, products=["lantern"])
+        self.assertEqual(s.scrub_strings(["Zephyr Lantern"])[0], "Zephyr Lantern")
+        # a roster person whose name holds a product word is still replaced: the roster is never second-guessed
+        r = cs.Roster({"salt": "s", "people": [{"names": ["Dana Nextcloud"], "emails": [], "phones": []}]})
+        self.assertEqual(cs.Scrubber(r, use_ner=True).scrub_strings(["Dana Nextcloud wrote"])[0], "[PERSON_1] wrote")
+
     def test_all_strings_go_in_one_call(self):
         s = cs.Scrubber(cs.Roster(), use_ner=True)
         out = s.scrub({"a": "Wendell Fogbottom", "b": ["Wendell Pennywhistle", 3]})
@@ -181,7 +198,9 @@ class ConfigFiles(unittest.TestCase):
         p = os.path.join(self.tmp, "c.json")
         fx.write_json(p, {"folders": ["~/x*"], "allow": ["Op"], "ner": False})
         os.environ["COOP_SCRUBBER_CONFIG"] = p
-        self.assertEqual(cs.load_config(), {"folders": ["~/x*"], "allow": ["Op"], "ner": False})
+        self.assertEqual(cs.load_config(), {"folders": ["~/x*"], "allow": ["Op"], "ner": False, "products": []})
+        fx.write_json(p, {"folders": [], "products": ["Lantern", 7]})
+        self.assertEqual(cs.load_config()["products"], ["Lantern"])
 
     def test_missing_roster_is_empty(self):
         os.environ["COOP_ROSTER_FILE"] = os.path.join(self.tmp, "none.json")
