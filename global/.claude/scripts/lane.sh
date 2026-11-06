@@ -2107,7 +2107,9 @@ if [ "$engine" != claude ]; then
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $(lane_docker_env | sed 's/^/export /; s/ $/; /')$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  # Print mode stops background jobs 10 minutes after the last turn and exits 0 (#260: two backlog lanes waiting on a build and on a pull request's checks
+  # ended that way, silently). A headless lane waits up to an hour instead; a value the caller already set is kept.
+  cmd="{ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-3600000}; $(lane_docker_env | sed 's/^/export /; s/ $/; /')$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; lane_rc=\$?; echo \"exit \$lane_rc\" >>$(printf %q "$out"); python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $(printf %q "$out") \"\$lane_rc\" claude $(printf %q "$HOME/.claude/state"); }"
 elif [ "$console" = 1 ]; then
   cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
 else
