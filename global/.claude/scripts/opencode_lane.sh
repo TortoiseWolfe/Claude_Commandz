@@ -54,10 +54,11 @@ load_key GOOGLE_GENERATIVE_AI_API_KEY "$HOME/.config/gemini/api-key" || true
 load_key OPENROUTER_API_KEY "$HOME/.config/openrouter/api-key" || true
 
 # One config for the run: allow everything, deny paths outside the checkout except the ones this lane is told to use.
-# The repo a worktree belongs to: its folder is <repo>--<topic> (git worktree) or <repo>-wf-<id> (director); a plain checkout is its own repo.
-# (The rules below name sibling worktrees as <repo>--*; using the worktree's own name there gave <repo>--<topic>--*, which matched nothing.)
 repo_name="$(basename -- "$dir")"
-case "$repo_name" in *--*) repo_name="${repo_name%%--*}" ;; *-wf-*) repo_name="${repo_name%%-wf-*}" ;; esac
+# A lane started inside a linked worktree (<repo>--<topic>) names the repo, not the worktree: the rule below lets the lane use that repo's
+# OTHER worktrees, and a rule built from the worktree's own name (<repo>--<topic>--*) matches none of them (issue 285).
+_common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || _common=""
+[ "$(basename -- "$_common")" = .git ] && repo_name="$(basename -- "$(dirname -- "$_common")")"
 mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 cat >"$conf" <<JSON

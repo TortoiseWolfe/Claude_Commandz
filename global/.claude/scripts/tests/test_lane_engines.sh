@@ -303,6 +303,14 @@ assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/$
 assert_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/$(basename "$REPO")-wf-*/**" 'opencode may use its own director worktrees'
 assert_not_contains "$(cat "$OC_HAND/opencode.json")" "$HOME_TEST/repos/.worktrees/**" 'opencode may not use every repo worktree'
 [ ! -e "$REPO/opencode.json" ] || fail 'opencode writes its config to the lane folder, never into the repo'
+# Issue 285: a lane started inside a linked worktree names its REPO in the permission rule, not the worktree (a rule built from
+# "<worktree>--*" matches none of the repo's other worktrees).
+: >"$TMP/opencode-calls"; : >"$TMP/curl-calls"
+run_lane --engine opencode oc-wt "$UNPROTECTED_WORKTREE" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'opencode lane starts inside a linked worktree'
+WT_CONF="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-wt/opencode.json")"
+assert_contains "$WT_CONF" "$HOME_TEST/repos/.worktrees/$(basename "$UNPROTECTED_REPO")--*/**" 'opencode rule names the repo, not the worktree'
+assert_not_contains "$WT_CONF" "$(basename "$UNPROTECTED_WORKTREE")--*" 'opencode rule is not built from the worktree name'
 [ ! -e "$REPO/injected" ] || fail 'opencode prompt contents are not executed by the shell'
 assert_contains "$(cat "$OC_HAND/prompt.md")" "$(cat "$PROMPT")" 'opencode prompt copy keeps the caller prompt'
 case "$(head -n1 "$OC_HAND/prompt.md")" in 'You can edit files'*) fail 'opencode prompt copy has no edit-only header' ;; *) checks=$((checks + 1)) ;; esac
@@ -387,10 +395,17 @@ assert_contains "$LO_CONF" "$LO_HAND/**" 'local may write the lane folder'
 assert_contains "$LO_CONF" "$HOME_TEST/repos/.worktrees/$(basename "$REPO")--*/**" 'local may use its own repo worktrees'
 assert_not_contains "$LO_CONF" "$HOME_TEST/repos/.worktrees/**" 'local may not use every repo worktree'
 [ ! -e "$REPO/opencode.json" ] || fail 'local writes its config to the lane folder, never into the repo'
+# Issue 285: a lane started inside a linked worktree names its REPO in the permission rule, not the worktree (a rule built from
+# "<worktree>--*" matches none of the repo's other worktrees).
+: >"$TMP/opencode-calls"; : >"$TMP/curl-calls"
+run_lane --engine local lo-wt "$UNPROTECTED_WORKTREE" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'local lane starts inside a linked worktree'
+WT_CONF="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-lo-wt/opencode.json")"
+assert_contains "$WT_CONF" "$HOME_TEST/repos/.worktrees/$(basename "$UNPROTECTED_REPO")--*/**" 'local rule names the repo, not the worktree'
+assert_not_contains "$WT_CONF" "$(basename "$UNPROTECTED_WORKTREE")--*" 'local rule is not built from the worktree name'
 [ ! -e "$REPO/injected" ] || fail 'local prompt contents are not executed by the shell'
 case "$(grep -P '\tlo-lane\t' "$HOME_TEST/.claude/state/lanes/index.tsv")" in *$'\tlocal\t'*) checks=$((checks + 1)) ;; *) fail 'the index row says billing local' ;; esac
-# Issue 285: a lane in a worktree named <repo>--<topic> got the rule <repo>--<topic>--*, which matched nothing, so its first edit was refused.
-# Both free engines must name the repo (not the worktree) in the sibling rules, and allow the lane's own folder outright.
+# Issue 285 (the repo-name half is fixed and tested above): both free engines must also allow the lane's own folder outright.
 for eng in opencode local; do
   WT="$HOME_TEST/repos/.worktrees/Some_Repo--issue-4"; mkdir -p "$WT"
   : >"$TMP/opencode-calls"; : >"$TMP/curl-calls"
@@ -398,15 +413,10 @@ for eng in opencode local; do
   assert_exit 0 "$LAST_STATUS" "$eng lane starts in a worktree folder"
   WT_CONF="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-wt-$eng/opencode.json")"
   assert_contains "$WT_CONF" "$WT/**" "$eng may edit inside its own worktree"
-  assert_contains "$WT_CONF" "$HOME_TEST/repos/.worktrees/Some_Repo--*/**" "$eng names the repo, so sibling worktrees match"
-  assert_not_contains "$WT_CONF" "Some_Repo--issue-4--*" "$eng does not append the suffix pattern to the worktree's own name"
   WT_OK="$(python3 -I -c 'import fnmatch,json,sys
 c=json.loads(sys.argv[1])["permission"]["external_directory"]
 sys.exit(0 if any(v=="allow" and fnmatch.fnmatchcase(sys.argv[2]+"/global/.claude/scripts/lane.sh",k) for k,v in c.items()) else 1)' "$WT_CONF" "$WT" && echo yes || echo no)"
   assert_contains "$WT_OK" yes "$eng: a file inside the worktree is allowed by some rule"
-  WT2="$HOME_TEST/repos/.worktrees/Some_Repo-wf-ab12"; mkdir -p "$WT2"
-  run_lane --engine "$eng" "wf-$eng" "$WT2" sonnet "$PROMPT"
-  assert_contains "$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-wf-$eng/opencode.json")" "$HOME_TEST/repos/.worktrees/Some_Repo-wf-*/**" "$eng in a director worktree names the repo"
 done
 # A model named ollama/<tag> passes through; a hosted name does not.
 run_lane --dry-run --engine local lo-map "$REPO" ollama/gpt-oss:20b "$PROMPT"

@@ -886,6 +886,25 @@ sa_watch "WORKING $(date -d '+1 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/
 if ! grep -q '^stamp ahead' "$TMP/sa-out2" && [ ! -s "$SEND_LOG" ]; then echo "ok   a report time 1 minute ahead is within the slack and left alone"; else echo "FAIL stamp 1 min ahead flagged: out=$(cat "$TMP/sa-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 sa_watch "WORKING $(date -d '30 min ago' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out3"
 if ! grep -q '^stamp ahead' "$TMP/sa-out3" && [ ! -s "$SEND_LOG" ]; then echo "ok   a report time behind the clock is left alone"; else echo "FAIL stamp behind flagged: out=$(cat "$TMP/sa-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+# 6 Nov 2026: bw-masters' line 1 said "deadline 7:00 PM" and the watcher read that time (and the PM of the last time on the line) as the report's
+# stamp. Only the status time counts; a time after by/until/deadline/due/before/till is a target, not a stamp.
+sa_tgt() { # sa_tgt <line 1 text> <out file> <label> <want: named|quiet>
+  sa_watch "$1" "$2"
+  if [ "$4" = named ]; then
+    if grep -q '^stamp ahead' "$2"; then echo "ok   $3"; else echo "FAIL $3: out=$(cat "$2")"; failures=$((failures + 1)); fi
+  else
+    if ! grep -q '^stamp ahead' "$2" && [ ! -s "$SEND_LOG" ]; then echo "ok   $3"; else echo "FAIL $3: out=$(cat "$2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+  fi
+}
+tgt="$(date -d '+3 hours' '+%-I:%M %p')"; nowt="$(date '+%-I:%M %p')"
+sa_tgt "WORKING $nowt | deadline $tgt | done: 1" "$TMP/sa-t1" "a deadline time after the status time is not read as the stamp" quiet
+sa_tgt "WORKING $nowt | by $tgt | done: 1" "$TMP/sa-t2" "a 'by <time>' target is not read as the stamp" quiet
+sa_tgt "WORKING $(date '+%-H:%M') | deadline $tgt | done: 1" "$TMP/sa-t6" "a status time without AM/PM does not promote the deadline to the stamp" quiet
+sa_tgt "WORKING by $tgt" "$TMP/sa-t7" "a line whose only time is a 'by <time>' target has no stamp" quiet
+sa_tgt "BLOCKED | Deadline: $tgt, waiting on Jonathan" "$TMP/sa-t8" "a 'Deadline: <time>' target has no stamp" quiet
+sa_tgt "WORKING $nowt until $tgt, due $tgt, before $tgt" "$TMP/sa-t3" "until, due and before targets are not read as the stamp" quiet
+sa_tgt "deadline $tgt | WORKING $nowt | done: 1" "$TMP/sa-t4" "a deadline time ahead of the status time is skipped, the status time is used" quiet
+sa_tgt "WORKING $(date -d '+11 min' '+%-I:%M %p') | deadline $tgt | done: 1" "$TMP/sa-t5" "a status time that is itself ahead is still named when a deadline follows" named
 sa_watch "WORKING $(date -d '+11 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out5"
 su_again "$TMP/sa-out6"
 if grep -q '^stamp ahead' "$TMP/sa-out5" && ! grep -q '^stamp ahead' "$TMP/sa-out6" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same ahead-of-clock line is named once, across a re-armed watcher"; else echo "FAIL repeated stamp naming: first=$(cat "$TMP/sa-out5") second=$(cat "$TMP/sa-out6")"; failures=$((failures + 1)); fi
@@ -991,6 +1010,18 @@ out=$(nt_run)
 if printf '%s\n' "$out" | grep -qx 'note: 2026-11-01 14:00 | Waiting on Hatch: something new | detail | r-4444444444' \
    && ! printf '%s\n' "$out" | grep -q 'Peer line NX-01'; then echo "ok   on NX-01 the watcher reads hub-inbox.md, not peer-inbox.md"
 else echo "FAIL NX-01 inbox choice: $out"; failures=$((failures + 1)); fi
+
+# 6 Nov 2026: the hub started the watcher inside a lane worktree; the lane removed it after its merge and the watcher died with
+# "getcwd: cannot access parent directories". The watcher leaves its starting folder first thing, so a deleted one cannot kill it.
+gc_home="$TMP/gc-home"; mkdir -p "$gc_home/.claude/state/lanes" "$TMP/gc-gone"
+gc_real="$(cd "$gc_home" && pwd -P)"
+# --check runs in the watcher's own folder: it must be HOME, not the deleted starting folder.
+gc_rc=0; gc_out=$(cd "$TMP/gc-gone" && rmdir "$TMP/gc-gone" && HOME="$gc_home" timeout 30 bash "$SCRIPT" --max-min 1 --check "[ \"\$(pwd -P)\" = \"$gc_real\" ]" 2>&1) || gc_rc=$?
+if [ "$gc_rc" = 0 ]; then echo "ok   a watcher started in a folder that is then deleted moves to HOME"
+else echo "FAIL deleted starting folder: rc=$gc_rc out=$gc_out"; failures=$((failures + 1)); fi
+# A relative path to the script still finds its sibling scripts after the cd.
+gc_rel=$(cd "$(dirname "$SCRIPT")" && HOME="$gc_home" bash -c 'bash ./lane_watch.sh --recycle-once; echo rc=$?' 2>&1)
+if printf '%s' "$gc_rel" | grep -q 'rc=0'; then echo "ok   a watcher started by a relative path runs"; else echo "FAIL relative start: $gc_rel"; failures=$((failures + 1)); fi
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
