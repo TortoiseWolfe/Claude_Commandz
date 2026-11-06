@@ -14,6 +14,8 @@ Read-only maintenance check for the wireframe extension repo and its catalog pre
 /extension-status --traffic                 # Stars, clones, views, referrers only
 /extension-status --mentions                # External GitHub mentions only
 /extension-status owner/other-repo          # Run against a different repo
+/extension-status --since 7d                # Changes since the newest snapshot at least 7 days old
+/extension-status --no-diff                 # Absolute numbers only (the original behaviour)
 ```
 
 ## Arguments
@@ -24,6 +26,8 @@ ARGUMENTS: $ARGUMENTS
 - `--triage`: Support-needed items only (sections 1 + 4)
 - `--traffic`: Engagement metrics only (section 2)
 - `--mentions`: External mention search only (section 4)
+- `--since <N><m|h|d|w>`: compare against the newest snapshot at least that old (e.g. `7d`, `12h`, `2w`); default is the newest snapshot saved before this run
+- `--no-diff`: absolute numbers only, no comparison (the snapshot is still saved)
 - `REPO`: `owner/name` override (default: `TortoiseWolfe/spec-kit-extension-wireframe`)
 
 ---
@@ -257,6 +261,20 @@ If `--triage` / `--traffic` / `--mentions` was passed, only render that slice.
 **Never tag anyone.** Authors and handles copied from search results must never appear as a bare `@name` in anything posted to GitHub: GitHub emails them on every run (wireframe issue #4). Before posting a report or the "log is long, consider closing" cleanup note, pipe the body through `python3 scripts/neutralize-mentions.py < body.md > body.safe.md` (in the wireframe repo checkout) and post `body.safe.md` with `--body-file` (the filter puts an invisible zero-width character after each handle's `@`, so GitHub sends no email). Also write handles in inline code. The cleanup note itself names nobody. If the script is not present (override repos), write every handle in backticks by hand.
 
 Finish with a footer listing the run timestamp in the user's local time and a UTC timestamp.
+
+### 8. Snapshot and "what changed" (full runs only)
+
+Only a full report is saved and compared. A slice (`--triage`, `--traffic`, `--mentions`) has missing parts, so a diff of it would read as drops; skip this step for those.
+
+After sections 1 to 5 are gathered, put the raw answers you already fetched into one JSON object and pipe it to the helper:
+
+```bash
+# keys: repo, stars, forks, watchers, clones {count, uniques}, views {count, uniques}, issues [], prs [], mentions []
+# Leave a key out when its call failed (a 403 on traffic): the helper skips a part that either side lacks.
+python3 ~/.claude/scripts/extension_status_snapshot.py --repo <REPO> [--since 7d] [--no-diff] < snapshot.json
+```
+
+The helper saves `~/.claude/state/extension-status/<owner>-<name>/<YYYY-MM-DD-HHMM>.json`, deletes snapshots older than 90 days, and prints the change lines (`+2 stars`, `+14 clones (+6 unique)`, `1 new issue: #12 title`, `1 PR closed or gone`, `1 new external mention`). Put its output directly under the TL;DR as a `Since <time>` block. With no earlier snapshot it prints a note that this run is the starting point; show the absolute report and that note. Snapshots stay on this machine.
 
 ---
 
