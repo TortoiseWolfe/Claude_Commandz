@@ -159,6 +159,18 @@ class Refuses(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.deny(cmd % ME)
 
+    def test_a_mail_tool_is_trusted_only_as_the_very_next_word_by_absolute_path(self):
+        for cmd in ("python3 -u %s/gmail_api.py x --to %s", "python3 -c 'import requests' %s/gmail_api.py %s",
+                    "python3 -m gmail_api x --to %s", "python3 -mfoo %s/gmail_api.py --to %s", "node --require=/tmp/x.js %s/gmail_api.py %s"):
+            with self.subTest(cmd=cmd):
+                n = cmd.count("%s")
+                self.deny(cmd % ((TOOLS, ME) if n == 2 else (ME,)))
+        self.deny("cd %s && python3 gmail_api.py --to %s" % (TOOLS, ME))
+        self.deny("cd; python3 gmail_api.py --to %s" % ME)
+        self.deny("export PYTHONPATH=/tmp/evil; python3 %s/gmail_api.py --to %s" % (TOOLS, ME))
+        self.deny("source /tmp/x.sh; python3 %s/gmail_api.py --to %s" % (TOOLS, ME))
+        self.deny("FOO=1 declare -x PYTHONPATH=/tmp/e; python3 %s/gmail_api.py --to %s" % (TOOLS, ME))
+
     def test_a_mail_tool_is_not_trusted_beside_settings_that_load_other_code(self):
         for pre in ("PYTHONPATH=/tmp/evil ", "PYTHONSTARTUP=/tmp/x.py ", "NODE_OPTIONS=--require=/tmp/x.js ", "LD_PRELOAD=/tmp/x.so ",
                     "env PYTHONPATH=/tmp/evil ", "env -i "):
@@ -196,7 +208,7 @@ class Allows(unittest.TestCase):
 
     def test_the_mail_tools(self):
         self.ok("python3 %s/gmail_api.py draft-create --to %s --subject s --html f.html" % (TOOLS, ME))
-        self.ok("python3 -u %s/gmail_api.py draft-raw r123 --to %s" % (TOOLS, ME))
+        self.ok("python3 %s/gmail_api.py draft-raw r123 --to %s" % (TOOLS, ME))
         self.ok("python3 %s/calendar_api.py events --account %s" % (TOOLS, ME))
 
     def test_a_script_with_a_mail_tool_name_elsewhere_is_not_a_mail_tool(self):
@@ -306,6 +318,7 @@ class Settings(unittest.TestCase):
             cmd = bash("python3 mymail.py", cwd=d)
             r, _ = self.run_hook(cmd, config={"addresses": [ME]})
             self.assertEqual(r.returncode, 2)
+            cmd = bash("python3 %s/mymail.py" % d, cwd="/tmp")
             r, _ = self.run_hook(cmd, config={"addresses": [ME], "allow_scripts": ["mymail.py"]}, scripts_dir=d)
             self.assertEqual(r.returncode, 0)
 

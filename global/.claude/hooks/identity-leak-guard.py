@@ -45,8 +45,10 @@ SCRIPTS_DIR = "~/.claude/scripts"
 NOT_A_FILE = ("-", "<", "$", "(", ">", "|", ";", "&")
 SEPARATOR = re.compile(r"\|\||&&|[;|&]")
 # Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
-INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+|DENO_\w+|LD_\w+|DYLD_\w+)=|(?:^|[\s;&|(])env\s")
+INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+|DENO_\w+|LD_\w+|DYLD_\w+)\b|(?:^|[\s;&|(])(?:env|source|export|declare|typeset)\s|(?:^|[;&|(]\s*)\.\s")
+CHANGES_FOLDER = re.compile(r"\b(?:cd|pushd|popd|chdir)\b")
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
+INLINE_PREFIXES = ("-c", "-m", "-e", "-E", "-p", "-r", "--eval", "--print", "--require", "--import", "--loader", "--input-type")
 
 WHY = (
     "This call would send the account owner's email address to a website. Claude Code has been reported putting that "
@@ -181,17 +183,21 @@ def sinks(cmd, cwd, allowed):
     """Network sinks in the command: names as strings, or ("script file", text) for a script that uses the network.
     A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink.
     Only the words up to the next shell separator belong to the interpreter. A mail tool is skipped only when it is the
-    script itself (the first word that is not an option) and nothing in the line can change what the interpreter loads."""
+    script itself (the very next word after the interpreter, named by an absolute path) and nothing in the line can change what
+    the interpreter loads or where it looks."""
     found = []
     if CLIENT_RE.search(cmd):
         found.append("network client")
-    hijackable = bool(INTERPRETER_ENV.search(cmd))
+    # A mail tool is trusted only when nothing in the line can change what runs: no folder change, no interpreter settings.
+    hijackable = bool(INTERPRETER_ENV.search(cmd) or CHANGES_FOLDER.search(cmd))
     for m in INTERP_RE.finditer(cmd):
         toks = SEPARATOR.split(m.group("rest"))[0].split()
         words = [t.strip("'\"") for t in toks if not t.startswith(NOT_A_FILE)]
-        inline = any(t in INLINE_FLAGS for t in toks) or not words
+        inline = any(t.startswith(INLINE_PREFIXES) for t in toks) or not words
         if inline and NETWORK_CODE.search(cmd):
             found.append("inline code that uses the network")
+        if any(t.startswith("-m") for t in toks):
+            found.append("a module this hook can't read")
         if cd_unfollowable(cmd):
             found.append("a folder change this hook can't follow")
         files = candidate_files(toks, cwd, cmd)
@@ -201,7 +207,8 @@ def sinks(cmd, cwd, allowed):
             continue
         first = words[0] if words and not inline else None
         for tok, path in files:
-            if tok == first and not hijackable and is_allowed_tool(path, allowed):
+            if tok == first and toks and toks[0].strip("'\"") == first and os.path.isabs(os.path.expanduser(first)) \
+                    and not hijackable and is_allowed_tool(path, allowed):
                 continue
             try:
                 with open(path, errors="replace") as f:
