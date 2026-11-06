@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Warn the hub before its context reaches the hand-off line (330K tokens by default, the last tenth before auto-compact at 367K; Jonathan 31 Oct at 157K: "still too soon, fifty seven percent left").
 
-The hub (cwd = ~/repos) gets a short "Hub context: NNNK of 367K" line on every call, plus three tiers.
+The hub (cwd = ~/repos) gets a short "Hub context: NNNK of 367K" line once per prompt, plus three tiers.
+The line comes with the UserPromptSubmit event; a PostToolUse call prints it only when no prompt event has shown it in this session
+(a resumed session's first tool call), because every print lands in the hub's own context (issue 224, 5 Nov 2026: it printed after
+every tool call). A tier warning still arrives on whichever event first sees the crossing, with the line above it.
 All come from absolute token counts, not percentages of an auto-compaction window:
   - AFA_HANDOFF_START_K (default 250): "start the running hand-off file now", once per session;
   - hand-off line minus 20K (310K by default): "start wrapping up", once per session;
@@ -105,10 +108,21 @@ def main():
 
         state_dir = Path(os.path.expanduser(os.environ.get("AFA_STATE_DIR", "~/.claude/state")))
         stamp = state_dir / ("context-warn." + session_id)
+        # Once per prompt: UserPromptSubmit always shows the line and leaves a mark; PostToolUse shows it only when there is no mark yet.
+        line_mark = state_dir / ("context-line." + session_id)
+        is_prompt = payload.get("hook_event_name") == "UserPromptSubmit"
+        show_line = is_prompt or not line_mark.exists()
+        if show_line:
+            try:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                line_mark.write_text("1", encoding="ascii")
+            except OSError:
+                pass
         # Reset the stamp when below the lowest warning point
         if size < min(thresholds_k) * 1000:
             stamp.unlink(missing_ok=True)
-            # Still show the per-turn line
+            if not show_line:
+                return 0
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": payload.get("hook_event_name"),
@@ -150,6 +164,8 @@ def main():
 
         if extra:
             message += "\n" + extra
+        elif not show_line:
+            return 0
 
         print(json.dumps({
             "hookSpecificOutput": {

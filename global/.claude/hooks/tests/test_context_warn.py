@@ -53,7 +53,7 @@ class ContextWarnTests(unittest.TestCase):
             contents += "\n"
         self.transcript.write_text(contents, encoding="utf-8")
 
-    def call_hook(self, *, cwd=None, event="PostToolUse", session=None, extra_env=None):
+    def call_hook(self, *, cwd=None, event="UserPromptSubmit", session=None, extra_env=None):
         env = os.environ.copy()
         env.update({
             "AFA_HUB_DIR": str(self.hub),
@@ -127,6 +127,44 @@ class ContextWarnTests(unittest.TestCase):
         self.assertIn("start wrapping up", seen[2])
         self.assertIn("hand off and end", seen[3])
         self.assertIn("hand off and end", seen[4])
+
+    def test_line_prints_once_per_prompt_not_after_every_tool_call(self):
+        # Issue 224: the line printed after every tool call; every print lands in the hub's own context.
+        self.write_transcript((100_000, 0, 0))
+        first = self.warning(self.call_hook(event="UserPromptSubmit"))["additionalContext"]
+        self.assertEqual(first, "Hub context: 100K of 367K")
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+        self.write_transcript((101_000, 0, 0))
+        second = self.warning(self.call_hook(event="UserPromptSubmit"))["additionalContext"]
+        self.assertEqual(second, "Hub context: 101K of 367K")
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+
+    def test_first_tool_call_with_no_prompt_event_prints_the_line_once(self):
+        self.write_transcript((100_000, 0, 0))
+        self.assertEqual(self.warning(self.call_hook(event="PostToolUse"))["additionalContext"], "Hub context: 100K of 367K")
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+
+    def test_tier_warning_still_arrives_on_a_tool_call_without_the_plain_line_repeating(self):
+        self.write_transcript((100_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit")
+        self.write_transcript((250_000, 0, 0))
+        text = self.warning(self.call_hook(event="PostToolUse"))["additionalContext"]
+        self.assertIn("start the running hand-off file now", text)
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+
+    def test_handoff_warning_repeats_on_every_tool_call(self):
+        self.write_transcript((100_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit")
+        self.write_transcript((331_000, 0, 0))
+        for _ in range(2):
+            self.assertIn("hand off and end, no new work", self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+
+    def test_sessions_do_not_share_the_mark(self):
+        self.write_transcript((100_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit", session="a")
+        self.assertEqual(self.call_hook(event="PostToolUse", session="a"), "")
+        self.assertIn("Hub context", self.call_hook(event="PostToolUse", session="b"))
 
     def test_AFA_HANDOFF_START_K_setting(self):
         self.write_transcript((200_000, 0, 0))

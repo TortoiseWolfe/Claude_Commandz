@@ -1,6 +1,6 @@
 name: scripts tests
 
-# Runs the hub scripts' test suite on every push to main and every pull request.
+# Runs the hub scripts' and hooks' test suites on every push to main and every pull request.
 # Tests run with an empty HOME, so none of them can read or write a developer's live ~/.claude.
 on:
   push:
@@ -37,6 +37,19 @@ jobs:
           summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/pytest.out" | tail -n 1)"
           if [ -z "$summary" ]; then echo "::error::pytest summary missing"; exit 1; fi
           echo "Pytest summary: $summary; $skips skipped"
+      - name: hook tests (skipped tests fail the job)
+        working-directory: global/.claude/hooks
+        run: |
+          # Issue 224: the hooks' own tests live in global/.claude/hooks/tests and the step above never collected them.
+          set -o pipefail
+          export HOME="$(mktemp -d)"
+          # Wiring checks the tower's live ~/.claude/hooks/block-outbound.sh, which is private and not in this repo; a runner has no such file.
+          python3 -m pytest tests -q -p no:cacheprovider -rs --deselect tests/test_draft_recipient_guard.py::Wiring | tee "$RUNNER_TEMP/hooks-pytest.out"
+          skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/hooks-pytest.out" || true)"
+          if [ "$skips" != 0 ]; then echo "::error::unexpected skipped hook tests: $skips"; exit 1; fi
+          summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"
+          if [ -z "$summary" ]; then echo "::error::hook pytest summary missing"; exit 1; fi
+          echo "Hook pytest summary: $summary; $skips skipped"
 
   shell:
     runs-on: ubuntu-latest
