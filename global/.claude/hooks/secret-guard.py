@@ -548,9 +548,9 @@ F_GIT_TEXT = re.compile(r"insteadof|sshcommand|gitproxy|ext::|core\.(?:pager|edi
 
 
 F_GIT_SUB = {"add", "commit", "log", "status", "diff", "show", "fetch", "pull", "push", "clone", "checkout",
-             "switch", "branch", "merge", "rebase", "tag", "remote", "stash", "worktree", "rev-parse", "rev-list",
+             "switch", "branch", "merge", "tag", "remote", "stash", "worktree", "rev-parse", "rev-list",
              "ls-files", "ls-remote", "blame", "reset", "restore", "cherry-pick", "describe", "shortlog",
-             "submodule", "mv", "rm", "init", "config"}
+             "mv", "rm", "init", "config"}
 F_GH_SUB = {"api", "issue", "pr", "repo", "run", "release", "workflow", "search", "gist", "label", "browse"}
 F_GIT_CONFIG_OK = {"user.email", "user.name", "--get", "--get-all", "--list", "-l"}
 
