@@ -143,6 +143,16 @@ class Classify(unittest.TestCase):
         self.assertEqual(nc.classify("[NCC-74656>MUSE] hi", tower), ("outbound", "[NCC-74656>MUSE]"))
         self.assertEqual(nc.classify("[MUSE>CC] not the tower's", tower), (None, None))
 
+    def test_the_towers_note_to_hatch_under_the_cc_muse_tag(self):
+        # 6 Nov 2026: the tower writes to Hatch as "[CC>MUSE] NCC-74656: <topic>" (Hatch's watcher wakes only on [CC>MUSE]).
+        tower = {"NCC-74656"}
+        self.assertEqual(nc.classify("[CC>MUSE] NCC-74656: power photos"), (None, None))  # NX-01: not ours, a relay
+        self.assertEqual(nc.classify("Re: [CC>MUSE] NCC-74656: power photos"), (None, None))  # Hatch answering the tower
+        self.assertEqual(nc.classify("[CC>MUSE] NCC-74656: power photos", tower), ("outbound", "[CC>MUSE]"))
+        self.assertEqual(nc.classify("Re: [CC>MUSE] NCC-74656: power photos", tower), ("inbound", "Re: [CC>MUSE]"))
+        self.assertEqual(nc.classify("[CC>MUSE] power photos"), ("outbound", "[CC>MUSE]"))  # NX-01's own are unchanged
+        self.assertEqual(nc.classify("[CC>MUSE] NCC-74656x: nope"), ("outbound", "[CC>MUSE]"))
+
     def test_machine_file_picks_the_names(self):
         self.assertEqual(nc.my_names("NX-01"), {"NX-01", "CC"})
         self.assertEqual(nc.my_names("NCC-74656"), {"NCC-74656"})
@@ -421,6 +431,11 @@ class Relay(SweepBase):
 
     def test_the_towers_record_does_not_clear_a_note_Hatch_reads(self):
         self.fake.add("t-99", "[NCC-74656>MUSE] for Hatch", 30)
+        self.sweep_with(self.record(READ_RECORD))
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_the_towers_cc_muse_note_is_kept_until_Hatch_absorbs_it(self):
+        self.fake.add("t-98", "[CC>MUSE] NCC-74656: for Hatch", 30)
         self.sweep_with(self.record(READ_RECORD))
         self.assertEqual(self.fake.deleted, [])
 

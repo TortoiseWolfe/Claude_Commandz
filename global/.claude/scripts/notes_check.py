@@ -249,6 +249,7 @@ def check_notes(processed_path, log):
 #
 # NX-01 owns the Gmail sweeps (the tower has no Gmail token), so this sweep covers EVERY fleet tag in EVERY direction:
 # [MUSE>CC], [CC>MUSE], [NX-01>NCC-74656], [NCC-74656>NX-01], [NCC-74656>MUSE], [MUSE>NCC-74656] and any new [X>Y] pair
+# ("[CC>MUSE] NCC-74656: <topic>" is the tower's note to Hatch since 6 Nov: see parties())
 # between fleet names. Every draft is paged through (no newest-50 cap). The machine name comes from ~/.config/afa/machine
 # (NX-01 is also "CC", the name the Hatch channel uses). For a subject tag [SRC>DST] the READER is DST (SRC in a "Re:" form,
 # which the other side wrote):
@@ -306,6 +307,10 @@ def parties(subject):
     for m in _TAG_RE.finditer(subj):
         src, dst = m.group(1), m.group(2)
         if src in FLEET_NAMES and dst in FLEET_NAMES:
+            # 6 Nov 2026: the tower writes to Hatch as "[CC>MUSE] NCC-74656: <topic>" (Hatch's watcher wakes only on [CC>MUSE]).
+            # The topic's "NCC-74656:" makes it the tower's note, not NX-01's, so this sweep treats it as a relay, not our own.
+            if (src, dst) == ("CC", "MUSE") and subj[m.end():].lstrip().startswith("NCC-74656:"):
+                src = "NCC-74656"
             return m.group(0), src, dst, bool(_REPLY_RE.match(subj))
     return None
 
