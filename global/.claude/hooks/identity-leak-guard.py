@@ -42,6 +42,10 @@ LOG = "~/.claude/state/identity-guard.log"
 DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 SCRIPTS_DIR = "~/.claude/scripts"
+NOT_A_FILE = ("-", "<", "$", "(", ">", "|", ";", "&")
+SEPARATOR = re.compile(r"\|\||&&|[;|&]")
+# Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
+INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+|DENO_\w+|LD_\w+|DYLD_\w+)=|(?:^|[\s;&|(])env\s")
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
 
 WHY = (
@@ -141,44 +145,63 @@ def is_allowed_tool(path, allowed):
     return any(real == os.path.join(scripts_dir(), name) for name in allowed)
 
 
+def cd_targets(cmd):
+    return re.findall(r"\bcd\s+([^\s;&|]+)", cmd)
+
+
+def cd_unfollowable(cmd):
+    """True when the line changes folder in a way this hook can't work out: pushd, popd, cd - or a target built at run time."""
+    if re.search(r"\b(?:pushd|popd)\b", cmd):
+        return True
+    return any(d.strip("'\"") == "-" or re.search(r"[$`*?]", d) for d in cd_targets(cmd))
+
+
 def candidate_files(tokens, cwd, cmd):
-    """Every token after an interpreter that names an existing file. Looks in the working folder and in any folder the
-    command cd's into, so an option that takes a value (python -W ignore x.py) or a cd earlier in the line hides nothing."""
+    """(token, path) for every token after an interpreter that names an existing file. Looks in the working folder and in
+    any folder the command cd's into, so an option that takes a value (python -W ignore x.py) or a cd earlier in the line
+    hides nothing."""
     dirs = [cwd]
-    for d in re.findall(r"\bcd\s+([^\s;&|]+)", cmd):
+    for d in cd_targets(cmd):
         d = os.path.expanduser(d.strip("'\""))
         dirs.append(d if os.path.isabs(d) else os.path.join(cwd, d))
     out = []
     for tok in tokens:
         tok = tok.strip("'\"")
-        if not tok or tok.startswith(("-", "<", "$", "(", ">", "|", ";", "&")):
+        if not tok or tok.startswith(NOT_A_FILE):
             continue
         p = os.path.expanduser(tok)
         for base in ([""] if os.path.isabs(p) else dirs):
             q = os.path.join(base, p) if base else p
-            if os.path.isfile(q) and q not in out:
-                out.append(q)
+            if os.path.isfile(q) and (tok, q) not in out:
+                out.append((tok, q))
     return out
 
 
 def sinks(cmd, cwd, allowed):
     """Network sinks in the command: names as strings, or ("script file", text) for a script that uses the network.
-    A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink."""
+    A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink.
+    Only the words up to the next shell separator belong to the interpreter. A mail tool is skipped only when it is the
+    script itself (the first word that is not an option) and nothing in the line can change what the interpreter loads."""
     found = []
     if CLIENT_RE.search(cmd):
         found.append("network client")
+    hijackable = bool(INTERPRETER_ENV.search(cmd))
     for m in INTERP_RE.finditer(cmd):
-        toks = m.group("rest").split()
-        if any(t in INLINE_FLAGS for t in toks) or not [t for t in toks if not t.startswith(("-", "<", "$", "(", ">", "|", ";", "&"))]:
-            if NETWORK_CODE.search(cmd):
-                found.append("inline code that uses the network")
-            continue
+        toks = SEPARATOR.split(m.group("rest"))[0].split()
+        words = [t.strip("'\"") for t in toks if not t.startswith(NOT_A_FILE)]
+        inline = any(t in INLINE_FLAGS for t in toks) or not words
+        if inline and NETWORK_CODE.search(cmd):
+            found.append("inline code that uses the network")
+        if cd_unfollowable(cmd):
+            found.append("a folder change this hook can't follow")
         files = candidate_files(toks, cwd, cmd)
         if not files:
-            found.append("a script this hook can't find")
+            if not inline:
+                found.append("a script this hook can't find")
             continue
-        for path in files:
-            if is_allowed_tool(path, allowed):
+        first = words[0] if words and not inline else None
+        for tok, path in files:
+            if tok == first and not hijackable and is_allowed_tool(path, allowed):
                 continue
             try:
                 with open(path, errors="replace") as f:
@@ -190,6 +213,8 @@ def sinks(cmd, cwd, allowed):
                 found.append("a script too large to read in full")
             elif NETWORK_CODE.search(body):
                 found.append(("script file", body))
+        if first is not None and not any(t == first for t, _ in files):
+            found.append("a script this hook can't find")
     return found
 
 

