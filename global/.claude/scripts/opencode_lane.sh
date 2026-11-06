@@ -67,6 +67,16 @@ cat >"$conf" <<JSON
 JSON
 export OPENCODE_CONFIG="$conf"
 
+# A provider whose key is not on this machine is left out: opencode started on google/* with no key does not say so, it fails at once with "Unexpected
+# server error" (ref err_...), which is not a quota line, so the wrapper exited instead of trying the next provider (stw-117-ci, 6 Nov 2026: failed twice
+# on a tower with no ~/.config/gemini). opencode/* (its own free tier) needs no key and always stays, so the list is never empty.
+provider_has_key() {  # <provider>
+  case "$1" in
+    google) [ -n "${GOOGLE_GENERATIVE_AI_API_KEY:-}" ] ;;
+    openrouter) [ -n "${OPENROUTER_API_KEY:-}" ] ;;
+    *) return 0 ;;
+  esac
+}
 # Order: the requested model, then the defaults not already tried.
 models=()
 case "$want" in google/*|openrouter/*|opencode/*) models+=("$want") ;; esac  # the keyed providers loaded above, and OpenCode's keyless free tier
@@ -74,6 +84,12 @@ for m in "${DEFAULT_MODELS[@]}"; do
   seen=0; for x in "${models[@]:-}"; do [ "$x" = "$m" ] && seen=1; done
   [ "$seen" = 1 ] || models+=("$m")
 done
+keyed=()
+for m in "${models[@]}"; do
+  if provider_has_key "${m%%/*}"; then keyed+=("$m")
+  else echo "opencode: no key for ${m%%/*} on this machine (looked for the key files under ~/.config/gemini and ~/.config/openrouter); leaving out $m"; fi
+done
+models=("${keyed[@]}")
 
 # A quota or rate limit shows up as an "Error:" line; the lane's own output (test logs that say "rate limit") is not scanned.
 quota_lines() {  # <log file>: the matching Error lines, colour codes removed

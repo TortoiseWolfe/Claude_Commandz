@@ -38,6 +38,8 @@ contains() { grep -qF -- "$2" <<<"$1" || fail "$3: expected '$2' in: $1"; }
 lacks() { grep -qF -- "$2" <<<"$1" && fail "$3: did not expect '$2' in: $1"; return 0; }
 count() { grep -cFx -- "$2" "$1" || true; }
 
+# The existing cases run with both provider keys present; the keyless cases at the end remove them. (Key files hold a placeholder.)
+mkdir -p "$HOME_T/.config/gemini" "$HOME_T/.config/openrouter"; printf 'placeholder\n' >"$HOME_T/.config/gemini/api-key"; printf 'placeholder\n' >"$HOME_T/.config/openrouter/api-key"
 export HOME="$HOME_T" OPENCODE_BIN="$TMP/opencode" OPENCODE_QUOTA_DIR="$TMP/quota" OPENCODE_RETRY_SCALE=0.01 OPENCODE_LANE_POLL=0.05
 export STUB_CALLS="$TMP/calls" STUB_PLAN="$TMP/plan"
 run() {  # <plan lines...>: runs the wrapper with a fresh call log; sets OUT and STATUS
@@ -108,5 +110,31 @@ CASES=$((CASES + 1))
 [ "$STATUS" = 0 ] || fail "the keyless Zen model should rescue the run, got $STATUS: $OUT"
 [ "$(count "$STUB_CALLS" "$ZEN")" = 1 ] || fail "Zen is called once: $(cat "$STUB_CALLS")"
 lacks "$OUT" "free quota exhausted" "not exhausted while Zen answers"
+
+# 8. No Gemini key on this machine (stw-117-ci, 6 Nov 2026: opencode on google/* with no key fails at once with "Unexpected server error", which is
+# not a quota line, so the lane died instead of trying the next provider): the unkeyed providers are left out and the keyless Zen model runs.
+unset GOOGLE_GENERATIVE_AI_API_KEY OPENROUTER_API_KEY
+rm -f "$HOME_T/.config/gemini/api-key" "$HOME_T/.config/openrouter/api-key"; rm -rf "$TMP/quota"
+run
+CASES=$((CASES + 1))
+[ "$STATUS" = 0 ] || fail "with no keys the Zen model should run, got $STATUS: $OUT"
+[ "$(count "$STUB_CALLS" "$GEMINI")" = 0 ] || fail "Gemini must not be called without its key: $(cat "$STUB_CALLS")"
+[ "$(count "$STUB_CALLS" "$ROUTER")" = 0 ] || fail "OpenRouter must not be called without its key"
+[ "$(count "$STUB_CALLS" "$ZEN")" = 1 ] || fail "Zen is called once: $(cat "$STUB_CALLS")"
+contains "$OUT" "no key for google on this machine" "says why Gemini was left out"
+contains "$OUT" "leaving out $ROUTER" "says why OpenRouter was left out"
+# 9. Only OpenRouter has a key: Gemini is left out, OpenRouter runs first.
+printf 'placeholder\n' >"$HOME_T/.config/openrouter/api-key"
+run
+CASES=$((CASES + 1))
+[ "$(count "$STUB_CALLS" "$GEMINI")" = 0 ] || fail "Gemini must not be called without its key"
+[ "$(count "$STUB_CALLS" "$ROUTER")" = 1 ] && [ "$(count "$STUB_CALLS" "$ZEN")" = 0 ] || fail "OpenRouter answers: $(cat "$STUB_CALLS")"
+contains "$OUT" "leaving out $GEMINI" "Gemini is the one left out"
+lacks "$OUT" "leaving out $ROUTER" "OpenRouter has its key"
+# 10. A model asked for by name on an unkeyed provider is left out too, and the run still works.
+rm -f "$HOME_T/.config/openrouter/api-key"; : >"$STUB_CALLS"; : >"$STUB_PLAN"
+set +e; OUT="$(bash "$SCRIPT" "$REPO" "$HAND" "$ROUTER" "$PROMPT" 2>&1)"; STATUS=$?; set -e
+CASES=$((CASES + 1))
+[ "$STATUS" = 0 ] && [ "$(count "$STUB_CALLS" "$ZEN")" = 1 ] || fail "a named unkeyed model falls to Zen ($STATUS): $OUT"
 
 echo "ok: $CASES cases"
