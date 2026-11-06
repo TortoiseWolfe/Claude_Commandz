@@ -180,6 +180,9 @@ LANE_SKILLS_KEEP="
 # The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
+# The standing rule every lane is told at start and at every re-prime (6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke
+# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1.
+LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs."
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 
@@ -504,6 +507,17 @@ new_lane_session() {  # <window name> <dir>
   t set-option -t "$SESSION" default-size "${SESSION_SIZE_X}x${SESSION_SIZE_Y}"
 }
 
+# Where a session's transcript lives. Claude Code files it under the folder the lane is in WHEN the session starts, so a lane started in the
+# repo folder that moved into a worktree gets its next transcript under the worktree's folder (6 Nov 2026, #275: runit-apk-3, eduity-security
+# and sh-backlog-3 failed their recycles on this). The start folder's own file wins; otherwise the same id in any project folder.
+transcript_of() {  # <dir> <session-id>: prints the path, or nothing when no folder holds it
+  local own f
+  own="$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")/$2.jsonl"
+  [ -e "$own" ] && { echo "$own"; return 0; }
+  for f in "$PROJ"/*/"$2.jsonl"; do [ -e "$f" ] && { echo "$f"; return 0; }; done
+  return 0
+}
+
 # A lane's session is never guessed from file age: a folder like ~/repos also holds the hub's sessions and a person's own, and the newest
 # unclaimed transcript there is not the lane's (23 Oct: mac-mini-prep was handed the hub director's session). The proof is the lane's own
 # process: lane_session_hook.sh (a SessionStart hook in every lane's settings) records the session id against AFA_LANE_NAME, and the pane it
@@ -528,12 +542,13 @@ proven_session() {  # <name> <start-epoch>
 session_with_text() {  # <dir> <start-epoch> <text>
   local slug f b
   slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")"
-  [ -d "$PROJ/$slug" ] || return 0
+  [ -d "$PROJ" ] || return 0
+  # The lane's own folder first, then every other project folder: after a move into a worktree the new transcript is under the worktree's.
   while IFS= read -r f; do
     b="$(stat -c %W "$f")"; [ "$b" -gt 0 ] || b="$(stat -c %Y "$f")"
     [ "$b" -ge $(( $2 - 2 )) ] || continue
     if grep -qF -- "$3" "$f" 2>/dev/null; then basename "$f" .jsonl; return 0; fi
-  done < <(ls -t "$PROJ/$slug"/*.jsonl 2>/dev/null)
+  done < <({ ls -t "$PROJ/$slug"/*.jsonl 2>/dev/null; ls -t "$PROJ"/*/*.jsonl 2>/dev/null | grep -vF -- "$PROJ/$slug/"; } 2>/dev/null)
 }
 
 # Fill blank session ids in the index (column 8) where a transcript can be found.
@@ -617,11 +632,10 @@ follow_session_locked() {  # <name> <session-id>: point the lane's last row at t
     && index_commit "$tmp" || rm -f "$tmp"
 }
 follow_session() {  # <name> <dir> <session-id> <start-epoch>
-  local name="$1" dir="$2" id="$3" start="${4:-0}" slug best
+  local name="$1" dir="$2" id="$3" start="${4:-0}" best
   { [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -s "$INDEX" ]; } || { echo "$id"; return 0; }
-  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
   best="$(proven_session "$name" "$start")"
-  if [ -z "$best" ] || [ "$best" = "$id" ] || [ ! -e "$PROJ/$slug/$best.jsonl" ]; then echo "$id"; return 0; fi
+  if [ -z "$best" ] || [ "$best" = "$id" ] || [ -z "$(transcript_of "$dir" "$best")" ]; then echo "$id"; return 0; fi
   index_locked follow_session_locked "$name" "$best" || true
   echo "$best"
 }
@@ -796,10 +810,10 @@ agy_model() {
   esac
 }
 
-# OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads; anything else (a Claude alias) is the free default.
+# OpenCode's own provider/model names pass through when they are on a provider whose free key opencode_lane.sh loads, or opencode/ (its keyless free tier); anything else (a Claude alias) is the free default.
 opencode_model() {
   case "$1" in
-    google/*|openrouter/*) printf '%s' "$1" ;;
+    google/*|openrouter/*|opencode/*) printf '%s' "$1" ;;
     *) printf 'google/gemini-3-flash-preview' ;;
   esac
 }
@@ -1121,20 +1135,19 @@ print(",".join(out))
 # yes / input / job / no for a lane's report: "yes" only when report.md is newer than everything the lane was told and no background job
 # is running (lane_report_state.py reads the transcript). 19 Oct: "report:yes idle" got a lane closed mid-work.
 report_word() {  # <report.md> <dir> <session-id>
-  local rep="$1" dir="$2" id="$3" slug st
+  local rep="$1" dir="$2" id="$3" st tf=""
   [ -n "$rep" ] && [ -s "$rep" ] || { echo no; return 0; }
-  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")"
-  if [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ] && [ -r "$PROJ/$slug/$id.jsonl" ]; then
-    st="$(python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_report_state.py" "$rep" "$PROJ/$slug/$id.jsonl" 2>/dev/null || echo '?')"
+  if [ -n "$id" ] && [ "$id" != - ] && [ "$id" != "?" ]; then tf="$(transcript_of "$dir" "$id")"; fi
+  if [ -n "$tf" ] && [ -r "$tf" ]; then
+    st="$(python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_report_state.py" "$rep" "$tf" 2>/dev/null || echo '?')"
     case "$st" in input|job) echo "stale:$st"; return 0 ;; esac
   fi
   echo yes
 }
 ctx_k() {  # <dir> <session-id>
-  local f slug
-  slug="$(sed 's/[^A-Za-z0-9]/-/g' <<<"$1")"
-  f="$PROJ/$slug/$2.jsonl"
-  [ -r "$f" ] || { echo "?"; return 0; }
+  local f
+  f="$(transcript_of "$1" "$2")"
+  [ -n "$f" ] && [ -r "$f" ] || { echo "?"; return 0; }
   tail -n 400 "$f" | python3 -I -c '
 import sys, json
 last = None
@@ -1351,11 +1364,16 @@ send_to() {  # <name> <text...>
       python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")" "${sid:--}" "$text" "${LANE_SEND_NEW_SINCE:-}" "$INDEX" "$name" <<'PY' && return 0
 import json, os, sys
 proj, sid, want, since, index, me = sys.argv[1], sys.argv[2], " ".join(sys.argv[3].split())[-120:], sys.argv[4], sys.argv[5], sys.argv[6]
+# A lane that moved into a worktree gets its transcripts under the worktree's folder (#275), so every project folder is read, not only the
+# one named for the folder the lane started in.
+root = os.path.dirname(proj)
 try:
-    files = [os.path.join(proj, f) for f in os.listdir(proj) if f.endswith(".jsonl")]
+    files = [os.path.join(d, f) for d in (os.path.join(root, x) for x in os.listdir(root)) if os.path.isdir(d) for f in os.listdir(d) if f.endswith(".jsonl")]
 except OSError:
     sys.exit(1)
 own = os.path.join(proj, sid + ".jsonl")
+if not os.path.exists(own):
+    own = next((f for f in files if os.path.basename(f) == sid + ".jsonl"), own)
 keep = [f for f in files if f == own]
 if since.isdigit():
     claimed = set()
@@ -1604,7 +1622,7 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
   id="$(follow_session "$1" "$dir" "$id" "${st:-0}")"
   if [ "$mode" = turn ]; then
-    f="$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")/$id.jsonl"
+    f="$(transcript_of "$dir" "$id")"
     python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_turn_kind.py" "$f" 2>/dev/null || echo "?"
     exit 0
   fi
@@ -1650,7 +1668,7 @@ if [ "$mode" = recycle ]; then
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
-    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one."
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. $LANE_STANDING_RULE"
   }
   msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
@@ -1730,7 +1748,7 @@ if [ "$mode" = recycle ]; then
   # dequeue when it runs and popAll when Escape puts it back in the input line. queue_pending counts what is still queued.
   queue_pending() {
     [ -n "${id:-}" ] && [ "$id" != - ] || { echo 0; return; }
-    python3 -I - "$PROJ/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$dir")/$id.jsonl" <<'PY'
+    python3 -I - "$(transcript_of "$dir" "$id")" <<'PY'
 import json, sys
 q = []
 try:
@@ -1832,7 +1850,16 @@ PY
     fi
   fi
   msg_reprime="$(build_reprime)"   # a --send that arrived while the recycle ran has left hub-pending.md by now
-  LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null || rfail "the lane was cleared but the re-prime message did not reach it; send it by hand: $msg_reprime"
+  # The re-prime is the one message that must land (#275: sh-backlog-3 was cleared and the message never reached it). A failed send is retried
+  # twice, but only after looking in every project folder for the words: a message that did land under a worktree's folder is not typed again.
+  reprime_tail="${msg_reprime##*$'\n'}"; [ -n "$reprime_tail" ] || reprime_tail="$msg_reprime"
+  for attempt in 1 2 3; do
+    if LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null; then break; fi
+    if [ -n "$(session_with_text "$dir" "$clear_at" "$reprime_tail")" ]; then break; fi
+    [ "$attempt" -lt 3 ] || rfail "the lane was cleared but the re-prime message did not reach it after 3 tries; send it by hand: $msg_reprime"
+    printf '%s\t%s\tREPRIME-RETRY\ttry %s did not land; typing it again\n' "$(date -Is)" "$name" "$attempt" >>"$rlog"
+    sleep 3
+  done
 
   newid=""
   for _ in $(seq 1 20); do
@@ -2231,7 +2258,7 @@ fi
 eff="-"; flags=""; conn="-"; rk=""
 # Claude gets a short fixed message naming the prompt file, never the prompt text: the text would sit on claude's command line, and a lane
 # that ran pgrep -f with words from its own prompt killed itself (28 Oct 2026). The hand-off folder is already an --add-dir.
-lane_msg="Your task is in $lprompt. Read that whole file now and follow it. report.md line 1 changes only when the hub must act (done, blocked, a step for Jonathan); routine status goes to status.md in the same folder, or a line starting HOURLY or STATUS."
+lane_msg="Your task is in $lprompt. Read that whole file now and follow it. report.md line 1 changes only when the hub must act (done, blocked, a step for Jonathan); routine status goes to status.md in the same folder, or a line starting HOURLY or STATUS. $LANE_STANDING_RULE"
 if [ "$engine" = claude ]; then
   conn="$(lane_connectors "$name" "$prompt")"
   # A restart keeps the lane's last recycle line unless --recycle-at is given (28 Oct 2026: a restart reset 120K to 100K and the lane recycled two minutes later).

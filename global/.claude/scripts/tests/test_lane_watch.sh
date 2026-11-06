@@ -5,6 +5,7 @@ set -euo pipefail
 export AFA_ENGINES_AVAILABLE="*"
 # The idle heartbeat stretch (tests/test_lane_watch_quiet.sh covers it) would turn every "--max-min 0" run here into a two-hour wait.
 export LANE_WATCH_IDLE_MAX_MIN=0
+export LANE_WATCH_IDLE_REMIND_MIN=0   # off for the older cases; the idle-reminder cases below turn it on
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_watch.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-watch.XXXXXX")"
@@ -671,6 +672,39 @@ if grep -q 'background job still running' "$TMP/jb-out3"; then echo "ok   a late
 LANE_WATCH_JOB_IDLE_MIN=90 job_case "LANE_WATCH_JOB_IDLE_MIN raises the line (45 min is under 90)" no job 45
 rm -f "$rl_dir"/.jobidle-*; : > "$JOB_FILE"; rl_reset
 echo "ok   (job-idle cases done)"
+
+# 6 Nov 2026 (Jonathan: "we have to big of a backlog to idle on smoke breaks"): a lane idle 20+ minutes whose report.md line 1 is not
+# QUEUE EMPTY or BLOCKED is named again every 20 minutes while it stays idle, across re-armed watchers.
+remind_case() { # remind_case <label> <want yes|no> <idle min> <report line 1> [pane]
+  local label=$1 want=$2 got=no
+  mkdir -p "$rl_hand"; rl_reset; rm -f "$rl_dir"/.idleremind-*; printf '%s' "none" > "$JOB_FILE"
+  printf '%s\n' "$4" > "$rl_hand/report.md"
+  if [ -n "${5:-}" ]; then printf '%s\n' "$5" > "$RC_PANE"; else job_pane "$3" > "$RC_PANE"; fi
+  LANE_WATCH_IDLE_REMIND_MIN="${REMIND_MIN:-20}" rl_watch 95 5 "$TMP/rm-out"
+  grep -q '^idle: rl has been idle [0-9]* min and its report line 1 is not QUEUE EMPTY or BLOCKED' "$TMP/rm-out" && got=yes
+  if [ "$got" = "$want" ]; then echo "ok   $label"; else echo "FAIL $label: want $want, got $got: $(cat "$TMP/rm-out")"; failures=$((failures + 1)); fi
+}
+remind_case "a lane idle 25 minutes with MERGE on line 1 is named" yes 25 "MERGE Claude_Commandz #1 (green)"
+grep -q 'idle 2[4-6] min' "$TMP/rm-out" && echo "ok   the line names the idle minutes" || { echo "FAIL remind minutes: $(cat "$TMP/rm-out")"; failures=$((failures + 1)); }
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/rm-out2"
+if ! grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/rm-out2"; then echo "ok   a re-armed watcher does not name it again inside the 20 minutes"; else echo "FAIL remind named twice at once: $(cat "$TMP/rm-out2")"; failures=$((failures + 1)); fi
+done_epoch=$(cut -d' ' -f1 "$rl_dir/.idleremind-rl")
+printf '%s %s' "$done_epoch" "$(( $(date +%s) - 21 * 60 ))" > "$rl_dir/.idleremind-rl"
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/rm-out3"
+if grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/rm-out3"; then echo "ok   21 minutes after the last naming, the same idle stretch is named again"; else echo "FAIL remind not repeated: $(cat "$TMP/rm-out3")"; failures=$((failures + 1)); fi
+printf '%s %s' "$done_epoch" "$(( $(date +%s) - 5 * 60 ))" > "$rl_dir/.idleremind-rl"
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/rm-out4"
+if ! grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/rm-out4"; then echo "ok   5 minutes after the last naming, it is not named yet"; else echo "FAIL remind too soon: $(cat "$TMP/rm-out4")"; failures=$((failures + 1)); fi
+remind_case "QUEUE EMPTY on line 1 is left alone" no 90 "QUEUE EMPTY: nothing left in the queue"
+remind_case "BLOCKED on line 1 is left alone" no 90 "BLOCKED (hub: needs the Deck token)"
+remind_case "an empty report.md counts as no QUEUE EMPTY, so the lane is named" yes 40 ""
+remind_case "idle only 10 minutes is left alone" no 10 "MERGE Claude_Commandz #1"
+remind_case "a lane still working (spinner) is left alone" no 0 "MERGE x" "$(printf '%s\n' '⏺ Waiting' '✻ Thinking… (12s · esc to interrupt)' '✻ Worked for 1m 9s · done 1:09 AM' '❯ ')"
+remind_case "a lane stuck on a dialog is left to the dialog check" no 0 "MERGE x" "$(printf '%s\n' '✻ Worked for 1m 9s · done 1:09 AM' 'Do you want to proceed?' 'Esc to cancel')"
+REMIND_MIN=0 remind_case "LANE_WATCH_IDLE_REMIND_MIN=0 turns the reminder off" no 90 "MERGE x"
+REMIND_MIN=60 remind_case "LANE_WATCH_IDLE_REMIND_MIN raises the line (25 minutes is under 60)" no 25 "MERGE x"
+rm -f "$rl_dir"/.idleremind-*; : > "$rl_hand/report.md"; rl_reset
+echo "ok   (idle-reminder cases done)"
 
 # Spend alarm: a lane past the limit today wakes the hub once per lane per day; the ledger is asked no more than every few minutes.
 sp_home="$TMP/sp-home"; mkdir -p "$sp_home/.claude/state/lanes"

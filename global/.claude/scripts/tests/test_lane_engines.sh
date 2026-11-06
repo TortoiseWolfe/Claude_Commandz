@@ -251,6 +251,13 @@ assert_exit 0 "$LAST_STATUS" 'agy dry run works'
 assert_contains "$LAST_OUTPUT" 'agy\ -p\ ' 'agy dry run prints the command'
 assert_not_contains "$LAST_OUTPUT" 'dangerously-skip-permissions' 'agy dry run never skips permissions'
 
+# 6 Nov 2026: every lane is told the standing rule at start (start the next queue item at once; end a turn only with QUEUE EMPTY or BLOCKED).
+run_lane --dry-run claude-rule-lane "$REPO" sonnet "$PROMPT"
+assert_exit 0 "$LAST_STATUS" 'a claude start dry run works'
+plain_start="$(printf '%s' "$LAST_OUTPUT" | tr -d '\\')"   # a dry run shell-quotes the command more than once: drop the backslashes
+assert_contains "$plain_start" 'Standing rule: when a step finishes, start the next item in your queue at once.' 'the start message carries the standing rule'
+assert_contains "$plain_start" 'End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1.' 'the start message names QUEUE EMPTY and BLOCKED'
+
 # Sending follow-up text to one-shot lanes must stop before touching their tmux window.
 run_lane --send codex-lane 'echo should-not-be-sent'
 assert_exit 1 "$LAST_STATUS" 'Codex lane refuses --send'
@@ -304,7 +311,7 @@ assert_not_contains "$(cat "$OC_HAND/out.log")" 'free quota exhausted' 'a lane w
 case "$(grep -P '\toc-lane\t' "$HOME_TEST/.claude/state/lanes/index.tsv")" in *$'\topencode\t'*) checks=$((checks + 1)) ;; *) fail 'the index row says billing opencode' ;; esac
 
 # Model mapping: provider/model names on a provider whose key the wrapper loads pass through, anything else is the free default.
-for pair in google/gemini-3.8-flash=google/gemini-3.8-flash openrouter/nvidia/nemotron-3-ultra-550b-a55b:free=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free groq/openai/gpt-oss-120b=google/gemini-3-flash-preview opus=google/gemini-3-flash-preview; do
+for pair in opencode/big-pickle=opencode/big-pickle google/gemini-3.8-flash=google/gemini-3.8-flash openrouter/nvidia/nemotron-3-ultra-550b-a55b:free=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free groq/openai/gpt-oss-120b=google/gemini-3-flash-preview opus=google/gemini-3-flash-preview; do
   run_lane --dry-run --engine opencode "oc-map" "$REPO" "${pair%%=*}" "$PROMPT"
   assert_exit 0 "$LAST_STATUS" "opencode accepts model ${pair%%=*}"
   case "$LAST_OUTPUT" in *"$(printf %q "${pair#*=}")"*) checks=$((checks + 1)) ;; *) fail "opencode model ${pair%%=*} should map to ${pair#*=}: $LAST_OUTPUT" ;; esac
@@ -325,7 +332,7 @@ assert_not_contains "$OC_FB" 'free quota exhausted' 'one provider left means not
 assert_contains "$OC_FB" 'exit 0' 'the fallback run ends with exit 0'
 [ "$(grep -c '' "$TMP/opencode-calls")" = 2 ] || fail 'the fallback calls opencode twice'
 : >"$TMP/opencode-calls"
-OPENCODE_QUOTA_MODELS="google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" run_lane --engine opencode oc-exhausted "$REPO" sonnet "$PROMPT"
+OPENCODE_QUOTA_MODELS="google/gemini-3-flash-preview openrouter/nvidia/nemotron-3-ultra-550b-a55b:free opencode/big-pickle" run_lane --engine opencode oc-exhausted "$REPO" sonnet "$PROMPT"
 OC_EX="$(cat "$HOME_TEST/.claude/state/lanes/$(date +%F)-oc-exhausted/out.log")"
 assert_contains "$OC_EX" 'opencode: free quota exhausted on every provider' 'both providers out ends with the line the dispatcher reads'
 assert_not_contains "$OC_EX" 'exit 0' 'an exhausted opencode lane does not exit 0'
