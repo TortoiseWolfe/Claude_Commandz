@@ -130,6 +130,22 @@ class TextFormats(Fixture):
         self.assertNotIn("abcdef", out)
         self.assertIn("hello world", out)
 
+    def test_password_line_in_markdown(self):
+        # CLAUDE.md files list test logins as "- Password: `value`" next to the test email; the code span
+        # used to read as a shell substitution and the value printed in clear. Fake value only.
+        fake = "Fake-Pw-0000-xyz"
+        p = self.write("CLAUDE.md", (
+            "- Email: test@example.com\n- Password: `%s`\n- **Password**: `%s`\n- Password: %s\n"
+            "Email: test@example.com / Password: `%s`\nSign in as test@example.com, password: \"%s\" now\n"
+            "- Password: $TEST_PASSWORD\n- Password: `$TEST_PASSWORD`\nA password manager is fine.\n") % ((fake,) * 5))
+        out = self.run_cli(p).stdout
+        self.assertNotIn(fake, out)
+        self.assertEqual(out.count("<redacted:"), 5)  # one on each of the first five lines
+        self.assertIn("test@example.com", out)
+        self.assertIn("$TEST_PASSWORD", out)
+        self.assertIn("A password manager is fine.", out)
+        self.assertNotIn(fake, self.run_cli(p, "--keys-only").stdout)
+
     def test_text_keys_only(self):
         p = self.write(".env", "A_TOKEN=%s\nB=1\n" % PW)
         out = self.run_cli(p, "--keys-only").stdout
