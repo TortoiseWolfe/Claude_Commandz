@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for lane.sh --update and --behind (6 Nov 2026: Claude Code 2.1.319 landed while 10 of 14 running sessions were on 2.1.318).
-# Fake lanes are real processes: a copy of sleep named by version (versions/2.1.318), started through a symlink called "claude" under a pane
+# Fake lanes are real processes: a copy of bash named by version (versions/2.1.318), started through a symlink called "claude" under a pane
 # shell, so /proc/<pid>/exe and comm look like Claude Code's. A fake tmux keeps the window list and plays the lane (it writes handoff.md when
 # it is asked). Nothing here touches a real lane; only the fake processes this script started are ended, by exact PID.
 set -euo pipefail
@@ -17,7 +17,8 @@ cleanup() {  # only processes this test started, by exact PID
 }
 trap cleanup EXIT
 trap 'echo "test_lane_update.sh: died at line $LINENO: $BASH_COMMAND" >&2' ERR   # a set -e exit must say where
-cp /bin/sleep "$VER/2.1.318"; cp /bin/sleep "$VER/2.1.319"; cp /bin/bash "$VER/2.1.320"   # 2.1.320 is bash: a "claude" that ignores SIGTERM
+# Fakes are copies of bash, not sleep: the CI runner's sleep is a multi-call binary that refuses to run under another name (6 Nov 2026).
+cp /bin/bash "$VER/2.1.318"; cp /bin/bash "$VER/2.1.319"; cp /bin/bash "$VER/2.1.320"   # 2.1.320 ignores SIGTERM
 mkdir -p "$TMP/p318" "$TMP/p319" "$TMP/p320"
 ln -s "$VER/2.1.318" "$TMP/p318/claude"; ln -s "$VER/2.1.319" "$TMP/p319/claude"; ln -s "$VER/2.1.320" "$TMP/p320/claude"
 printf '#!/usr/bin/env bash\necho "2.1.319 (Claude Code)"\n' >"$BIN/claude"; chmod +x "$BIN/claude"
@@ -29,7 +30,7 @@ name="$1"; vdir="$2"; ST="$3"
 if [ "$vdir" = p320 ]; then
   bash -c "\"$4/$vdir/claude\" -c 'trap \"\" TERM; while :; do /bin/sleep 1; done' & wait" >/dev/null 2>&1 &
 else
-  bash -c "\"$4/$vdir/claude\" 300 & wait" >/dev/null 2>&1 &
+  bash -c "\"$4/$vdir/claude\" -c 'while :; do /bin/sleep 1; done' & wait" >/dev/null 2>&1 &
 fi
 echo $! >"$ST/pid-$name"; echo $! >>"$ST/pids"
 for _ in $(seq 1 50); do [ -n "$(pgrep -P "$(cat "$ST/pid-$name")" 2>/dev/null)" ] && break; /bin/sleep 0.1; done
@@ -156,7 +157,7 @@ rm -f "$ST/sent.log"; touch -d '10 minutes ago' "$HAND/report.md" "$HAND/handoff
 # The full roll: hand-off, exact-PID stop, window closed, restart with the row's settings, new process on the installed version.
 BEFORE_ROWS="$(wc -l <"$INDEX")"
 T0=$(date +%s)
-LANE_UPDATE_TERM_SECS=60 FAKE_WRITE_HANDOFF=1 lane --update up-lane
+LANE_UPDATE_WAIT_SECS=20 LANE_UPDATE_TERM_SECS=60 FAKE_WRITE_HANDOFF=1 lane --update up-lane
 T1=$(date +%s)
 [ "$LAST_RC" = 0 ] || fail "the roll succeeds ($LAST_OUT)"; ok
 # SIGTERM alone ends a normal claude: the roll must not sit out the SIGKILL wait.
@@ -183,7 +184,7 @@ row stub-lane subscription; printf 'stub-lane\ncur-lane\n' >"$ST/windows"
 bash "$TMP/spawn.sh" stub-lane p320 "$ST" "$TMP"; STUBPID="$(claude_of stub-lane)"
 # 2.1.320 is "newer" than the installed 2.1.319, which is still a mismatch worth rolling
 rm -f "$ST/kills.log"; touch -d '10 minutes ago' "$HAND/report.md"
-LANE_UPDATE_TERM_SECS=2 FAKE_WRITE_HANDOFF=1 lane --update stub-lane
+LANE_UPDATE_WAIT_SECS=20 LANE_UPDATE_TERM_SECS=2 FAKE_WRITE_HANDOFF=1 lane --update stub-lane
 [ "$LAST_RC" = 0 ] || fail "a TERM-proof process is still rolled ($LAST_OUT)"; ok
 alive "$STUBPID" && fail "the TERM-proof process was not ended"; ok
 alive "$CURPID" || fail "SIGKILL reached another lane"; ok
