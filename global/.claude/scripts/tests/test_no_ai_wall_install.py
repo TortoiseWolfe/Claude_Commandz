@@ -25,6 +25,7 @@ OLD_SETTINGS = {
 }
 OLD_LANE = "#!/usr/bin/env bash\n# old launcher\n. \"$SCRIPT_DIR/no_ai_wall.sh\"\n"
 NEW_LANE = "#!/usr/bin/env bash\n# new launcher\n. \"$HOME/.claude/no-ai-wall/no_ai_wall.sh\"\n"
+NO_WALL_LANE = "#!/usr/bin/env bash\n# a launcher that does not read the wall at all\n"
 
 
 def run(cmd, **kw):
@@ -102,10 +103,15 @@ class InstallTests(unittest.TestCase):
                 out[rel] = (open(p, "rb").read(), stat.S_IMODE(os.stat(p).st_mode))
         return out
 
-    def install(self, sha=None, script=INSTALL):
+    def install(self, sha=None, script=INSTALL, flags=("--with-tooling",)):
+        """Runs the installer. Most tests here exercise step 6 (the other global files), which only runs with --with-tooling, so that is the
+        default for this helper; install_default() runs it the way the one command does, wall only."""
         env = {k: v for k, v in os.environ.items() if k not in ("NO_AI_PATHS_FILE", "NO_AI_REFUSAL_LOG", "PYTHONPATH")}
         env.update(HOME=self.home, WALL_INSTALL_REPO=self.repo)
-        return run(["bash", script, sha or self.B], env=env, cwd=self.tmp)
+        return run(["bash", script, *flags, sha or self.B], env=env, cwd=self.tmp)
+
+    def install_default(self, sha=None):
+        return self.install(sha, flags=())
 
     def last(self, r):
         return r.stdout.strip().splitlines()[-1]
@@ -132,6 +138,51 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(open(os.path.join(self.live, "state/install-global-commit")).read().strip(), self.B)
         self.assertNotIn("install.sh", os.listdir(wall))  # the installer and its smoke test stay in the repo
         self.assertNotIn("smoke.py", os.listdir(wall))
+
+    # -- the default run moves the wall and nothing else (6 Nov 2026: step 6 is opt-in, because an all-at-once copy broke lane.sh)
+    def test_default_run_moves_only_the_wall_and_skips_the_other_global_files(self):
+        self.put_live("scripts/lane.sh", NO_WALL_LANE + "# a live edit that must stay\n")
+        before = self.snapshot()
+        r = self.install_default()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^WALL OK %s refused (\d+)/\1 ordinary (\d+)/\2$" % self.B[:7])
+        wall = os.path.join(self.live, "no-ai-wall")
+        self.assertEqual(sorted(os.listdir(wall)), sorted(WALL_FILES))
+        for gone in ("hooks/no-ai-wall-guard.py", "scripts/no_ai_wall.py", "scripts/no_ai_wall.sh"):
+            self.assertFalse(os.path.exists(os.path.join(self.live, gone)), gone)
+        after = self.snapshot()
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        self.assertEqual(changed, sorted(["settings.json", "hooks/no-ai-wall-guard.py", "scripts/no_ai_wall.py", "scripts/no_ai_wall.sh",
+                                          *("no-ai-wall/" + f for f in WALL_FILES)]))  # lane.sh, install_global.py and the install record untouched
+        self.assertEqual(open(os.path.join(self.live, "state/install-global-commit")).read().strip(), self.A)
+        self.assertIn("--with-tooling", r.stdout)  # it says how to include the rest
+
+    def test_default_run_backs_up_only_what_it_changes_and_the_undo_restores_it(self):
+        self.put_live("scripts/lane.sh", NO_WALL_LANE)
+        before = self.snapshot()
+        r = self.install_default()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        bk = os.path.join(self.live, "state", "no-ai-wall-backups", self.backups()[0])
+        manifest = open(os.path.join(bk, "manifest.tsv")).read()
+        self.assertNotIn("lane.sh", manifest)
+        self.assertNotIn("install_global.py", manifest)
+        u = run(["bash", os.path.join(bk, "undo.sh")])
+        self.assertEqual(u.returncode, 0, u.stdout + u.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_default_run_still_refuses_when_the_live_launcher_reads_the_old_folder(self):
+        """With step 6 off lane.sh is not updated, so a live lane.sh that sources the old copy would break once step 5 empties that folder."""
+        before = self.snapshot()
+        r = self.install_default()  # the live lane.sh here is the old launcher, which reads the old folder
+        self.assertEqual(r.returncode, 1)
+        self.assertRegex(self.last(r), r"^WALL FAILED .*lane\.sh.* after undoing itself$")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_flag_alone_is_a_usage_failure(self):
+        env = dict(os.environ, HOME=self.home, WALL_INSTALL_REPO=self.repo)
+        r = run(["bash", INSTALL, "--with-tooling"], env=env)
+        self.assertEqual(r.returncode, 1)
+        self.assertRegex(self.last(r), r"^WALL FAILED usage")
 
     def test_settings_hook_entry_moves_and_nothing_else_in_the_file_changes(self):
         self.assertEqual(self.install().returncode, 0)
