@@ -13,6 +13,7 @@ import shlex
 import stat
 import sys
 import time
+import urllib.parse
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
         r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer|webhook)")
@@ -514,19 +515,50 @@ def _has(text, email):
 
 
 F_TRUSTED_GMAIL = os.path.realpath(os.path.expanduser("~/.claude/scripts/gmail_api.py"))
-F_GITHUB_HOST = re.compile(r"^https?://(?:[\w.-]+\.)?(?:github\.com|githubusercontent\.com)(?:[:/]|$)", re.I)
-F_GIT_UA = re.compile(r"http\.(?:extraheader|useragent)|--hostname|GH_HOST", re.I)
+F_GITHUB_HOSTS = ("github.com", "githubusercontent.com")
+# A git or gh call that changes where it talks, what it sends, or how it connects is not the plain GitHub call.
+F_GIT_RISKY = re.compile(r"insteadof|sshcommand|gitproxy|(?<![\w/])http\.|--hostname|GH_HOST|GIT_[A-Z_]+=|"
+                         r"--(?:upload|receive)-pack|ext::|--exec", re.I)
+F_SUBST = re.compile(r"\$\(|`|<\(|>\(")
+F_SCHEME_URL = re.compile(r"(?:https?|ssh|git|ftps?|rsync)://[^\s'\"]*", re.I)
+F_SCP_REMOTE = re.compile(r"(?<![\w.%+-])(?:[\w.-]+@)?([\w.-]+\.[a-z]{2,}):(?!//)[\w~./-]", re.I)
+F_PY_FLAGS = {"-u", "-B", "-I", "-E", "-s", "-S"}
+
+
+def _host_is_github(host):
+    host = (host or "").lower()
+    return any(host == h or host.endswith("." + h) for h in F_GITHUB_HOSTS)
+
+
+def _f_non_github_remote(seg, email):
+    """True when a git/gh segment names a remote on a host that is not GitHub."""
+    for u in F_SCHEME_URL.findall(seg):
+        try:
+            host = urllib.parse.urlsplit(u).hostname
+        except ValueError:
+            return True
+        if not _host_is_github(host):
+            return True
+    bare = seg
+    for f in _forms(email):
+        bare = re.sub(re.escape(f), " ", bare, flags=re.I)
+    bare = F_SCHEME_URL.sub(" ", bare)
+    return any(not _host_is_github(m.group(1)) for m in F_SCP_REMOTE.finditer(bare))
 
 
 def _f_program(segment):
-    """Program a segment runs; 'gmail_api.py' only when an interpreter runs our installed copy."""
+    """Program a segment runs; 'gmail_api.py' only for our installed copy run straight by an
+    interpreter (no -c/-m/-e, no command or process substitution, no web client word)."""
     toks, i = _process_command(segment)
     if i >= len(toks):
         return ""
     prog = os.path.basename(toks[i])
-    if F_SCRIPT_RUNNER.fullmatch(prog) or prog in ("bash", "sh"):
-        script = next((t for t in toks[i + 1:] if not t.startswith("-")), "")
-        if script and os.path.realpath(os.path.expanduser(script)) == F_TRUSTED_GMAIL:
+    if F_SCRIPT_RUNNER.fullmatch(prog) and not F_SUBST.search(blank_quotes(segment)):
+        j = i + 1
+        while j < len(toks) and toks[j] in F_PY_FLAGS:
+            j += 1
+        if j < len(toks) and os.path.realpath(os.path.expanduser(toks[j])) == F_TRUSTED_GMAIL \
+                and not F_HTTP_WORD.search(blank_quotes(segment)):
             return "gmail_api.py"
     return prog
 
@@ -547,10 +579,9 @@ def email_leak(cmd, email):
     for seg, prog in zip(segs, progs):
         if prog == "gmail_api.py":
             continue
-        if prog in ("git", "gh"):
-            # GitHub knows the address; another host, or a header/user-agent setting, does not count.
-            if _has(seg, email) and (F_GIT_UA.search(seg) or any(
-                    not F_GITHUB_HOST.match(u) for u in re.findall(r"https?://[^\s'\"]*", seg))):
+        if prog in ("git", "gh") and not F_SUBST.search(blank_quotes(seg)) and not F_HTTP_WORD.search(blank_quotes(seg)):
+            # GitHub already knows the address; another host, or a header/proxy/host setting, is not GitHub.
+            if F_GIT_RISKY.search(seg) or _f_non_github_remote(seg, email):
                 return "a User-Agent header or a host that is not GitHub"
             continue
         if _has(seg, email) and UA_HEADER.search(seg):
