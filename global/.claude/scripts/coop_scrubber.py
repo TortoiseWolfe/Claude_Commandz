@@ -18,7 +18,7 @@ Private config, never in a repo (a missing file means that part is off):
                sits under a match is a co-op session. No file or no folders: the scrubber is off everywhere.
       allow    words that must never become a placeholder (the operator's own name, for example).
       products extra product, project or board words (on top of the built-in list: Nextcloud, CiviCRM, Collabora, Traefik ...). A
-               name Presidio guesses that contains one of these words is not a person and stays readable (issue 239: the card title
+               name Presidio guesses that is only a product word plus plain words ("Standard Nextcloud") is not a person and stays readable (issue 239: the card title
                "Standard Nextcloud images" showed as [PERSON_...]). A roster person is still always replaced.
       ner      false turns Presidio off.
   ~/.config/afa/coop-roster.json   {"salt": "...", "people": [{"names": [...], "emails": [...], "phones": [...]}]}
@@ -45,11 +45,19 @@ BUILTIN_ALLOW = {"claude", "anthropic"}
 # Product and project words the co-op's own cards and chat are full of. Presidio sometimes reads a capitalised phrase containing one as a
 # person ("Standard Nextcloud images"); a guessed name that holds one of these words stays readable. Roster people never do.
 BUILTIN_PRODUCTS = {
-    "nextcloud", "civicrm", "collabora", "traefik", "hubzilla", "deck", "talk", "docker", "portainer", "wordpress", "postgres",
+    "nextcloud", "civicrm", "collabora", "traefik", "hubzilla", "deck", "docker", "portainer", "wordpress", "postgres",
     "postgresql", "mariadb", "mysql", "redis", "grafana", "prometheus", "keycloak", "authentik", "listmonk", "mautic", "matomo",
-    "github", "gitea", "cloudflare", "letsencrypt", "ubuntu", "debian", "linux", "windows", "stripe", "paypal", "zoom", "jitsi",
-    "onlyoffice", "libreoffice", "thunderbird", "roundcube", "dovecot", "postfix", "nginx", "apache", "caddy", "tailscale",
-    "wireguard", "vaultwarden", "bitwarden", "backblaze", "restic", "borg", "ansible", "terraform", "kubernetes", "swarm",
+    "github", "gitea", "cloudflare", "letsencrypt", "ubuntu", "debian", "linux", "windows", "paypal", "jitsi",
+    "onlyoffice", "libreoffice", "thunderbird", "roundcube", "dovecot", "postfix", "nginx", "tailscale",
+    "wireguard", "vaultwarden", "bitwarden", "backblaze", "restic", "ansible", "terraform", "kubernetes",
+}
+# Plain words that can sit beside a product word in a card title or a chat line. A guessed name stays readable only when it holds a product
+# word and EVERY other word in it is one of these, so "Wendell Nextcloud" is still replaced: a failed guess here would leak a name.
+COMMON_WORDS = {
+    "standard", "custom", "default", "new", "old", "shared", "public", "private", "main", "base", "official", "latest", "test", "demo",
+    "production", "staging", "admin", "user", "users", "group", "groups", "team", "board", "card", "cards", "image", "images", "server",
+    "servers", "app", "apps", "backup", "backups", "cloud", "file", "files", "setup", "install", "update", "updates", "config", "plugin",
+    "plugins", "site", "sites", "stack", "container", "containers", "the", "a", "an", "and", "for", "of", "on", "in", "to", "with",
 }
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
@@ -283,10 +291,11 @@ class Scrubber:
         return "[%s_x%s]" % (kind, h)
 
     def _product_guess(self, written, span):
-        """True for a PERSON span only Presidio guessed (no roster index) that holds a product word: not a person."""
+        """True for a PERSON span only Presidio guessed (no roster index) made of a product word plus plain common words: not a person."""
         if span[2] != "PERSON" or span[3] is not None:
             return False
-        return any(w in self.products for w in re.findall(r"[a-z0-9]+", written.lower()))
+        words = re.findall(r"[a-z0-9]+", written.lower())
+        return any(w in self.products for w in words) and all(w in self.products or w in COMMON_WORDS for w in words)
 
     def _merge(self, text, spans):
         # roster spans (index set) first, then longer, then earlier

@@ -144,7 +144,10 @@ class PresidioStandIn(unittest.TestCase):
         s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
         self.assertRegex(s.scrub_strings(["Zephyr Lantern"])[0], r"^\[PERSON_x")
         s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True, products=["lantern"])
-        self.assertEqual(s.scrub_strings(["Zephyr Lantern"])[0], "Zephyr Lantern")
+        # fail closed: a product word does not excuse a guessed name that has a non-common word in it
+        self.assertRegex(s.scrub_strings(["Zephyr Lantern"])[0], r"^\[PERSON_x")
+        self.assertRegex(s.scrub_strings(["Wendell Nextcloud"])[0], r"^\[PERSON_x")
+        self.assertEqual(s.scrub_strings(["Standard Lantern"])[0], "Standard Lantern")
         # a roster person whose name holds a product word is still replaced: the roster is never second-guessed
         r = cs.Roster({"salt": "s", "people": [{"names": ["Dana Nextcloud"], "emails": [], "phones": []}]})
         self.assertEqual(cs.Scrubber(r, use_ner=True).scrub_strings(["Dana Nextcloud wrote"])[0], "[PERSON_1] wrote")

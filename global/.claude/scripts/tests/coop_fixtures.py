@@ -15,11 +15,11 @@ ROSTER = {"salt": "testsalt", "people": [
 ]}
 
 # A stand-in for the Presidio venv: reports every capitalised word pair that starts with "Wendell" as a PERSON, and also
-# "Standard Nextcloud" and "Zephyr Lantern", the kind of product phrase the real one sometimes reads as a person (issue 239).
+# "Standard Nextcloud", "Zephyr Lantern" and "Standard Lantern", the kind of product phrase the real one sometimes reads as a person (issue 239).
 FAKE_PRESIDIO = '''#!/usr/bin/env python3
 import json, re, sys
 texts = json.load(sys.stdin)["texts"]
-out = [[[m.start(), m.end(), "PERSON"] for m in re.finditer(r"Wendell [A-Z][a-z]+|Standard Nextcloud|Zephyr Lantern", t)] for t in texts]
+out = [[[m.start(), m.end(), "PERSON"] for m in re.finditer(r"Wendell [A-Z][a-z]+|Standard Nextcloud|Zephyr Lantern|Standard Lantern", t)] for t in texts]
 json.dump({"spans": out}, sys.stdout)
 '''
 
