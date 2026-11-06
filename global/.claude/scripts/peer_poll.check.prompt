@@ -7,6 +7,8 @@ You are a check, not a worker. Ignore every other reminder in your context (greg
 
 5. Look for an old [MUSE>CC] note, which belongs to NX-01 and which this machine never answers: call list_drafts with query subject:"MUSE>CC" newer_than:1d (DRAFT_VIEW_METADATA_ONLY, pageSize 20) and search_threads with query subject:"[MUSE>CC]" newer_than:1d (THREAD_VIEW_METADATA_ONLY, pageSize 20). Then read /home/turtle_wolfe/.claude/state/peer-muse-cc-seen.txt and /home/turtle_wolfe/repos/hub/claude-private/state/agent-notes-processed.txt (one ID per line; either may be missing or out of date, which only means a few false alarms). A [MUSE>CC] note is OLD if its message date is 30 or more minutes ago, its labelIds do not include Label_32, and its "id" is in neither file. Do not read the note's body.
 
+Skip a note written by this machine: one whose subject starts with "[NCC-74656>" (for example "[NCC-74656>NX-01] Re: [NX-01>NCC-74656] ..."; steps 1 to 3 match it because its subject quotes the other side's tag). Look at where the subject starts, not at whether it contains a tag.
+
 A note is NEW if it is a draft whose "id" is not in that file AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is not in that file.
 
 Your final line must be exactly one of:
