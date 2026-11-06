@@ -386,6 +386,15 @@ if [ "$mode" = start ] && ! engine_present "$engine_program"; then
   exit 1
 fi
 
+# An engine that reported itself out of quota with a reset time (lane_fail_report.py wrote engine-out/<engine>.until) is refused until then.
+if [ "$mode" = start ] && [ -r "$HOME/.claude/state/engine-out/$engine.until" ]; then
+  until_epoch="$(head -n 1 "$HOME/.claude/state/engine-out/$engine.until" 2>/dev/null || true)"
+  if [[ "$until_epoch" =~ ^[0-9]+$ ]] && [ "$until_epoch" -gt "$(date +%s)" ]; then
+    echo "refusing engine $engine: it said it is out of quota and resets at $(date -d "@$until_epoch" '+%a %-I:%M %p'); pick the next engine in the order (delete $HOME/.claude/state/engine-out/$engine.until if it has come back sooner)" >&2
+    exit 1
+  fi
+fi
+
 case "$effort_opt" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
@@ -2078,7 +2087,9 @@ if [ "$engine" != claude ]; then
     if ! is_claude_model "$model"; then cmd+=" --model $(printf %q "$model")"; fi
     cmd+=" >$out_cmd 2>&1"
   fi
-  cmd+="; lane_rc=\$?; printf 'exit %s\\n' \"\$lane_rc\" >>$out_cmd; exit \"\$lane_rc\""
+  # A failed run with no report.md gets "FAILED exit <code> | <last error line>" as line 1 (so lane_watch wakes the hub), and an engine that
+  # says it is out of quota with a reset time is refused at the next start until then (#234: agy sat dead for 70 minutes unnoticed).
+  cmd+="; lane_rc=\$?; printf 'exit %s\\n' \"\$lane_rc\" >>$out_cmd; [ \"\$lane_rc\" -eq 0 ] || python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $out_cmd \"\$lane_rc\" $engine $(printf %q "$HOME/.claude/state") || true; exit \"\$lane_rc\""
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
