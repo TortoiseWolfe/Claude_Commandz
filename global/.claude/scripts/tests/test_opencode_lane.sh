@@ -12,6 +12,7 @@ echo 'do the thing' >"$PROMPT"
 
 GEMINI=google/gemini-3-flash-preview
 ROUTER=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+ZEN=opencode/big-pickle
 
 # Stub: calls are logged as "<model>". STUB_PLAN is a file with one line per call to a model, "<model>|<action>"; each call to a model uses the
 # next unused line for it (a model with no lines left succeeds). Actions: ok, minute (Gemini's per-minute message, retry in 2s), minute-forever,
@@ -75,13 +76,13 @@ CASES=$((CASES + 1))
 
 # 4. OpenRouter's per-day refusal: stamp written, exit 75; the next run skips OpenRouter without calling it.
 rm -rf "$TMP/quota"
-run "$GEMINI|nodelay" "$ROUTER|day"
+run "$GEMINI|nodelay" "$ROUTER|day" "$ZEN|nodelay"
 CASES=$((CASES + 1))
 [ "$STATUS" = 75 ] || fail "every provider out should exit 75, got $STATUS: $OUT"
 stamp="$TMP/quota/openrouter-$(date +%F)"
 [ -e "$stamp" ] || fail "per-day refusal should write $stamp; have: $(ls "$TMP/quota" 2>/dev/null)"
 contains "$OUT" "free quota exhausted on every provider" "line the dispatcher reads"
-run "$GEMINI|nodelay" "$ROUTER|ok"
+run "$GEMINI|nodelay" "$ROUTER|ok" "$ZEN|nodelay"
 CASES=$((CASES + 1))
 [ "$(count "$STUB_CALLS" "$ROUTER")" = 0 ] || fail "a stamped provider must not be called"
 contains "$OUT" "skipping $ROUTER" "skip line"
@@ -99,5 +100,13 @@ mkdir -p "$HOME_T/.config/gemini"; echo 'SECRETKEY123' >"$HOME_T/.config/gemini/
 run "$GEMINI|minute" "$GEMINI|ok"
 CASES=$((CASES + 1))
 lacks "$OUT" "SECRETKEY123" "key stays out of the log"
+
+# 7. Gemini and OpenRouter both out for the day: OpenCode's keyless free tier takes the prompt and the lane exits 0.
+rm -rf "$TMP/quota"
+run "$GEMINI|nodelay" "$ROUTER|day"
+CASES=$((CASES + 1))
+[ "$STATUS" = 0 ] || fail "the keyless Zen model should rescue the run, got $STATUS: $OUT"
+[ "$(count "$STUB_CALLS" "$ZEN")" = 1 ] || fail "Zen is called once: $(cat "$STUB_CALLS")"
+lacks "$OUT" "free quota exhausted" "not exhausted while Zen answers"
 
 echo "ok: $CASES cases"

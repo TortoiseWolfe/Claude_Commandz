@@ -11,6 +11,7 @@ Read-only maintenance check for the wireframe extension repo and its catalog pre
 ```
 /extension-status                           # Full report
 /extension-status --triage                  # Who needs help? (issues/PRs/mentions only)
+/extension-status --draft-replies           # Suggested replies for outside issues and PRs (prints only)
 /extension-status --traffic                 # Stars, clones, views, referrers only
 /extension-status --mentions                # External GitHub mentions only
 /extension-status owner/other-repo          # Run against a different repo
@@ -24,6 +25,7 @@ ARGUMENTS: $ARGUMENTS
 
 - No args: Full report
 - `--triage`: Support-needed items only (sections 1 + 4)
+- `--draft-replies`: a suggested reply for each outside issue or PR, and nothing else (see "Draft replies" below)
 - `--traffic`: Engagement metrics only (section 2)
 - `--mentions`: External mention search only (section 4)
 - `--since <N><m|h|d|w>`: compare against the newest snapshot at least that old (e.g. `7d`, `12h`, `2w`); default is the newest snapshot saved before this run
@@ -256,7 +258,7 @@ TL;DR format:
 📬 {N} support items • 📈 {clones} clones ({uniques}u / 14d) • 🏷️ {latest_tag} live • 🔍 {N} external mentions
 ```
 
-If `--triage` / `--traffic` / `--mentions` was passed, only render that slice.
+If `--triage` / `--traffic` / `--mentions` / `--draft-replies` was passed, only render that slice.
 
 **Never tag anyone.** Authors and handles copied from search results must never appear as a bare `@name` in anything posted to GitHub: GitHub emails them on every run (wireframe issue #4). Before posting a report or the "log is long, consider closing" cleanup note, pipe the body through `python3 scripts/neutralize-mentions.py < body.md > body.safe.md` (in the wireframe repo checkout) and post `body.safe.md` with `--body-file` (the filter puts an invisible zero-width character after each handle's `@`, so GitHub sends no email). Also write handles in inline code. The cleanup note itself names nobody. If the script is not present (override repos), write every handle in backticks by hand.
 
@@ -283,6 +285,20 @@ The helper saves `~/.claude/state/extension-status/<owner>-<name>/<YYYY-MM-DD-HH
 ### --triage
 Sections 1 + 4 only. Header changes to: `🔎 Triage view — {N} items need attention`.
 
+### --draft-replies
+Only the drafts: skip engagement, release health, mentions, hygiene and the snapshot. Header: `💬 Draft replies`.
+
+Section 1's issue and PR queries need three more fields here: add `body,url` to the `--json` list of both (the issue query already has `comments`; add `comments` to the PR query). Pipe the answers to the helper and show its output as it is:
+
+```bash
+# {"issues": <issue list JSON>, "prs": <PR list JSON>}
+python3 ~/.claude/scripts/extension_status_replies.py --owner <OWNER> < items.json
+```
+
+For each outside item the helper prints a `💬 Suggested reply` block, tailored to one class: `question`, `bug-report`, `feature-request`, `install-issue` or `docs-unclear` (the first class with a matching word wins, in the order install, bug, feature, docs; the default is `question` for an issue and `feature-request` for a PR). It also flags `⚠ waiting` where the newest comment (or the opening post, when nobody commented) is from an outsider and more than 48 hours old, and says `✓ owner replied last` otherwise. Replies carry a part in angle brackets for you to fill in.
+
+This view only prints. Never post, comment, close or label from it, never look up an author's history, and never paste an author's handle as a bare `@name` (the helper already guards this).
+
 ### --traffic
 Section 2 only. Header: `📈 Traffic view — last 14 days`.
 
@@ -301,7 +317,7 @@ Section 4 only. Header: `🔍 External mentions — last 30 days`.
 
 Planned enhancements tracked on [`TortoiseWolfe/Claude_Commandz` issues](https://github.com/TortoiseWolfe/Claude_Commandz/issues?q=label%3Aextension-status):
 
-1. Inbound-engagement assist (draft replies for non-owner issues/PRs)
+1. ~~Inbound-engagement assist (draft replies for non-owner issues/PRs)~~ — done: `--draft-replies`
 2. Snapshot diff ("what changed since last run")
 3. `/schedule` integration helper
 4. Multi-extension config file

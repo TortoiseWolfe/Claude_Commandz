@@ -51,6 +51,9 @@ case "$1" in
       python3 -I - "$FAKE_ST" "$FAKE_PROJ" "$(cat "$FAKE_ST/pending")" <<'PY'
 import json, os, sys
 st, proj, text = sys.argv[1:4]
+# 6 Nov 2026 (#275): a lane that has moved into a worktree gets its next transcript under the worktree's folder, not the folder it started in.
+if os.path.exists(os.path.join(st, "projdir")):
+    proj = open(os.path.join(st, "projdir")).read().strip()
 open(os.path.join(st, "pending"), "w").close()
 open(os.path.join(st, "sent.log"), "a").write(text + "\n")
 cur = open(os.path.join(st, "cur")).read().strip()
@@ -58,11 +61,19 @@ if text == "/clear":
     n = int(open(os.path.join(st, "n")).read()) + 1 if os.path.exists(os.path.join(st, "n")) else 1
     open(os.path.join(st, "n"), "w").write(str(n))
     open(os.path.join(st, "cur"), "w").write("new-sess-%d" % n)
+    if os.environ.get("FAKE_PROJ_AFTER_CLEAR"):
+        os.makedirs(os.environ["FAKE_PROJ_AFTER_CLEAR"], exist_ok=True)
+        open(os.path.join(st, "projdir"), "w").write(os.environ["FAKE_PROJ_AFTER_CLEAR"])
     sys.exit(0)
 # /model is a local command: it only prints a confirmation line on the screen, never in the transcript (22 Oct).
 if text.startswith("/model "):
     if not os.path.exists(os.path.join(st, "no-pane-line")):
         open(os.path.join(st, "pane"), "a").write("Set model to %s 5.5 and saved as your default for new sessions\n" % text.split(None, 1)[1].capitalize())
+    sys.exit(0)
+# FAKE_DROP_FIRST_REPRIME=1: the first re-prime after /clear is lost (typed, never in the transcript), as sh-backlog-3 saw on 6 Nov 2026 (#275).
+# FAKE_DROP_ALWAYS=1: every one is lost.
+if "context was cleared" in text and (os.environ.get("FAKE_DROP_ALWAYS") == "1" or (os.environ.get("FAKE_DROP_FIRST_REPRIME") == "1" and not os.path.exists(os.path.join(st, "dropped")))):
+    open(os.path.join(st, "dropped"), "w").close()
     sys.exit(0)
 with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
@@ -110,7 +121,7 @@ usage_rec() {  # usage_rec <total-tokens>: one assistant turn whose context is t
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
-reset_fake() { rm -f "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
 cur_for() { cut -f8 < <(awk -F"\t" -v n="$1" '$2==n' "$INDEX" | tail -1) >"$ST/cur"; }  # the fake lane writes into the transcript its index row names (a send is confirmed only there)
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
@@ -155,6 +166,7 @@ n3="$(grep -n '3\. wait for .*handoff.md to change' <<<"$LAST_OUT" | cut -d: -f1
 n5="$(grep -n '5\. send: Hub: your context was cleared' <<<"$LAST_OUT" | cut -d: -f1)"; n6="$(grep -n '6\. append an index row' <<<"$LAST_OUT" | cut -d: -f1)"
 [ -n "$n1" ] && [ "$n1" -lt "$n2" ] && [ "$n2" -lt "$n3" ] && [ "$n3" -lt "$n4" ] && [ "$n4" -lt "$n5" ] && [ "$n5" -lt "$n6" ] || fail "dry-run steps out of order: $LAST_OUT"; ok
 assert_contains "$LAST_OUT" "Read $HAND/prompt.md, then $HAND/handoff.md" 'the re-prime reads prompt.md, then handoff.md'
+assert_contains "$LAST_OUT" 'Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED' 'the re-prime carries the standing rule'
 [ ! -e "$ST/sent.log" ] || fail '--dry-run typed into the window'; ok
 [ ! -e "$HAND/handoff.md" ] || fail '--dry-run wrote handoff.md'; ok
 
@@ -184,6 +196,43 @@ lane --ctx rl-lane
 [ "$LAST_OUT" != 130 ] || fail '--ctx still reads the old transcript after the recycle'; ok
 [ -d "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock" ] && fail 'recycle lock left behind'; ok
 grep -q "recycled" "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no recycled row'; ok
+
+# #275: a lane started in the repo folder that moved into a worktree before its recycle. After /clear its new transcript lands under the
+# worktree's own folder. The recycle must still confirm the re-prime, find the new session and record it (3 failures on 6 Nov 2026).
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+WT="$HOME_T/.claude/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$TMP/worktrees/repo--topic")"
+FAKE_PROJ_AFTER_CLEAR="$WT" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'a lane that moved into a worktree recycles cleanly'
+assert_contains "$LAST_OUT" 'recycled rl-lane' 'the worktree recycle says what it did'
+assert_not_contains "$LAST_OUT" 'no new transcript' 'the new transcript is found under the worktree folder'
+assert_not_contains "$LAST_OUT" 'did not reach it' 'the re-prime is confirmed from the worktree folder'
+NEWS="$(cat "$ST/cur")"   # the fake counts /clear across the whole file, so the name is read, not assumed
+[ -s "$WT/$NEWS.jsonl" ] || fail 'the fake lane wrote its new transcript under the worktree folder'; ok
+[ "$(wc -l <"$INDEX")" = $((rows_before + 1)) ] || fail 'one new index row after the worktree recycle'; ok
+[ "$(cut -f8 < <(tail -1 "$INDEX"))" = "$NEWS" ] || fail "the index row names the worktree session: $(tail -1 "$INDEX")"; ok
+mapfile -t sent <"$ST/sent.log"
+[ "${#sent[@]}" = 3 ] || fail "the re-prime is typed once, not retried after a confirmed send: ${sent[*]}"; ok
+usage_rec 42000 >>"$WT/$NEWS.jsonl"
+lane --ctx rl-lane
+[ "$LAST_OUT" = 42 ] || fail "--ctx reads the session that lives under a worktree folder, got: $LAST_OUT"; ok
+rm -rf "$WT"; sed -i '$d' "$INDEX"   # drop this test's row so the next test starts from the earlier recycle's state
+
+# #275 point 2: a re-prime that does not land is typed again (twice at most) instead of failing the recycle for the hub to finish by hand.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_DROP_FIRST_REPRIME=1 LANE_SEND_CONFIRM_SECS=1 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'a lost first re-prime is retried and the recycle succeeds'
+assert_contains "$LAST_OUT" 'recycled rl-lane' 'the retried recycle says what it did'
+[ "$(grep -c 'context was cleared' "$ST/sent.log")" = 2 ] || fail "the re-prime was typed twice (first lost, then retried): $(cat "$ST/sent.log")"; ok
+grep -q $'\tREPRIME-RETRY\t' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log names the retry'; ok
+[ "$(wc -l <"$INDEX")" = $((rows_before + 1)) ] || fail 'one new index row after the retried re-prime'; ok
+sed -i '$d' "$INDEX"
+# Typed three times and never landed: the recycle fails and says so, with the message for the hub to send by hand.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_DROP_ALWAYS=1 LANE_SEND_CONFIRM_SECS=1 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 1 "$LAST_RC" 'a re-prime that never lands fails the recycle'
+assert_contains "$LAST_OUT" 'did not reach it after 3 tries' 'the failure names the three tries'
+[ "$(grep -c 'context was cleared' "$ST/sent.log")" = 3 ] || fail "three tries, no more: $(cat "$ST/sent.log")"; ok
+[ "$(wc -l <"$INDEX")" = "$rows_before" ] || fail 'a failed recycle adds no index row'; ok
 
 # A lane that never writes handoff.md is NOT cleared.
 reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"

@@ -3,6 +3,7 @@
 # a routine HOURLY/STATUS report, a report that lands between a wake and the re-arm, a dead watcher, and the longer idle heartbeat.
 set -euo pipefail
 export AFA_ENGINES_AVAILABLE="*"
+export LANE_WATCH_IDLE_REMIND_MIN=0   # these cases are about wakes the hub should not get; the idle reminder has its own cases in test_lane_watch.sh
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_watch.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-watch-quiet.XXXXXX")"
