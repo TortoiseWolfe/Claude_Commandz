@@ -19,6 +19,10 @@ class ContextWarnTests(unittest.TestCase):
         self.state = self.root / "state"
         self.transcript = self.root / "transcript.jsonl"
         self.session_id = "fixture-session"
+        # Most tests are about the size tiers, so a fresh running hand-off file is there (issue 227); tests of the no-file warning remove it.
+        self.state.mkdir()
+        self.handoff = self.state / "hub-handoff-2026-11-05-0900.md"
+        self.handoff.write_text("open items\n", encoding="utf-8")
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -60,6 +64,7 @@ class ContextWarnTests(unittest.TestCase):
             "AFA_STATE_DIR": str(self.state),
         })
         env.pop("AFA_HANDOFF_K", None)
+        env.pop("AFA_HANDOFF_FRESH_K", None)
         env.update(extra_env or {})
         payload = {
             "session_id": session or self.session_id,
@@ -202,6 +207,58 @@ class ContextWarnTests(unittest.TestCase):
         self.write_transcript((330_000, 0, 0))
         out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_K": "lots"}))["additionalContext"]
         self.assertIn("hand off and end, no new work", out)
+
+    def test_200k_with_no_fresh_handoff_file_warns(self):
+        self.handoff.unlink()
+        self.write_transcript((199_000, 0, 0))
+        self.assertEqual(self.warning(self.call_hook())["additionalContext"], "Hub context: 199K of 367K")
+        self.write_transcript((200_000, 0, 0))
+        text = self.warning(self.call_hook())["additionalContext"]
+        self.assertIn("no hub-handoff-*.md newer than 30 minutes", text)
+        self.assertIn("start this session's running hand-off file now", text)
+
+    def test_200k_with_a_fresh_handoff_file_is_silent(self):
+        self.write_transcript((220_000, 0, 0))
+        self.assertEqual(self.warning(self.call_hook())["additionalContext"], "Hub context: 220K of 367K")
+
+    def test_a_handoff_file_older_than_30_minutes_does_not_count(self):
+        old = self.handoff.stat().st_mtime - 31 * 60
+        os.utime(self.handoff, (old, old))
+        self.write_transcript((220_000, 0, 0))
+        self.assertIn("no hub-handoff-*.md newer than 30 minutes", self.warning(self.call_hook())["additionalContext"])
+        recent = self.handoff.stat().st_mtime + 40 * 60
+        os.utime(self.handoff, (recent, recent))
+        self.state.joinpath("context-nohandoff." + self.session_id).unlink()
+        self.assertNotIn("no hub-handoff", self.warning(self.call_hook())["additionalContext"])
+
+    def test_the_no_file_warning_repeats_at_most_every_10_minutes(self):
+        self.handoff.unlink()
+        self.write_transcript((220_000, 0, 0))
+        self.assertIn("no hub-handoff", self.warning(self.call_hook())["additionalContext"])
+        self.assertNotIn("no hub-handoff", self.warning(self.call_hook())["additionalContext"])
+        mark = self.state / ("context-nohandoff." + self.session_id)
+        earlier = mark.stat().st_mtime - 11 * 60
+        os.utime(mark, (earlier, earlier))
+        self.assertIn("no hub-handoff", self.warning(self.call_hook())["additionalContext"])
+
+    def test_the_no_file_warning_rides_a_tool_call_even_when_the_line_was_shown(self):
+        self.handoff.unlink()
+        self.write_transcript((220_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit")
+        # the prompt event used up the warning; remove its rate mark so the tool call is due again
+        (self.state / ("context-nohandoff." + self.session_id)).unlink()
+        out = self.warning(self.call_hook(event="PostToolUse"))["additionalContext"]
+        self.assertIn("no hub-handoff", out)
+
+    def test_AFA_HANDOFF_FRESH_K_setting_and_330k_tier_unchanged(self):
+        self.handoff.unlink()
+        self.write_transcript((100_000, 0, 0))
+        out = self.warning(self.call_hook(extra_env={"AFA_HANDOFF_FRESH_K": "100"}))["additionalContext"]
+        self.assertIn("no hub-handoff", out)
+        self.write_transcript((331_000, 0, 0))
+        out = self.warning(self.call_hook(session="late"))["additionalContext"]
+        self.assertIn("hand off and end, no new work", out)
+        self.assertNotIn("no hub-handoff", out)
 
     def test_size_mode_on_missing_file_exits_1_quietly(self):
         result = subprocess.run([sys.executable, str(HOOK), "--size", str(self.root / "nope.jsonl")],
