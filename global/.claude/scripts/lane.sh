@@ -82,6 +82,8 @@
 #                                       never writes handoff.md is not cleared. The request goes to the lane at once, even mid-turn (a long turn would never end first): it
 #                                       finishes the step in hand and writes handoff.md as its next action. lane_watch.sh runs this when a
 #                                       lane passes its own recycle line.
+#   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
+#                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
@@ -259,6 +261,8 @@ Usage:
   lane.sh [--dry-run] --model <name> <model>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] [--allow-high-tier "<reason>"] --resume <name>
   lane.sh [--dry-run] --recycle <name>
+  lane.sh [--dry-run] --update <name>
+  lane.sh --behind
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
@@ -361,6 +365,8 @@ while [ $# -gt 0 ]; do
     --send) mode=send; shift ;;
     --model) mode=model; shift ;;
     --recycle) mode=recycle; shift ;;
+    --update) mode=update; shift ;;
+    --behind) mode=behind; shift ;;
     --ctx) mode=ctx; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
@@ -1838,6 +1844,167 @@ PY
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
+  exit 0
+fi
+
+# --update <name> and --behind: move a live lane onto the Claude Code version now installed, with no reboot (hub, 6 Nov 2026: 10 of 14 running
+# sessions were on 2.1.318 after 2.1.319 landed; updates arrive every few days, so this is a tool and not a hand recipe).
+#   --behind          one line per live Claude lane whose process runs an older version: "<name> <running> <installed> <idle|working|dialog>"
+#   --update <name>   refuses a lane that is working or has a dialog on screen, or one that is not an interactive Claude lane; skips one already on
+#                     the installed version. Otherwise: the lane is asked to write handoff.md and is waited for until that file is newer than its
+#                     report.md, then its claude process is ended by exact PID (SIGTERM, SIGKILL only after LANE_UPDATE_TERM_SECS; never by
+#                     name or pattern), its window is closed by window id, and the lane starts again through `lane.sh --restart` with the model,
+#                     effort, connectors, high-tier reason, console setting, project servers, add-dirs and recycle line from its index row
+#                     (--restart carries the last three over from the row). The new process's version is checked at the end.
+#   The restart is first run as a --dry-run, so a lane that would be refused (the no-AI wall, a tier rule) is refused while it is still alive.
+#   The running version is `readlink /proc/<pid>/exe` (Claude Code keeps each version as ~/.local/share/claude/versions/<n>); the installed one is
+#   `claude --version`. LANE_UPDATE_WAIT_SECS (600) bounds the wait for handoff.md; LANE_UPDATE_TERM_SECS (30) the wait for the process to exit.
+claude_installed_version() {
+  local c v; c="$(command -v claude 2>/dev/null || true)"; [ -n "$c" ] || c="$HOME/.local/bin/claude"
+  v="$("$c" --version 2>/dev/null | awk 'NR==1{print $1}')"
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$v"
+  return 0
+}
+lane_claude_pid() {  # <name>: the lane's claude process (a direct child of the pane's shell, comm claude); empty when there is none
+  local sp c
+  sp="$(tmux display -p -t "$SESSION:$1" '#{pane_pid}' 2>/dev/null)" || return 0
+  [[ "$sp" =~ ^[0-9]+$ ]] || return 0
+  for c in $(pgrep -P "$sp" 2>/dev/null); do
+    [ "$(cat "/proc/$c/comm" 2>/dev/null)" = claude ] && { printf '%s' "$c"; return 0; }
+  done
+  return 0
+}
+proc_claude_version() {  # <pid>: the version its binary is, "" when the layout is not .../versions/<n>
+  local e; e="$(readlink "/proc/$1/exe" 2>/dev/null)" || return 0
+  e="${e% (deleted)}"; e="${e##*/}"
+  [[ "$e" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$e"
+  return 0
+}
+lane_screen_state() {  # <name>: idle, working or dialog
+  local pane; pane="$(tmux capture-pane -p -t "$SESSION:$1" 2>/dev/null)" || { echo unknown; return; }
+  if printf '%s\n' "$pane" | tail -15 | command grep -qE 'Enter to select|Do you want to proceed|Esc to cancel'; then echo dialog
+  elif pane_spinner "$pane"; then echo working
+  else echo idle; fi
+}
+
+if [ "$mode" = behind ]; then
+  [ $# -eq 0 ] || { echo "usage: lane.sh --behind" >&2; exit 1; }
+  inst="$(claude_installed_version)"
+  [ -n "$inst" ] || { echo "cannot read the installed version (claude --version)" >&2; exit 1; }
+  command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null || exit 0
+  while IFS= read -r w; do
+    [ -n "$w" ] && [ "$w" != fleet ] || continue
+    pane_is_claude "$w" || continue
+    pid="$(lane_claude_pid "$w")"; [ -n "$pid" ] || continue
+    rv="$(proc_claude_version "$pid")"; [ -n "$rv" ] && [ "$rv" != "$inst" ] || continue
+    echo "$w $rv $inst $(lane_screen_state "$w")"
+  done < <(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null)
+  exit 0
+fi
+
+if [ "$mode" = update ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --update <name>" >&2; exit 1; }
+  name="$1"
+  row="$(index_row "$name")"
+  [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
+  IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
+  case "${b:-subscription}" in subscription|console) ;; *) echo "update refused: $name runs on engine ${b}, not an interactive Claude session" >&2; exit 1 ;; esac
+  is_headless_billing "${b:-}" && { echo "update refused: $name is a headless lane" >&2; exit 1; }
+  [ -n "${rep:-}" ] && [ "$rep" != - ] || { echo "update refused: $name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
+  hand="$(dirname "$rep")"; handoff="$hand/handoff.md"; report_f="$rep"
+  [ -d "$dir" ] || { echo "update refused: folder $dir is gone" >&2; exit 1; }
+  command -v tmux >/dev/null && tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
+    || { echo "update refused: no window named $name in $SESSION (use --restart for a lane whose window is gone)" >&2; exit 1; }
+  pane_is_claude "$name" || { echo "update refused: $name's pane is not running claude (pane shows $(pane_cmd "$name" | sed 's/^$/nothing/'))" >&2; exit 1; }
+  inst="$(claude_installed_version)"; [ -n "$inst" ] || { echo "update refused: cannot read the installed version (claude --version)" >&2; exit 1; }
+  pid="$(lane_claude_pid "$name")"; [ -n "$pid" ] || { echo "update refused: no claude process found under $name's pane" >&2; exit 1; }
+  rv="$(proc_claude_version "$pid")"; [ -n "$rv" ] || { echo "update refused: cannot tell which version pid $pid runs (/proc/$pid/exe is not a versions/<n> file)" >&2; exit 1; }
+  if [ "$rv" = "$inst" ]; then echo "$name already runs $inst (pid $pid); nothing to do"; exit 0; fi
+  state="$(lane_screen_state "$name")"
+  case "$state" in
+    working) echo "update refused: $name is working; roll it when it goes idle" >&2; exit 1 ;;
+    dialog) echo "update refused: $name has a dialog on its screen" >&2; exit 1 ;;
+  esac
+  # The restart, built from the row. Its prompt is a note stored beside the original prompt.md.
+  ra=(--restart)
+  [ "${b:-}" = console ] && ra+=(--console)
+  [ -n "${eff:-}" ] && [ "$eff" != - ] && ra+=(--effort "$eff")
+  [ "${conn:-}" = off ] && ra+=(--no-connectors) || ra+=(--connectors)
+  [ -n "${ent:-}" ] && [ "$ent" != - ] && ra+=(--allow-high-tier "$ent")
+  [ -n "${pm:-}" ] && [ "$pm" != - ] && ra+=(--project-mcp "$pm")
+  if [ -n "${ad:-}" ] && [ "$ad" != - ]; then
+    IFS=: read -r -a _uad <<<"$ad"; for _a in "${_uad[@]}"; do [ -d "$_a" ] && ra+=(--add-dir "$_a"); done
+  fi
+  [[ "${rk:-}" =~ ^[0-9]+$ ]] && ra+=(--recycle-at "$rk")
+  note="$(mktemp "${TMPDIR:-/tmp}/lane-update-note.XXXXXX")"
+  trap 'rm -f "$note"' EXIT
+  printf 'Claude Code was updated to %s (this session ran %s). The hub restarted you onto it; your context is fresh and nothing else changed. Read your hand-off and carry on from the next step it names, re-arming what it lists.\n' "$inst" "$rv" >"$note"
+  rid="$(date +%s)"
+  msg_handoff="Hub: Claude Code $inst is installed and you run $rv, so I am restarting you onto it (update $rid; this is not a recycle and you did nothing wrong). Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines. Write it after you last touch report.md. Then stop, even mid-task, and say \"ready to restart\". Your session is ended and started again as soon as the file is written."
+  if [ "$dry" = 1 ]; then
+    echo "update $name: pid $pid runs $rv, installed is $inst, screen is $state"
+    echo "  1. keep the current handoff.md as handoff-prev<N>.md; send the lane: $msg_handoff"
+    echo "  2. wait up to ${LANE_UPDATE_WAIT_SECS:-600}s for $handoff to be newer than $report_f and the lane idle; otherwise the lane is left running"
+    echo "  3. end pid $pid by exact PID (SIGTERM; SIGKILL only after ${LANE_UPDATE_TERM_SECS:-30}s) after checking it is still $name's claude process, then close its window by window id"
+    echo "  4. run: lane.sh ${ra[*]} $name $dir $m $note"
+    echo "  5. check the new process runs $inst"
+    bash "${BASH_SOURCE[0]}" --dry-run "${ra[@]}" "$name" "$dir" "$m" "$note" >/dev/null 2>"$note.err" && echo "  (the restart passes its own --dry-run)" || { echo "  the restart would be REFUSED: $(tail -1 "$note.err")"; rm -f "$note.err"; exit 1; }
+    rm -f "$note.err"; exit 0
+  fi
+  rlog="$HOME/.claude/state/lanes/recycle.log"; mkdir -p "$(dirname "$rlog")"
+  ufail() { echo "update $name FAILED: $*" >&2; printf '%s\t%s\tUPDATE-FAILED\t%s\n' "$(date -Is)" "$name" "$*" >>"$rlog"; exit 1; }
+  lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
+  if [ -d "$lockd" ] && [ -n "$(find "$lockd" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rmdir "$lockd" 2>/dev/null || true; fi
+  mkdir "$lockd" 2>/dev/null || { echo "$name is already being recycled or updated ($lockd)" >&2; exit 1; }
+  trap 'rm -f "$note" "$note.err"; rmdir "$lockd" 2>/dev/null || true' EXIT
+  # The restart must pass before anything is ended.
+  bash "${BASH_SOURCE[0]}" --dry-run "${ra[@]}" "$name" "$dir" "$m" "$note" >/dev/null 2>"$note.err" || ufail "the restart would be refused ($(tail -1 "$note.err" | cut -c1-200)); the lane was left running"
+  # Keep the hand-off the lane is about to overwrite as handoff-prev<N>.md (as --recycle does) and prune.
+  max=0
+  if [ -s "$handoff" ]; then
+    for f in "$hand"/handoff-prev*.md; do
+      [ -e "$f" ] || continue; k="${f##*/handoff-prev}"; k="${k%.md}"; [ -n "$k" ] || k=1
+      [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -gt "$max" ] && max="$k"
+    done
+    cp -p "$handoff" "$hand/handoff-prev$((max + 1)).md" || ufail "could not keep the old handoff.md as a handoff-prev file"
+  fi
+  ls -t "$hand"/handoff-prev*.md 2>/dev/null | tail -n +"$(( ${LANE_HANDOFF_PREV_KEEP:-5} + 1 ))" | while IFS= read -r f; do rm -f -- "$f"; done
+  before="$(stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none)"; t0="$(date +%s)"
+  send_to "$name" "$msg_handoff" >/dev/null || ufail "the hand-off request did not reach the lane; it was left running"
+  end=$(( t0 + ${LANE_UPDATE_WAIT_SECS:-600} )); written=0
+  while [ "$(date +%s)" -lt "$end" ]; do
+    nowst="$(stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none)"
+    if [ "$nowst" != none ] && [ "$nowst" != "$before" ] && [ -s "$handoff" ] && [ "$(stat -c %Y "$handoff")" -ge "$t0" ] \
+       && { [ ! -e "$report_f" ] || [ ! "$report_f" -nt "$handoff" ]; } && [ "$(lane_screen_state "$name")" = idle ]; then
+      sleep 2
+      [ "$(lane_screen_state "$name")" = idle ] && { [ ! -e "$report_f" ] || [ ! "$report_f" -nt "$handoff" ]; } && { written=1; break; }
+    fi
+    sleep 2
+  done
+  [ "$written" = 1 ] || ufail "no new $handoff, newer than report.md, in ${LANE_UPDATE_WAIT_SECS:-600}s with the lane idle; the lane was left running"
+  # The process must still be the one we looked at, and its pane's shell must be the only other thing in the window.
+  [ "$(lane_claude_pid "$name")" = "$pid" ] || ufail "the claude process under $name changed while waiting (was pid $pid); left alone"
+  wid="$(tmux display -p -t "$SESSION:$name" '#{window_id}' 2>/dev/null)"; [[ "$wid" =~ ^@[0-9]+$ ]] || ufail "cannot read $name's window id"
+  kill -TERM "$pid" 2>/dev/null || true
+  tend=$(( $(date +%s) + ${LANE_UPDATE_TERM_SECS:-30} ))
+  while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$tend" ]; do sleep 1; done
+  if kill -0 "$pid" 2>/dev/null; then
+    [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = claude ] && kill -KILL "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+  kill -0 "$pid" 2>/dev/null && ufail "pid $pid would not end; the window was left open"
+  tmux kill-window -t "$wid" 2>/dev/null || ufail "claude ended but window $wid would not close; restart by hand: lane.sh ${ra[*]} $name $dir $m <note>"
+  if ! out="$(bash "${BASH_SOURCE[0]}" "${ra[@]}" "$name" "$dir" "$m" "$note" 2>&1 8>&- 9>&-)"; then
+    ufail "claude was ended and the restart was refused: $(printf '%s' "$out" | tail -1 | cut -c1-200). Restart by hand: lane.sh ${ra[*]} $name $dir $m <note>"
+  fi
+  newv=""
+  for _ in $(seq 1 30); do
+    np="$(lane_claude_pid "$name")"; [ -n "$np" ] && { newv="$(proc_claude_version "$np")"; [ -n "$newv" ] && break; }
+    sleep 1
+  done
+  printf '%s\t%s\tupdated\tfrom %s to %s (pid %s to %s)\n' "$(date -Is)" "$name" "$rv" "${newv:-?}" "$pid" "${np:-?}" >>"$rlog"
+  if [ "$newv" = "$inst" ]; then echo "updated $name from $rv to $inst: hand-off written, restarted (pid $np)"
+  else echo "updated $name: restarted, but its new process shows version '${newv:-unknown}', installed is $inst" >&2; exit 1; fi
   exit 0
 fi
 
