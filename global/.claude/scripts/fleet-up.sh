@@ -190,9 +190,13 @@ win=$(ps_run "${PS_ALL//__HOURS__/$hours}")
 
 boot_iso=$(printf '%s\n' "$win" | sed -n 's/^BOOT=//p' | head -1)
 logon_iso=$(printf '%s\n' "$win" | sed -n 's/^LOGON=//p' | head -1)
-[ -n "$boot_iso" ] || boot_iso=$(uptime -s 2>/dev/null | tr ' ' 'T')   # fallback: when this Linux side started
+# Only Windows' own answer is compared with the stored stamp. When Windows does not answer (the query timed out or the
+# bridge was down), keep the stored stamp: the Linux start time (uptime -s) is a different clock and would read as a reboot.
+# uptime -s is used only when nothing is stored yet, so the very first run still has a stamp to remember.
 prev_boot=""; [ -r "$STATE/fleet-up.boot" ] && prev_boot=$(cat "$STATE/fleet-up.boot")
 booted=0; [ -n "$prev_boot" ] && [ -n "$boot_iso" ] && [ "$prev_boot" != "$boot_iso" ] && booted=1
+[ -n "$boot_iso" ] || boot_iso=$prev_boot
+[ -n "$boot_iso" ] || boot_iso=$(uptime -s 2>/dev/null | tr ' ' 'T')
 lanes_gone=0
 if [ -s "$LANES/live.tsv" ] && ! "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then lanes_gone=1; fi
 
