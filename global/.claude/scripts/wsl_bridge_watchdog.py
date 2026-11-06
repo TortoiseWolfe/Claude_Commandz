@@ -10,6 +10,9 @@ also ships with vm.compaction_proactiveness=0 and vm.watermark_boost_factor=0, s
 
   wsl_bridge_watchdog.py              check; heal when free order-7+ blocks are below the threshold; re-apply the sysctl reserve if it drifted
   wsl_bridge_watchdog.py --probe      also run the 10 s `cmd.exe /c echo ok` probe when nothing needed healing (the 15-minute task)
+  wsl_bridge_watchdog.py --display    also opens a one-pixel test window on the WSLg display and wakes the hub with "display frozen" when it is never
+                                      drawn (#107). Off unless asked: the window is on his desktop for a moment, so the scheduled task adds the flag only
+                                      once the hub has seen that it does not take keyboard focus.
   wsl_bridge_watchdog.py --dry-run    report what it would do, change nothing (prints the disk line and lists what the sweep would remove)
   wsl_bridge_watchdog.py --print-sysctl-conf   the text of /etc/sysctl.d/99-wsl-bridge.conf (this file is the one source of the values)
 
@@ -139,6 +142,36 @@ def probe_bridge(timeout=10):
     except (subprocess.TimeoutExpired, OSError):
         return False
     return r.returncode == 0 and b"ok" in r.stdout
+
+
+DISPLAY_TITLE = "afa-display-probe"
+
+
+def probe_display(timeout=8):
+    """Open a one-pixel test window on the WSLg display and ask X whether it got mapped (drawn). True when it did, False when it did not
+    inside `timeout` seconds (24 Oct 2026: WSLg's compositor froze and every window stayed IsUnMapped for three hours), None when
+    there is nothing to test with (no DISPLAY, or xmessage or xwininfo missing). The window closes itself and is terminated here."""
+    if not os.environ.get("DISPLAY") or not shutil.which("xmessage") or not shutil.which("xwininfo"):
+        return None
+    try:
+        proc = subprocess.Popen(["xmessage", "-name", DISPLAY_TITLE, "-timeout", str(int(timeout) + 2), "-geometry", "1x1+0+0", "display probe"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    try:
+        deadline = time.time() + timeout
+        while True:
+            try:
+                r = subprocess.run(["xwininfo", "-name", DISPLAY_TITLE], capture_output=True, text=True, timeout=3)
+                if "Map State: IsViewable" in r.stdout:
+                    return True
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.5)
+    finally:
+        proc.terminate()
 
 
 def stamp(now):
@@ -351,9 +384,10 @@ def check_disk(sd, t, dry_run, statvfs, tmp_dir):
         print(msg)
 
 
-def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time, churn_of=None, statvfs=os.statvfs, tmp_dir=TMP_DIR):
+def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.time, churn_of=None, statvfs=os.statvfs, tmp_dir=TMP_DIR, display=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--probe", action="store_true", help="run the bridge probe even when nothing needed healing")
+    ap.add_argument("--display", action="store_true", help="open a one-pixel test window and wake the hub when the WSLg display never draws it (off by default: the window may take keyboard focus for a moment)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--print-sysctl-conf", action="store_true")
     args = ap.parse_args(argv)
@@ -422,6 +456,22 @@ def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.t
     elif args.dry_run and (low or notes):
         print("dry-run: order%d+ blocks %d (min %d) %s" % (ORDER, before, MIN_BLOCKS, " ".join(notes)))
 
+    # Display health (#107): --display opens a one-pixel test window. A dry run only says it would.
+    display_frozen = False
+    if args.display:
+        if args.dry_run:
+            print("dry-run: would open a test window on DISPLAY=%s and check it gets drawn" % os.environ.get("DISPLAY", "(unset)"))
+        else:
+            shown = (display or probe_display)()
+            if shown is False:
+                display_frozen = True
+                log_line(sd, "%s display=FROZEN: a test window on DISPLAY=%s never got drawn" % (stamp(t), os.environ.get("DISPLAY", "")))
+                write_alert(sd, t, "display frozen: a test window on the WSLg display was never drawn. The compositor (weston) is stuck inside a kernel wait that "
+                                   "a force-kill cannot break; windows from Linux apps will not show until WSL restarts (wsl --shutdown from Windows, which stops "
+                                   "every lane, so save hand-offs first).")
+
+    if display_frozen and probe_ok is not False and not root_failed:
+        return 2
     if probe_ok is False or root_failed:
         write_alert(sd, t, "wsl bridge: Windows commands from WSL %s; free order-%d+ blocks %d (min %d)%s. See %s"
                     % ("are NOT answering (10 s probe failed)" if probe_ok is False else "could not be healed (no root route)",
