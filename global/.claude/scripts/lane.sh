@@ -636,12 +636,29 @@ shared_read_flags() {  # <lane folder> <colon list already given>: "--add-dir 'p
   for c in "${cand[@]}"; do
     case "$c" in *:*|*"$TAB"*|*$'\n'*) continue ;; esac
     [ -d "$c" ] && [ ! -L "$c" ] || continue
+    # Owned by this user; the temp folder (a name anyone can pre-create under /tmp) also must not be writable by group or others.
+    [ "$(stat -c %u "$c" 2>/dev/null)" = "$(id -u)" ] || continue
+    case "${c##*/}" in claude-*) [ -z "$(find "$c" -maxdepth 0 -perm /022 2>/dev/null)" ] || continue ;; esac
     case "$given$seen" in *":$c:"*) continue ;; esac
     if no_ai_wall_paths_hit "$c"; then continue; fi
     seen+="$c:"
     out+="--add-dir $(printf %q "$c") "
   done
   printf '%s' "$out"
+}
+# The state folder holds the hub's own control files (the .deny and .rules files exist outside a lane's folder so a lane cannot rewrite its own
+# rules; index.tsv; the heartbeat), and the main checkout's .git holds hooks every worktree runs. Granting those folders as working directories
+# must not make them editable by Edit and Write, so each claude lane gets deny rules for them (Bash is unchanged, as before).
+shared_read_denies() {  # <lane folder>: space-separated Edit rules, or nothing
+  local d="${1:-.}" st="$HOME/.claude/state" root rel repo r out=""
+  case "$HOME" in *[[:space:]]*) return 0 ;; esac
+  for r in "$st/lanes/.deny/**" "$st/lanes/.rules/**" "$st/lanes/index.tsv" "$st/heartbeat" "$st/heartbeat.gap"; do out+="Edit(/$r) "; done
+  root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || root=""
+  case "$d/" in "$root/.worktrees/"*)
+    if [ -n "$root" ]; then rel="${d#"$root"/.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"
+      case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) ;; *) out+="Edit(/$root/$repo/.git/**) " ;; esac
+    fi ;; esac
+  printf '%s' "${out% }"
 }
 # Latest index row for a lane name (tab-separated line), or nothing.
 index_row() { [ -s "$INDEX" ] && awk -F'\t' -v n="$1" '$2==n{r=$0} END{if(r)print r}' "$INDEX" || true; }
@@ -1146,7 +1163,8 @@ print(",".join(out))
   fi
   json+='}'
   printf -- '--settings %q' "$json"
-  local off="$LANE_TOOLS_OFF"
+  local off="$LANE_TOOLS_OFF" sd
+  sd="$(shared_read_denies "${5:-.}")"; [ -z "$sd" ] || off="${off:+$off }$sd"
   [ -z "${7:-}" ] || [ "$7" = - ] || off="${off:+$off }${7//,/ }"
   [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
   if [ -f "$LANE_RULES" ]; then

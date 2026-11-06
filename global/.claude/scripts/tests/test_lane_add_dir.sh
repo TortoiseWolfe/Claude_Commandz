@@ -208,4 +208,20 @@ rm -f "$TMPC/claude-$(id -u)"
 shared sh8 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
 hasnt "$(last_cmd)" "claude-$(id -u)" "a missing temp folder is left out"
 
+# the shared folders are not a way around the hub's control files: Edit/Write are denied on them (Bash is unchanged), and the main checkout's .git too
+shared sh9 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+c="$(last_cmd)"
+has "$c" "--disallowedTools" "a claude lane carries deny rules"
+has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/.deny/\\*\\*\\)" "the .deny files cannot be edited"
+has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/.rules/\\*\\*\\)" "the .rules files cannot be edited"
+has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/index.tsv\\)" "the lane index cannot be edited"
+has "$c" "Edit\\(/$WORK/.git/\\*\\*\\)" "the main checkout's .git (hooks) cannot be edited from a worktree lane"
+# a temp folder others can write to, or one owned by someone else's mode, is left out
+mkdir -p "$TMPC/claude-$(id -u)"; chmod 777 "$TMPC/claude-$(id -u)"
+shared sh10 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+hasnt "$(last_cmd)" "--add-dir $TMPC/claude-$(id -u) " "a world-writable temp folder is left out"
+chmod 700 "$TMPC/claude-$(id -u)"
+shared sh11 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
+has "$(last_cmd)" "--add-dir $TMPC/claude-$(id -u) " "a private temp folder is added"
+
 printf 'ok: %s checks\n' "$checks"
