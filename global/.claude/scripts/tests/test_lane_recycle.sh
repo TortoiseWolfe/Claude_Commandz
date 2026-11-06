@@ -155,6 +155,7 @@ n3="$(grep -n '3\. wait for .*handoff.md to change' <<<"$LAST_OUT" | cut -d: -f1
 n5="$(grep -n '5\. send: Hub: your context was cleared' <<<"$LAST_OUT" | cut -d: -f1)"; n6="$(grep -n '6\. append an index row' <<<"$LAST_OUT" | cut -d: -f1)"
 [ -n "$n1" ] && [ "$n1" -lt "$n2" ] && [ "$n2" -lt "$n3" ] && [ "$n3" -lt "$n4" ] && [ "$n4" -lt "$n5" ] && [ "$n5" -lt "$n6" ] || fail "dry-run steps out of order: $LAST_OUT"; ok
 assert_contains "$LAST_OUT" "Read $HAND/prompt.md, then $HAND/handoff.md" 'the re-prime reads prompt.md, then handoff.md'
+assert_contains "$LAST_OUT" 'Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED' 'the re-prime carries the standing rule'
 [ ! -e "$ST/sent.log" ] || fail '--dry-run typed into the window'; ok
 [ ! -e "$HAND/handoff.md" ] || fail '--dry-run wrote handoff.md'; ok
 
