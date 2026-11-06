@@ -318,6 +318,59 @@ idle_remind_check() {
   hit=1; other=1
 }
 
+# green_pr_check <lane>: a pull request named under "## Hub merges" in the lane's report.md (a line holding `gh pr merge <n> ... -R <owner>/<repo>`)
+# whose checks have all passed wakes the hub once with "green: ...", so it merges without waiting to be asked (issue 278). The watcher never merges
+# itself: the hub keeps the one place where the client-repo rule is applied. Only Jonathan's own repos get the line: the owner must be
+# TortoiseWolfe or TurtleWolfe, and the repo's name must not appear in ~/repos/hub/client-repos.txt (the last folder of each path) or in
+# column 2 of client-senders.tsv; if either list cannot be read the check says nothing (a client PR must never be called ready by mistake).
+# "Green" means `gh pr checks` lists at least one check, none pending, failing or cancelled, and the PR is still open. The mark
+# .green-<lane>-<owner>-<repo>-<n> in $recycle_dir keeps it to one wake per PR, even across re-armed watchers. gh is asked at most once per
+# LANE_WATCH_GREEN_EVERY seconds (default 120) per watcher, and LANE_WATCH_GREEN_EVERY=off turns the check off.
+green_last=0
+green_own_repo() { # green_own_repo <owner/repo>: 0 only for one of his own repos
+  local owner=${1%%/*} name=${1##*/} hub="${HOME}/repos/hub" p x
+  case "$owner" in TortoiseWolfe|TurtleWolfe) ;; *) return 1 ;; esac
+  [ -f "$hub/client-repos.txt" ] && [ -r "$hub/client-repos.txt" ] && [ -f "$hub/client-senders.tsv" ] && [ -r "$hub/client-senders.tsv" ] || return 1
+  while IFS= read -r p; do
+    p=${p%%#*}; p=${p//[[:space:]]/}; [ -n "$p" ] || continue
+    [ "${p##*/}" = "$name" ] && return 1
+  done < "$hub/client-repos.txt"
+  while IFS=$'\t' read -r _ x _; do
+    x=${x##*/}; [ -n "$x" ] && [ "${x,,}" = "${name,,}" ] && return 1
+  done < "$hub/client-senders.tsv"
+  return 0
+}
+green_pr_check() {
+  local l=$1 every=${LANE_WATCH_GREEN_EVERY:-120} rep line rest tok pr repo mark out total skipped now
+  [ "$every" = off ] && return 0
+  [[ "$every" =~ ^[0-9]+$ ]] || every=120
+  now=$(date +%s)
+  [ $(( now - green_last )) -ge "$every" ] || return 0
+  rep=$(report_of "$l"); [ -n "$rep" ] && [ -f "$rep" ] || return 0
+  while IFS= read -r line; do
+    [[ "$line" == *"gh pr merge"* ]] || continue
+    pr=""; rest=${line#*gh pr merge}
+    for tok in $rest; do tok=${tok//[\`\'\".,;:)(]/}; tok=${tok#\#}; if [[ "$tok" =~ ^[0-9]+$ ]]; then pr=$tok; break; fi; done
+    repo=""; [[ "$line" =~ (-R|--repo)[\ =]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) ]] && repo=${BASH_REMATCH[2]}
+    [ -n "$pr" ] && [ -n "$repo" ] || continue
+    green_own_repo "$repo" || continue
+    mark="$recycle_dir/.green-$l-${repo//\//-}-$pr"
+    [ -e "$mark" ] && continue
+    green_last=$now
+    [ "$(timeout 30 gh pr view "$pr" -R "$repo" --json state -q .state 2>/dev/null)" = OPEN ] || continue
+    out=$(timeout 30 gh pr checks "$pr" -R "$repo" 2>/dev/null) || true
+    [ -n "$out" ] || continue
+    printf '%s\n' "$out" | command grep -qiE '(^|[[:space:]])(pending|fail|cancel)|no checks' && continue
+    printf '%s\n' "$out" | command grep -qiE '(^|[[:space:]])pass' || continue
+    total=$(printf '%s\n' "$out" | command grep -c .)
+    skipped=$(printf '%s\n' "$out" | command grep -ciE '(^|[[:space:]])skipp') || skipped=0
+    mkdir -p "$recycle_dir" 2>/dev/null
+    : > "$mark" 2>/dev/null || true
+    echo "green: $l's pull request $pr in $repo has every check passed ($total checks, $skipped skipped) and is listed under Hub merges in its report; it is one of his own repos, so the standing rule is: gh pr merge $pr -R $repo --squash --delete-branch (the watcher does not merge)."
+    hit=1; other=1
+  done < <(awk '/^## Hub merges/{f=1; next} /^## /{f=0} f' "$rep")
+}
+
 # The recycle decision for one lane, shared by the poll loop and the scheduled pass (--recycle-once). recycle_pass <lane> <pane> [quiet]
 # returns 0 when the lane is due: it started `lane.sh --recycle` in the background, or it is recycling too often and the thrash guard held
 # it back (named to the hub unless quiet). It returns 1 when the lane is not due, was tried a moment ago, or has a recycle under way.
@@ -764,6 +817,7 @@ while :; do
       fi
       dead_check "$l"
       high_check "$l"
+      green_pr_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then
         recycling[$l]=1; seen_turn[$l]=$done_line   # the hand-off turn is ours, not news
