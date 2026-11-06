@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """What a headless lane leaves behind when its engine process exits with a failure (issue #234).
 
-lane.sh runs this after "exit <code>" is written to out.log, only when the code is not 0:
+lane.sh runs this after "exit <code>" is written to out.log (a headless Claude lane on every exit, the other engines only when the code is not 0):
 
   lane_fail_report.py <report.md> <out.log> <exit code> <engine> [<state dir>]
 
-1. If report.md is missing or empty, line 1 becomes "FAILED exit <code> | <last error line>", so lane_watch wakes the hub.
-   A report the lane wrote itself is never touched.
-2. If out.log shows the engine is out of quota with a reset time ("RESOURCE_EXHAUSTED ... Resets in 91h56m"),
+1. If report.md is missing or empty and the code is not 0, line 1 becomes "FAILED exit <code> | <last error line>", so lane_watch wakes the hub.
+   A report the lane wrote itself is never touched, with one exception (issue #260):
+1b. If line 1 of the lane's report still starts with WORKING when the process has ended, line 1 becomes "ENDED WHILE WORKING exit <code> | was: <old line 1>"
+   and the rest of the report is kept, so the hub is woken instead of a lane sitting silently dead (5 Nov 2026: two lanes ended on Claude Code's
+   10-minute background wait with exit 0 and nobody knew for half an hour).
+2. If the code is not 0 and out.log shows the engine is out of quota with a reset time ("RESOURCE_EXHAUSTED ... Resets in 91h56m"),
    <state dir>/engine-out/<engine>.until holds the epoch second when it resets, and `lane.sh` refuses that engine until then.
 
 Reads out.log only (it is the engine's own output); prints nothing. Exit 0 always: a failed note must not mask the lane's own exit code.
@@ -45,6 +48,19 @@ def reset_seconds(text):
     return secs if secs > 0 else None
 
 
+def end_while_working(report, num):
+    """Line 1 starting WORKING when the process is gone: say so, keep the rest of the file."""
+    fd = os.open(report, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, errors="replace") as f:
+        body = f.read()
+    first, nl, rest = body.partition("\n")
+    if not first.startswith("WORKING"):
+        return
+    fd = os.open(report, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+    with os.fdopen(fd, "w") as f:
+        f.write("ENDED WHILE WORKING exit %s | was: %s\n%s" % (num, first[:300], rest))
+
+
 def main(argv):
     if len(argv) < 5:
         return 0
@@ -63,13 +79,16 @@ def main(argv):
         except FileNotFoundError:
             writable = True
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        if writable:
+        num = re.sub(r"\D", "", code) or "?"
+        if writable and num != "0":
             fd = os.open(report, flags, 0o644)
             with os.fdopen(fd, "w") as f:
-                f.write("FAILED exit %s | %s\n" % (re.sub(r"\D", "", code) or "?", last_error_line(text)))
+                f.write("FAILED exit %s | %s\n" % (num, last_error_line(text)))
+        elif not writable and stat.S_ISREG(st.st_mode):
+            end_while_working(report, num)
     except OSError:
         pass
-    secs = reset_seconds(text)
+    secs = reset_seconds(text) if re.sub(r"\D", "", code) not in ("", "0") else None
     if secs and re.fullmatch(r"[a-z]+", engine):
         try:
             d = os.path.join(state, "engine-out")

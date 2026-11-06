@@ -55,6 +55,25 @@ python3 -I "$HELPER" "$H/report.md" "$H/out.log" 1 codex "$STATE"
 assert_eq "$(cat "$TMP/target")" keep 'a symlinked report.md is not written through'
 rm -f "$H/report.md"
 
+# #260 (5 Nov 2026): a lane that ends while line 1 of its report still says WORKING left the hub with no news (two lanes ended on Claude Code's
+# 10-minute background wait with exit 0). The helper now rewrites that line 1, whatever the exit code, and keeps the rest of the report.
+printf 'WORKING 9:27 PM | PR 144 | checks pending\nnotes line\n' >"$H/report.md"
+printf 'Background tasks still running 10m after the last turn; stopping them.\nexit 0\n' >"$H/out.log"
+python3 -I "$HELPER" "$H/report.md" "$H/out.log" 0 claude "$STATE"
+assert_eq "$(head -1 "$H/report.md")" 'ENDED WHILE WORKING exit 0 | was: WORKING 9:27 PM | PR 144 | checks pending' 'a lane that ends on WORKING gets an ENDED line 1, exit 0 included'
+assert_eq "$(sed -n 2p "$H/report.md")" 'notes line' 'the rest of its report is kept'
+printf 'WORKING 9:27 PM | x\n' >"$H/report.md"
+python3 -I "$HELPER" "$H/report.md" "$H/out.log" 1 claude "$STATE"
+assert_eq "$(cat "$H/report.md")" 'ENDED WHILE WORKING exit 1 | was: WORKING 9:27 PM | x' 'a non-zero exit on WORKING gets the same line with its code'
+printf 'DONE shipped\n' >"$H/report.md"
+python3 -I "$HELPER" "$H/report.md" "$H/out.log" 0 claude "$STATE"
+assert_eq "$(cat "$H/report.md")" 'DONE shipped' 'a clean exit with a DONE report is left alone'
+rm -f "$H/report.md"; python3 -I "$HELPER" "$H/report.md" "$H/out.log" 0 claude "$STATE"
+[ ! -e "$H/report.md" ] || fail 'a clean exit with no report writes nothing'; ok
+rm -rf "$STATE/engine-out"; printf 'quota note\nResets in 5h\nexit 0\n' >"$H/out.log"
+python3 -I "$HELPER" "$H/report.md" "$H/out.log" 0 claude "$STATE"
+[ ! -e "$STATE/engine-out/claude.until" ] || fail 'a clean exit never sets a quota marker'; ok
+
 # ---- lane.sh --------------------------------------------------------------------------------------------------------------------------------
 lane() { set +e; LAST_OUT="$(HOME="$HOME_T" PATH="$BIN:$PATH" bash "$SCRIPT" "$@" 2>&1)"; LAST_RC=$?; set -e; }
 P="$TMP/p.md"; echo 'Fix the lint errors.' >"$P"
@@ -77,5 +96,13 @@ assert_eq "$LAST_RC" 0 'another engine still starts'
 echo $(( $(date +%s) - 60 )) >"$STATE/engine-out/agy.until"
 lane --dry-run --engine agy fr-back "$OWN" sonnet "$P"
 assert_eq "$LAST_RC" 0 'an expired marker is ignored'
+
+# #260: a headless Claude lane waits up to an hour for a background job, not Claude Code's 10 minutes, and the helper runs on every exit.
+lane --claude-because "fail report test" --dry-run --console --headless fr-hl "$OWN" sonnet "$P"
+assert_eq "$LAST_RC" 0 'a headless Claude lane starts'
+assert_contains "$LAST_OUT" 'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000' 'a headless lane waits an hour for a background job'
+assert_contains "$LAST_OUT" 'lane_fail_report.py' 'a headless Claude lane calls the helper when it exits'
+CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=1800000 lane --claude-because "fail report test" --dry-run --console --headless fr-hl2 "$OWN" sonnet "$P"
+assert_contains "$LAST_OUT" 'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=1800000' 'a value already set is kept'
 
 echo "ok - $checks checks passed"
