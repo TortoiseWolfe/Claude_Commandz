@@ -105,6 +105,25 @@ First run on a machine with no record: `--status`, deal with each "live edit" (c
 `--record` (or pass `--from <commit>`). `--include-stale` also reinstalls the stale files `--status` lists. It covers scripts,
 hooks, workflows, agents and skills. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_global.py`.
 
+#### Installing just the scripts, straight from origin/main (`install_scripts.py`)
+
+`install_scripts.py` installs `global/.claude/scripts/` into `~/.claude/scripts/` from what is merged on origin/main. It reads
+the files from git, never from a working folder, so a half-edited checkout can't leak into the live scripts. It prints a
+per-file summary first (new, changed, same, drift) and asks `Install? [y/N]` before it copies anything. A live file that
+matches no earlier repo version is listed as drift and left alone. A script that reads the no-AI wall from
+`~/.claude/no-ai-wall/` (lane.sh) is held back, and not copied, while that folder lacks any of the wall's three files; the
+summary then prints the exact `global/.claude/no-ai-wall/install.sh` command a person runs first (6 Nov: a lane.sh installed
+without that folder refused to start any lane). No-AI-wall files and settings files are skipped without
+being read. It backs up every file it replaces and writes an `undo.sh` beside the backup under
+`~/.claude/state/scripts-install-backups/`; a failure part way puts every file back. A person types the one command:
+
+```bash
+git -C ~/repos/Claude_Commandz fetch -q origin main && python3 -I <(git -C ~/repos/Claude_Commandz show origin/main:global/.claude/scripts/install_scripts.py) --no-fetch
+```
+
+Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--repo`, `--home`, `--ref`. Last line is
+`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+
 ### Installing the no-AI wall (a person runs this, never a session)
 
 The wall's three files live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
