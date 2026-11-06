@@ -148,6 +148,9 @@ read_dialog() {  # read_dialog <path> [option lines...]
   local path="$1"; shift
   printf '%s\n' 'Read outside the working directories' '' "  Read($path)" '' 'Do you want to proceed?' "$@" 'Esc to cancel' >"$ST/pane"
 }
+mkdir -p "$HOME_T/repos/.worktrees/x--y" "$HOME_T/repos/z" "$HOME_T/.config/afa"
+: >"$HOME_T/repos/.worktrees/x--y/a.txt"; : >"$HOME_T/repos/.worktrees/x--y/c.txt"; : >"$HOME_T/repos/z/b.txt"; : >"$HOME_T/.config/afa/key"
+ln -sf "$HOME_T/.config/afa/key" "$HOME_T/repos/z/link-to-key"
 RD_OPTS=('❯ 1. Yes' '  2. Yes, allow reading from wt/ during this session' '  3. No')
 read_dialog "$HOME_T/repos/.worktrees/x--y/a.txt" "${RD_OPTS[@]}"
 lane --dry-run --update up-lane
@@ -171,8 +174,23 @@ rm -f "$ST/keys.log" "$ST/sent.log"; idle_pane; rm -f "$HAND"/handoff-prev*.md
 # Refused, nothing typed: a path in a private folder, a path with no Read(), no Yes option, a different dialog that merely mentions the words.
 read_dialog "$HOME_T/.config/afa/key" "${RD_OPTS[@]}"
 lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a read of a private folder is refused ($LAST_OUT)"; assert_contains "$LAST_OUT" "has a dialog on its screen" "says why"
-read_dialog "$HOME_T/repos/x/../../.config/k" "${RD_OPTS[@]}"
-lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a path with .. is refused"
+read_dialog "$HOME_T/repos/x/../../.config/afa/key" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a path with .. that resolves into a private folder is refused"
+read_dialog "$HOME_T/repos/z/link-to-key" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a symlink in the repos that points into a private folder is refused"
+read_dialog "$HOME_T/repos/z/missing.txt" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a path that does not exist is refused"
+read_dialog "relative/b.txt" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a relative path is refused"
+# An earlier read dialog still in the scrollback above a different, newer dialog is never what is answered.
+{ printf '%s\n' 'Read outside the working directories' '' "  Read($HOME_T/repos/z/b.txt)" '' 'Do you want to proceed?' "${RD_OPTS[@]}" 'Esc to cancel' '● Bash(curl x)' ' Bash command' '   rm -rf ~/y' 'Do you want to proceed?' '❯ 1. Yes' '  2. Yes, allow reading from wt/ during this session' '  3. No' 'Esc to cancel'; } >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "an old read dialog above a Bash prompt is not answered"
+# A header-looking line inside a Bash prompt is not the dialog's title.
+printf '%s\n' ' Bash command' '   echo Read outside the working directories' "  Read($HOME_T/repos/z/b.txt)" 'Do you want to proceed?' "${RD_OPTS[@]}" 'Esc to cancel' >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a Bash prompt that mentions the title is not answered"
+# A bare path line (no Read( )) is not accepted.
+printf '%s\n' 'Read outside the working directories' "  $HOME_T/repos/z/b.txt" 'Do you want to proceed?' "${RD_OPTS[@]}" 'Esc to cancel' >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a bare path line is refused"
 printf '%s\n' 'Read outside the working directories' 'Do you want to proceed?' "${RD_OPTS[@]}" 'Esc to cancel' >"$ST/pane"
 lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a read dialog that names no path is refused"
 read_dialog "$HOME_T/repos/z/b.txt" '❯ 1. No' '  2. No, and tell Claude why'

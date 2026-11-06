@@ -1966,30 +1966,38 @@ lane_screen_state() {  # <name>: idle, working or dialog
 # "<option number><TAB><path>" for the option that allows the read and return 0; return 1 for any other screen (every other dialog stays
 # refused: a digit typed at a permission dialog we have not read is a permission decision). The number comes from the screen, never from a
 # constant: the option that says "allow reading from <dir> during this session" if there is one, else the plain "Yes" (one read). The path must
-# be named on the screen and sit under the repos, the state folder, the scripts folder or Claude's temp folder; a read of anything else (the
+# be named on the dialog's own Read(...) line and, once resolved (symlinks, ..), sit under the repos, the state folder, the scripts folder or this user's Claude temp folder; a read of anything else (the
 # private config folders, keys, dotfiles) is left for the hub to decide (hub, 6 Nov: grand-daze-red froze on this dialog for every file and
 # never went idle, so its roll waited for ever).
 read_dialog_answer() {
-  local pane path num opt
+  local pane block path real num opt
   pane="$(tmux capture-pane -p -t "$SESSION:$1" 2>/dev/null | tail -30)" || return 1
-  printf '%s\n' "$pane" | command grep -qiE 'Read outside the working director' || return 1
-  printf '%s\n' "$pane" | tail -15 | command grep -qE 'Do you want to proceed|Enter to select|Esc to cancel' || return 1
-  path="$(printf '%s\n' "$pane" | sed -nE 's/.*Read\(([^)]+)\).*/\1/p' | tail -1)"
-  [ -n "$path" ] || path="$(printf '%s\n' "$pane" | command grep -viE 'outside the working director|Esc to cancel|Enter to select|Do you want|^[[:space:]]*[❯>]?[[:space:]]*[0-9]+\.' | command grep -oE '(~|/)[A-Za-z0-9._~+@/-]*[A-Za-z0-9._~+@-]' | head -1)"
+  # Only the last dialog on the screen counts: from the last line that is exactly the dialog's title to the end. Older text above it (a Bash
+  # prompt, an earlier read dialog still in the scrollback) is never read. The block must be one Read(...) dialog and nothing else.
+  block="$(printf '%s\n' "$pane" | awk '/^[[:space:]]*Read outside the working directories\??[[:space:]]*$/ { b = ""; on = 1 } on { b = b $0 "\n" } END { printf "%s", b }')"
+  [ -n "$block" ] || return 1
+  [ "$(printf '%s' "$block" | wc -l)" -le 15 ] || return 1
+  [ "$(printf '%s' "$block" | command grep -c 'Do you want to proceed')" = 1 ] || return 1
+  [ "$(printf '%s' "$block" | command grep -c 'Esc to cancel')" = 1 ] || return 1
+  [ "$(printf '%s' "$block" | command grep -cE '^[[:space:]]*Read\(')" = 1 ] || return 1
+  printf '%s\n' "$block" | sed -n '2,5p' | command grep -qE '^[[:space:]]*Read\([^)]+\)[[:space:]]*$' || return 1
+  path="$(printf '%s\n' "$block" | sed -nE 's/^[[:space:]]*Read\(([^)]+)\)[[:space:]]*$/\1/p' | head -1)"
   [ -n "$path" ] || return 1
   case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
-  case "$path" in *..*|*[\"\'\`\$\;\|\&\<\>]*) return 1 ;; esac
-  case "$path" in
-    "$HOME"/repos/*|"$HOME"/.claude/state/*|"$HOME"/.claude/scripts/*|/tmp/claude-*/*) ;;
+  case "$path" in /*) ;; *) return 1 ;; esac
+  # The path is resolved (symlinks, ..) before it is checked, and the resolved path must sit under one of these folders.
+  real="$(realpath -e -- "$path" 2>/dev/null)" || return 1
+  case "$real" in
+    "$HOME"/repos/*|"$HOME"/.claude/state/*|"$HOME"/.claude/scripts/*|"/tmp/claude-$(id -u)"/*) ;;
     *) return 1 ;;
   esac
   # Option lines look like "❯ 1. Yes" or "  2. Yes, allow reading from x/ during this session"; a line that starts with No is never chosen.
-  opt="$(printf '%s\n' "$pane" | tail -15 | sed -nE 's/^[[:space:]]*[❯>]?[[:space:]]*([0-9]+)\.[[:space:]]+(Yes.*)$/\1\t\2/p')"
+  opt="$(printf '%s\n' "$block" | sed -nE 's/^[[:space:]]*[❯>]?[[:space:]]*([0-9]+)\.[[:space:]]+(Yes.*)$/\1\t\2/p')"
   [ -n "$opt" ] || return 1
   num="$(printf '%s\n' "$opt" | awk -F'\t' '$2 ~ /allow reading from .* during this session/ { print $1; exit }')"
   [ -n "$num" ] || num="$(printf '%s\n' "$opt" | awk -F'\t' '$2 ~ /^Yes[[:space:]]*$/ { print $1; exit }')"
   [[ "$num" =~ ^[0-9]$ ]] || return 1
-  printf '%s\t%s\n' "$num" "$path"
+  printf '%s\t%s\n' "$num" "$real"
 }
 
 if [ "$mode" = behind ]; then
