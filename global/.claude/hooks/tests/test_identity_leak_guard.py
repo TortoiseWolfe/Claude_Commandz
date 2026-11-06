@@ -174,7 +174,7 @@ class Refuses(unittest.TestCase):
     def test_a_mail_tool_is_not_trusted_when_the_interpreter_can_be_swapped(self):
         for cmd in ("PATH=/tmp/evil:$PATH python3 %s/gmail_api.py --to %s", "alias python3=/tmp/evil; python3 %s/gmail_api.py --to %s",
                     "python3() { /tmp/evil \"$@\"; }; python3 %s/gmail_api.py --to %s", "hash -p /tmp/evil python3; python3 %s/gmail_api.py --to %s",
-                    "/tmp/evil/python3 %s/gmail_api.py --to %s", "./python3 %s/gmail_api.py --to %s"):
+                    "/tmp/evil/python3 %s/gmail_api.py --to %s", "/usr/bin/../../tmp/evil/python3 %s/gmail_api.py --to %s", "export PATH=/tmp/evil; python3 %s/gmail_api.py --to %s", "./python3 %s/gmail_api.py --to %s"):
             with self.subTest(cmd=cmd):
                 self.deny(cmd % (TOOLS, ME))
 

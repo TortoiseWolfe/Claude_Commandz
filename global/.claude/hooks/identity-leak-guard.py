@@ -49,7 +49,7 @@ SEPARATOR = re.compile(r"\|\||&&|[;|&]")
 # Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
 INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+|DENO_\w+|LD_\w+|DYLD_\w+)\b|(?:^|[\s;&|(])(?:env|source|export|declare|typeset)\s|(?:^|[;&|(]\s*)\.\s")
 # Anything that can make the word "python3" mean something else on the same line: PATH changes, aliases, functions, hash.
-SHADOWING = re.compile(r"\bPATH\w*=|\b(?:alias|hash|enable|function|command_not_found_handle)\b|\w+\s*\(\s*\)\s*\{")
+SHADOWING = re.compile(r"\bPATH\b|\b(?:alias|hash|enable|function|command_not_found_handle)\b|\w+\s*\(\s*\)\s*\{")
 SYSTEM_INTERPRETER_DIRS = ("/usr/bin/", "/usr/local/bin/", "/bin/", "/opt/homebrew/bin/")
 CHANGES_FOLDER = re.compile(r"\b(?:cd|pushd|popd|chdir)\b")
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
@@ -197,7 +197,7 @@ def sinks(cmd, cwd, allowed):
     hijackable = bool(INTERPRETER_ENV.search(cmd) or CHANGES_FOLDER.search(cmd) or SHADOWING.search(cmd))
     for m in INTERP_RE.finditer(cmd):
         # The interpreter itself must be a bare name or a system path; one at any other path is a program like any other.
-        odd_interpreter = bool(m.group("dir")) and not m.group("dir").startswith(SYSTEM_INTERPRETER_DIRS)
+        odd_interpreter = bool(m.group("dir")) and m.group("dir") not in SYSTEM_INTERPRETER_DIRS
         toks = SEPARATOR.split(m.group("rest"))[0].split()
         words = [t.strip("'\"") for t in toks if not t.startswith(NOT_A_FILE)]
         inline = any(t.startswith(INLINE_PREFIXES) for t in toks) or not words
