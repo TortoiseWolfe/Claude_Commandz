@@ -301,5 +301,131 @@ class RuleE(unittest.TestCase):
         self.assertNotIn(self.PW, open(sg.KS_CACHE).read())
 
 
+class RuleF(unittest.TestCase):
+    """The account email (read from the Claude config at run time) never goes to a website."""
+    EM = "pat.tester" + "@example.test"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = os.path.join(self.tmp.name, "claude-config.json")
+        with open(self.cfg, "w") as fh:
+            json.dump({"oauthAccount": {"emailAddress": self.EM.upper()}}, fh)
+        self.saved = (sg.F_CONFIG, sg._account_email)
+        sg.F_CONFIG, sg._account_email = self.cfg, False
+        self.addCleanup(lambda: setattr(sg, "F_CONFIG", self.saved[0]) or setattr(sg, "_account_email", self.saved[1]))
+
+    def blocked(self, cmd):
+        r = bash(cmd)
+        self.assertIsNotNone(r, "should block: " + cmd)
+        self.assertEqual(r[0], "F", cmd)
+        self.assertNotIn(self.EM, r[1])
+        self.assertNotIn(self.EM.split("@")[0], r[1])
+        return r
+
+    def allowed(self, cmd):
+        self.assertIsNone(bash(cmd), "should allow: " + cmd)
+
+    def test_user_agent_header(self):
+        e = self.EM
+        for c in ["echo 'User-Agent: selftest (%s)' > /dev/null" % e,
+                  "curl -H 'user-agent: bot (%s)' https://example.org/" % e,
+                  "curl -A 'bot (%s)' https://example.org/" % e,
+                  "curl -A'bot %s' https://example.org/" % e,
+                  "curl --user-agent 'bot %s' https://example.org/" % e,
+                  "wget -U 'bot %s' https://example.org/x" % e,
+                  "wget --user-agent=\"bot %s\" https://example.org/x" % e,
+                  "http GET https://example.org/ 'User-Agent:bot %s'" % e]:
+            self.blocked(c)
+
+    def test_url_path_and_query(self):
+        e = self.EM
+        for c in ["curl 'https://example.org/api?contact=%s'" % e,
+                  "curl -s 'https://example.org/api?contact=%s'" % e.replace("@", "%40"),
+                  "curl https://example.org/u/%s" % e,
+                  "wget -q -O - 'https://example.org/?mail=%s'" % e,
+                  "https GET 'https://example.org/?q=%s'" % e]:
+            self.blocked(c)
+
+    def test_request_body(self):
+        e = self.EM
+        for c in ["curl -d 'email=%s' https://example.org/" % e,
+                  "curl --data-urlencode 'email=%s' https://example.org/" % e,
+                  "curl -F 'email=%s' https://example.org/" % e,
+                  "curl --json '{\"e\":\"%s\"}' https://example.org/" % e,
+                  "curl -X POST https://example.org/ --data-raw '{\"e\":\"%s\"}'" % e,
+                  "wget --post-data='e=%s' https://example.org/" % e,
+                  "curl -s https://example.org/ \\\n  -d 'e=%s'" % e]:
+            self.blocked(c)
+
+    def test_scripts(self):
+        e = self.EM
+        for c in ["python3 -c \"import requests; requests.post('https://example.org/', data={'e': '%s'})\"" % e,
+                  "python3 - <<'EOF'\nimport httpx\nhttpx.get('https://example.org/', params={'e': '%s'})\nEOF" % e,
+                  "python3 - <<'EOF'\nimport requests\nH = {'User-Agent': 'x (%s)'}\nEOF" % e,
+                  "python3 -c \"import urllib.request as u; u.urlopen('https://example.org/?e=%s')\"" % e,
+                  "node -e \"fetch('https://example.org/', {method:'POST', body:'%s'})\"" % e,
+                  "node -e \"require('axios').post('https://example.org/', {e:'%s'})\"" % e]:
+            self.blocked(c)
+
+    def test_case_and_chained_commands(self):
+        self.blocked("curl -A 'bot %s' https://example.org/" % self.EM.upper())
+        self.blocked("git status && curl -d 'e=%s' https://example.org/" % self.EM)
+        self.blocked("ls; wget --post-data='e=%s' https://example.org/" % self.EM)
+
+    def test_webfetch_and_browser_url(self):
+        ev = lambda tool, **ti: sg.evaluate({"tool_name": tool, "tool_input": ti})
+        for u in ["https://example.org/?contact=" + self.EM, "https://example.org/?c=" + self.EM.replace("@", "%40"),
+                  "https://example.org/" + self.EM]:
+            r = ev("WebFetch", url=u, prompt="summarise")
+            self.assertEqual(r[0], "F", u)
+            self.assertNotIn(self.EM, r[1])
+        self.assertEqual(ev("mcp__MCP_DOCKER__browser_navigate", url="https://example.org/?c=" + self.EM)[0], "F")
+        self.assertIsNone(ev("WebFetch", url="https://example.org/docs", prompt="mail " + self.EM))
+        self.assertIsNone(ev("WebFetch", url="https://example.org/a@b"))
+
+    def test_allowed_git_gh_and_gmail_api(self):
+        e = self.EM
+        for c in ["git config user.email %s" % e,
+                  "git log --author=%s --oneline" % e,
+                  "git commit -m 'note: User-Agent header and %s'" % e,
+                  "gh issue create --title t --body 'owner %s'" % e,
+                  "gh api -X POST repos/o/r/issues -f body='cc %s'" % e,
+                  "python3 ~/.claude/scripts/gmail_api.py draft --to %s --subject s --body 'requests.post notes'" % e,
+                  "python3 ~/.claude/scripts/gmail_api.py list --query 'from:%s'" % e]:
+            self.allowed(c)
+
+    def test_allowed_when_no_web_request(self):
+        e = self.EM
+        for c in ["echo %s >> notes.txt" % e,
+                  "grep -rn %s docs/" % e,
+                  "curl -A 'claude-code' https://example.org/",
+                  "curl -s https://example.org/api?x=1 -d 'a=b'",
+                  "python3 -c \"import requests; requests.get('https://example.org/')\"",
+                  "mail -s hi %s < /dev/null" % e,
+                  "curl -s https://example.org/ | grep -c %s" % e]:
+            self.allowed(c)
+
+    def test_other_address_is_not_the_account(self):
+        self.allowed("curl -A 'bot someone.else@example.test' https://example.org/")
+
+    def test_no_config_or_bad_config_allows(self):
+        sg.F_CONFIG, sg._account_email = os.path.join(self.tmp.name, "missing.json"), False
+        self.allowed("curl -A 'bot %s' https://example.org/" % self.EM)
+        with open(self.cfg, "w") as fh:
+            fh.write("{not json")
+        sg.F_CONFIG, sg._account_email = self.cfg, False
+        self.allowed("curl -A 'bot %s' https://example.org/" % self.EM)
+
+    def test_through_the_hook_process(self):
+        env = dict(os.environ, SECRET_GUARD_CLAUDE_CONFIG=self.cfg)
+        cmd = "echo 'User-Agent: selftest (%s)' > /dev/null" % self.EM
+        p = subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("rule F", p.stderr)
+        self.assertNotIn(self.EM, p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
