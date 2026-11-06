@@ -73,6 +73,27 @@ check "first run stores the boot stamp" '[ "$(cat $S/fleet-up.boot)" = 2026-10-2
 check "no incident, no record" '[ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]'
 check "no incident, no inbox line" '[ ! -e $S/peer-inbox.md ]'
 
+# 2b. Windows silent (the query timed out): the stored Windows stamp is kept, nothing reads as a reboot (6 Nov 2026: the Linux start time
+# replaced the Windows stamp, so the next run saw "a reboot" twice and wrote two records for the 4 Nov boot)
+setup NCC-74656
+printf '%s\n' "BOOT=2026-10-28T08:00:00" >"$FAKE_WIN"
+run --heartbeat
+NOW=$((NOW + 60)) run
+: >"$FAKE_WIN"   # Windows answers nothing
+NOW=$((NOW + 60)) run --heartbeat; NOW=$((NOW + 60)) run
+check "silent Windows: stored stamp is unchanged" '[ "$(cat $S/fleet-up.boot)" = 2026-10-28T08:00:00 ]'
+check "silent Windows: no record" '[ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]'
+printf '%s\n' "BOOT=2026-10-28T08:00:00" >"$FAKE_WIN"   # Windows answers the same stamp again
+NOW=$((NOW + 60)) run --heartbeat; NOW=$((NOW + 60)) run
+check "same stamp after a silent run: still no record" '[ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]'
+check "same stamp after a silent run: no inbox line" '[ ! -e $S/peer-inbox.md ]'
+# first ever run with Windows silent still stores a stamp (the Linux start time) so later runs have something to compare
+setup NCC-74656
+: >"$FAKE_WIN"
+run --heartbeat; NOW=$((NOW + 60)) run
+check "no stamp and no Windows: the Linux start time is stored" '[ -s $S/fleet-up.boot ]'
+check "no stamp and no Windows: no record" '[ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]'
+
 # 3. a crash: gap, dead lanes, services, record, inbox, idempotence
 setup NCC-74656
 mkdir -p "$HOME/stream"

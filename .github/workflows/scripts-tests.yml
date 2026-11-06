@@ -43,8 +43,9 @@ jobs:
           # Issue 224: the hooks' own tests live in global/.claude/hooks/tests and the step above never collected them.
           set -o pipefail
           export HOME="$(mktemp -d)"
-          # Wiring checks the tower's live ~/.claude/hooks/block-outbound.sh, which is private and not in this repo; a runner has no such file.
-          python3 -m pytest tests -q -p no:cacheprovider -rs --deselect tests/test_draft_recipient_guard.py::Wiring | tee "$RUNNER_TEMP/hooks-pytest.out"
+          # Wiring runs the hook's draft and send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME. LiveHook checks the tower's private
+          # ~/.claude/hooks/block-outbound.sh (and that the fixture still matches it); a runner has no such file, so only LiveHook is deselected.
+          python3 -m pytest tests -q -p no:cacheprovider -rs --deselect tests/test_draft_recipient_guard.py::LiveHook | tee "$RUNNER_TEMP/hooks-pytest.out"
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/hooks-pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped hook tests: $skips"; exit 1; fi
           summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"
