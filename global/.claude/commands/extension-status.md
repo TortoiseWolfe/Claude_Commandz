@@ -17,6 +17,7 @@ Read-only maintenance check for the wireframe extension repo and its catalog pre
 /extension-status owner/other-repo          # Run against a different repo
 /extension-status --since 7d                # Changes since the newest snapshot at least 7 days old
 /extension-status --no-diff                 # Absolute numbers only (the original behaviour)
+/extension-status --install-schedule        # Offer to register a recurring run through /schedule (asks first)
 ```
 
 ## Arguments
@@ -25,11 +26,12 @@ ARGUMENTS: $ARGUMENTS
 
 - No args: Full report
 - `--triage`: Support-needed items only (sections 1 + 4)
-- `--draft-replies`: a suggested reply for each outside issue or PR, and nothing else (see "Draft replies" below)
+- `--draft-replies`: a suggested reply for each outside issue or PR, and nothing else (see "--draft-replies" under Filtered views)
 - `--traffic`: Engagement metrics only (section 2)
 - `--mentions`: External mention search only (section 4)
 - `--since <N><m|h|d|w>`: compare against the newest snapshot at least that old (e.g. `7d`, `12h`, `2w`); default is the newest snapshot saved before this run
 - `--no-diff`: absolute numbers only, no comparison (the snapshot is still saved)
+- `--install-schedule`: offer to register a recurring run through `/schedule`; nothing is registered without a yes (see "Scheduling")
 - `REPO`: `owner/name` override (default: `TortoiseWolfe/spec-kit-extension-wireframe`)
 
 ---
@@ -307,9 +309,36 @@ Section 4 only. Header: `🔍 External mentions — last 30 days`.
 
 ---
 
+## Scheduling
+
+Recommended cron for a weekday-morning check:
+
+```
+0 9 * * 1-5 /extension-status --triage
+```
+
+**Why this cadence.** Outside people write during their working day, so 9:00 on weekdays catches overnight messages before you start. `--triage` is short and says `✓ No inbound items` when nothing came in, so a quiet day costs you one line. A daily run only carries news now that the snapshot diff exists (the `Since <time>` block), so the cadence is worth it. The 48-hour flag in `--draft-replies` also works on a weekday rhythm: a Friday message is flagged by Monday. Weekends are skipped on purpose.
+
+The cadence is yours to pick; the command does not detect one. A second schedule (for example a full report weekly) is a second cron registered the same way, not a feature of this command.
+
+One limit: snapshots are saved on the machine that ran the command (section 8). A scheduled run that has no local state folder prints the starting-point note instead of a diff each time, so use a run on your own machine when you want the `Since <time>` block.
+
+### --install-schedule
+
+An optional helper that sets the cron up through `/schedule`. Follow these steps in order:
+
+1. Ask which command to schedule (default `/extension-status --triage`) and which days and hour. The user picks; do not choose a cadence for them. Offer the recommended cron above as the default answer, with the reason above beside it.
+2. Show the exact cron expression and the exact command it would run, and ask for confirmation.
+3. Only after a clear yes, hand the command and the cron to `/schedule`. Never register, change or delete a schedule without an explicit yes, and say plainly if the answer is anything else.
+4. After `/schedule` reports back, print what it registered (the expression, the command and the name or id it gave).
+
+This flag only registers a schedule. It runs no report itself, and it never posts to GitHub.
+
+---
+
 ## Related
 
-- `/schedule` — once the signal is worth it, schedule this daily (e.g. `0 9 * * 1-5 /extension-status --triage`)
+- `/schedule` — register the recurring run; the "Scheduling" section above gives the recommended cron and why (e.g. `0 9 * * 1-5 /extension-status --triage`)
 - `/session-stats` — token/cost telemetry for the current session
 - `/status` — project-internal dashboard (different scope; this one is external GitHub)
 
@@ -319,5 +348,5 @@ Planned enhancements tracked on [`TortoiseWolfe/Claude_Commandz` issues](https:/
 
 1. ~~Inbound-engagement assist (draft replies for non-owner issues/PRs)~~ — done: `--draft-replies`
 2. Snapshot diff ("what changed since last run")
-3. `/schedule` integration helper
+3. ~~`/schedule` integration helper~~ — done: "Scheduling" and `--install-schedule`
 4. Multi-extension config file
