@@ -236,6 +236,18 @@ lane_env_prefix() {
   fi
   printf 'AFA_BIG_OUT=1 AFA_LANE_FOLDER=%q ' "$2"
   printf 'AFA_LANE_NAME=%q ' "$1"   # lane_session_hook.sh records the lane's session against this name
+  lane_docker_env
+}
+
+# DOCKER_CONFIG=<empty folder> for a lane's shell (issue 46, 17 Oct 2026): Docker's own config names a Windows credential helper, and every pull,
+# public images too, calls it over the WSL link; one timeout there failed a lane's pull of node:22-slim. With an empty config a public pull never
+# calls the helper. docker compose, buildx and docker ps keep working. A lane that must pull from a private registry sets AFA_LANE_DOCKER_CONFIG=host
+# when it is started and keeps the real config.
+lane_docker_env() {
+  [ "${AFA_LANE_DOCKER_CONFIG:-}" = host ] && return 0
+  local d="$HOME/.cache/afa/docker-empty"
+  mkdir -p "$d" 2>/dev/null || return 0
+  printf 'DOCKER_CONFIG=%q ' "$d"
 }
 
 usage() {
@@ -2091,10 +2103,11 @@ if [ "$engine" != claude ]; then
   # A failed run with no report.md gets "FAILED exit <code> | <last error line>" as line 1 (so lane_watch wakes the hub), and an engine that
   # says it is out of quota with a reset time is refused at the next start until then (#234: agy sat dead for 70 minutes unnoticed).
   cmd+="; lane_rc=\$?; printf 'exit %s\\n' \"\$lane_rc\" >>$out_cmd; [ \"\$lane_rc\" -eq 0 ] || python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $out_cmd \"\$lane_rc\" $engine $(printf %q "$HOME/.claude/state") || true; exit \"\$lane_rc\""
+  denv="$(lane_docker_env)"; [ -n "$denv" ] && cmd="export $denv; $cmd"
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
   [ "$dry" = 1 ] || : >"$out"  # exists from the start, so --status knows the lane is headless
-  cmd="{ $HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
+  cmd="{ $(lane_docker_env | sed 's/^/export /; s/ $/; /')$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") -p --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg") >$(printf %q "$out") 2>&1; echo \"exit \$?\" >>$(printf %q "$out"); }"
 elif [ "$console" = 1 ]; then
   cmd="$(lane_env_prefix "$name" "$hand")$HOME/.claude/scripts/console_worker.sh --inner $(printf %q "$dir") --model $(printf %q "$model") --add-dir $(printf %q "$hand") $adsf$flags $(printf %q "$lane_msg")"
 else
