@@ -10,8 +10,8 @@
   openclaw_local.py probe   --model ID --message TEXT [--agent hubtest] [--reminder]
                                            one-off run on the test agent, forced onto one model.
 
-Runs INSIDE the OpenClawGateway distro as user openclaw (python3 stdlib only):
-  wsl.exe -d OpenClawGateway -u openclaw -e python3 - apply < THIS_FILE
+Runs INSIDE the OpenClaw gateway (its Docker container, or the WSL gateway distro where NX-01 still has one) as the gateway user (python3 stdlib only):
+  python3 ~/.claude/scripts/openclaw_gateway.py exec -- python3 - apply < THIS_FILE
 It prints no key and no config value that could hold one.
 
 Two rules from Jonathan (16 Oct), enforced in code and covered by tests/test_openclaw_local.py:

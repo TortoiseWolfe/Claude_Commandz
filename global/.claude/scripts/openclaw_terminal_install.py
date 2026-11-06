@@ -18,14 +18,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
+
 NAME = "Receptionist"
 GUID = "{b6c1c1f4-6f0e-5b0a-9a52-0c0e7a3f2d11}"
-COMMANDLINE = "wsl.exe -d OpenClawGateway -u openclaw -- openclaw tui --session agent:main:main"
+TUI = ["openclaw", "tui", "--session", "agent:main:main"]
 SHORTCUT = NAME + ".lnk"
 
 
+def commandline():
+    """The terminal profile's command: `docker exec -it ...` when the gateway runs in Docker, `wsl.exe -d <distro> ...` otherwise (openclaw_gateway.py)."""
+    return " ".join(gw.argv(TUI, tty=True, via_shell=True))
+
+
 def profile():
-    return {"guid": GUID, "name": NAME, "commandline": COMMANDLINE, "hidden": False, "tabTitle": NAME}
+    return {"guid": GUID, "name": NAME, "commandline": commandline(), "hidden": False, "tabTitle": NAME}
 
 
 def _indent(text):

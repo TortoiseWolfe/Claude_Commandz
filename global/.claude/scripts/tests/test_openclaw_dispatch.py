@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import state_guard  # noqa: E402,F401  first: no test of this suite (or of the mutation harness) may write the live ~/.claude/state
 import openclaw_dispatch as dp  # noqa: E402
+import openclaw_gateway as gw  # noqa: E402
 import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 from tmpdirs import fresh_dir  # noqa: E402
@@ -1946,63 +1947,10 @@ class Projection(unittest.TestCase):
 
 class GatewayRoute(unittest.TestCase):
     """5 Nov 2026 9:30 PM: on the tower there is no OpenClawGateway distro (OpenClaw runs in Docker), so every hub post died with wsl.exe
-    exit 255 and "stderr=" empty in the log. The route is chosen by what wsl.exe lists; nothing here reaches a real gateway."""
+    exit 255 and "stderr=" empty in the log. The route itself is tested in test_openclaw_gateway.py; here is what the dispatcher does with it."""
 
     def setUp(self):
         self.tmp = Path(fresh_dir(self))
-        dp._gateway_route_seen[:] = [0.0, None]
-        self.addCleanup(dp._gateway_route_seen.__setitem__, slice(None), [0.0, None])
-
-    def fake_wsl(self, listing, code=0, utf16=True):
-        """A wsl.exe on PATH that answers `-l -q` with listing and fails anything else, so a stray real call shows."""
-        b = self.tmp / "bin"
-        b.mkdir(exist_ok=True)
-        data = listing.encode("utf-16-le") if utf16 else listing.encode()
-        (self.tmp / "listing").write_bytes(data)
-        f = b / "wsl.exe"
-        f.write_text('#!/usr/bin/env bash\n[ "$1 $2" = "-l -q" ] || exit 99\ncat "%s"\nexit %d\n' % (self.tmp / "listing", code))
-        f.chmod(0o755)
-        return mock.patch.dict(os.environ, {"PATH": str(b) + os.pathsep + os.environ["PATH"], dp.GATEWAY_ROUTE_ENV: ""})
-
-    def test_distro_listed_means_wsl(self):
-        with self.fake_wsl("Debian\r\nOpenClawGateway\r\n"):
-            self.assertEqual(dp.gateway_route(), "wsl")
-
-    def test_distro_missing_from_the_list_means_docker(self):
-        with self.fake_wsl("Debian\r\nUbuntu-24.04\r\ndocker-desktop\r\n"):
-            self.assertEqual(dp.gateway_route(), "docker")
-
-    def test_a_plain_utf8_listing_is_read_too(self):
-        with self.fake_wsl("Debian\nOpenClawGateway\n", utf16=False):
-            self.assertEqual(dp.gateway_route(), "wsl")
-
-    def test_wsl_that_cannot_be_asked_keeps_the_wsl_route(self):
-        with self.fake_wsl("", code=1):
-            self.assertEqual(dp.gateway_route(), "wsl")
-        dp._gateway_route_seen[:] = [0.0, None]
-        with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "empty"), dp.GATEWAY_ROUTE_ENV: ""}):
-            self.assertEqual(dp.gateway_route(), "wsl")
-
-    def test_the_answer_is_kept_for_a_while_and_the_env_forces_it(self):
-        with self.fake_wsl("Debian\r\n"):
-            self.assertEqual(dp.gateway_route(), "docker")
-            with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "empty")}):
-                self.assertEqual(dp.gateway_route(), "docker")  # not asked again inside the TTL
-            with mock.patch.dict(os.environ, {dp.GATEWAY_ROUTE_ENV: "wsl"}):
-                self.assertEqual(dp.gateway_route(), "wsl")
-
-    def test_docker_argv_runs_in_the_gateway_container_with_stdin_open(self):
-        with mock.patch.dict(os.environ, {dp.GATEWAY_ROUTE_ENV: "docker"}):
-            argv = dp.gateway_argv("echo $HOME", "x")
-        self.assertEqual(argv[:4], ["docker", "exec", "-i", "-w"])
-        self.assertIn(dp.GATEWAY_CONTAINER, argv)
-        self.assertEqual(argv[-4:], ["bash", "-c", "echo $HOME", "x"])
-        self.assertNotIn("wsl.exe", argv)
-
-    def test_wsl_argv_is_what_it_was(self):
-        with mock.patch.dict(os.environ, {dp.GATEWAY_ROUTE_ENV: "wsl"}):
-            argv = dp.gateway_argv("echo $HOME")
-        self.assertEqual(argv, ["wsl.exe", "-d", "OpenClawGateway", "-u", "openclaw", "-e", "bash", "-c", "echo $HOME"])
 
     def run_inject(self, route, result):
         host = dp.LaneHost()
@@ -2016,7 +1964,7 @@ class GatewayRoute(unittest.TestCase):
         host.sleep = lambda s: None
         state = self.tmp / "state"
         with mock.patch.object(dp, "STATE", state), mock.patch.dict(
-                os.environ, {dp.GATEWAY_ROUTE_ENV: route, dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:route"}):
+                os.environ, {gw.ROUTE_ENV: route, dp.TEST_ENV: "1", dp.TEST_SESSION_ENV: "agent:test:route"}):
             ok = host.inject("answer")
         log = (state / "openclaw-inject.log")
         return ok, calls, log.read_text().splitlines() if log.exists() else []
@@ -2045,19 +1993,19 @@ class GatewayRoute(unittest.TestCase):
 
     def test_why_failed_is_never_empty(self):
         R = lambda o, e: type("R", (), {"returncode": 1, "stdout": o, "stderr": e})()
-        self.assertEqual(dp.why_failed(R("", "")), "(no output)")
-        self.assertEqual(dp.why_failed(None), "no process result")
-        self.assertEqual(dp.why_failed(R("out", "err")), "err out")
-        self.assertEqual(len(dp.why_failed(R("x" * 900, ""))), 300)
+        self.assertEqual(gw.why_failed(R("", "")), "(no output)")
+        self.assertEqual(gw.why_failed(None), "no process result")
+        self.assertEqual(gw.why_failed(R("out", "err")), "err out")
+        self.assertEqual(len(gw.why_failed(R("x" * 900, ""))), 300)
 
     def test_the_outbox_is_not_written_on_the_docker_route(self):
         host = dp.LaneHost()
-        with mock.patch.dict(os.environ, {dp.GATEWAY_ROUTE_ENV: "docker"}), mock.patch.object(dp.subprocess, "run") as run:
+        with mock.patch.dict(os.environ, {gw.ROUTE_ENV: "docker"}), mock.patch.object(dp.subprocess, "run") as run:
             self.assertFalse(host.push_outbox("text"))
         run.assert_not_called()
 
     def test_tests_cannot_reach_a_real_gateway(self):
-        self.assertEqual(os.environ.get(dp.GATEWAY_ROUTE_ENV), "wsl")  # state_guard sets it for every run
+        self.assertEqual(os.environ.get(gw.ROUTE_ENV), "wsl")  # state_guard sets it for every run
 
 
 if __name__ == "__main__":

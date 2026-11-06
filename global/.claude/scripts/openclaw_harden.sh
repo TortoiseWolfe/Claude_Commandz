@@ -20,11 +20,11 @@
 # When no default chain is configured, the script seeds the current free default. Existing model settings and
 # providers are left untouched. Override the seed with OPENCLAW_HARDEN_CHAIN="provider/model,provider/model,provider/model".
 #
-# Runs INSIDE the OpenClawGateway distro as user openclaw. It works on whichever state directory the
+# Runs INSIDE the OpenClaw gateway (its Docker container, or the WSL gateway distro where NX-01 still has one) as the gateway user. It works on whichever state directory the
 # environment names (OPENCLAW_STATE_DIR), which is how it is tested on a staged copy first. It prints
 # no key, no token and no config value that could hold one: only key names, counts and PASS/FAIL lines.
 # Run it from this repo, never from /mnt/wsl/ocstage:
-#   wsl.exe -d OpenClawGateway -u openclaw -- bash -s -- apply < THIS_FILE
+#   python3 ~/.claude/scripts/openclaw_gateway.py exec -- bash -s -- apply < THIS_FILE
 # Piped through `bash -s`, bash reads this file from stdin line by line, and any program started on the
 # way (openclaw, python3) would swallow what is left of the file. So the file holds function definitions
 # and one last line only: main runs after the whole file is read, with stdin pointed at /dev/null.

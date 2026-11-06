@@ -25,6 +25,7 @@ out="$state/openclaw-status-digest.md"
 mkdir -p "$state"
 exec 9>"$state/openclaw-status.run.lock"
 flock -n 9 || exit 0
+. "$here/openclaw_gateway.sh"  # Docker first, the WSL distro only as the fallback (openclaw_gateway.py)
 
 # First, the WSL-to-Windows bridge: every wsl.exe call below needs it. The watchdog checks /proc/buddyinfo for free 512 KB blocks (what each
 # Windows command's Hyper-V channel allocates), heals when they run out, and runs the 10 s cmd.exe probe. It is silent when all is well.
@@ -97,9 +98,9 @@ timeout 60 python3 "$here/openclaw_reconcile.py" --file --quiet >/dev/null 2>&1 
 # The receptionist's live model chain (primary, then fallbacks), model names and nothing else: client repos get PR titles in the
 # digest only when every one is a claude/ model, since a fallback reads the same digest. The digest checks the shape and treats
 # anything else (empty, an error, another provider, a line cut short) as not Claude: counts only.
-model=$(timeout 30 wsl.exe -d OpenClawGateway -u openclaw -e python3 -c '
-import json
-c = json.load(open("/home/openclaw/.openclaw/openclaw.json"))
+model=$(timeout 30 python3 "$oc_gateway_py" exec -- python3 -c '
+import json, os
+c = json.load(open(os.path.expanduser("~/.openclaw/openclaw.json")))
 a = c.get("agents") or {}
 d = (a.get("defaults") or {}).get("model")
 m = next((x.get("model") for x in a.get("list") or [] if isinstance(x, dict) and x.get("id") == "main" and x.get("model")), None) or d
@@ -119,10 +120,16 @@ fi
 mv "$out.new" "$out"
 [ "${1:-}" = "--build" ] && { echo "$out"; exit 0; }
 
+# Only a gateway with a front-desk workspace takes the status block and the hand-off sweep. The tower's Docker gateway has none the hub writes
+# (openclaw_gateway.py, workspace()): there both steps say so and stop, and nothing is created in the tower agent's files.
+W=$(oc_gateway_workspace) || W=""
+if [ -z "$W" ]; then
+  echo "skipped: this machine's OpenClaw gateway has no front-desk workspace for the status block"
+  exit 0
+fi
 res=$({
+  printf 'set -eu\nW=%s\n' "$W"
   cat <<'REMOTE'
-set -eu
-W=/home/openclaw/.openclaw/workspace
 f=$W/MEMORY.md
 blk=$(mktemp "$W/.status-block.XXXXXX"); tmp=$(mktemp "$W/.status-new.XXXXXX")
 trap 'rm -f "$blk" "$tmp"' EXIT
@@ -137,14 +144,12 @@ chmod --reference="$f" "$tmp"
 mv "$tmp" "$f"
 echo "ok $(wc -c < "$f")"
 REMOTE
-} | timeout 60 wsl.exe -d OpenClawGateway -u openclaw -- bash -s 2>&1 | tr -d '\r\0' | tail -1)
+} | timeout 60 python3 "$oc_gateway_py" exec -- bash -s 2>&1 | tr -d '\r\0' | tail -1)
 
 # After the status block is in, keep the receptionist's hand-off block current while its chat is quiet. The 4 AM
 # daily reset only runs when the next message arrives, hours after the last turn, so this is what the new chat
 # starts from. handoff.js makes no model call unless the chat changed and has been quiet for 2 minutes. It runs
 # detached (the pickup caller waits 90 s on this script) and under this script's lock, so runs never overlap.
-node=/home/openclaw/.openclaw/tools/node-v24.19.0/bin/node
-hook=/home/openclaw/.openclaw/hooks/session-handoff/handoff.js
-( timeout 150 wsl.exe -d OpenClawGateway -u openclaw -e "$node" "$hook" --agent main --session-key agent:main:main --reason sweep \
+( timeout 150 python3 "$oc_gateway_py" exec -- bash -c 'exec "$HOME/.openclaw/tools/node-v24.19.0/bin/node" "$HOME/.openclaw/hooks/session-handoff/handoff.js" "$@"' _ --agent main --session-key agent:main:main --reason sweep \
     2>&1 | tr -d '\r\0' | tail -1 > "$state/openclaw-handoff-sweep.log" ) </dev/null >/dev/null 2>&1 &
 echo "$res"
