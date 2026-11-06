@@ -1164,8 +1164,8 @@ print(",".join(out))
   json+='}'
   printf -- '--settings %q' "$json"
   local off="$LANE_TOOLS_OFF" sd
-  sd="$(shared_read_denies "${5:-.}")"; [ -z "$sd" ] || off="${off:+$off }$sd"
   [ -z "${7:-}" ] || [ "$7" = - ] || off="${off:+$off }${7//,/ }"
+  sd="$(shared_read_denies "${5:-.}")"; [ -z "$sd" ] || off="${off:+$off }$sd"  # last, so the hub's own rules keep their place
   [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
   if [ -f "$LANE_RULES" ]; then
     local rf="$LANE_RULES"

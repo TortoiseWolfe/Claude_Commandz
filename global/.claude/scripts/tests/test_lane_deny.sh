@@ -39,13 +39,15 @@ lane --deny 'Bash(*deck_write*)' --deny 'Bash(ssh:*)' dk "$WORK" sonnet "$TMP/p1
 [ "$LAST_RC" = 0 ] || fail "a start with --deny works ($LAST_OUT)"; ok
 c="$(last_cmd)"
 has "$c" "--disallowedTools Artifact\\ ArtifactComments\\ ArtifactData\\ Bash\\(\\*deck_write\\*\\)\\ Bash\\(ssh:\\*\\)" "both rules are added to the withheld tools"
+has "$c" "Bash\\(ssh:\\*\\)\\ Edit\\(" "the shared-folder Edit rules come after the hub rules, which keep their order"
 [ "$(cat "$LANES/.deny/$DAY-dk.txt")" = "$(printf 'Bash(*deck_write*)\nBash(ssh:*)')" ] || fail "the deny file holds one rule per line"; ok
 
 # 2. No option: only the Artifact tools, and no file.
 lane plain "$WORK" sonnet "$TMP/p1.md"
 [ "$LAST_RC" = 0 ] || fail "a plain start works ($LAST_OUT)"; ok
-has "$(last_cmd)" "--disallowedTools Artifact\\ ArtifactComments\\ ArtifactData " "a plain start withholds only the Artifact tools"
-hasnt "$(last_cmd)" "deck_write" "a plain start denies nothing else"
+has "$(last_cmd)" "--disallowedTools Artifact\\ ArtifactComments\\ ArtifactData" "a plain start withholds the Artifact tools"
+hasnt "$(last_cmd)" "deck_write" "a plain start denies no hub rule"
+hasnt "$(last_cmd)" "Bash\\(" "a plain start denies no Bash rule (only the shared-folder Edit rules follow the Artifact tools)"
 [ ! -e "$LANES/.deny/$DAY-plain.txt" ] || fail "a plain start writes no deny file"; ok
 
 # 3. --resume (no option given) and --restart reuse the file.
