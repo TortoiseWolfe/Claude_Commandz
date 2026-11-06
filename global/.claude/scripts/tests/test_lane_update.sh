@@ -116,6 +116,13 @@ lane --behind
 lane --update cur-lane
 assert_contains "$LAST_OUT" "already runs 2.1.319" "a current lane is skipped"; [ "$LAST_RC" = 0 ] || fail "skip exits 0"; ok
 alive "$CURPID" || fail "the current lane's process was touched"; ok
+assert_contains "$LAST_OUT" "--restart --update" "the skip names the way to restart a current lane anyway"
+# --restart --update plans a restart of a lane already on the installed version (new folders and rules); --dry-run changes nothing.
+lane --dry-run --restart --update cur-lane
+[ "$LAST_RC" = 0 ] || fail "--dry-run --restart --update on a current lane exits 0 ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "runs 2.1.319, installed is 2.1.319" "a current lane is planned for a restart"
+assert_contains "$LAST_OUT" "the restart passes its own --dry-run" "its restart is pre-checked"
+[ ! -e "$ST/sent.log" ] && alive "$CURPID" || fail "--dry-run --restart --update changed something"; ok
 
 # Refusals: working, dialog, other engine, no window, no such lane. Nothing is typed and the process lives.
 printf '%s\n' '✻ Thinking… (12s · esc to interrupt)' '❯ ' >"$ST/pane"
