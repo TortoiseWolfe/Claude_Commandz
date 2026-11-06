@@ -1246,6 +1246,14 @@ is_headless_billing() {
   case "$1" in codex|copilot|agy|opencode|local) return 0 ;; *) return 1 ;; esac
 }
 
+# reads_outlog <billing> <report.md>: 0 when the lane's out.log is the word on whether it is running. Judged by the newest index row's billing
+# (6 Nov 2026, #301): an engine lane or a console (headless) lane writes out.log and ends with "exit <code>"; a subscription lane is a window,
+# and an out.log left in its folder by an earlier headless run (a first start on opencode that ran out of quota, exit 75) says nothing about it.
+reads_outlog() {
+  [ -n "${2:-}" ] && [ -e "$(dirname "$2")/out.log" ] || return 1
+  is_headless_billing "${1:-}" || [ "${1:-}" = console ]
+}
+
 # Colour-coded pane text (tmux capture-pane -e) in, plain text out.
 strip_ansi() { sed -E 's/\x1b\[[0-9;:?]*[A-Za-z]//g'; }
 # Text on the lane's input line (last line starting with the prompt arrow), from a capture-pane -e
@@ -1335,7 +1343,8 @@ if [ "$mode" = status ]; then
       wrote="$(report_word "${rep:-}" "${dir:-}" "${id:-}")"; why=""
       case "$wrote" in stale:*) why="${wrote#stale:}"; wrote=stale ;; esac
       outlog=""
-      [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ] && outlog="$(dirname "$rep")/out.log"
+      # A window with no index row keeps the old rule (an out.log means headless); one with a row follows the row's billing (#301).
+      if { [ -z "$row" ] && [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ]; } || reads_outlog "${b:-}" "${rep:-}"; then outlog="$(dirname "$rep")/out.log"; fi
       if [ -n "$outlog" ]; then
         # Headless lane: the process writes "exit <code>" to out.log when it ends.
         code="$(tail -n 1 "$outlog" | sed -n 's/^exit \([0-9][0-9]*\)$/\1/p')"
@@ -1554,7 +1563,8 @@ send_held() {
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
   is_headless_billing "${b:-}" && return 1
   case "${b:-subscription}" in codex|copilot|agy|opencode|local) return 1 ;; esac
-  [ -n "${rep:-}" ] && [ -z "$(find "$(dirname "$rep")/out.log" -maxdepth 0 2>/dev/null)" ] || return 1
+  [ -n "${rep:-}" ] || return 1
+  ! reads_outlog "${b:-}" "$rep" || return 1
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" || return 1
   lockd="$HOME/.claude/state/lanes/.recycle-$name.lock"
   if [ -d "$lockd" ] && [ -z "$(find "$lockd" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then locked=1; fi
@@ -1676,7 +1686,7 @@ if [ "$mode" = pane ]; then
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
-  if is_headless_billing "${b:-}" || { [ -n "${rep:-}" ] && [ -e "$(dirname "$rep")/out.log" ]; }; then echo headless; exit 0; fi
+  if is_headless_billing "${b:-}" || reads_outlog "${b:-}" "${rep:-}"; then echo headless; exit 0; fi
   if pane_is_claude "$1"; then echo claude; else echo "dead $(pane_cmd "$1" | sed 's/^$/nothing/')"; fi
   exit 0
 fi
@@ -2261,7 +2271,7 @@ if [ "$mode" = resume ]; then
   IFS=: read -r -a _rad <<<"${ad:--}"
   _rad=("${_rad[@]/#-/}")
   no_ai_wall_guard "$dir" "${p:-/nonexistent}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} "${_rad[@]}" || exit 1
-  if [ -e "$(dirname "${rep:-/nonexistent}")/out.log" ]; then
+  if reads_outlog "${b:-}" "${rep:-}"; then
     echo "$name is a headless lane (out.log beside its report); there is no interactive session to resume. Read $(dirname "$rep")/out.log" >&2; exit 1
   fi
   [ "$b" = console ] && console=1

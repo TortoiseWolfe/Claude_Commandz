@@ -104,4 +104,32 @@ assert_contains "$LAST_OUT" 'hand-off' 'the refusal points to a restart from a h
 FAKE_PANE_CMD=claude lane --send lv-lane 'hello after old out.log'
 assert_eq "$LAST_RC" 0 '--send to a claude pane proceeds with an old out.log in the folder'
 
+# 6 Nov 2026 (#301): a lane first started on opencode failed with "exit 75" in its out.log, then the hub restarted it as a live Claude window in
+# the same folder. --status read the old out.log and showed "exit75" for a busy lane (six lanes at 1:39 PM), and --pane said "headless", which
+# switched the dead-pane check off. The newest index row decides: a subscription row is a window, whatever the folder holds.
+HAND3="$HOME_T/.claude/state/lanes/2026-11-06-stale"; mkdir -p "$HAND3"; echo 'brief' >"$HAND3/prompt.md"
+printf 'opencode: free quota exhausted on every provider\nexit 75\n' >"$HAND3/out.log"
+printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tlive-sess\t-\thigh\toff\n' "$(date +%F)" lv-lane "$REPO" "$HAND3/prompt.md" "$HAND3/report.md" >>"$INDEX"
+printf '%s\n' '⏺ Reading' '✻ Thinking… (12s · esc to interrupt)' '❯ ' >"$ST/pane"
+lane --status
+assert_contains "$LAST_OUT" 'lv-lane' '--status lists the lane'
+assert_not_contains "$LAST_OUT" 'exit75' '--status does not show an old exit code for a live subscription lane'
+assert_contains "$LAST_OUT" 'working' '--status shows the busy subscription lane as working'
+printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$ST/pane"
+lane --status
+assert_contains "$LAST_OUT" 'idle' '--status shows the quiet subscription lane as idle'
+FAKE_PANE_CMD=claude lane --pane lv-lane; assert_eq "$LAST_OUT" claude '--pane on a live subscription lane with an old out.log prints claude'
+FAKE_PANE_CMD=bash lane --pane lv-lane; assert_eq "$LAST_OUT" 'dead bash' '--pane still sees a dead window when an old out.log is in the folder'
+# A console (headless) or engine lane still reads its own out.log.
+printf '%s\t%s\t%s\tsonnet\tconsole\t%s\t%s\tlive-sess\t-\thigh\toff\n' "$(date +%F)" lv-lane "$REPO" "$HAND3/prompt.md" "$HAND3/report.md" >>"$INDEX"
+lane --status
+assert_contains "$LAST_OUT" 'exit75' '--status still shows the exit code of a console (headless) lane'
+FAKE_PANE_CMD=bash lane --pane lv-lane; assert_eq "$LAST_OUT" headless '--pane still says headless for a console lane'
+# --resume refuses a headless lane, but not a subscription window that only has an old out.log beside its report.
+lane --dry-run --resume lv-lane
+assert_contains "$LAST_OUT" 'is a headless lane' '--resume still refuses a console lane'
+printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tlive-sess\t-\thigh\toff\n' "$(date +%F)" lv-lane "$REPO" "$HAND3/prompt.md" "$HAND3/report.md" >>"$INDEX"
+lane --dry-run --resume lv-lane
+assert_not_contains "$LAST_OUT" 'is a headless lane' '--resume does not call a subscription lane headless because of an old out.log'
+
 echo "ok - $checks checks passed"
