@@ -75,13 +75,13 @@ class Watchdog(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.t = 1_000_000.0
 
-    def go(self, box, *argv, probe=True, dt=0, churn="", statvfs=None):
+    def go(self, box, *argv, probe=True, dt=0, churn="", statvfs=None, display=True):
         self.t += dt
         out = io.StringIO()
         probes = probe if isinstance(probe, list) else [probe] * 5
         with redirect_stdout(out):
             rc = wd.run(list(argv), read=box.read, root=box.root, probe=lambda: probes.pop(0), now=lambda: self.t, churn_of=lambda: churn,
-                         statvfs=statvfs or self.statvfs, tmp_dir=self.tmp)
+                         statvfs=statvfs or self.statvfs, tmp_dir=self.tmp, display=lambda: display)
         return rc, out.getvalue()
 
     def alert(self):
@@ -408,6 +408,60 @@ class Watchdog(unittest.TestCase):
         self.assertNotIn("tmpabcd1234", out)
         self.assertTrue(os.path.exists(old) and os.path.exists(other))
         self.assertFalse(os.path.exists(os.path.join(self.sd, "disk.log")))
+
+    # ---- display health (#107: 24 Oct 2026 WSLg's compositor froze for three hours and nothing noticed)
+    def test_a_frozen_display_wakes_the_hub_and_names_the_reboot(self):
+        rc, out = self.go(Box(**self.HEALTHY), "--display", display=False)
+        self.assertEqual(rc, 2)
+        self.assertIn("display frozen", self.alert())
+        self.assertIn("wsl --shutdown", self.alert())
+        self.assertIn("display=FROZEN", self.heal_log())
+
+    def test_a_viewable_test_window_raises_no_alert(self):
+        rc, _ = self.go(Box(**self.HEALTHY), "--display", display=True)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self.alert())
+
+    def test_no_display_tools_or_no_display_is_not_an_alarm(self):
+        rc, _ = self.go(Box(**self.HEALTHY), "--display", display=None)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self.alert())
+
+    def test_the_test_window_opens_only_when_asked_for(self):
+        with mock.patch.object(wd, "probe_display", side_effect=AssertionError("window opened")):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = wd.run([], read=Box(**self.HEALTHY).read, root=Box(**self.HEALTHY).root, probe=lambda: True, now=lambda: self.t,
+                            statvfs=self.statvfs, tmp_dir=self.tmp)
+        self.assertEqual(rc, 0)
+
+    def test_dry_run_never_opens_the_test_window(self):
+        with mock.patch.object(wd, "probe_display", side_effect=AssertionError("window opened")):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                wd.run(["--dry-run", "--display"], read=Box(**self.HEALTHY).read, root=Box(**self.HEALTHY).root, probe=lambda: True,
+                       now=lambda: self.t, statvfs=self.statvfs, tmp_dir=self.tmp)
+        self.assertIn("would open a test window", out.getvalue())
+
+    def test_a_standing_frozen_display_wakes_the_hub_once_per_half_hour(self):
+        box = Box(**self.HEALTHY)
+        self.go(box, "--display", display=False)
+        first = os.stat(os.path.join(self.sd, "alert")).st_mtime
+        self.go(box, "--display", display=False, dt=60)
+        self.assertEqual(os.stat(os.path.join(self.sd, "alert")).st_mtime, first)
+
+    def test_probe_display_reads_the_map_state_of_the_test_window(self):
+        def fake(state):
+            return mock.Mock(stdout="  Map State: %s\n" % state, returncode=0)
+        with mock.patch.object(wd.shutil, "which", return_value="/usr/bin/x"), mock.patch.dict(os.environ, {"DISPLAY": ":0"}), \
+             mock.patch.object(wd.subprocess, "Popen") as popen, mock.patch.object(wd.time, "sleep"):
+            with mock.patch.object(wd.subprocess, "run", return_value=fake("IsViewable")):
+                self.assertIs(wd.probe_display(timeout=2), True)
+            with mock.patch.object(wd.subprocess, "run", return_value=fake("IsUnMapped")):
+                self.assertIs(wd.probe_display(timeout=0), False)
+            popen.return_value.terminate.assert_called()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(wd.probe_display(timeout=1))
 
     def test_pattern_names(self):
         self.assertEqual([wd.tmp_pattern(n) for n in ("tmpa1B2c3D4", "cc-test-xyz", "claude-1000", "muse-poll.lock", "x", "abcdef")],
