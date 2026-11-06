@@ -601,6 +601,7 @@ assert_contains "$LAST_COMMAND" 'syncClaudeAiSkills' 'claude.ai synced skills ar
 assert_contains "$LAST_COMMAND" 'skillOverrides' 'skills not on the keep list are switched off'
 assert_contains "$LAST_COMMAND" 'zz-off-cmd\":\"off' 'a command not on the keep list is off'
 assert_contains "$LAST_COMMAND" 'zz-off-skill\":\"off' 'a skill not on the keep list is off'
+assert_contains "$LAST_COMMAND" 'auto-mode-setup\":\"off' 'the auto-mode setup pop-up is off (it froze lanes on 5 Nov)'
 assert_not_contains "$LAST_COMMAND" 'prep\":\"off' 'a kept command stays on'
 assert_not_contains "$LAST_COMMAND" 'graphify\":\"off' 'a kept skill stays on'
 assert_not_contains "$LAST_COMMAND" 'no-skill-file' 'a folder without SKILL.md is not a skill'

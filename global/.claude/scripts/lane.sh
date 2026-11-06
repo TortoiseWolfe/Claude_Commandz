@@ -970,7 +970,8 @@ print(json.dumps(names, separators=(",", ":")))
 ' "${1:-.}" 2>/dev/null || echo '[]'
 }
 
-# JSON object {"skill":"off",...} for every skill dir and command file in the claude home that is not in LANE_SKILLS_KEEP.
+# JSON object {"skill":"off",...} for every skill dir and command file in the claude home that is not in LANE_SKILLS_KEEP,
+# plus the built-in auto-mode-setup.
 lane_skill_overrides() {
   python3 -I -c '
 import json, os, sys
@@ -987,7 +988,12 @@ for sub, is_skill in (("commands", False), ("skills", True)):
             names.add(e)
         elif not is_skill and e.endswith(".md"):
             names.add(e[:-3])
-print(json.dumps({n: "off" for n in sorted(names - keep)}, separators=(",", ":")))
+off = {n: "off" for n in sorted(names - keep)}
+# Claude Code offers "Teach auto mode about your environment?" (the built-in /auto-mode-setup) after several auto-mode blocks; in an
+# unattended lane that dialog freezes the pane (night-watch and bw-masters, 5 Nov 2026). code.claude.com/docs/en/auto-mode-config.md:
+# a skillOverrides entry of "off" turns off both the command and the offer.
+off["auto-mode-setup"] = "off"
+print(json.dumps(off, separators=(",", ":")))
 ' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
 }
 
