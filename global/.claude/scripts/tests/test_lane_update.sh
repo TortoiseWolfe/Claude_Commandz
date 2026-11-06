@@ -16,6 +16,7 @@ cleanup() {  # only processes this test started, by exact PID
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+trap 'echo "test_lane_update.sh: died at line $LINENO: $BASH_COMMAND" >&2' ERR   # a set -e exit must say where
 cp /bin/sleep "$VER/2.1.318"; cp /bin/sleep "$VER/2.1.319"; cp /bin/bash "$VER/2.1.320"   # 2.1.320 is bash: a "claude" that ignores SIGTERM
 mkdir -p "$TMP/p318" "$TMP/p319" "$TMP/p320"
 ln -s "$VER/2.1.318" "$TMP/p318/claude"; ln -s "$VER/2.1.319" "$TMP/p319/claude"; ln -s "$VER/2.1.320" "$TMP/p320/claude"
