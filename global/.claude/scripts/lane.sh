@@ -84,6 +84,8 @@
 #                                       lane passes its own recycle line.
 #   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
 #                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
+#                                       A lane already on the installed version is skipped unless --restart is given too (lane.sh --restart --update <name>):
+#                                       it then restarts the same way, so a lane started before a lane.sh change takes up the new folders and rules.
 #   lane.sh [--dry-run] --unlock-gone   free the worktree locks lane.sh made (it locks a lane's linked worktree at start/--resume so `git worktree remove`
 #                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
@@ -268,7 +270,7 @@ Usage:
   lane.sh [--dry-run] --model <name> <model>
   lane.sh [--dry-run] [--console] [--effort <level>] [--connectors] [--allow-low-tier] [--allow-high-tier "<reason>"] --resume <name>
   lane.sh [--dry-run] --recycle <name>
-  lane.sh [--dry-run] [--claude-because "<reason>"] [--add-dir <path>]... --update <name>
+  lane.sh [--dry-run] [--restart] [--claude-because "<reason>"] [--add-dir <path>]... --update <name>
   lane.sh --behind
   lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
@@ -2041,7 +2043,9 @@ if [ "$mode" = update ]; then
   inst="$(claude_installed_version)"; [ -n "$inst" ] || { echo "update refused: cannot read the installed version (claude --version)" >&2; exit 1; }
   pid="$(lane_claude_pid "$name")"; [ -n "$pid" ] || { echo "update refused: no claude process found under $name's pane" >&2; exit 1; }
   rv="$(proc_claude_version "$pid")"; [ -n "$rv" ] || { echo "update refused: cannot tell which version pid $pid runs (/proc/$pid/exe is not a versions/<n> file)" >&2; exit 1; }
-  if [ "$rv" = "$inst" ]; then echo "$name already runs $inst (pid $pid); nothing to do"; exit 0; fi
+  # A lane already on the installed version is left alone unless --restart is given with --update: a lane started before a lane.sh change (new
+  # --add-dir folders, new deny rules) only picks it up through a restart, whatever its version (hub, 6 Nov: grand-daze-red).
+  if [ "$rv" = "$inst" ] && [ "${restart_opt:-0}" != 1 ]; then echo "$name already runs $inst (pid $pid); nothing to do (--restart --update <name> restarts it anyway, for new flags or folders)"; exit 0; fi
   state="$(lane_screen_state "$name")"
   case "$state" in
     working) echo "update refused: $name is working; roll it when it goes idle" >&2; exit 1 ;;
@@ -2071,9 +2075,14 @@ if [ "$mode" = update ]; then
   [[ "${rk:-}" =~ ^[0-9]+$ ]] && ra+=(--recycle-at "$rk")
   note="$(mktemp "${TMPDIR:-/tmp}/lane-update-note.XXXXXX")"
   trap 'rm -f "$note"' EXIT
-  printf 'Claude Code was updated to %s (this session ran %s). The hub restarted you onto it; your context is fresh and nothing else changed. Read your hand-off and carry on from the next step it names, re-arming what it lists.\n' "$inst" "$rv" >"$note"
+  if [ "$rv" = "$inst" ]; then
+    printf 'The hub restarted you (Claude Code %s, unchanged) so that new folders and rules from lane.sh apply; your context is fresh and nothing else changed. Read your hand-off and carry on from the next step it names, re-arming what it lists.\n' "$inst" >"$note"
+  else
+    printf 'Claude Code was updated to %s (this session ran %s). The hub restarted you onto it; your context is fresh and nothing else changed. Read your hand-off and carry on from the next step it names, re-arming what it lists.\n' "$inst" "$rv" >"$note"
+  fi
   rid="$(date +%s)"
-  msg_handoff="Hub: Claude Code $inst is installed and you run $rv, so I am restarting you onto it (update $rid; this is not a recycle and you did nothing wrong). Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines. Write it after you last touch report.md. Then stop, even mid-task, and say \"ready to restart\". Your session is ended and started again as soon as the file is written."
+  if [ "$rv" = "$inst" ]; then why="you run $inst already, but lane.sh changed (new folders and rules), so I am restarting you to apply it"; else why="Claude Code $inst is installed and you run $rv, so I am restarting you onto it"; fi
+  msg_handoff="Hub: $why (update $rid; this is not a recycle and you did nothing wrong). Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines. Write it after you last touch report.md. Then stop, even mid-task, and say \"ready to restart\". Your session is ended and started again as soon as the file is written."
   if [ "$dry" = 1 ]; then
     echo "update $name: pid $pid runs $rv, installed is $inst, screen is $state"
     echo "  1. keep the current handoff.md as handoff-prev<N>.md; send the lane: $msg_handoff"
