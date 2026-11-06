@@ -1962,6 +1962,35 @@ lane_screen_state() {  # <name>: idle, working or dialog
   elif pane_spinner "$pane"; then echo working
   else echo idle; fi
 }
+# read_dialog_answer <name>: when the lane's screen is Claude Code's "Read outside the working directories" dialog and nothing else, print
+# "<option number><TAB><path>" for the option that allows the read and return 0; return 1 for any other screen (every other dialog stays
+# refused: a digit typed at a permission dialog we have not read is a permission decision). The number comes from the screen, never from a
+# constant: the option that says "allow reading from <dir> during this session" if there is one, else the plain "Yes" (one read). The path must
+# be named on the screen and sit under the repos, the state folder, the scripts folder or Claude's temp folder; a read of anything else (the
+# private config folders, keys, dotfiles) is left for the hub to decide (hub, 6 Nov: grand-daze-red froze on this dialog for every file and
+# never went idle, so its roll waited for ever).
+read_dialog_answer() {
+  local pane path num opt
+  pane="$(tmux capture-pane -p -t "$SESSION:$1" 2>/dev/null | tail -30)" || return 1
+  printf '%s\n' "$pane" | command grep -qiE 'Read outside the working director' || return 1
+  printf '%s\n' "$pane" | tail -15 | command grep -qE 'Do you want to proceed|Enter to select|Esc to cancel' || return 1
+  path="$(printf '%s\n' "$pane" | sed -nE 's/.*Read\(([^)]+)\).*/\1/p' | tail -1)"
+  [ -n "$path" ] || path="$(printf '%s\n' "$pane" | command grep -viE 'outside the working director|Esc to cancel|Enter to select|Do you want|^[[:space:]]*[❯>]?[[:space:]]*[0-9]+\.' | command grep -oE '(~|/)[A-Za-z0-9._~+@/-]*[A-Za-z0-9._~+@-]' | head -1)"
+  [ -n "$path" ] || return 1
+  case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
+  case "$path" in *..*|*[\"\'\`\$\;\|\&\<\>]*) return 1 ;; esac
+  case "$path" in
+    "$HOME"/repos/*|"$HOME"/.claude/state/*|"$HOME"/.claude/scripts/*|/tmp/claude-*/*) ;;
+    *) return 1 ;;
+  esac
+  # Option lines look like "❯ 1. Yes" or "  2. Yes, allow reading from x/ during this session"; a line that starts with No is never chosen.
+  opt="$(printf '%s\n' "$pane" | tail -15 | sed -nE 's/^[[:space:]]*[❯>]?[[:space:]]*([0-9]+)\.[[:space:]]+(Yes.*)$/\1\t\2/p')"
+  [ -n "$opt" ] || return 1
+  num="$(printf '%s\n' "$opt" | awk -F'\t' '$2 ~ /allow reading from .* during this session/ { print $1; exit }')"
+  [ -n "$num" ] || num="$(printf '%s\n' "$opt" | awk -F'\t' '$2 ~ /^Yes[[:space:]]*$/ { print $1; exit }')"
+  [[ "$num" =~ ^[0-9]$ ]] || return 1
+  printf '%s\t%s\n' "$num" "$path"
+}
 
 if [ "$mode" = behind ]; then
   [ $# -eq 0 ] || { echo "usage: lane.sh --behind" >&2; exit 1; }
@@ -1999,6 +2028,27 @@ if [ "$mode" = update ]; then
   # --add-dir folders, new deny rules) only picks it up through a restart, whatever its version (hub, 6 Nov: grand-daze-red).
   if [ "$rv" = "$inst" ] && [ "${restart_opt:-0}" != 1 ]; then echo "$name already runs $inst (pid $pid); nothing to do (--restart --update <name> restarts it anyway, for new flags or folders)"; exit 0; fi
   state="$(lane_screen_state "$name")"
+  # A lane on the "Read outside the working directories" dialog never goes idle (it asks again for every file), so it counts as rollable: the
+  # dialog is answered (see read_dialog_answer for which one and how) and the roll goes on. Any other dialog is still refused.
+  upd_answered=0; upd_answer_max="${LANE_UPDATE_DIALOG_ANSWERS:-30}"
+  answer_read_dialog() {  # answers the read dialog if that is what is up; returns 0 when it did (or, with --dry-run, would)
+    local ans num apath
+    [ "$upd_answered" -lt "$upd_answer_max" ] || return 1
+    ans="$(read_dialog_answer "$name")" || return 1
+    num="${ans%%$TAB*}"; apath="${ans#*$TAB}"
+    if [ "$dry" = 1 ]; then echo "would answer $name's read dialog for $apath with option $num"; return 0; fi
+    tmux send-keys -t "$SESSION:$name" "$num" || return 1
+    upd_answered=$((upd_answered + 1))
+    printf '%s\t%s\tUPDATE-ANSWERED-READ-DIALOG\toption %s for %s\n' "$(date -Is)" "$name" "$num" "$apath" >>"$HOME/.claude/state/lanes/recycle.log" 2>/dev/null || true
+    echo "answered $name's read dialog for $apath with option $num"
+    return 0
+  }
+  if [ "$state" = dialog ] && answer_read_dialog; then
+    if [ "$dry" = 1 ]; then state=dialog-read
+    else
+      for _ in $(seq 1 20); do sleep 1; state="$(lane_screen_state "$name")"; [ "$state" = dialog ] || break; answer_read_dialog || break; done
+    fi
+  fi
   case "$state" in
     working) echo "update refused: $name is working; roll it when it goes idle" >&2; exit 1 ;;
     dialog) echo "update refused: $name has a dialog on its screen" >&2; exit 1 ;;
@@ -2036,7 +2086,7 @@ if [ "$mode" = update ]; then
   if [ "$rv" = "$inst" ]; then why="you run $inst already, but lane.sh changed (new folders and rules), so I am restarting you to apply it"; else why="Claude Code $inst is installed and you run $rv, so I am restarting you onto it"; fi
   msg_handoff="Hub: $why (update $rid; this is not a recycle and you did nothing wrong). Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines. Write it after you last touch report.md. Then stop, even mid-task, and say \"ready to restart\". Your session is ended and started again as soon as the file is written."
   if [ "$dry" = 1 ]; then
-    echo "update $name: pid $pid runs $rv, installed is $inst, screen is $state"
+    echo "update $name: pid $pid runs $rv, installed is $inst, screen is ${state/dialog-read/a read dialog (answered first)}"
     echo "  1. keep the current handoff.md as handoff-prev<N>.md; send the lane: $msg_handoff"
     echo "  2. wait up to ${LANE_UPDATE_WAIT_SECS:-600}s for $handoff to be newer than $report_f and the lane idle; otherwise the lane is left running"
     echo "  3. end pid $pid by exact PID (SIGTERM; SIGKILL only after ${LANE_UPDATE_TERM_SECS:-30}s) after checking it is still $name's claude process, then close its window by window id"
@@ -2067,6 +2117,8 @@ if [ "$mode" = update ]; then
   send_to "$name" "$msg_handoff" >/dev/null || ufail "the hand-off request did not reach the lane; it was left running"
   end=$(( t0 + ${LANE_UPDATE_WAIT_SECS:-600} )); written=0
   while [ "$(date +%s)" -lt "$end" ]; do
+    # The lane reads files for its hand-off; a read dialog that comes up while it does is answered the same way.
+    [ "$(lane_screen_state "$name")" = dialog ] && answer_read_dialog >/dev/null || true
     nowst="$(stat -c '%Y.%s' "$handoff" 2>/dev/null || echo none)"
     if [ "$nowst" != none ] && [ "$nowst" != "$before" ] && [ -s "$handoff" ] && [ "$(stat -c %Y "$handoff")" -ge "$t0" ] \
        && { [ ! -e "$report_f" ] || [ ! "$report_f" -nt "$handoff" ]; } && [ "$(lane_screen_state "$name")" = idle ]; then

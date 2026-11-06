@@ -58,7 +58,10 @@ case "$1" in
   new-window)  # new-window -t lanes: -n NAME -c DIR: the restarted lane comes up on the installed version
     printf '%s\n' "$5" >>"$FAKE_ST/windows"; bash "$FAKE_TMP/spawn.sh" "$5" p319 "$FAKE_ST" "$FAKE_TMP" ;;
   send-keys)
-    if [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
+    if [[ "${4:-}" =~ ^[0-9]$ ]]; then  # an option digit typed at a dialog; FAKE_ANSWER_CLEARS=1: the dialog goes away
+      printf '%s\n' "$4" >>"$FAKE_ST/keys.log"
+      if [ "${FAKE_ANSWER_CLEARS:-}" = 1 ]; then printf '%s\n' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' >"$FAKE_ST/pane"; fi
+    elif [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
     elif [ "${4:-}" = C-m ] && [ -s "$FAKE_ST/pending" ]; then
       python3 -I - "$FAKE_ST" "$FAKE_PROJ" "$(cat "$FAKE_ST/pending")" <<'PY'
 import json, os, sys
@@ -138,6 +141,49 @@ printf 'up-lane\ncur-lane\n' >"$ST/windows"
 [ ! -e "$ST/sent.log" ] || fail "a refusal typed into a lane"; ok
 alive "$OLDPID" || fail "a refusal ended the process"; ok
 
+# The "Read outside the working directories" dialog (grand-daze-red, 6 Nov: it asked for every file, never went idle, so the roll waited for ever)
+# is answered, by the option number read off the screen, and the roll goes on. Any other dialog, and a read of a path outside the repos, the state
+# folder, the scripts folder and Claude's temp folder, is still refused with nothing typed.
+read_dialog() {  # read_dialog <path> [option lines...]
+  local path="$1"; shift
+  printf '%s\n' 'Read outside the working directories' '' "  Read($path)" '' 'Do you want to proceed?' "$@" 'Esc to cancel' >"$ST/pane"
+}
+RD_OPTS=('❯ 1. Yes' '  2. Yes, allow reading from wt/ during this session' '  3. No')
+read_dialog "$HOME_T/repos/.worktrees/x--y/a.txt" "${RD_OPTS[@]}"
+lane --dry-run --update up-lane
+[ "$LAST_RC" = 0 ] || fail "a dry run on the read dialog plans the roll ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "would answer up-lane's read dialog for $HOME_T/repos/.worktrees/x--y/a.txt with option 2" "a dry run says which option it would send"
+[ ! -e "$ST/keys.log" ] && [ ! -e "$ST/sent.log" ] || fail "a dry run typed into a lane"; ok
+lane --behind; assert_contains "$LAST_OUT" "up-lane 2.1.318 2.1.319 dialog" "--behind still shows the dialog state"
+export LANE_UPDATE_WAIT_SECS=3
+FAKE_ANSWER_CLEARS=1 lane --update up-lane
+assert_contains "$LAST_OUT" "answered up-lane's read dialog for $HOME_T/repos/.worktrees/x--y/a.txt with option 2" "the read dialog is answered"
+assert_not_contains "$LAST_OUT" "has a dialog on its screen" "the roll is not refused for the read dialog"
+[ "$(cat "$ST/keys.log")" = 2 ] || fail "exactly the session-allow option was typed: $(cat "$ST/keys.log" 2>/dev/null)"; ok
+grep -q UPDATE-ANSWERED-READ-DIALOG "$LANES/recycle.log" || fail "the answer is logged"; ok
+assert_contains "$LAST_OUT" "left running" "with no hand-off the lane is still left running after the answer"
+rm -f "$ST/keys.log" "$ST/sent.log"; idle_pane; touch -d '10 minutes ago' "$HAND/report.md" "$HAND/handoff.md"; rm -f "$HAND"/handoff-prev*.md
+# Only a plain Yes on the screen: that one (a single read).
+read_dialog "$HOME_T/repos/z/b.txt" '❯ 1. Yes' '  2. No'
+FAKE_ANSWER_CLEARS=1 lane --update up-lane
+[ "$(cat "$ST/keys.log")" = 1 ] || fail "with only a plain Yes, option 1 is typed: $(cat "$ST/keys.log" 2>/dev/null)"; ok
+rm -f "$ST/keys.log" "$ST/sent.log"; idle_pane; rm -f "$HAND"/handoff-prev*.md
+# Refused, nothing typed: a path in a private folder, a path with no Read(), no Yes option, a different dialog that merely mentions the words.
+read_dialog "$HOME_T/.config/afa/key" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a read of a private folder is refused ($LAST_OUT)"; assert_contains "$LAST_OUT" "has a dialog on its screen" "says why"
+read_dialog "$HOME_T/repos/x/../../.config/k" "${RD_OPTS[@]}"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a path with .. is refused"
+printf '%s\n' 'Read outside the working directories' 'Do you want to proceed?' "${RD_OPTS[@]}" 'Esc to cancel' >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a read dialog that names no path is refused"
+read_dialog "$HOME_T/repos/z/b.txt" '❯ 1. No' '  2. No, and tell Claude why'
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a dialog with no Yes option is refused"
+printf '%s\n' 'Bash command' '  rm -rf ~/x   # Read outside the working directories' 'Do you want to proceed?' '❯ 1. Yes' '  2. No' 'Esc to cancel' >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "a Bash prompt is refused"
+printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' '  Esc to cancel' >"$ST/pane"
+lane --update up-lane; [ "$LAST_RC" = 1 ] || fail "another permission dialog is refused"
+[ ! -e "$ST/keys.log" ] && [ ! -e "$ST/sent.log" ] || fail "a refused dialog was typed at"; ok
+idle_pane; unset LANE_UPDATE_WAIT_SECS
+
 # --dry-run: the plan, the restart built from the row, nothing typed or ended.
 lane --dry-run --update up-lane
 [ "$LAST_RC" = 0 ] || fail "--dry-run exits 0 ($LAST_OUT)"; ok
@@ -216,8 +262,12 @@ row stub-lane subscription; printf 'stub-lane\ncur-lane\n' >"$ST/windows"
 bash "$TMP/spawn.sh" stub-lane p320 "$ST" "$TMP"; STUBPID="$(claude_of stub-lane)"
 # 2.1.320 is "newer" than the installed 2.1.319, which is still a mismatch worth rolling
 rm -f "$ST/kills.log"; touch -d '10 minutes ago' "$HAND/report.md"
-LANE_UPDATE_WAIT_SECS=20 LANE_UPDATE_TERM_SECS=2 FAKE_WRITE_HANDOFF=1 lane --update stub-lane
-[ "$LAST_RC" = 0 ] || fail "a TERM-proof process is still rolled ($LAST_OUT)"; ok
+# The lane is sitting on the read dialog: it is answered, then rolled as an idle lane is.
+read_dialog "$HOME_T/repos/.worktrees/x--y/c.txt" "${RD_OPTS[@]}"; rm -f "$ST/keys.log"
+FAKE_ANSWER_CLEARS=1 LANE_UPDATE_WAIT_SECS=20 LANE_UPDATE_TERM_SECS=2 FAKE_WRITE_HANDOFF=1 lane --update stub-lane
+[ "$LAST_RC" = 0 ] || fail "a TERM-proof process on the read dialog is answered and rolled ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "answered stub-lane's read dialog" "the roll answered the dialog first"
+[ "$(cat "$ST/keys.log")" = 2 ] || fail "the roll typed the session-allow option once"; ok
 alive "$STUBPID" && fail "the TERM-proof process was not ended"; ok
 alive "$CURPID" || fail "SIGKILL reached another lane"; ok
 
