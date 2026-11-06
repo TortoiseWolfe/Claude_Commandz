@@ -25,6 +25,7 @@
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
 #     outbox again in the background (queue pump), so a post that failed while Windows could not reach WSL lands once it can.
 #   - the WSL-to-Windows bridge cannot be healed or still fails its 10 s probe (wsl_bridge_watchdog.py runs from every poll and raises the alert)
+#   - the weekly budget reading failed (check_calibrate: usage_calibrate.js wrote ok:false to usage-calibrate-status.json; named once per distinct failure)
 #   - a lane has cost over $LANE_SPEND_LIMIT (default 25) dollars of API-equivalent spend today (lane_spend.py, from the usage ledger),
 #     once per lane per day. 21 Oct: $303 went in one day, $85 on one mail lane redrafting a reply, and nothing said so until night.
 #   - a live lane is on opus or fable and its index row holds no --allow-high-tier reason (lane.sh --tier says "<model> TAB -"; a site-model
@@ -666,7 +667,30 @@ check_bridge() {
   echo "bridge: $w"
   exit 0
 }
+# The weekly budget reading failed. usage_calibrate.js writes its outcome to usage-calibrate-status.json; the Windows task that runs it hides the
+# script's exit code (conhost --headless), so a Cloudflare check or a signed-out page used to leave the budget gauge stale with nothing to say so.
+# A failed outcome (ok:false) is named once per distinct failure, kept as a checksum mark in $recycle_dir, and the hub wakes. A later success
+# clears the mark so the next failure is named again. 6 Nov 2026: the gauge sat at the 30 Oct reading; Task Scheduler said Last Result 0.
+calibrate_status="${USAGE_CALIBRATE_STATUS:-$HOME/.config/ledger/usage-calibrate-status.json}"
+check_calibrate() {
+  local line sum mark="$recycle_dir/.calibrate-failed"
+  [ -f "$calibrate_status" ] || return 0
+  line=$(python3 -I - "$calibrate_status" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+if d.get("ok") is False:
+    print("budget reading failed: exit %s (%s) at %s" % (d.get("code"), str(d.get("reason", ""))[:200], d.get("at")))
+PY
+  )
+  if [ -z "$line" ]; then rm -f "$mark"; return 0; fi
+  sum=$(printf '%s' "$line" | cksum | cut -d' ' -f1)
+  [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
+  printf '%s' "$sum" > "$mark"
+  echo "$line"
+  exit 0
+}
 check_bridge
+check_calibrate
 check_outbox
 check_undelivered
 check_open_questions
@@ -687,6 +711,7 @@ all_idle() {
 }
 while :; do
   check_bridge
+  check_calibrate
   check_outbox
   check_undelivered
   check_open_questions

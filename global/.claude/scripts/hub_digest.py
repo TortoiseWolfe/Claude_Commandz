@@ -3,7 +3,7 @@
 re-reading the roadmap body, MEMORY.md, the whole muse inbox and the briefing files.
 
   hub_digest.py [--out FILE] [--cap N] [--now ISO] [--roadmap-file F] [--lane-status-file F]
-                [--lanes-dir D] [--inbox F] [--git-repo D] [--tidy-file F] [--budget-file F]
+                [--lanes-dir D] [--inbox F] [--git-repo D] [--tidy-file F] [--budget-file F] [--calibration-file F]
                 [--report-hours H]
 
 No model calls and no Gmail (the client pollers queue mail and chat lines in the hub inbox). Sources, all local except one gh call:
@@ -444,6 +444,26 @@ def budget_line(budget_file, now_ts, ttl=BUDGET_TTL):
         return p.read_text().strip() or "budget report unavailable"
     except OSError:
         return "budget report unavailable"
+
+
+CALIBRATION_FILE = HOME / ".config/ledger/limit-calibration.json"
+CALIBRATION_MAX_AGE = 24 * 3600
+
+
+def calibration_note(cal_file, now_ts):
+    """The suffix that says whether the budget figure was checked against claude.ai's own Usage page lately (issue 273: the
+    reader failed for days and the figure still read as measured). Goes at the END of the line; BUDGET_RESET_RE reads the front."""
+    try:
+        at = datetime.fromisoformat(json.loads(Path(cal_file).read_text())["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return " | UNCHECKED: no claude.ai reading on record"
+    et = ZoneInfo("America/New_York")
+    at_et, now_et = at.astimezone(et), datetime.fromtimestamp(now_ts, et)
+    same_day = at_et.date() == now_et.date()
+    when = at_et.strftime("%-I:%M %p") if same_day else at_et.strftime("%a %-d %b %-I:%M %p")
+    if now_ts - at.timestamp() > CALIBRATION_MAX_AGE:
+        return " | UNCHECKED: no claude.ai reading since " + when
+    return " | checked against claude.ai " + when
 
 
 BUDGET_VARIABLE = "FLEET_BUDGET"
@@ -1025,6 +1045,7 @@ def main(argv=None):
     ap.add_argument("--git-repo", default=str(HOME / "repos"))
     ap.add_argument("--tidy-file", help="tidy-report output to use instead of running it (tests)")
     ap.add_argument("--budget-file", default=str(HOME / ".claude/state/hub-digest-budget.txt"))
+    ap.add_argument("--calibration-file", default=str(CALIBRATION_FILE))
     ap.add_argument("--publish-budget", action="store_true",
                     help="after a live build on NX-01, set the FLEET_BUDGET variable on %s for the tower" % HUB_REPO)
     ap.add_argument("--report-hours", type=int, default=24)
@@ -1053,6 +1074,8 @@ def main(argv=None):
     tidy = Path(a.tidy_file).read_text() if a.tidy_file else _run(
         ["bash", str(HOME / "repos/hub/scripts/tidy-report.sh")], timeout=30)
     budget = budget_line(a.budget_file, now.timestamp())
+    if budget != NO_BUDGET:
+        budget += calibration_note(a.calibration_file, now.timestamp())
     open_questions_error = None
     if a.open_questions_file:
         try:
