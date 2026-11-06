@@ -89,4 +89,19 @@ lane --pane no-such-lane; assert_eq "$LAST_OUT" '?' '--pane on an unknown lane p
 printf '%s\t%s\t%s\tsonnet\tcodex\t%s\t%s\tx\t-\thigh\toff\n' "$(date +%F)" hl-lane "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
 FAKE_PANE_CMD=bash lane --pane hl-lane; assert_eq "$LAST_OUT" headless '--pane on a headless (codex) lane prints headless'
 
+# 5 Nov 2026 (#243): a console --headless lane keeps an out.log in its hand-off folder, and its window drops to bash when the run ends. The
+# out.log used to switch the gate off, so --send typed a 9-line brief into bash. The gate now looks at the pane alone.
+HAND2="$HOME_T/.claude/state/lanes/2026-11-05-hl2"; mkdir -p "$HAND2"; echo 'brief' >"$HAND2/prompt.md"
+printf 'The work is done.\nexit 0\n' >"$HAND2/out.log"
+printf '%s\t%s\t%s\tsonnet\tconsole\t%s\t%s\tlive-sess\t-\thigh\toff\n' "$(date +%F)" lv-lane "$REPO" "$HAND2/prompt.md" "$HAND2/report.md" >>"$INDEX"
+rm -f "$ST/keys.log"
+FAKE_PANE_CMD=bash lane --send lv-lane 'Hub, please do this'
+assert_eq "$LAST_RC" 1 '--send to a bash pane exits 1 even when the lane folder holds an out.log'
+assert_contains "$LAST_OUT" 'not sent: lv-lane is not running claude (pane shows bash)' 'the refusal names the pane program'
+assert_contains "$LAST_OUT" 'hand-off' 'the refusal points to a restart from a hand-off'
+[ ! -e "$ST/keys.log" ] || fail 'keys were typed into a bash pane because an out.log existed'; ok
+# A live interactive lane whose folder still holds an old out.log is unaffected.
+FAKE_PANE_CMD=claude lane --send lv-lane 'hello after old out.log'
+assert_eq "$LAST_RC" 0 '--send to a claude pane proceeds with an old out.log in the folder'
+
 echo "ok - $checks checks passed"

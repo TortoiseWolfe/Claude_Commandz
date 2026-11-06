@@ -1295,9 +1295,10 @@ send_to() {  # <name> <text...>
   fi
   tmux has-session -t "$SESSION" 2>/dev/null && tmux list-windows -t "$SESSION" -F '#{window_name}' | command grep -qx -- "$name" \
     || { echo "no window named $name in $SESSION" >&2; return 1; }
-  # Liveness gate: type only into a pane that is running Claude (a console --headless lane has an out.log and no pane).
-  if { [ -z "${rep:-}" ] || [ ! -e "$(dirname "$rep")/out.log" ]; } && ! pane_is_claude "$name"; then
-    echo "not sent: $name is not running claude (pane shows $(pane_cmd "$name" | sed 's/^$/nothing/'))" >&2
+  # Liveness gate: type only into a pane that is running Claude. An out.log in the hand-off folder no longer switches it off: a console
+  # --headless lane has one, and its window drops to bash when the run ends, so on 5 Nov 2026 a 9-line brief ran as shell commands (#243).
+  if ! pane_is_claude "$name"; then
+    echo "not sent: $name is not running claude (pane shows $(pane_cmd "$name" | sed 's/^$/nothing/')); its session has ended or takes no typed input. Start a fresh lane from its hand-off instead." >&2
     return 1
   fi
   target="$SESSION:$name"
