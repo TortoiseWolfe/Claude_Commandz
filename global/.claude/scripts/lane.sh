@@ -1981,10 +1981,18 @@ read_dialog_answer() {
   block="$(printf '%s\n' "$pane" | awk '/^[[:space:]]*Read outside the working directories\??[[:space:]]*$/ { b = ""; on = 1 } on { b = b $0 "\n" } END { printf "%s", b }')"
   [ -n "$block" ] || return 1
   [ "$(printf '%s' "$block" | wc -l)" -le 15 ] || return 1
-  [ "$(printf '%s' "$block" | command grep -c 'Do you want to proceed')" = 1 ] || return 1
-  [ "$(printf '%s' "$block" | command grep -c 'Esc to cancel')" = 1 ] || return 1
-  [ "$(printf '%s' "$block" | command grep -cE '^[[:space:]]*Read\(')" = 1 ] || return 1
-  printf '%s\n' "$block" | sed -n '2,5p' | command grep -qE '^[[:space:]]*Read\([^)]+\)[[:space:]]*$' || return 1
+  # Nothing but the dialog's own lines is allowed in the block: the title, blank lines, one Read(...) line right under the title (blank lines
+  # between only), "Do you want to proceed?", numbered options that are exactly "Yes", "Yes, allow reading from ... during this session" or "No...",
+  # and "Esc to cancel". Any other line (a tool header, a command, another kind of Yes such as "don't ask again") makes the screen not this dialog.
+  printf '%s\n' "$block" | awk '
+    NR == 1 { next }
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*Read\([^)]+\)[[:space:]]*$/ { if (nread++ || seen_other) bad = 1; next }
+    /^[[:space:]]*Do you want to proceed\?[[:space:]]*$/ { seen_other = 1; if (q++) bad = 1; next }
+    /^[[:space:]]*Esc to cancel[[:space:]]*$/ { seen_other = 1; if (e++) bad = 1; next }
+    /^[[:space:]]*(❯|>)?[[:space:]]*[0-9]+\.[[:space:]]+(Yes|Yes, allow reading from [^"]* during this session|No.*)[[:space:]]*$/ { seen_other = 1; if (!q) bad = 1; next }
+    { bad = 1 }
+    END { exit (bad || nread != 1 || q != 1 || e != 1) ? 1 : 0 }' || return 1
   path="$(printf '%s\n' "$block" | sed -nE 's/^[[:space:]]*Read\(([^)]+)\)[[:space:]]*$/\1/p' | head -1)"
   [ -n "$path" ] || return 1
   case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
