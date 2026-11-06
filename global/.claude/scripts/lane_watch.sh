@@ -307,7 +307,8 @@ idle_remind_check() {
   [ "$mins" -ge "$limit" ] || return 0
   rep=$(report_of "$l")
   first=$(head -n 1 "$rep" 2>/dev/null)
-  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*) return 0 ;; esac
+  # EMPTY <time> | ... is what the lane prompts have always asked for as the end-of-queue line (6 Nov: six lanes wrote it and were named every 20 min).
+  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
   mark="$recycle_dir/.idleremind-$l"
   prev=$(cat "$mark" 2>/dev/null)   # "<done epoch> <named epoch>"
   if [ "${prev%% *}" = "$de" ] && [ -n "${prev##* }" ] && [ $(( now - ${prev##* } )) -lt $(( limit * 60 )) ]; then return 0; fi
