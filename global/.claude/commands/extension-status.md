@@ -219,6 +219,8 @@ TL;DR format:
 
 If `--triage` / `--traffic` / `--mentions` was passed, only render that slice.
 
+**Never tag anyone.** Authors and handles copied from search results must never appear as a bare `@name` in anything posted to GitHub: GitHub emails them on every run (wireframe issue #4). Before posting a report or the "log is long, consider closing" cleanup note, pipe the body through `python3 scripts/neutralize-mentions.py < body.md > body.safe.md` (in the wireframe repo checkout) and post `body.safe.md` with `--body-file` (the filter puts an invisible zero-width character after each handle's `@`, so GitHub sends no email). Also write handles in inline code. The cleanup note itself names nobody. If the script is not present (override repos), write every handle in backticks by hand.
+
 Finish with a footer listing the run timestamp in the user's local time and a UTC timestamp.
 
 ---
