@@ -52,5 +52,9 @@ commit that touches other files: `git pull --rebase --autostash`, then push. A c
 ## 6. End
 - `touch ~/.claude/state/hub-handed-off.<session id>` (the stop hook lets the session end once a fresh hand-off file
   and this marker both exist); then answer no more lane wakes.
+  Never take the id from the newest transcript in the project folder: another session may have written one more
+  recently (6 Nov 2026: the marker went to the wrong id and the guard kept blocking). Take it from the
+  lane-watch-guard block message, which says "this session's id is <id>, so run touch <path>": run that exact
+  `touch`. If the guard has not blocked yet, end the turn once; its block message then names the path.
 - Last message, outcome first, two layers: what was handed off, the hand-off file path on its own line, the question
   that went to Hatch, and: "Open a fresh terminal in ~/repos and run /prep."
