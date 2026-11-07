@@ -35,6 +35,9 @@
 # HEAD:main, refs/heads/main), force pushes, and install_scripts.py; the prompt says a lane pushes a branch and opens a PR and never installs.
 # The provider keys are in the environment the model's shells inherit; "*API_KEY*" and printenv are denied, which is advisory too (the firm fixes are
 # GitHub branch protection on main and passing keys to OpenCode by file reference, neither of which this script can set).
+# Git settings (6 Nov 2026, 8:58 PM: a lane had left a placeholder author email in ~/.gitconfig): shell commands that change git configuration are denied
+# (git config, git -c, ~/.gitconfig, .git/config, .git/hooks, core.hooksPath, GIT_CONFIG*, --config-env; reads are denied too, because OpenCode takes the LAST matching rule and an allow after the denies would override the push and key rules for a chained command), and the edit tool
+# cannot write those files. Advisory like the rest: a script can still reach the file.
 # The deny is on command text, so a bare "git push" from a checkout that is on main is not caught: lane.sh starts opencode lanes on a branch.
 # The config is written to the lane folder (OPENCODE_CONFIG), never into the repo. A wall-clock limit (OPENCODE_LANE_TIMEOUT seconds, default 7200)
 # stops a run that loops.
@@ -78,8 +81,8 @@ cat >"$conf" <<JSON
 {"\$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
  "permission":{"*":"allow",
   "read":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
-  "edit":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
-  "bash":{"*":"allow","*.env*":"deny","*api-key*":"deny","*.pem*":"deny","*id_rsa*":"deny","*id_ed25519*":"deny","*git*push*--force*":"deny","*git*push*--mirror*":"deny","*git*push*--all*":"deny","*git*push*+*":"deny","*API_KEY*":"deny","*git*push* -f*":"deny","*git*push* main":"deny","*git*push* main *":"deny","*git*push*:main":"deny","*git*push*:main *":"deny","*git*push* master":"deny","*git*push* master *":"deny","*git*push*:master":"deny","*git*push*:master *":"deny","*git*push*refs/heads/main*":"deny","*git*push*refs/heads/master*":"deny","*install_scripts.py*":"deny","printenv*":"deny","env":"deny","env *":"deny","*/proc/*/environ*":"deny","export -p*":"deny"},
+  "edit":{"*":"allow","*.gitconfig":"deny","*/.git/config":"deny","*/.git/hooks/*":"deny","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
+  "bash":{"*":"allow","*.env*":"deny","*api-key*":"deny","*.pem*":"deny","*id_rsa*":"deny","*id_ed25519*":"deny","*git*push*--force*":"deny","*git*push*--mirror*":"deny","*git*push*--all*":"deny","*git*push*+*":"deny","*API_KEY*":"deny","*git*push* -f*":"deny","*git*push* main":"deny","*git*push* main *":"deny","*git*push*:main":"deny","*git*push*:main *":"deny","*git*push* master":"deny","*git*push* master *":"deny","*git*push*:master":"deny","*git*push*:master *":"deny","*git*push*refs/heads/main*":"deny","*git*push*refs/heads/master*":"deny","*install_scripts.py*":"deny","printenv*":"deny","env":"deny","env *":"deny","*/proc/*/environ*":"deny","export -p*":"deny","*git*config*":"deny","*git* -c *":"deny","*git* -c*=*":"deny","*--config-env*":"deny","*.gitconfig*":"deny","*.git/config*":"deny","*.git/hooks*":"deny","*core.hooksPath*":"deny","*GIT_CONFIG*":"deny"},
   "external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
