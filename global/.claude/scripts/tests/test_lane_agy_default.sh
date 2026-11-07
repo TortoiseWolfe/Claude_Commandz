@@ -44,6 +44,8 @@ assert_exit 1 "$LAST_RC" 'an own-repo code lane on Claude with no reason is refu
 assert_contains "$LAST_OUT" 'lane.sh --engine agy fix-header' 'the refusal prints the agy command with the lane name'
 assert_contains "$LAST_OUT" "$OWN gemini-3.8-flash-high $P_CODE" 'the refusal prints the caller own dir and prompt file'
 assert_contains "$LAST_OUT" '--claude-because' 'the refusal names the override'
+assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2026 12:43 PM' 'the refusal names the day Codex is back, from the one variable'
+assert_not_contains "$LAST_OUT" '31 Oct' 'and not the old date'
 for kind in 'needs Docker' 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review or planning (strongest tier)' 'not code'; do
   assert_contains "$LAST_OUT" "$kind" "the refusal lists the accepted reason: $kind"
 done
@@ -110,6 +112,10 @@ unset LANE_HOME
 lane --help
 assert_contains "$LAST_OUT" '--claude-because' 'help documents the option'
 assert_contains "$LAST_OUT" 'gemini-3.8-flash-high' 'help names the agy command'
+assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2026 12:43 PM' 'help names the day Codex is back'
+assert_not_contains "$LAST_OUT" '31 Oct' 'help carries no old date'
+CODEX_BACK='1 Jan 2030' lane --help
+assert_contains "$LAST_OUT" 'until Codex returns on 1 Jan 2030' 'the date lives in one variable'
 head -6 "$SCRIPT" | grep -q -- '--claude-because' || fail 'the header usage names the option'; ok
 
 printf 'ok - %s checks passed\n' "$checks"
