@@ -58,8 +58,17 @@ def report_state(report, transcript, now=None):
         ts, kind = epoch(o.get("timestamp")), o.get("type")
         if ts is None:
             continue
-        if kind == "user" and not o.get("isMeta") and not o.get("isSidechain"):
-            if is_input(text_of(o.get("message", {}).get("content"))):
+        if kind == "user":
+            content = o.get("message", {}).get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result" or not block.get("is_error"):
+                        continue
+                    if text_of(block.get("content")).startswith("PreToolUse:"):
+                        tool_id = block.get("tool_use_id")
+                        if isinstance(tool_id, str) and tool_id:
+                            done.add(tool_id)  # the safety hook refused it before any background job began
+            if not o.get("isMeta") and not o.get("isSidechain") and is_input(text_of(content)):
                 last_input = max(last_input, ts)
         elif kind == "queue-operation" and o.get("operation") == "enqueue":
             body = text_of(o.get("content"))

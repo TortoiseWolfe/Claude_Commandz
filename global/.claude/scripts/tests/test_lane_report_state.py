@@ -30,8 +30,11 @@ def user(t, text, **extra):
     return {"type": "user", "timestamp": iso(t), "message": {"role": "user", "content": text}, **extra}
 
 
-def tool_result(t):
-    return {"type": "user", "timestamp": iso(t), "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}}
+def tool_result(t, tool_id="x", content="ok", is_error=None):
+    block = {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+    if is_error is not None:
+        block["is_error"] = is_error
+    return {"type": "user", "timestamp": iso(t), "message": {"role": "user", "content": [block]}}
 
 
 def bash(t, tool_id, background):
@@ -75,6 +78,25 @@ class Tigard(unittest.TestCase):
 
     def test_a_background_job_still_running_makes_it_stale(self):
         rows = self.base + [bash(at(17, 5), "t2", True)]
+        self.assertEqual(self.state(rows, report_at=at(17, 6)), "job")
+
+    def test_a_pretooluse_refusal_does_not_count_as_a_started_background_job(self):
+        rows = self.base + [bash(at(17, 5), "refused", True),
+                            tool_result(at(17, 5), "refused", "PreToolUse:Bash hook error: command refused", is_error=True)]
+        self.assertEqual(self.state(rows, report_at=at(17, 6)), "fresh")
+
+    def test_only_an_error_starting_with_pretooluse_clears_the_background_job(self):
+        started = bash(at(17, 5), "t2", True)
+        cases = [
+            (tool_result(at(17, 5), "t2", "PreToolUse:Bash hook error", is_error=False), "the result is not an error"),
+            (tool_result(at(17, 5), "t2", "Bash hook error: PreToolUse refused", is_error=True), "the error has a different prefix"),
+        ]
+        for result, reason in cases:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.state(self.base + [started, result], report_at=at(17, 6)), "job")
+
+    def test_an_ordinary_tool_result_without_a_task_notification_does_not_clear_the_job(self):
+        rows = self.base + [bash(at(17, 5), "t2", True), tool_result(at(17, 15), "t2", "command completed")]
         self.assertEqual(self.state(rows, report_at=at(17, 6)), "job")
 
     def test_the_job_ending_clears_it(self):
