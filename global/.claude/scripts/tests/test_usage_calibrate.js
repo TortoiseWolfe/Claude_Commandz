@@ -118,27 +118,7 @@ test('exit 5 and the calibration file untouched when the reading is lower than t
   assert.strictEqual(fs.readFileSync(s.calFile, 'utf8'), before);
 });
 
-test('a calibration through model_quality_report.py on a synthetic ledger writes the file and the report reads the page figure', () => {
-  const s = sandbox();
-  const db = path.join(s.dir, 'ledger.db');
-  const mk = spawnSync('python3', ['-c', `
-import sqlite3, datetime as dt
-c = sqlite3.connect(${JSON.stringify('PLACEHOLDER')})
-`.replace('PLACEHOLDER', db) + `
-c.execute("CREATE TABLE tokens(message_id TEXT PRIMARY KEY, ts INTEGER, session TEXT, agent_id TEXT, repo TEXT, model TEXT, sidechain INTEGER, input INTEGER, output INTEGER, cache_5m INTEGER, cache_1h INTEGER, cache_read INTEGER)")
-ts = int(dt.datetime(2026, 10, 23, 9, 0, tzinfo=dt.timezone(dt.timedelta(hours=-4))).timestamp())
-c.execute("INSERT INTO tokens VALUES('m1', ?, 's', NULL, 'r', 'claude-opus-5-5', 0, 5000000, 0, 0, 0, 0)", (ts,))
-c.commit()
-`], { encoding: 'utf8' });
-  assert.strictEqual(mk.status, 0, mk.stderr);
-  const r = run(['--fixture', fxPath('usage_page.txt'), '--calibration-file', s.calFile, '--db', db, '--now', '2026-10-27T21:58:00-04:00']);
-  assert.strictEqual(r.status, 0, r.stderr);
-  const c = JSON.parse(fs.readFileSync(s.calFile, 'utf8'));
-  assert.strictEqual(c.pct, 94);
-  assert.strictEqual(c.at, '2026-10-27T21:58:00-04:00');
-  assert.ok(c.pct_per_unit > 0);
-  assert.match(r.stdout, /the report now reads 94\.0% used so far/);
-});
+// The case that runs model_quality_report.py moved to test_usage_calibrate_report.js: that script lives in the hub repo, which CI does not check out.
 
 // ---- the status file the watcher reads (issue 273): every outcome leaves one line of evidence ----
 
