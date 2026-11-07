@@ -129,7 +129,10 @@ c="$(last_cmd)"
 has "$c" "--add-dir $WT/proj--topic-a --add-dir $WT/proj--topic-b " "both checkouts of the lane's repo are added, each before a flag"
 hasnt "$c" "projx--other" "a repo whose name starts the same is not matched"
 hasnt "$c" "elsewhere--c" "another repo's checkout is not added"
-hasnt "$c" "--add-dir $WT " "the whole .worktrees folder is never added"
+# 7 Nov 2026: the hub reversed the old rule "the whole .worktrees folder is never added". A path given to --add-dir must exist, so a worktree the lane makes after
+# launch can only be covered by its parent folder; before this every read in one stopped the lane on the "outside the working directories" dialog.
+has "$c" "--add-dir $WT " "the .worktrees folder is added, so worktrees made after launch read without the dialog"
+[ "$(printf '%s' "$c" | grep -o -- "--add-dir $WT " | wc -l)" = 1 ] || fail "the .worktrees folder is added once ($c)"; ok
 has "$c" "$LANES/$(date +%F)-wt" "the hand-off folder is still added"
 [ "$(ad_of wt)" = "$WT/proj--topic-a:$WT/proj--topic-b" ] || fail "column 15 holds the checkouts, got $(ad_of wt)"; ok
 lane --add-dir "$STREAM" wt2 "$WORK/" sonnet "$TMP/p1.md"
@@ -174,11 +177,13 @@ c="$(last_cmd)"
 has "$c" "--add-dir $HOME_T/.claude/state " "the state folder (hub and peer inboxes) is added"
 has "$c" "--add-dir $TMPC/claude-$(id -u) " "Claude's temp folder is added"
 has "$c" "--add-dir $WORK " "a lane in a worktree gets the repo's main checkout"
+has "$c" "--add-dir $WT " "a lane gets ~/repos/.worktrees, so worktrees it makes later read without the dialog (7 Nov 2026)"
 [ "$(ad_of sh1)" = "$WT/proj--topic-a" ] || fail "column 15 holds only the checkouts, got $(ad_of sh1)"; ok
 shared sh2 "$WORK" sonnet "$TMP/p1.md"
 c="$(last_cmd)"
 has "$c" "--add-dir $HOME_T/.claude/state " "a lane in the main checkout gets the state folder"
 hasnt "$c" "--add-dir $WORK " "...but not its own folder again"
+has "$c" "--add-dir $WT " "a lane in the main checkout gets ~/repos/.worktrees too"
 shared --add-dir "$HOME_T/.claude/state" sh3 "$WORK" sonnet "$TMP/p1.md"
 c="$(last_cmd)"
 [ "$(printf '%s' "$c" | grep -o -- "--add-dir $HOME_T/.claude/state " | wc -l)" = 1 ] || fail "a folder already given is not added twice ($c)"; ok
@@ -188,12 +193,13 @@ shared --resume sh4
 [ "$LAST_RC" = 0 ] || fail "--resume works ($LAST_OUT)"; ok
 has "$(last_cmd)" "--add-dir $HOME_T/.claude/state " "--resume adds the state folder"
 has "$(last_cmd)" "--add-dir $WORK " "--resume adds the main checkout"
+has "$(last_cmd)" "--add-dir $WT " "--resume adds ~/repos/.worktrees"
 [ "$(ad_of sh4)" = "-" ] || [ "$(ad_of sh4)" = "$WT/proj--topic-a" ] || fail "--resume leaves column 15 to the checkouts, got $(ad_of sh4)"; ok
 # the other engines get none of them
 for eng in codex agy copilot; do
   shared --dry-run --allow-client --engine "$eng" "sh5-$eng" "$WT/proj--topic-a" sonnet "$TMP/p1.md"
   [ "$LAST_RC" = 0 ] || fail "$eng dry run works ($LAST_OUT)"; ok
-  hasnt "$LAST_OUT" "--add-dir $HOME_T/.claude/state " "$eng gets no state folder"; hasnt "$LAST_OUT" "claude-$(id -u)" "$eng gets no temp folder"
+  hasnt "$LAST_OUT" "--add-dir $WT " "$eng gets no worktrees folder"; hasnt "$LAST_OUT" "--add-dir $HOME_T/.claude/state " "$eng gets no state folder"; hasnt "$LAST_OUT" "claude-$(id -u)" "$eng gets no temp folder"
 done
 # a symlink, a missing folder and a folder on the no-AI list are left out
 mkdir -p "$HOME_T/.claude/no-ai-wall"
