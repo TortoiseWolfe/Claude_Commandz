@@ -23,6 +23,10 @@ What counts as sending (Bash): the address appears anywhere in the command AND t
   Reading the address from git config or an environment variable into a sink counts as well.
   A script this hook can't find, can't read or can't read in full counts as a sink; it is never assumed safe. Every token
   after the interpreter is tried as a file, in the working folder and in any folder a cd in the line moves to.
+Binary files named after the script (a zip, pdf, image or audio attachment for a mail tool, a data file for any script) are data:
+  they are not scanned as code, however large. A file counts as binary when its first 8 KB hold a null byte or it starts with the magic
+  bytes of a known binary type. Only a file that is not the first file named (the first one is the program the interpreter runs; a zip
+  there could be a zipapp) is skipped, so the script is still read and judged, and a text file is always read.
 Allowed: the address in grep, echo, git, local files, and the mail tools gmail_api.py and calendar_api.py (plus names under
   allow_scripts). A mail tool is allowed by its real path in ~/.claude/scripts, never by file name alone, so a copy or a link
   with the same name somewhere else is judged like any other script.
@@ -45,6 +49,9 @@ LOG = "~/.claude/state/identity-guard.log"
 DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 SCRIPTS_DIR = "~/.claude/scripts"
+BINARY_SNIFF_BYTES = 8192
+BINARY_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"%PDF-", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"ID3", b"RIFF", b"OggS", b"fLaC",
+                b"\x1f\x8b", b"7z\xbc\xaf", b"Rar!", b"BZh", b"\xfd7zXZ")
 NOT_A_FILE = ("-", "<", "$", "(", ">", "|", ";", "&")
 SEPARATOR = re.compile(r"\|\||&&|[;|&]")
 # Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
@@ -185,6 +192,16 @@ def candidate_files(tokens, cwd, cmd):
     return out
 
 
+def is_binary(path):
+    """True for a file that is data, not a script: a null byte in its first 8 KB, or the magic bytes of a known binary type."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(BINARY_SNIFF_BYTES)
+    except OSError:
+        return False
+    return b"\0" in head or head.startswith(BINARY_MAGIC)
+
+
 def sinks(cmd, cwd, allowed):
     """Network sinks in the command: names as strings, or ("script file", text) for a script that uses the network.
     A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink.
@@ -214,9 +231,11 @@ def sinks(cmd, cwd, allowed):
                 found.append("a script this hook can't find")
             continue
         first = words[0] if words and not inline else None
-        for tok, path in files:
+        for n, (tok, path) in enumerate(files):
             if tok == first and not odd_interpreter and toks and toks[0].strip("'\"") == first and os.path.isabs(os.path.expanduser(first)) \
                     and not hijackable and is_allowed_tool(path, allowed):
+                continue
+            if n > 0 and is_binary(path):  # an attachment or data file after the program: not code, so not scanned
                 continue
             try:
                 with open(path, errors="replace") as f:
