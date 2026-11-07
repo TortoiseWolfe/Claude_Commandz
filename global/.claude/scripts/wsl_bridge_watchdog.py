@@ -119,19 +119,71 @@ def sysctl_conf():
     return "\n".join(lines) + "\n"
 
 
-def run_root(script, timeout=100):
-    """Run a root shell script. Returns (ok, route). Docker first (does not need the bridge), then wsl.exe -u root."""
-    routes = [
-        ("docker", ["timeout", "90", "docker", "run", "--rm", "--privileged", "--pull=never", "--network", "none", IMAGE, "sh", "-c", script]),
-        ("wsl", ["timeout", "40", "wsl.exe", "-d", "Debian", "-u", "root", "-e", "sh", "-c", script]),
-    ]
-    for name, argv in routes:
-        try:
-            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd="/mnt/c" if os.path.isdir("/mnt/c") else "/")
-        except (subprocess.TimeoutExpired, OSError):
+def local_alpine_image(timeout=20):
+    """Return (image ID, lookup succeeded) for a tagged local Alpine image."""
+    argv = ["timeout", "15", "docker", "image", "ls", "--no-trunc", "--format", "{{.ID}} {{.Repository}} {{.Tag}}"]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           cwd="/mnt/c" if os.path.isdir("/mnt/c") else "/")
+    except (subprocess.TimeoutExpired, OSError):
+        return None, False
+    if r.returncode != 0:
+        return None, False
+    for line in r.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
             continue
+        image_id, repository, _tag = fields
+        if repository.rsplit("/", 1)[-1] == "alpine" and re.fullmatch(r"(?:sha256:)?[0-9a-f]{12,64}", image_id):
+            return image_id, True
+    return None, True
+
+
+def run_root(script, timeout=100):
+    """Run as root through a local Alpine image, pulling alpine:3 only when none is tagged locally.
+
+    Returns (ok, route). Docker does not need the bridge; wsl.exe -u root is the fallback.
+    """
+    cwd = "/mnt/c" if os.path.isdir("/mnt/c") else "/"
+    image, lookup_ok = local_alpine_image(timeout=min(timeout, 20))
+    pulled = False
+    pull_failed = False
+    if lookup_ok and image is None:
+        argv = ["timeout", "90", "docker", "pull", IMAGE]
+        try:
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd)
+            if r.returncode == 0:
+                image = IMAGE
+                pulled = True
+            else:
+                pull_failed = True
+        except (subprocess.TimeoutExpired, OSError):
+            pull_failed = True
+
+    if image is not None:
+        argv = ["timeout", "90", "docker", "run", "--rm", "--privileged", "--pull=never", "--network", "none", image, "sh", "-c", script]
+        try:
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd)
+            if r.returncode == 0:
+                return True, "docker-pulled" if pulled else "docker"
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    argv = ["timeout", "40", "wsl.exe", "-d", "Debian", "-u", "root", "-e", "sh", "-c", script]
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=timeout, cwd=cwd)
         if r.returncode == 0:
-            return True, name
+            if pulled:
+                return True, "wsl-after-docker-pull"
+            if pull_failed:
+                return True, "wsl-after-pull-failed"
+            return True, "wsl"
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    if pulled:
+        return False, "none-after-docker-pull"
+    if pull_failed:
+        return False, "none-after-pull-failed"
     return False, "none"
 
 
