@@ -94,6 +94,25 @@ def add_to_archive(path, new_lines):
         os.fsync(f.fileno())
 
 
+def log_moves(archive_dir, moved):
+    """One line per block moved, in archive.log beside the month files: when, which month file, the block's id and the date it was last
+    touched. No line text, so the log is safe to read and to paste. Written after the inbox rewrite, so a failed run logs nothing."""
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    rows = []
+    for month, blk in sorted(moved.items()):
+        _, blocks = split_blocks(blk)
+        for b in blocks:
+            head = b[0].rstrip("\n")
+            ident = head.rsplit(" | ", 1)[-1].strip() if " | " in head else "no-id"
+            touched = last_touch(b)
+            rows.append("%s archived %s -> %s.md (last change %s)\n" % (stamp, ident[:40], month, touched or "unknown"))
+    if rows:
+        with open(archive_dir / "archive.log", "a", encoding="utf-8") as f:
+            f.write("".join(rows))
+            f.flush()
+            os.fsync(f.fileno())
+
+
 def run(inbox, archive_dir, today, days, dry_run=False):
     inbox = Path(os.path.realpath(inbox))  # the old muse-inbox.md name is a symlink: replace the file it points at
     if not inbox.exists():
@@ -124,6 +143,7 @@ def run(inbox, archive_dir, today, days, dry_run=False):
                 if os.path.exists(tmp):
                     os.unlink(tmp)
                 raise
+            log_moves(Path(archive_dir), moved)
             return n, open_before
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
