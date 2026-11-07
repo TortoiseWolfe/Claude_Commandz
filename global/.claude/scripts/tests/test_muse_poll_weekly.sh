@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
-SCRIPT=$SCRIPT_DIR/muse_poll.sh
+SCRIPT=$SCRIPT_DIR/../muse_poll.sh
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 CONFIG=$TMP/weekly.tsv

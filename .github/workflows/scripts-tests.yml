@@ -31,6 +31,8 @@ jobs:
           set -o pipefail
           export HOME="$(mktemp -d)"
           python3 -m pytest tests test_*.py -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
+          # A test file that collected nothing (or was ignored) never ran; each file the suite must run needs a progress line in the output.
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/pytest.out" scripts
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
@@ -52,6 +54,7 @@ jobs:
           cp tests/fixtures/block-outbound.case.sh "$HOME/.claude/hooks/block-outbound.sh"
           cp draft-recipient-guard.py "$HOME/.claude/hooks/draft-recipient-guard.py"
           python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/hooks-pytest.out"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/hooks-pytest.out" hooks
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/hooks-pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped hook tests: $skips"; exit 1; fi
           if grep -qE '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out"; then echo "::error::deselected hook tests never ran: $(grep -E '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"; exit 1; fi
@@ -67,16 +70,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: every test file has a runner
+        run: |
+          # Fails on a test file (anywhere in the repo) that no step here runs and that .github/ci_not_run.tsv does not openly list with a reason and an issue.
+          python3 .github/scripts/ci_test_coverage.py check
       - name: shell tests
         working-directory: global/.claude/scripts
         run: |
           export HOME="$(mktemp -d)"
-          failed=0
-          for t in tests/test_*.sh; do
-            # Needs wsl.exe and the OpenClawGateway distro: it only runs inside that distro, so a runner cannot.
-            [ "$t" = tests/test_openclaw_uid_stage.sh ] && { echo "excluded (WSL only): $t"; continue; }
+          failed=0; ran=0
+          # The list comes from ci_test_coverage.py, the same rule the step above checks, so a file cannot fall out of the glob.
+          # Files in .github/ci_not_run.tsv (test_openclaw_uid_stage.sh needs the WSL distro) are left out of it, with the reason and issue printed by that step.
+          while IFS= read -r t; do
             echo "::group::$t"
             if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
             echo "::endgroup::"
-          done
+            ran=$((ran + 1))
+          done < <(python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" list shell)
+          echo "shell tests run: $ran"
+          if [ "$ran" -lt 1 ]; then echo "::error::no shell test ran"; failed=1; fi
           exit "$failed"
+      - name: node tests (skipped tests fail the job)
+        working-directory: global/.claude/scripts
+        run: |
+          set -o pipefail
+          export HOME="$(mktemp -d)"
+          mapfile -t files < <(python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" list node)
+          if [ "${#files[@]}" -lt 1 ]; then echo "::error::no node test file found"; exit 1; fi
+          node --version
+          node --test "${files[@]}" | tee "$RUNNER_TEMP/node.out"
+          # node --test prints "# skipped N" / "# todo N" (older node) or "ℹ skipped N"; a skipped test is not a passing test.
+          if grep -qE '^(#|ℹ) (skipped|todo|cancelled) [1-9]' "$RUNNER_TEMP/node.out"; then echo "::error::node tests skipped, todo or cancelled"; exit 1; fi
+          grep -qE '^(#|ℹ) pass [1-9]' "$RUNNER_TEMP/node.out" || { echo "::error::node ran no passing test"; exit 1; }
