@@ -221,6 +221,12 @@ assert_not_contains "$LAST_COMMAND" 'dangerously-skip-permissions' 'agy never sk
 assert_not_contains "$LAST_COMMAND" '--mode auto' 'agy never runs in auto mode'
 assert_not_contains "$(cat "$TMP/agy-calls")" 'dangerously-skip-permissions' 'the agy binary is never called with a permission bypass'
 [ ! -e "$REPO/injected" ] || fail 'agy prompt contents are not executed by the shell'
+# agy lanes start with enforced deny rules (6 Nov 2026: there were none; only the prompt header kept a lane out of a secrets file in the checkout).
+AGY_SETTINGS="$AGY_HAND/agy-settings.json"
+assert_contains "$(cat "$TMP/agy-calls")" "--settings $AGY_SETTINGS" 'agy is started with a per-session settings file'
+[ -s "$AGY_SETTINGS" ] || fail 'the agy deny settings file is written before agy runs'
+assert_contains "$(cat "$AGY_SETTINGS")" '"read_file(' 'agy deny rules cover file reads'
+assert_contains "$(cat "$AGY_SETTINGS")" 'command(regex:.*git.*push.* (main|master)( .*)?)' 'agy deny rules cover a push to main or master'
 checks=$((checks + 1))
 # The header is on the lane's copy of the prompt, ahead of the caller's words; the caller's file is untouched.
 AGY_PROMPT_COPY="$(cat "$AGY_HAND/prompt.md")"
