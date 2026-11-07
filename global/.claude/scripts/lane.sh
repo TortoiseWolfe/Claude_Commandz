@@ -167,6 +167,9 @@
 # opt-in (Esc).
 set -euo pipefail
 SESSION=lanes
+# The day Codex is back (its free plan hit the usage limit 7 Nov 2026 4:13 AM). The only place this date is written; the help text and the
+# own-repo refusal read it from here. Change it here when it moves.
+CODEX_BACK="${CODEX_BACK:-6 Dec 2026 12:43 PM}"
 
 # Plugins switched off in every Claude lane (set to false through --settings enabledPlugins).
 # Kept on: afa-mods (--status reads its band), security-guidance, code-review.
@@ -272,7 +275,7 @@ lane_docker_env() {
 }
 
 usage() {
-  cat <<'USAGE'
+  cat <<'USAGE' | sed "s/@CODEX_BACK@/$CODEX_BACK/g"
 Usage:
   lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
@@ -307,7 +310,7 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
-his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on 31 Oct 2026; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
 needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
@@ -2355,7 +2358,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     return 0
   fi
   {
-    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on 31 Oct 2026 (his rule, 22 Oct 3:30 PM). Use:"
+    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on $CODEX_BACK (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
     echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
