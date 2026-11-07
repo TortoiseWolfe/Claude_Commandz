@@ -30,9 +30,10 @@ jobs:
           # GitHub's default shell has no pipefail, so without this a failing pytest piped into tee left the job green.
           set -o pipefail
           export HOME="$(mktemp -d)"
+          # A test file that collected nothing (or was ignored) never runs; every file this suite must run needs at least one collected test.
+          python3 -m pytest tests test_*.py --collect-only -q -p no:cacheprovider > "$RUNNER_TEMP/collected.out"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/collected.out" scripts
           python3 -m pytest tests test_*.py -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/pytest.out"
-          # A test file that collected nothing (or was ignored) never ran; each file the suite must run needs a progress line in the output.
-          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/pytest.out" scripts
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
@@ -53,8 +54,9 @@ jobs:
           mkdir -p "$HOME/.claude/hooks"
           cp tests/fixtures/block-outbound.case.sh "$HOME/.claude/hooks/block-outbound.sh"
           cp draft-recipient-guard.py "$HOME/.claude/hooks/draft-recipient-guard.py"
+          python3 -m pytest tests --collect-only -q -p no:cacheprovider > "$RUNNER_TEMP/hooks-collected.out"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/hooks-collected.out" hooks
           python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/hooks-pytest.out"
-          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/hooks-pytest.out" hooks
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/hooks-pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped hook tests: $skips"; exit 1; fi
           if grep -qE '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out"; then echo "::error::deselected hook tests never ran: $(grep -E '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"; exit 1; fi

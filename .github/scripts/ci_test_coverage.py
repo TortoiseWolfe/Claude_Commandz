@@ -10,8 +10,8 @@ and the workflow takes its shell and node lists from it, so the lists cannot dri
                                             file that no longer exists fails too
   ci_test_coverage.py list shell|node       the files the shell / node step must run, one per line, relative to global/.claude/scripts
   ci_test_coverage.py pytest-ran FILE scripts|hooks
-                                            FILE is the output of `pytest -q`; every file that suite must run needs a progress line in it,
-                                            so a file that collected no tests (or was ignored) fails
+                                            FILE is the output of `pytest --collect-only -q` (one "path::test" line per test); every file that
+                                            suite must run needs at least one line in it, so a file that collected no tests (or was ignored) fails
 
 A "test file" is any tracked file named test_*.py|sh|js|cjs|mjs, *_test.py|sh|js|cjs|mjs or *.test.* / *.spec.* in js/ts.
 """
@@ -101,13 +101,13 @@ def listing(files, runner, not_run):
 
 
 def pytest_missing(files, output, suite, not_run=()):
-    """Files the pytest suite must run that have no progress line ("path ....") in `pytest -q` output."""
+    """Files the pytest suite must run that have no collected test ("path::name" line) in `pytest --collect-only -q` output."""
     runner = "pytest-" + suite
     base = (SCRIPTS if suite == "scripts" else HOOKS) + "/"
     want = sorted(f[len(base):] for f in files if runner_of(f) == runner and f not in not_run)
     seen = set()
     for line in output.splitlines():
-        m = re.match(r"^(\S+\.py) [.sSxXFEp]+", line)
+        m = re.match(r"^(\S+\.py)::", line)
         if m:
             seen.add(m.group(1))
     return [w for w in want if w not in seen]

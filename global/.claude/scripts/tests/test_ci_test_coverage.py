@@ -70,9 +70,9 @@ def test_the_list_file_needs_a_reason_and_an_issue_link(tmp_path):
     assert any("issue link" in p for p in problems) and any("three" in p for p in problems)
 
 
-def test_pytest_ran_flags_a_file_with_no_progress_line():
+def test_pytest_ran_flags_a_file_with_no_collected_test():
     files = [S + "/tests/test_a.py", S + "/tests/test_b.py", S + "/test_c.py", S + "/tests/test_skip.py"]
-    out = "tests/test_a.py ....                                [ 40%]\ntest_c.py .s.\n"
+    out = "tests/test_a.py::test_one\ntests/test_a.py::TestX::test_two\ntest_c.py::test_three\n\n3 tests collected in 0.01s\n"
     assert cov.pytest_missing(files, out, "scripts") == ["tests/test_b.py", "tests/test_skip.py"]
     assert cov.pytest_missing(files, out, "scripts", {S + "/tests/test_b.py": ("r", ISSUE)}) == ["tests/test_skip.py"]
 
@@ -85,6 +85,6 @@ def test_the_real_repo_has_no_unrun_test_file():
 def test_the_workflow_takes_its_lists_from_the_tool():
     wf = open(os.path.join(REPO, ".github", "workflows", "scripts-tests.yml"), encoding="utf-8").read()
     for needle in ("ci_test_coverage.py\" list shell", "ci_test_coverage.py\" list node", "ci_test_coverage.py check",
-                   "pytest-ran \"$RUNNER_TEMP/pytest.out\" scripts", "pytest-ran \"$RUNNER_TEMP/hooks-pytest.out\" hooks"):
+                   "pytest-ran \"$RUNNER_TEMP/collected.out\" scripts", "pytest-ran \"$RUNNER_TEMP/hooks-collected.out\" hooks"):
         assert needle in wf, needle
     assert "tests/test_*.sh" not in wf
