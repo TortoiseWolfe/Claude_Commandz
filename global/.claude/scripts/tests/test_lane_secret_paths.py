@@ -81,6 +81,12 @@ class SharedListTests(unittest.TestCase):
         os.symlink(sealed_target, os.path.join(self.root, "app/sealed-link"))
         _, dirs = lsp.hide_list([os.path.join(self.root, "app")], self.home)
         self.assertIn(os.path.realpath(sealed_target), dirs)
+        # A link that would blank the filesystem, the home folder or a searched folder is refused, not hidden.
+        for danger, name in [("/", "sealed-root"), (self.home, "sealed-home"), (self.root, "sealed-parent"), (os.path.join(self.root, "app"), "sealed-self")]:
+            os.symlink(danger, os.path.join(self.root, "app", name))
+        _, dirs = lsp.hide_list([os.path.join(self.root, "app")], self.home)
+        for danger in ["/", self.home, self.root, os.path.join(self.root, "app")]:
+            self.assertNotIn(os.path.realpath(danger), dirs)
 
     def test_a_runaway_walk_fails_closed(self):
         old = lsp.MAX_PATHS
