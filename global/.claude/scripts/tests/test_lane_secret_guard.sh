@@ -58,12 +58,17 @@ printf '%s\n' "$V_SECRETS" >"$HOME_TEST/.config/afa/secrets/service_token"
 printf '%s\n' "$V_GRANT" >"$HOME_TEST/.config/afa/secrets/FAKE_TEST_TOKEN"
 printf '{"password":"%s"}\n' "$V_ROTATED" >"$HOME_TEST/.config/afa/rotated-test-users/user1.json"
 printf '%s\n' "$V_PEM" >"$REPO/deploy.pem"
+# A settings-named link to a file outside every searched folder: hiding the link must hide what it points at.
+V_LINK="$(fixture_value link)"
+mkdir -p "$TMP/outside"
+printf 'API_TOKEN=%s\n' "$V_LINK" >"$TMP/outside/real-settings"
+ln -s "$TMP/outside/real-settings" "$REPO/linked.env"
 # A placeholder env file is not a settings file and must stay readable (the guard is not a blanket).
 printf 'API_TOKEN=change-me\n' >"$REPO/.env.example"
 
 HIDDEN=("$REPO/.env" "$REPO/.env.local" "$REPO/nested/.env.production" "$REPO/deploy.pem" "$HOME_TEST/repos/other-project/.env"
   "$HOME_TEST/repos/hub/sealed/deploy.key" "$HOME_TEST/.config/afa/secrets/service_token" "$HOME_TEST/.config/afa/secrets/FAKE_TEST_TOKEN"
-  "$HOME_TEST/.config/afa/rotated-test-users/user1.json")
+  "$HOME_TEST/.config/afa/rotated-test-users/user1.json" "$REPO/linked.env" "$TMP/outside/real-settings")
 printf '%s\n' "${HIDDEN[@]}" >"$TMP/hidden.list"
 
 # The stand-in engine: a model that goes looking. It writes what it saw to $PROBE/<tag> and never prints a fixture to its own output except the one
@@ -82,6 +87,10 @@ for p in "$FIRST_HIDDEN" "$SECOND_HIDDEN"; do
   umount -l "$p" >/dev/null 2>&1 && echo "UMOUNT-LAZY-WORKED $p" >>"$out"
   unshare -m umount "$p" >/dev/null 2>&1 && echo "UNSHARE-UMOUNT-WORKED $p" >>"$out"
   printf 'AFTER %s <%s>\n' "$p" "$(cat -- "$p" 2>/dev/null | tr '\n' ' ')" >>"$out"
+done
+# Another process's root folder must not be a way round the hiding: try the parent, init and every process this lane can see.
+for pid in "$PPID" 1 $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | head -200); do
+  printf 'VIAPROC %s <%s>\n' "$pid" "$(cat -- "/proc/$pid/root$FIRST_HIDDEN" 2>/dev/null | tr '\n' ' ')" >>"$out"
 done
 # The placeholder file must stay readable.
 printf 'EXAMPLE <%s>\n' "$(cat -- "$EXAMPLE_FILE" 2>/dev/null | tr '\n' ' ')" >>"$out"
@@ -128,7 +137,7 @@ run_probe_direct() {
 }
 run_probe_direct
 control="$(cat "$PROBE/control")"
-for v in "$V_ENV" "$V_ENV2" "$V_SEALED" "$V_SECRETS" "$V_ROTATED" "$V_PEM"; do assert_contains "$control" "$v" 'control: the stand-in sees every fixture when nothing hides them'; done
+for v in "$V_ENV" "$V_ENV2" "$V_SEALED" "$V_SECRETS" "$V_ROTATED" "$V_PEM" "$V_LINK"; do assert_contains "$control" "$v" 'control: the stand-in sees every fixture when nothing hides them'; done
 
 run_lane() {  # run_lane <tag> <prompt file> [lane.sh args...]; sets LAST_RC (the command's exit) and LAST_PANE
   local tag="$1" prompt="$2"; shift 2
@@ -148,7 +157,7 @@ check_engine() {  # check_engine <engine> [extra lane.sh flags]
   run_lane "$tag" "$PROMPT" --engine "$engine" "$@" "$tag" "$REPO" sonnet
   [ -f "$PROBE/$tag" ] || fail "$engine: the stand-in engine never ran (exit $LAST_RC): $LAST_PANE"
   seen="$(cat "$PROBE/$tag")"
-  for v in "$V_ENV" "$V_ENV2" "$V_SEALED" "$V_SECRETS" "$V_ROTATED" "$V_PEM" "$V_GRANT"; do
+  for v in "$V_ENV" "$V_ENV2" "$V_SEALED" "$V_SECRETS" "$V_ROTATED" "$V_PEM" "$V_LINK" "$V_GRANT"; do
     case "$seen" in
       *"ENVVAR <$v>"*) ;;  # the one granted value is meant to arrive in the environment
       *"$v"*) fail "$engine: a lane could read a settings file; it saw a fixture value" ;;

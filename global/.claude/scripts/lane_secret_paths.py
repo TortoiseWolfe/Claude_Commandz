@@ -72,18 +72,22 @@ def hide_list(roots, home):
                 if s in SKIP_DIRS:
                     continue
                 full = os.path.join(cur, s)
-                if is_sealed_dir(s) and not os.path.islink(full):
-                    if full not in seen:
-                        seen.add(full)
-                        dirs.append(full)
+                if is_sealed_dir(s):
+                    # A link is hidden by what it points at: a bind mount follows the link.
+                    target = os.path.realpath(full) if os.path.islink(full) else full
+                    if os.path.isdir(target) and target not in seen:
+                        seen.add(target)
+                        dirs.append(target)
                     continue  # hidden whole, so no need to walk it
                 keep.append(s)
             subdirs[:] = keep
             for n in sorted(names):
                 full = os.path.join(cur, n)
-                if is_secret_file(n) and not os.path.islink(full) and full not in seen:
-                    seen.add(full)
-                    files.append(full)
+                if is_secret_file(n):
+                    target = os.path.realpath(full) if os.path.islink(full) else full
+                    if os.path.isfile(target) and target not in seen:
+                        seen.add(target)
+                        files.append(target)
             if len(files) + len(dirs) > MAX_PATHS:
                 raise OverflowError("more than %d settings paths under %s" % (MAX_PATHS, root))
     return files, dirs
