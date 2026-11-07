@@ -19,7 +19,11 @@
 #                                                ticks open client lines whose IDs are all absorbed. Also used for routine alerts.
 #   muse_poll_record.sh open [<prefix>] [-v] [--full]  -> prints the open lines only (never the done history), optionally one
 #                                                kind ("Waiting on Hatch"); -v adds each open line's indented notes.
-#                                                This is how a model reads the board: never read the whole file.
+#                                                This is how a model reads the board: never read the whole file. Items older than 14 days with no
+#                                                change since (HUB_STALE_DAYS) are left out and counted in a last line; --stale lists only
+#                                                them, --all lists both.
+#   muse_poll_record.sh ledger|order|risk|counts|stale  -> notes_ledger.py (state word per open item from checked facts, one work-order
+#                                                block per item, the at-risk escalation line, counts only, the stale list). No model.
 #   muse_poll_record.sh archive [<days>]      -> moves done lines (with their indented notes) not touched for more
 #                                                than <days> (default 7) to hub-inbox-archive/YYYY-MM.md
 #
@@ -155,23 +159,60 @@ case "${1:-}" in
     cat "$tmp" >"$INBOX"; rm -f "$tmp"
     ;;
   open)
-    shift; prefix=""; notes=0; full=0
-    for a in "$@"; do if [[ "$a" == "-v" ]]; then notes=1; elif [[ "$a" == "--full" ]]; then full=1; else prefix="$a"; fi; done
+    shift; prefix=""; notes=0; full=0; mode=fresh
+    for a in "$@"; do
+      if [[ "$a" == "-v" ]]; then notes=1
+      elif [[ "$a" == "--full" ]]; then full=1
+      elif [[ "$a" == "--stale" ]]; then mode=stale
+      elif [[ "$a" == "--all" ]]; then mode=all
+      else prefix="$a"; fi
+    done
     [[ -f "$INBOX" ]] || exit 0
-    # A lane or hub session (AFA_BIG_OUT=1) gets a count by kind and the path when the board is over 8,000 characters; --full prints it all.
-    out=$(awk -v p="$prefix" -v notes="$notes" '
-      /^- \[[ x]\] / { show = 0 }
+    # An open item is stale when its last change (the date on its line, or on the head of any note under it) is more than
+    # HUB_STALE_DAYS (default 14) days before today (HUB_TODAY overrides today, for tests). The default read leaves stale items out and says
+    # how many; --stale lists only them; --all lists both. A line with no readable date is never stale.
+    today=${HUB_TODAY:-$(date +%F)}
+    cutoff=$(date -d "$today -${HUB_STALE_DAYS:-14} days" +%F)
+    # One awk program, run twice: once for what is shown, once (mode "count") to count the stale items the default read leaves out.
+    # shellcheck disable=SC2016
+    OPEN_AWK='
+      function flush(   stale, ok) {
+        if (!have) return
+        stale = (last != "" && last < cutoff)
+        ok = match_p && (mode == "all" || (mode == "stale" && stale) || (mode == "fresh" && !stale) || (mode == "count" && stale))
+        if (ok) { n++; if (mode != "count") { print head; if (notes) printf "%s", buf } }
+        have = 0
+      }
+      /^- \[[ x]\] / { flush() }
       /^- \[ \] / {
         t = $0; sub(/^- \[ \] [^|]*\| /, "", t)
-        if (p == "" || tolower(substr(t, 1, length(p))) == tolower(p)) { print; show = 1 }
+        match_p = (p == "" || tolower(substr(t, 1, length(p))) == tolower(p))
+        head = $0; buf = ""; have = 1
+        last = (substr($0, 7, 10) ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) ? substr($0, 7, 10) : ""
         next }
-      /^[ \t]/ { if (show && notes) print }' "$INBOX")
-    [[ -n "$out" ]] || exit 0
-    if [[ $full == 1 ]]; then printf '%s\n' "$out"
-    else printf '%s\n' "$out" | python3 -I "$(dirname "$(readlink -f "$0")")/big_output.py" --name inbox-open --group-by '^- \[ \] [^|]*\| ([A-Za-z][A-Za-z ]*[A-Za-z])[:|]'; fi
+      /^- \[x\] / { next }
+      /^[ \t]/ { if (have) { buf = buf $0 "\n"
+          if (match(substr($0, 1, 30), /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) { d = substr($0, RSTART, 10); if (last != "" && d > last) last = d } } }
+      END { flush(); if (mode == "count") print n + 0 }'
+    # A lane or hub session (AFA_BIG_OUT=1) gets a count by kind and the path when the board is over 8,000 characters; --full prints it all.
+    out=$(awk -v p="$prefix" -v notes="$notes" -v mode="$mode" -v cutoff="$cutoff" "$OPEN_AWK" "$INBOX")
+    hidden=0
+    if [[ $mode == fresh ]]; then hidden=$(awk -v p="$prefix" -v notes=0 -v mode=count -v cutoff="$cutoff" "$OPEN_AWK" "$INBOX"); fi
+    if [[ -n "$out" ]]; then
+      if [[ $full == 1 ]]; then printf '%s\n' "$out"
+      else printf '%s\n' "$out" | python3 -I "$(dirname "$(readlink -f "$0")")/big_output.py" --name inbox-open --group-by '^- \[ \] [^|]*\| ([A-Za-z][A-Za-z ]*[A-Za-z])[:|]'; fi
+    fi
+    if [[ $hidden -gt 0 ]]; then
+      echo "($hidden stale open item(s) not shown: older than ${HUB_STALE_DAYS:-14} days with no change since. List them with: muse_poll_record.sh open --stale)"
+    fi
+    ;;
+  stale|counts|ledger|order|risk)
+    # The ledger (notes_ledger.py): the stale view, a state word per open item from facts a script can check, one work-order block per
+    # item, the at-risk escalation line. No model anywhere in this path.
+    exec python3 -I "$(dirname "$(readlink -f "$0")")/notes_ledger.py" "$1" --inbox "$INBOX" "${@:2}"
     ;;
   archive)
     exec python3 "$(dirname "$(readlink -f "$0")")/hub_inbox_archive.py" --inbox "$INBOX" --days "${2:-7}"
     ;;
-  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | tick \"<unique substring>\" \"<done note>\" | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] | archive [<days>]" >&2; exit 2 ;;
+  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | tick \"<unique substring>\" \"<done note>\" | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] [--stale|--all] | archive [<days>] | stale | counts | ledger | order | risk" >&2; exit 2 ;;
 esac
