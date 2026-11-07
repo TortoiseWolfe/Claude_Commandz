@@ -163,6 +163,13 @@ for denied in ("git push origin main", "git push -u origin master", "git push or
                "git push --force origin mybranch", "git push origin +mybranch", "git push --mirror", "git push --all origin", "echo $OPENROUTER_API_KEY", "git push -f origin mybranch", "git push origin main --no-verify", "python3 ~/.claude/scripts/install_scripts.py",
                "python3 -I <(git show origin/main:global/.claude/scripts/install_scripts.py)"):
     assert last_match(perm["bash"], denied) == "deny", denied
+for denied in ("git config --global user.email x", "git config user.name y", "git -C /x config --global user.email z", "sed -i s/a/b/ ~/.gitconfig",
+               "git -c user.email=a commit -m x", "echo x >> .git/config", "cp h .git/hooks/pre-commit", "GIT_CONFIG_GLOBAL=/x git commit -m x"):
+    assert last_match(perm["bash"], denied) == "deny", denied
+for ok in ("git config --get user.email", "git config --list", "git commit -m x", "git log", "git diff --stat"):
+    assert last_match(perm["bash"], ok) == "allow", ok
+for denied in ("/home/u/.gitconfig", "/x/repo/.git/config", "/x/repo/.git/hooks/pre-commit"):
+    assert last_match(perm["edit"], denied) == "deny", ("edit", denied)
 for ok in ("git push -u origin skip-census", "git push origin fix-main-menu", "git push origin maintenance", "git push", "git pull origin main", "git fetch origin main", "gh pr create --fill",
            "npm test", "git status", "ls docs", "grep -rn environment src", "cat docs/environment.md"):
     assert last_match(perm["bash"], ok) == "allow", ok
