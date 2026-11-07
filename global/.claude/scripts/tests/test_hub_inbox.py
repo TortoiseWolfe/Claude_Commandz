@@ -4,8 +4,10 @@ Every fixture is invented and lives in a throwaway state folder; nothing here to
 
 import fcntl
 import os
+import re
 import subprocess
 import sys
+import time
 import unittest
 from datetime import date, datetime
 from pathlib import Path
@@ -116,6 +118,74 @@ class Board(unittest.TestCase):
         self.assertEqual(len(changed), 1)
         self.assertTrue(changed[0][1].startswith("- [x] ") and "r-4545454" in changed[0][1])
         self.assertEqual(run(["done", "r-9999999"], self.st).stdout.strip(), "ticked 0")
+
+    def test_tick_uses_a_literal_substring_and_keeps_a_timestamped_prewrite_backup(self):
+        original = b"- [ ] 2026-11-07 08:00 | Hub: [MUSE>CC] item.name | still open\n- [x] old item\n"
+        self.board.write_bytes(original)
+        r = run(["tick", "[MUSE>CC] item.name | still", "Hatch replied"], self.st)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"^ticked 1; backup: hub-inbox\.md\.bak\.\d{8}T\d{6}\.\d{6}Z\.\d+\n$")
+        lines = self.board.read_bytes().splitlines()
+        self.assertRegex(lines[0].decode(), r"^- \[x\] 2026-11-07 08:00 \| Hub: \[MUSE>CC\] item\.name \| still open \| done \d{4}-\d\d-\d\d \d\d:\d\d: Hatch replied$")
+        self.assertEqual(lines[1], b"- [x] old item")
+        backups = list(self.st.glob("hub-inbox.md.bak.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+
+    def test_tick_refusals_leave_the_board_byte_identical_and_do_not_back_it_up(self):
+        cases = (
+            ("zero", b"- [ ] unique item without a final newline", "missing", "no open item"),
+            ("multiple", b"- [ ] 2026-11-07 | first match\n- [ ] second match", "match", "first match"),
+            ("already ticked", b"- [x] 2026-11-07 | match only in history\n", "match", "no open item"),
+        )
+        for name, original, needle, expected in cases:
+            with self.subTest(name=name):
+                self.board.write_bytes(original)
+                old_backup = self.st / "hub-inbox.md.bak.expired"
+                old_backup.write_bytes(b"keep until a successful tick")
+                r = run(["tick", needle, "done"], self.st)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(expected, r.stdout + r.stderr)
+                self.assertEqual(self.board.read_bytes(), original)
+                self.assertEqual([p.name for p in self.st.glob("hub-inbox.md.bak.*")], [old_backup.name])
+
+    def test_tick_rejects_empty_or_multiline_match_text_without_changing_the_board(self):
+        original = self.board.read_bytes()
+        for needle in ("", "Four\nnotes"):
+            with self.subTest(needle=needle):
+                r = run(["tick", needle, "done"], self.st)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(self.board.read_bytes(), original)
+                self.assertEqual(list(self.st.glob("hub-inbox.md.bak.*")), [])
+
+    def test_tick_expires_only_its_own_backups_after_a_successful_change(self):
+        expired = self.st / "hub-inbox.md.bak.20000101T000000.000000Z.123"
+        unrelated = self.st / "other-board.bak.expired"
+        expired.write_bytes(b"old board backup")
+        unrelated.write_bytes(b"not this command's backup")
+        old = time.time() - (2 * 24 * 60 * 60)
+        os.utime(expired, (old, old))
+        os.utime(unrelated, (old, old))
+
+        r = run(["tick", "Four notes", "Hatch replied"], self.st)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(expired.exists())
+        self.assertTrue(unrelated.exists())
+        backups = list(self.st.glob("hub-inbox.md.bak.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), BOARD.encode())
+
+    def test_concurrent_ticks_of_one_item_only_change_it_once(self):
+        command = ["bash", REC, "tick", "Four notes", "Hatch replied"]
+        env = dict(os.environ, MUSE_STATE=str(self.st))
+        first = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        second = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        first_out, first_err = first.communicate(timeout=60)
+        second_out, second_err = second.communicate(timeout=60)
+        self.assertCountEqual([first.returncode, second.returncode], [0, 1])
+        self.assertIn("ticked 1", first_out + second_out)
+        self.assertEqual(self.board.read_text().count(" | done "), 1, first_err + second_err)
+        self.assertEqual(len(list(self.st.glob("hub-inbox.md.bak.*"))), 1)
 
     def test_muse_inbox_env_still_works(self):
         r = run(["inbox", "Hub: via the old env var"], self.st, MUSE_INBOX=str(self.link))

@@ -7,6 +7,7 @@
 #                                                again, backing off as the exchange goes quiet
 #   muse_poll_record.sh done <our-draft-id>   -> Hatch's done-note arrived: ticks the open inbox lines
 #                                                ("Waiting on Hatch: ...") that end with that draft ID or name it as a whole word
+#   muse_poll_record.sh tick "<unique substring>" "<done note>" -> ticks exactly one matching open item, with a dated backup
 #   muse_poll_record.sh client-mail <Client mail|Client alert> "<client>" "<id> [<id>...]"
 #                                             -> queues "<label>: <client> | absorb lane | <ids>", leaving out
 #                                                every ID already in client-mail-seen.txt or already on an
@@ -89,6 +90,13 @@ case "${1:-}" in
     echo "ticked $(cat "$tmp.n")"
     rm -f "$tmp" "$tmp.n"
     ;;
+  tick)
+    needle="${2:?unique substring}"
+    note="${3:?done note}"
+    note="${note//$'\r'/ }"; note="${note//$'\n'/ }"
+    lock
+    python3 -I "$(dirname "$(readlink -f "$0")")/muse_poll_tick.py" "$INBOX" "$needle" "$note"
+    ;;
   client-mail)
     label="${2:?label}"; client="${3:?client}"; ids="${4:?ids}"
     [[ "$label" == "Client mail" || "$label" == "Client alert" ]] || { echo "bad label" >&2; exit 1; }
@@ -165,5 +173,5 @@ case "${1:-}" in
   archive)
     exec python3 "$(dirname "$(readlink -f "$0")")/hub_inbox_archive.py" --inbox "$INBOX" --days "${2:-7}"
     ;;
-  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] | archive [<days>]" >&2; exit 2 ;;
+  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | tick \"<unique substring>\" \"<done note>\" | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] | archive [<days>]" >&2; exit 2 ;;
 esac
