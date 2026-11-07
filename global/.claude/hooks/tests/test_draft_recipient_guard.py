@@ -105,16 +105,10 @@ class Cli(unittest.TestCase):
                 self.assertEqual(self.run_guard(s).returncode, 2)
 
 
-def case_block(text):
-    """The `case "$tool" in ... esac` arm list of a block-outbound hook: the part that hands the draft tools to the guard."""
-    a = text.index('case "$tool" in')
-    return text[a:text.index("esac", a) + 4]
-
-
 class Wiring(unittest.TestCase):
     """The hook must hand the draft tools to the guard. A runner has no private ~/.claude/hooks/block-outbound.sh, so this runs the
-    hook's draft/send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME beside a copy of the guard. LiveHook below checks
-    the fixture still matches the live hook."""
+    hook's draft/send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME beside a copy of the guard. That the fixture still
+    matches the live hook is checked where the live hook is: install_scripts.py refuses to install when the two case blocks differ."""
 
     def setUp(self):
         import shutil, tempfile
@@ -159,19 +153,16 @@ class Wiring(unittest.TestCase):
 
 
 class LiveHook(unittest.TestCase):
-    """Tower only (CI deselects this class: a runner has no live install). No skip: if the hook or the installed guard is missing,
-    the wiring is broken and this fails. Run it on the tower: python3 -m pytest global/.claude/hooks/tests."""
+    """Runs the hook installed at $HOME/.claude/hooks/block-outbound.sh. No skip: if the hook or the installed guard is missing, the wiring is
+    broken and this fails. On the tower HOME is the real home and this tests the live hook; the CI job installs the fixture and the repo's guard
+    into its temporary HOME first, so there it runs the same behaviour against the stand-in. (That the fixture still matches the live hook, and
+    that the hand copy of the guard is the repo's file, are checked by install_scripts.py, not here: on a runner the job's copy is made from
+    the repo, so either comparison would be a file against itself.)"""
 
     HOOK = Path.home() / ".claude" / "hooks" / "block-outbound.sh"
 
     def run_hook(self, payload):
         return subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload), capture_output=True, text=True)
-
-    def test_installed_guard_is_this_guard(self):
-        self.assertEqual((self.HOOK.parent / "draft-recipient-guard.py").read_text(), SRC.read_text())
-
-    def test_the_fixture_has_the_live_hooks_draft_and_send_arms(self):
-        self.assertEqual(case_block(self.HOOK.read_text()), case_block(FIXTURE.read_text()))
 
     def test_client_create_and_update_are_denied_by_the_live_hook(self):
         for tool, args in (("create_draft", {"to": ["client@example.org"]}), ("update_draft", {"draftId": "r1", "to": ["client@example.org"]})):
