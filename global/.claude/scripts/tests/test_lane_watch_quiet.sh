@@ -123,8 +123,56 @@ PY
   export LANE_WATCH_PROCLIST="1235 bash /home/x/.claude/scripts/lane_watch.sh --recycle-once"
   hub_watcher_check 3; printf '%s' "$(( $(date +%s) - 700 ))" > "$recycle_dir/.no-watcher"; hub_watcher_check 3
   chk "the 15-minute --recycle-once pass does not count as a watcher; a second gap is named again" 2 2
+
+  # 4b. A watcher started before a /clear: the old session id is gone and the process listing can come back empty, but the watcher
+  # wrote its pid in the shared state folder. The check must find it and clear the gap.
+  export CLAUDE_SESSION_ID=new-session
+  unset LANE_WATCH_PROCLIST
+  printf '%s %s\n' "$$" "$(process_start_time $$)" > "$recycle_dir/.lane_watch.pid"
+  hub_watcher_check 3; chk "a live pid file clears the alarm even when the process listing is empty" 2 2
+  [ ! -e "$recycle_dir/.no-watcher" ] && [ ! -e "$recycle_dir/.no-watcher-named" ] || { echo "FAIL marks not cleared by pid file"; exit 1; }
+  # A stale pid file (the process is gone) is not a watcher, so the alarm stands.
+  printf '%s 0\n' "$(( $$ + 99999 ))" > "$recycle_dir/.lane_watch.pid"
+  printf '%s' "$(( $(date +%s) - 700 ))" > "$recycle_dir/.no-watcher"
+  LANE_WATCH_PROCLIST="" hub_watcher_check 3; chk "a stale pid file does not hide a missing watcher" 3 3
+
+  # 4c. A listing that failed is unknown, not "no watcher": it must not write a mark or act on an old one.
+  rm -f "$recycle_dir/.lane_watch.pid" "$recycle_dir/.no-watcher" "$recycle_dir/.no-watcher-named"
+  export LANE_WATCH_LISTING_FAIL=1
+  hub_watcher_check 3; chk "a failed process listing is not a missing watcher" 3 3
+  [ ! -e "$recycle_dir/.no-watcher" ] || { echo "FAIL failed listing wrote a mark"; exit 1; }
+  printf '%s' "$(( $(date +%s) - 700 ))" > "$recycle_dir/.no-watcher"
+  hub_watcher_check 3; chk "... and it leaves an old mark alone instead of naming it" 3 3
+  [ -e "$recycle_dir/.no-watcher" ] || { echo "FAIL failed listing cleared the mark"; exit 1; }
+  unset LANE_WATCH_LISTING_FAIL
+  hub_watcher_check 0; chk "no lane open after all that still clears the marks" 3 3
 ) > "$TMP/wd.out" 2>&1 || true
 cat "$TMP/wd.out"; if grep -q '^FAIL' "$TMP/wd.out" || ! grep -q 'second gap is named again' "$TMP/wd.out"; then failures=$((failures + 1)); fi
+
+# 4d. A real watcher writes its pid and start time in the shared state folder, and its start clears a gap mark from an earlier pass.
+reset; pane_done "1:05 PM"
+: > "$LANES/.no-watcher"; : > "$LANES/.no-watcher-named"
+watch 2 5 >/dev/null 2>&1
+if [ -s "$LANES/.lane_watch.pid" ] && grep -qE '^[0-9]+( [0-9]+)?$' "$LANES/.lane_watch.pid"; then
+  ok "a watcher writes its pid and start time in the shared state folder"
+else bad "no pid file written: $(cat "$LANES/.lane_watch.pid" 2>/dev/null)"; fi
+if [ ! -e "$LANES/.no-watcher" ] && [ ! -e "$LANES/.no-watcher-named" ]; then
+  ok "a starting watcher clears the gap marks from an earlier pass"
+else bad "gap marks survived a watcher start"; fi
+rm -f "$LANES/.lane_watch.pid"
+
+# 4e. The production path lists pids with plain pgrep, not the redacting lister that could fail and answer "none".
+FAKE="$TMP/fake/.claude/scripts"; mkdir -p "$FAKE"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$FAKE/lane_watch.sh"
+bash "$FAKE/lane_watch.sh" --max-min 45 & wp=$!
+sleep 0.3
+( source "$SCRIPT"
+  recycle_dir="$TMP/wd3"; mkdir -p "$recycle_dir"
+  unset LANE_WATCH_PROCLIST LANE_WATCH_LISTING_FAIL
+  watcher_running && echo "ok   plain pgrep finds a real watcher" || { echo "FAIL plain pgrep missed a real watcher"; exit 1; }
+) > "$TMP/wd3.out" 2>&1 || true
+kill "$wp" 2>/dev/null; wait "$wp" 2>/dev/null || true
+cat "$TMP/wd3.out"; if grep -q '^FAIL' "$TMP/wd3.out" || ! grep -q 'plain pgrep finds a real watcher' "$TMP/wd3.out"; then failures=$((failures + 1)); fi
 
 # 5. Longer heartbeat while every lane is idle and no client line is open.
 pane_done "1:05 PM"; reset
