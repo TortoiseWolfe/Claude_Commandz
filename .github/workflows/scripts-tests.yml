@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python3 -m pip install pytest
-      - name: pytest (skipped tests fail the job)
+      - name: pytest (skipped or deselected tests fail the job)
         working-directory: global/.claude/scripts
         run: |
           # GitHub's default shell has no pipefail, so without this a failing pytest piped into tee left the job green.
@@ -34,23 +34,31 @@ jobs:
           # A skipped test is not a passing test; class-list behavior uses temporary test files.
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped tests: $skips"; exit 1; fi
+          # A deselected test never runs either; pytest only counts it in the summary line ("5 deselected"), never as SKIPPED.
+          if grep -qE '[0-9]+ deselected' "$RUNNER_TEMP/pytest.out"; then echo "::error::deselected tests never ran: $(grep -E '[0-9]+ deselected' "$RUNNER_TEMP/pytest.out" | tail -n 1)"; exit 1; fi
           summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/pytest.out" | tail -n 1)"
           if [ -z "$summary" ]; then echo "::error::pytest summary missing"; exit 1; fi
-          echo "Pytest summary: $summary; $skips skipped"
-      - name: hook tests (skipped tests fail the job)
+          echo "Pytest summary: $summary; $skips skipped; 0 deselected"
+      - name: hook tests (skipped or deselected tests fail the job)
         working-directory: global/.claude/hooks
         run: |
           # Issue 224: the hooks' own tests live in global/.claude/hooks/tests and the step above never collected them.
           set -o pipefail
           export HOME="$(mktemp -d)"
-          # Wiring runs the hook's draft and send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME. LiveHook checks the tower's private
-          # ~/.claude/hooks/block-outbound.sh (and that the fixture still matches it); a runner has no such file, so only LiveHook is deselected.
-          python3 -m pytest tests -q -p no:cacheprovider -rs --deselect tests/test_draft_recipient_guard.py::LiveHook | tee "$RUNNER_TEMP/hooks-pytest.out"
+          # LiveHook checks the hook installed at ~/.claude/hooks/block-outbound.sh. The tower's real one is private, so the job installs the
+          # stand-in (tests/fixtures/block-outbound.case.sh, the draft and send arms copied from it) and the repo's guard into the temporary HOME
+          # and LiveHook runs against those. On a runner its "fixture matches the live hook" check compares the fixture with itself; the real
+          # comparison happens when the suite is run on the tower. Nothing is deselected: a deselected test never runs.
+          mkdir -p "$HOME/.claude/hooks"
+          cp tests/fixtures/block-outbound.case.sh "$HOME/.claude/hooks/block-outbound.sh"
+          cp draft-recipient-guard.py "$HOME/.claude/hooks/draft-recipient-guard.py"
+          python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/hooks-pytest.out"
           skips="$(grep -c '^SKIPPED' "$RUNNER_TEMP/hooks-pytest.out" || true)"
           if [ "$skips" != 0 ]; then echo "::error::unexpected skipped hook tests: $skips"; exit 1; fi
+          if grep -qE '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out"; then echo "::error::deselected hook tests never ran: $(grep -E '[0-9]+ deselected' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"; exit 1; fi
           summary="$(grep -E '^[0-9]+ (passed|failed|skipped)' "$RUNNER_TEMP/hooks-pytest.out" | tail -n 1)"
           if [ -z "$summary" ]; then echo "::error::hook pytest summary missing"; exit 1; fi
-          echo "Hook pytest summary: $summary; $skips skipped"
+          echo "Hook pytest summary: $summary; $skips skipped; 0 deselected"
 
   shell:
     runs-on: ubuntu-latest
