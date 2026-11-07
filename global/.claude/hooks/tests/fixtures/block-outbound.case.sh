@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI stand-in for the tower's private ~/.claude/hooks/block-outbound.sh. Only the part that hands Gmail draft tools to
 # draft-recipient-guard.py and refuses the send tools is here, copied from the live hook; the live hook's other rules (mail transfer agents and so on) are not.
-# test_draft_recipient_guard.py::LiveHook, run on the tower, fails if the case block below differs from the live hook's.
+# install_scripts.py compares the case block below with the live hook's and refuses to install if they differ (tested in test_install_scripts.py).
 set -uo pipefail
 
 payload="$(timeout 2 cat 2>/dev/null || true)"
