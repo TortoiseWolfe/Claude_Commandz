@@ -164,9 +164,11 @@ for denied in ("git push origin main", "git push -u origin master", "git push or
                "python3 -I <(git show origin/main:global/.claude/scripts/install_scripts.py)"):
     assert last_match(perm["bash"], denied) == "deny", denied
 for denied in ("git config --global user.email x", "git config user.name y", "git -C /x config --global user.email z", "sed -i s/a/b/ ~/.gitconfig",
-               "git -c user.email=a commit -m x", "echo x >> .git/config", "cp h .git/hooks/pre-commit", "GIT_CONFIG_GLOBAL=/x git commit -m x"):
+               "git -c user.email=a commit -m x", "echo x >> .git/config", "cp h .git/hooks/pre-commit", "GIT_CONFIG_GLOBAL=/x git commit -m x",
+               "git -C /x -c user.email=a commit -m x", "git --config-env=user.email=E commit", "git push origin main; git config --get x", "git config --get x; git push origin main",
+               "echo $OPENROUTER_API_KEY; git config --list", "git config --get user.email", "git config --list"):
     assert last_match(perm["bash"], denied) == "deny", denied
-for ok in ("git config --get user.email", "git config --list", "git commit -m x", "git log", "git diff --stat"):
+for ok in ("git commit -m x", "git log", "git diff --stat"):
     assert last_match(perm["bash"], ok) == "allow", ok
 for denied in ("/home/u/.gitconfig", "/x/repo/.git/config", "/x/repo/.git/hooks/pre-commit"):
     assert last_match(perm["edit"], denied) == "deny", ("edit", denied)
