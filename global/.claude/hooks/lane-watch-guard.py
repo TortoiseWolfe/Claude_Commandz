@@ -12,6 +12,8 @@ stop and says to re-arm the watcher.
 One exemption: once the hub has written its hand-off (a ~/.claude/state/hub-handoff-*.md
 changed in the last 30 minutes) and touched ~/.claude/state/hub-handed-off.<session id>,
 it may stop, so it stops answering wakes and growing. AFA_STATE_DIR moves the state folder.
+A running watcher writes ~/.claude/state/lanes/.lane_watch.pid, which this hook checks before any
+process listing, so a watcher started before a /clear (a different session id) still counts.
 The marker must carry the id of the session that is stopping (a marker for another session does not count). When a fresh hand-off
 file exists but this session's marker does not, the block message names the exact marker path to touch.
 """
@@ -25,6 +27,7 @@ import sys
 import time
 
 WATCHER_PATTERN = r"^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)"
+RECYCLE_PATTERN = r"^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh --recycle-once( |$)"
 
 
 def open_lanes():
@@ -43,18 +46,66 @@ def open_lanes():
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def state_root():
+    state_dir = os.environ.get("AFA_STATE_DIR") or "~/.claude/state"
+    return Path(os.path.expanduser(state_dir))
+
+
+def process_start_time(pid):
+    """Field 22 of /proc/<pid>/stat, or None. Never reads the process command line."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    rest = stat.rsplit(") ", 1)[-1].split()
+    return rest[19] if len(rest) >= 20 else None
+
+
+def watcher_from_pid_file():
+    """A watcher writes its pid and start time to the state folder, so /clear cannot hide it."""
+    pid_file = state_root() / "lanes" / ".lane_watch.pid"
+    try:
+        fields = pid_file.read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    if not fields or not fields[0].isdigit():
+        return False
+    pid = int(fields[0])
+    start = fields[1] if len(fields) > 1 else ""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    now = process_start_time(pid)
+    # An older pid file has no start time; accept the live pid. A recycled pid does not match the stored start time.
+    return not start or not now or start == now
+
+
+def pids_matching(pattern):
+    result = subprocess.run(
+        ["pgrep", "-f", pattern],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode > 1:
+        raise RuntimeError("pgrep could not list processes")
+    return set(result.stdout.split()) if result.returncode == 0 else set()
+
+
 def watcher_running():
+    if watcher_from_pid_file():
+        return True
     override = os.environ.get("LANE_WATCH_GUARD_RUNNING")
     if override is not None:
         return override == "1"
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", WATCHER_PATTERN],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return result.returncode == 0
+        watching = pids_matching(WATCHER_PATTERN)
+        if not watching:
+            return False
+        recycled = pids_matching(RECYCLE_PATTERN)
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return True  # unknown: do not block on a failed listing
+    return bool(watching - recycled)
 
 
 def main():
@@ -76,8 +127,7 @@ def main():
 
         # Hand-off exemption: let it stop if a hand-off file was recently modified
         # and the session's handed-off marker exists.
-        state_dir = os.environ.get("AFA_STATE_DIR") or "~/.claude/state"
-        state_path = Path(os.path.expanduser(state_dir))
+        state_path = state_root()
         session_id = payload.get("session_id")
         marker = None
         if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9._-]+", session_id):
