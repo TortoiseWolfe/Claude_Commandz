@@ -222,6 +222,7 @@ has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/.deny/\\*\\*\\)" "the .deny files 
 has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/.rules/\\*\\*\\)" "the .rules files cannot be edited"
 has "$c" "Edit\\(/$HOME_T/.claude/state/lanes/index.tsv\\)" "the lane index cannot be edited"
 has "$c" "Edit\\(/$WORK/.git/\\*\\*\\)" "the main checkout's .git (hooks) cannot be edited from a worktree lane"
+has "$c" "Edit\\(/$WT/\\*/.git\\)" "with the worktrees folder granted, no worktree's .git pointer file can be edited"
 # a temp folder others can write to, or one owned by someone else's mode, is left out
 mkdir -p "$TMPC/claude-$(id -u)"; chmod 777 "$TMPC/claude-$(id -u)"
 shared sh10 "$WT/proj--topic-a" sonnet "$TMP/p1.md"
