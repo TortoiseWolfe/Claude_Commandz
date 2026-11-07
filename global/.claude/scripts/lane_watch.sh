@@ -545,23 +545,60 @@ routine_report() {
 }
 
 # Dead-watcher alarm. A hub watcher is a bash running lane_watch.sh that is not --recycle-once (the same match as hooks/lane-watch-guard.py).
-# LANE_WATCH_PROCLIST, when set, stands in for the redacted `pgrep -af lane_watch.sh` output (tests).
+# A watcher writes its pid and process start time to $recycle_dir/.lane_watch.pid when it starts, before it watches anything. That file lives
+# in the machine's state folder, not a Claude Code session folder, so it survives /clear. It is found with kill -0 and a start-time check,
+# never by reading a process command line (a lane's command line can carry a prompt).
+# LANE_WATCH_PROCLIST, when set, stands in for a `pgrep -af lane_watch.sh` listing (tests). LANE_WATCH_LISTING_FAIL=1 stands in for a pgrep
+# that could not list processes (tests). watcher_running returns 0 when a watcher runs, 1 when none does, and 2 when the answer is unknown.
+process_start_time() { # process_start_time <pid>: field 22 of /proc/<pid>/stat, the clock ticks at which the process started
+  local rest
+  [ -r "/proc/$1/stat" ] || return 1
+  rest=$(<"/proc/$1/stat") || return 1
+  # comm (field 2) is in parentheses and may contain spaces, so read the fields after the last ") ".
+  rest=${rest##*') '}
+  set -- $rest
+  [ "$#" -ge 20 ] && printf '%s' "${20}"
+}
 watcher_running() {
-  local out
+  local pid_file="$recycle_dir/.lane_watch.pid" pid start now out rc recycled
+  if [ -f "$pid_file" ]; then
+    read -r pid start < "$pid_file" 2>/dev/null || { pid=; start=; }
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      now=$(process_start_time "$pid") || now=
+      # An older pid file has no start time; accept the live pid. A recycled pid does not match the stored start time.
+      if [ -z "$start" ] || [ -z "$now" ] || [ "$start" = "$now" ]; then return 0; fi
+    fi
+  fi
+  [ "${LANE_WATCH_LISTING_FAIL:-0}" = 1 ] && return 2
   if [ -n "${LANE_WATCH_PROCLIST+x}" ]; then
     out=$LANE_WATCH_PROCLIST
-  else
-    out=$("$_lw_dir/ps_redacted.sh" pgrep -af 'lane_watch\.sh' 2>/dev/null) || out=
+    printf '%s\n' "$out" | sed -E 's/^[0-9]+ //' | command grep -E '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' | command grep -v -- '--recycle-once' | command grep -q .
+    return
   fi
-  printf '%s\n' "$out" | sed -E 's/^[0-9]+ //' | command grep -E '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' | command grep -v -- '--recycle-once' | command grep -q .
+  # Plain pgrep prints pids only, so no command line is read or printed. A watcher and the 15-minute --recycle-once pass share the
+  # first pattern; the second call names the pass, so it is never mistaken for a watcher.
+  out=$(pgrep -f '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)' 2>/dev/null)
+  rc=$?
+  [ "$rc" -le 1 ] || return 2
+  [ "$rc" -eq 1 ] && return 1
+  recycled=$(pgrep -f '^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh --recycle-once( |$)' 2>/dev/null) || recycled=
+  for pid in $out; do
+    case " $recycled " in *" $pid "*) continue ;; esac
+    return 0
+  done
+  return 1
 }
 # hub_watcher_check <open lane count>: called by the scheduled pass. With no lane open, or a watcher running, it clears its marks. With lanes open
 # and no watcher for LANE_WATCH_DEAD_SECS (default 600, so two passes 15 minutes apart, not the gap while the hub re-arms), it writes ONE "Hub:" line
 # in the hub inbox and sends ONE desktop ping per gap. 30 Oct 7:30 PM: Claude Code's memory reaper killed the tower's watcher and nothing woke the
 # hub for 12 hours while a pull request sat ready to merge.
 hub_watcher_check() {
-  local n=$1 first mark="$recycle_dir/.no-watcher" named="$recycle_dir/.no-watcher-named" now age mins
-  if [ "${n:-0}" -le 0 ] || watcher_running; then rm -f "$mark" "$named"; return 0; fi
+  local n=$1 first mark="$recycle_dir/.no-watcher" named="$recycle_dir/.no-watcher-named" now age mins rc
+  if [ "${n:-0}" -le 0 ]; then rm -f "$mark" "$named"; return 0; fi
+  watcher_running; rc=$?
+  if [ "$rc" -eq 0 ]; then rm -f "$mark" "$named"; return 0; fi
+  # A listing that failed is not a sighting of "no watcher": leave the marks alone so a normal re-arm gap is never named.
+  [ "$rc" -eq 2 ] && return 0
   now=$(date +%s)
   if [ ! -e "$mark" ]; then printf '%s' "$now" > "$mark"; return 0; fi
   first=$(cat "$mark" 2>/dev/null); [[ "$first" =~ ^[0-9]+$ ]] || { printf '%s' "$now" > "$mark"; return 0; }
@@ -643,6 +680,13 @@ if [ "$recycle_once" = 1 ]; then
   hub_watcher_check "$open_n"
   exit 0
 fi
+
+# A real watcher announces itself before it watches: the pid file is how a later pass (or the Stop hook) finds it without reading a
+# command line and without knowing which Claude Code session started it. Starting also ends any gap a previous pass marked, so a watcher
+# that ran between two 15-minute passes is never named as missing. A stale file is harmless because watcher_running checks the start time.
+mkdir -p "$recycle_dir" 2>/dev/null || true
+printf '%s %s\n' "$$" "$(process_start_time $$)" > "$recycle_dir/.lane_watch.pid" 2>/dev/null || true
+rm -f "$recycle_dir/.no-watcher" "$recycle_dir/.no-watcher-named" 2>/dev/null || true
 if [ "$auto" = 1 ]; then
   lanes=()
   while read -r n; do [ -n "$n" ] && { lanes+=("$n"); watch_lane "$n"; }; done < <(live_lanes)
