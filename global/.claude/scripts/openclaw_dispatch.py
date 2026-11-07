@@ -234,6 +234,7 @@ Rules:
 - Read this repo's own CLAUDE.md (or AGENTS.md) first if it has one, and follow it.
 - {work_rule}{extra_rules}
 - Look at your own output before reporting: run it, open it, read it back. Say what you saw, not what you expect.
+- Before you write any clock time into a report, message or note, run `date '+%-I:%M %p'` and use what it prints. Never guess or remember a time.
 - Never send email or messages, merge to a client's main, or spend money. If the task needs any of that, stop and ask in the report instead.
 - Finish by writing {report} (150 words or less, plain words: what you did, what you saw, what is left or what you need from him). Then stop.
 """
