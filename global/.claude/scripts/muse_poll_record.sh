@@ -71,6 +71,14 @@ case "${1:-}" in
       exit 1
     fi
     lock
+    # The same note queued twice (a handler that retried) writes one line: a line whose last "|" field is a note id already on the
+    # board, ticked or open, is not added again. Lines with no id-shaped last field are always added.
+    qid=${line:0:400}; qid=${qid##* | }
+    if [[ "${line:0:400}" == *" | "*" | "* && "$qid" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && [[ -s "$INBOX" ]] \
+       && awk -v id="$qid" '/^- \[[ x]\] /{n=split($0,a," [|] "); sub(/[ \t]+$/,"",a[n]); if(a[n]==id){f=1; exit}} END{exit !f}' "$INBOX"; then
+      echo "already queued: $qid"
+      exit 0
+    fi
     printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$INBOX"
     ;;
   active)

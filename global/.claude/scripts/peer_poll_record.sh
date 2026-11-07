@@ -16,6 +16,13 @@ case "${1:-}" in
   inbox)
     line="${2:?text}"
     line="${line//$'\n'/ }"
+    # Same rule as muse_poll_record.sh: a line whose last "|" field is a note id already on the board is not added twice.
+    qid=${line:0:400}; qid=${qid##* | }
+    if [[ "${line:0:400}" == *" | "*" | "* && "$qid" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && [[ -s "$STATE/peer-inbox.md" ]] \
+       && awk -v id="$qid" '/^- \[[ x]\] /{n=split($0,a," [|] "); sub(/[ \t]+$/,"",a[n]); if(a[n]==id){f=1; exit}} END{exit !f}' "$STATE/peer-inbox.md"; then
+      echo "already queued: $qid"
+      exit 0
+    fi
     printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$STATE/peer-inbox.md"
     ;;
   ccseen)
