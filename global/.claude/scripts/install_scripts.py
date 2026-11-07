@@ -30,6 +30,10 @@ Before anything else it also checks the one hook file the repo cannot hold (its 
 block of global/.claude/hooks/tests/fixtures/block-outbound.case.sh at the ref, which is what CI tests. If they differ, or the live wrapper has
 no case block, or the fixture cannot be read, it refuses and changes nothing (exit 2); it never prints the wrapper. With no live wrapper at all
 it says "wrapper check: not run" and goes on, so a machine without the hook is not stopped but is told it was not checked.
+The hand copy of the guard it hands drafts to is checked the same way: the live ~/.claude/hooks/draft-recipient-guard.py must be byte for
+byte global/.claude/hooks/draft-recipient-guard.py at the ref (a hand copy someone forgot to update is the risk). A difference, an unreadable
+repo copy, or a live wrapper with no live guard beside it refuses (exit 2) and changes nothing; with neither file it says "guard check: not run".
+The guard is only compared, never printed and never installed here (hooks are still copied by a person).
 
 Options: --repo DIR (default ~/repos/Claude_Commandz), --home DIR (default ~/.claude), --ref REF (default origin/main),
 --no-fetch, --dry-run, --yes, --list-same. Exit codes: 0 done (or nothing to do), 1 done but some file drifted, 2 could not run
@@ -47,6 +51,8 @@ import time
 TREE = "global/.claude/scripts"
 WRAPPER = "hooks/block-outbound.sh"  # under --home
 WRAPPER_FIXTURE = "global/.claude/hooks/tests/fixtures/block-outbound.case.sh"  # in the repo
+GUARD = "hooks/draft-recipient-guard.py"  # under --home, the hand copy
+GUARD_SRC = "global/.claude/hooks/draft-recipient-guard.py"  # in the repo
 BACKUPS = "state/scripts-install-backups"
 
 
@@ -330,6 +336,27 @@ def wrapper_check(repo, sha, home):
     return f"wrapper check: ok (the live {WRAPPER} case block equals the fixture at {sha[:7]})"
 
 
+def guard_check(repo, sha, home):
+    """The line to print: refuses (dies) when the hand copy of the draft guard is not the repo's, or is missing beside a live wrapper.
+    Never prints the guard."""
+    live = os.path.join(home, GUARD)
+    if not os.path.isfile(live):
+        if os.path.isfile(os.path.join(home, WRAPPER)):
+            die(f"{os.path.join(home, WRAPPER)} exists but {live} does not, so every Gmail draft would be refused; copy {GUARD_SRC} there first")
+        return f"guard check: not run ({live} does not exist, so nothing was compared with the repo)"
+    r = git(repo, "show", f"{sha}:{GUARD_SRC}", check=False)
+    if r.returncode != 0:
+        die(f"{live} exists but {GUARD_SRC} cannot be read at {sha[:7]}, so the two cannot be compared; fix the repo first")
+    try:
+        with open(live, "rb") as f:
+            have = f.read()
+    except OSError as e:
+        die(f"cannot read {live}: {e.strerror}")
+    if have != r.stdout:
+        die(f"the hand copy {live} differs from {GUARD_SRC} at {sha[:7]}: copy the repo's file over it (cp, by hand) before installing")
+    return f"guard check: ok (the hand copy {GUARD} equals the repo's at {sha[:7]})"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--repo", default=os.path.expanduser("~/repos/Claude_Commandz"))
@@ -357,6 +384,7 @@ def main(argv=None):
     subject = git(repo, "log", "-1", "--format=%s", sha).stdout.decode().strip()
 
     print(wrapper_check(repo, sha, home))
+    print(guard_check(repo, sha, home))
     plan = classify(repo, sha, home)
     print_summary(plan, sha[:7], subject, a.list_same, home)
     if plan["held"]:
