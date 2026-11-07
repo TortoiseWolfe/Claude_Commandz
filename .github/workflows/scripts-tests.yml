@@ -47,7 +47,7 @@ jobs:
           export HOME="$(mktemp -d)"
           # LiveHook runs the hook installed at $HOME/.claude/hooks/block-outbound.sh. The tower's real one is private, so the job installs the
           # stand-in (tests/fixtures/block-outbound.case.sh) and the repo's guard into the temporary HOME and LiveHook runs against those.
-          # Whether the stand-in still equals the real hook is checked by install_scripts.py on the tower. Nothing is deselected: a deselected test never runs.
+          # Whether the stand-in still equals the real hook, and the hand copy of the guard the repo's, is checked by install_scripts.py on the tower. Nothing is deselected: a deselected test never runs.
           mkdir -p "$HOME/.claude/hooks"
           cp tests/fixtures/block-outbound.case.sh "$HOME/.claude/hooks/block-outbound.sh"
           cp draft-recipient-guard.py "$HOME/.claude/hooks/draft-recipient-guard.py"
