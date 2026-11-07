@@ -160,7 +160,7 @@ for denied in ("cat .env", "cat ./.env.local", "echo hi && cat sub/.env", ".env"
                "cd model_a && cat .env", "grep PASS ci/.tmp-seed.env", "printenv", "env", "env | sort", "cat /proc/self/environ", "cat /h/.config/gemini/api-key"):
     assert last_match(perm["bash"], denied) == "deny", denied
 for denied in ("git push origin main", "git push -u origin master", "git push origin HEAD:main", "git -C /x/y push origin main", "git push origin HEAD:refs/heads/main",
-               "git push --force origin mybranch", "git push -f origin mybranch", "git push origin main --no-verify", "python3 ~/.claude/scripts/install_scripts.py",
+               "git push --force origin mybranch", "git push origin +mybranch", "git push --mirror", "git push --all origin", "echo $OPENROUTER_API_KEY", "git push -f origin mybranch", "git push origin main --no-verify", "python3 ~/.claude/scripts/install_scripts.py",
                "python3 -I <(git show origin/main:global/.claude/scripts/install_scripts.py)"):
     assert last_match(perm["bash"], denied) == "deny", denied
 for ok in ("git push -u origin skip-census", "git push origin fix-main-menu", "git push origin maintenance", "git push", "git pull origin main", "git fetch origin main", "gh pr create --fill",
