@@ -113,8 +113,8 @@ def case_block(text):
 
 class Wiring(unittest.TestCase):
     """The hook must hand the draft tools to the guard. A runner has no private ~/.claude/hooks/block-outbound.sh, so this runs the
-    hook's draft/send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME beside a copy of the guard. LiveHook below checks
-    the fixture still matches the live hook."""
+    hook's draft/send arms from tests/fixtures/block-outbound.case.sh in a temporary HOME beside a copy of the guard. That the fixture still
+    matches the live hook is checked where the live hook is: install_scripts.py refuses to install when the two case blocks differ."""
 
     def setUp(self):
         import shutil, tempfile
@@ -156,38 +156,6 @@ class Wiring(unittest.TestCase):
     def test_a_crashing_guard_denies(self):
         (self.home / ".claude" / "hooks" / "draft-recipient-guard.py").write_text("raise SystemExit(1)\n")
         self.assertEqual(self.run_hook(call("create_draft", to=[SELF])).returncode, 2)
-
-
-class LiveHook(unittest.TestCase):
-    """Tower only (CI deselects this class: a runner has no live install). No skip: if the hook or the installed guard is missing,
-    the wiring is broken and this fails. Run it on the tower: python3 -m pytest global/.claude/hooks/tests."""
-
-    HOOK = Path.home() / ".claude" / "hooks" / "block-outbound.sh"
-
-    def run_hook(self, payload):
-        return subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload), capture_output=True, text=True)
-
-    def test_installed_guard_is_this_guard(self):
-        self.assertEqual((self.HOOK.parent / "draft-recipient-guard.py").read_text(), SRC.read_text())
-
-    def test_the_fixture_has_the_live_hooks_draft_and_send_arms(self):
-        self.assertEqual(case_block(self.HOOK.read_text()), case_block(FIXTURE.read_text()))
-
-    def test_client_create_and_update_are_denied_by_the_live_hook(self):
-        for tool, args in (("create_draft", {"to": ["client@example.org"]}), ("update_draft", {"draftId": "r1", "to": ["client@example.org"]})):
-            with self.subTest(tool=tool):
-                r = self.run_hook(call(tool, **args))
-                self.assertEqual(r.returncode, 2)
-                self.assertIn("gmail_api.py draft-create", r.stderr)
-
-    def test_self_draft_and_bash_pass_the_live_hook(self):
-        self.assertEqual(self.run_hook(call("create_draft", to=[SELF], body="x")).returncode, 0)
-        self.assertEqual(self.run_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}}).returncode, 0)
-
-    def test_the_live_send_block_is_unchanged(self):
-        for tool in ("send_message", "reply", "forward"):
-            with self.subTest(tool=tool):
-                self.assertEqual(self.run_hook(call(tool)).returncode, 2)
 
 
 if __name__ == "__main__":

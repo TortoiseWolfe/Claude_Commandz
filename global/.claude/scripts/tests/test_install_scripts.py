@@ -429,6 +429,80 @@ class UnsafePaths(Base):
         self.assertEqual(manifests[0].read_text().splitlines(), ["remove\tscripts/ok.py"])
 
 
+FIXTURE_REL = "global/.claude/hooks/tests/fixtures/block-outbound.case.sh"
+CASE = """case "$tool" in
+  mcp__claude_ai_Gmail__create_draft|mcp__claude_ai_Gmail__update_draft)
+    printf '%s' "$payload" | python3 "$guard" || exit 2 ;;
+  mcp__claude_ai_Gmail__send_message) block "send" ;;
+esac"""
+
+
+class WrapperCheck(Base):
+    """The live wrapper (private header, so it is not in the repo) must carry the same case block as the fixture CI tests; the installer
+    is where both exist, so it refuses when they differ. A test that compared the fixture with itself in CI could never fail."""
+
+    def fixture(self, text):
+        p = self.dev / FIXTURE_REL
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return self.publish({"a.py": "a1"})
+
+    def wrapper(self, text):
+        p = self.home / "hooks" / "block-outbound.sh"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def test_no_live_wrapper_is_said_out_loud_and_installs_go_on(self):
+        self.fixture("#!/bin/bash\n" + CASE + "\n")
+        p = self.run_ins("--yes")
+        self.assertIn("wrapper check: not run", p.stdout)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(self.live("a.py"), "a1")
+
+    def test_equal_case_blocks_pass_whatever_else_the_files_say(self):
+        self.fixture("#!/bin/bash\n# stand-in\n" + CASE + "\n")
+        self.wrapper("#!/bin/bash\n# a long private history\nexit_early_rules\n" + CASE + "\nif [ x ]; then block mta; fi\n")
+        p = self.run_ins("--yes")
+        self.assertIn("wrapper check: ok", p.stdout)
+        self.assertEqual(self.live("a.py"), "a1")
+
+    def test_a_different_case_block_refuses_and_changes_nothing(self):
+        self.fixture("#!/bin/bash\n" + CASE + "\n")
+        self.wrapper("#!/bin/bash\n# PRIVATE-MARK history\n" + CASE.replace("exit 2", "exit 0") + "\n")
+        for args in (("--yes",), ("--dry-run",)):
+            p = self.run_ins(*args)
+            self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+            self.assertIn("INSTALL FAILED", p.stdout)
+            self.assertIn("differs from " + FIXTURE_REL, p.stdout)
+            self.assertIsNone(self.live("a.py"))
+            self.assertFalse((self.home / "state").exists())
+            self.assertNotIn("PRIVATE-MARK", p.stdout + p.stderr)  # the wrapper is never printed
+            self.assertNotIn("exit 0", p.stdout + p.stderr)
+
+    def test_a_wrapper_with_no_case_block_refuses(self):
+        self.fixture("#!/bin/bash\n" + CASE + "\n")
+        self.wrapper("#!/bin/bash\necho hi\n")
+        p = self.run_ins("--yes")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("has no case block", p.stdout)
+        self.assertIsNone(self.live("a.py"))
+
+    def test_a_fixture_that_cannot_be_read_refuses_when_a_wrapper_exists(self):
+        self.publish({"a.py": "a1"})  # no fixture in the repo
+        self.wrapper("#!/bin/bash\n" + CASE + "\n")
+        p = self.run_ins("--yes")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("cannot be read", p.stdout)
+        self.assertIsNone(self.live("a.py"))
+
+    def test_the_repos_own_fixture_has_a_case_block(self):
+        text = (HERE.parent.parent / "hooks" / "tests" / "fixtures" / "block-outbound.case.sh").read_text()
+        block = ins.case_block(text)
+        self.assertIsNotNone(block)
+        self.assertIn("draft-recipient-guard.py", block)
+        self.assertIn("mcp__claude_ai_Gmail__send_message", block)
+
+
 class Docs(unittest.TestCase):
     def test_the_readme_gives_the_command(self):
         text = (HERE.parent.parent.parent.parent / "README.md").read_text()
