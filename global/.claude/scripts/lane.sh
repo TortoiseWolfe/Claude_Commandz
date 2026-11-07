@@ -99,7 +99,7 @@
 #   lane.sh --add-dir <path> ...        at start, --restart or --resume, repeatable: a folder outside the lane's own that it may read and write
 #                                       (the stream folder for a Band Wagon lane). Passed to claude, codex, agy and copilot as --add-dir, kept in
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
-#                                       Claude lanes also get ~/.claude/state, Claude's temp folder and (in a worktree) the repo's main checkout as --add-dir,
+#                                       Claude lanes also get ~/.claude/state, Claude's temp folder, ~/repos/.worktrees and (in a worktree) the repo's main checkout as --add-dir,
 #                                       computed at each start and resume, never recorded (see shared_read_flags).
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
@@ -639,6 +639,10 @@ shared_read_flags() {  # <lane folder> <colon list already given>: "--add-dir 'p
     if [ -n "$root" ]; then rel="${d#"$root"/.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"
       case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) ;; *) cand+=("$root/$repo") ;; esac
     fi ;; esac
+  # A lane on any repo under ~/repos also gets ~/repos/.worktrees (7 Nov 2026): the worktrees it makes after launch (git worktree add) lie outside its
+  # working directories, and every read in one stopped the lane on the dialog five times in one night. Not the read block turned off: reads elsewhere
+  # still ask. This grants edit in other lanes' worktrees too, like the state folder above.
+  case "$d/" in "$root/"*) [ -z "$root" ] || cand+=("$root/.worktrees") ;; esac
   for c in "${cand[@]}"; do
     case "$c" in *:*|*"$TAB"*|*$'\n'*) continue ;; esac
     [ -d "$c" ] && [ ! -L "$c" ] || continue
