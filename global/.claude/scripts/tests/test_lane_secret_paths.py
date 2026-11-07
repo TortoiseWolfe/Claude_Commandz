@@ -1,5 +1,6 @@
 """The one list of settings files a lane must never see (issue 332): lane_secret_paths.py, and that the per-engine denies still follow it."""
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,10 +62,25 @@ class SharedListTests(unittest.TestCase):
         # A file inside a sealed folder is hidden with its folder, not listed on its own.
         self.assertNotIn("app/sealed/deploy.key", files)
 
-    def test_a_symlink_is_never_listed(self):
-        os.symlink(os.path.join(self.root, "app/readme.md"), os.path.join(self.root, "app/link.env"))
-        files, _ = self.listed()
-        self.assertNotIn("app/link.env", files)
+    def test_a_settings_named_link_is_hidden_by_what_it_points_at(self):
+        # A bind mount follows a link, so the target is what gets listed (never the link, never a file that is not there).
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        target = os.path.join(elsewhere, "real-settings")
+        with open(target, "w") as f:
+            f.write("FAKE=1\n")
+        os.symlink(target, os.path.join(self.root, "app/link.env"))
+        os.symlink(os.path.join(elsewhere, "nowhere"), os.path.join(self.root, "app/dangling.env"))
+        files, dirs = lsp.hide_list([os.path.join(self.root, "app")], self.home)
+        self.assertNotIn(os.path.join(self.root, "app/link.env"), files)
+        self.assertNotIn(os.path.join(self.root, "app/dangling.env"), files)
+        self.assertIn(os.path.realpath(target), files)
+        # A link named like a sealed folder hides the folder it points at.
+        sealed_target = os.path.join(elsewhere, "vault")
+        os.makedirs(sealed_target)
+        os.symlink(sealed_target, os.path.join(self.root, "app/sealed-link"))
+        _, dirs = lsp.hide_list([os.path.join(self.root, "app")], self.home)
+        self.assertIn(os.path.realpath(sealed_target), dirs)
 
     def test_a_runaway_walk_fails_closed(self):
         old = lsp.MAX_PATHS
