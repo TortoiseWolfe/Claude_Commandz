@@ -76,6 +76,12 @@ jobs:
         run: |
           # Fails on a test file (anywhere in the repo) that no step here runs and that .github/ci_not_run.tsv does not openly list with a reason and an issue.
           python3 .github/scripts/ci_test_coverage.py check
+      - name: allow user namespaces (issue 332)
+        run: |
+          # lane_hide_secrets.sh hides settings files from a lane with a user and mount namespace (unshare -Urm). Ubuntu 24.04 runners block that by
+          # default through AppArmor. This step lifts the block; the guard's own test (test_lane_secret_guard.sh) fails, never skips, if it is still off.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "sysctl not present; checking directly below"
+          unshare -Urm true && echo "user namespaces work"
       - name: shell tests
         working-directory: global/.claude/scripts
         run: |
