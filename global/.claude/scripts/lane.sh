@@ -668,6 +668,9 @@ shared_read_denies() {  # <lane folder>: space-separated Edit rules, or nothing
     if [ -n "$root" ]; then rel="${d#"$root"/.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"
       case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) ;; *) out+="Edit(/$root/$repo/.git/**) " ;; esac
     fi ;; esac
+  # With ~/repos/.worktrees granted (shared_read_flags), a lane could rewrite another worktree's .git pointer file and aim it at a git folder with hooks.
+  # Same condition as the grant; Bash is unchanged, so the lane's own git commands still work.
+  case "$d/" in "$root/"*) [ -z "$root" ] || out+="Edit(/$root/.worktrees/*/.git) " ;; esac
   printf '%s' "${out% }"
 }
 # Latest index row for a lane name (tab-separated line), or nothing.
