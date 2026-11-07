@@ -3,6 +3,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -60,11 +61,12 @@ def test_a_listed_line_for_a_missing_or_non_test_file_fails():
     assert cov.check(files, {S + "/notes.md": ("r", ISSUE)})
 
 
-def test_the_list_file_needs_a_reason_and_an_issue_link(tmp_path):
-    (tmp_path / ".github").mkdir()
-    tsv = tmp_path / ".github" / "ci_not_run.tsv"
-    tsv.write_text("# comment\n\nx/test_a.sh\tbecause\t%s\nx/test_b.sh\tno issue\tsoon\nx/test_c.sh\tonly two columns\n" % ISSUE)
-    entries, problems = cov.read_not_run(str(tmp_path))
+def test_the_list_file_needs_a_reason_and_an_issue_link():
+    with tempfile.TemporaryDirectory() as tmp:  # not pytest's tmp_path: test_no_tmp_leak fails on what it leaves behind
+        os.mkdir(os.path.join(tmp, ".github"))
+        with open(os.path.join(tmp, ".github", "ci_not_run.tsv"), "w") as fh:
+            fh.write("# comment\n\nx/test_a.sh\tbecause\t%s\nx/test_b.sh\tno issue\tsoon\nx/test_c.sh\tonly two columns\n" % ISSUE)
+        entries, problems = cov.read_not_run(tmp)
     assert list(entries) == ["x/test_a.sh", "x/test_b.sh"]
     assert len(problems) == 2
     assert any("issue link" in p for p in problems) and any("three" in p for p in problems)
