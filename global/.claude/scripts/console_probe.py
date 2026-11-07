@@ -9,8 +9,8 @@ Where the key comes from, in order:
   2. the file named by CONSOLE_PROBE_KEY_FILE, or ~/.config/anthropic/worker-key when that is not set
 Run it isolated, as the rules name it:  python3 -I ~/.claude/scripts/console_probe.py
 Exit codes: 0 = the Console answered 200; 1 = it answered with an error status; 2 = no key found; 3 = no answer (network).
-Test hook: CONSOLE_PROBE_URL may replace the API address, but only with a http://127.0.0.1 address, so the key can never be
-sent anywhere else by setting a variable.
+Test hook: CONSOLE_PROBE_LOCAL_PORT (digits only) sends the call to http://127.0.0.1:<port>/v1/messages instead. Only the port can
+change; the host is fixed, so setting a variable can never send the key to another machine.
 """
 import json
 import os
@@ -35,8 +35,11 @@ def find_key():
 
 
 def api_url():
-    url = os.environ.get("CONSOLE_PROBE_URL", "")
-    return url if url.startswith("http://127.0.0.1") else DEFAULT_URL
+    """The API address. Only a port number can be overridden, and the host is fixed at 127.0.0.1, so no variable can point the key elsewhere."""
+    port = os.environ.get("CONSOLE_PROBE_LOCAL_PORT", "")
+    if port.isascii() and port.isdigit() and 0 < int(port) < 65536:
+        return "http://127.0.0.1:%d/v1/messages" % int(port)
+    return DEFAULT_URL
 
 
 def scrub(text, key):

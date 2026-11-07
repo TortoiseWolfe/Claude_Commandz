@@ -44,7 +44,7 @@ class ConsoleProbe(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.srv = HTTPServer(("127.0.0.1", 0), Api)
-        cls.url = "http://127.0.0.1:%d/v1/messages" % cls.srv.server_port
+        cls.port = cls.srv.server_port
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         cls.addClassCleanup(cls.srv.server_close)
         cls.addClassCleanup(cls.srv.shutdown)
@@ -53,9 +53,9 @@ class ConsoleProbe(unittest.TestCase):
         self.d = Path(fresh_dir(self))
         Api.status, Api.message, Api.seen = 200, "", []
 
-    def probe(self, env_key=FAKE, key_file=None, url=None):
+    def probe(self, env_key=FAKE, key_file=None, port=None):
         env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_WORKER_KEY", "CONSOLE_PROBE_KEY_FILE")}
-        env["CONSOLE_PROBE_URL"] = url or self.url
+        env["CONSOLE_PROBE_LOCAL_PORT"] = str(port or self.port)
         env["HOME"] = str(self.d)
         env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1"
         if env_key is not None:
@@ -64,13 +64,13 @@ class ConsoleProbe(unittest.TestCase):
             env["CONSOLE_PROBE_KEY_FILE"] = str(key_file)
         return subprocess.run([sys.executable, "-I", TOOL], capture_output=True, text=True, env=env)
 
-    def closed_url(self):
-        """A local address nothing listens on (a port just freed), so a refusal is instant."""
+    def closed_port(self):
+        """A local port nothing listens on (just freed), so a refusal is instant."""
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
         s.close()
-        return "http://127.0.0.1:%d/none" % port
+        return port
 
     def test_200_prints_ok_exits_0_and_sends_the_key_to_the_api_only(self):
         r = self.probe()
@@ -93,11 +93,11 @@ class ConsoleProbe(unittest.TestCase):
         self.assertIn("[key]", r.stdout)
 
     def test_the_key_never_appears_on_success_or_when_nothing_answers(self):
-        for r in (self.probe(), self.probe(url=self.closed_url())):
+        for r in (self.probe(), self.probe(port=self.closed_port())):
             self.assertNotIn(FAKE, r.stdout + r.stderr)
 
     def test_no_answer_exits_3(self):
-        r = self.probe(url=self.closed_url())
+        r = self.probe(port=self.closed_port())
         self.assertEqual(r.returncode, 3)
         self.assertIn("no answer", r.stdout)
 
@@ -120,14 +120,22 @@ class ConsoleProbe(unittest.TestCase):
         self.assertIn("no Console key", r.stdout)
         self.assertEqual(Api.seen, [])
 
-    def test_a_non_local_url_override_is_ignored_so_the_key_cannot_be_redirected(self):
+    def test_no_variable_can_point_the_key_at_another_host(self):
+        """The only override is a port on 127.0.0.1. Host tricks that fooled a prefix check ("127.0.0.1.evil", "127.0.0.1@evil")
+        and anything that is not plain digits fall back to the real API address."""
         import importlib.util
         spec = importlib.util.spec_from_file_location("console_probe_mod", TOOL)
+        assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        os.environ["CONSOLE_PROBE_URL"] = "https://evil.example.test/steal"
+        self.addCleanup(os.environ.pop, "CONSOLE_PROBE_LOCAL_PORT", None)
         self.addCleanup(os.environ.pop, "CONSOLE_PROBE_URL", None)
-        self.assertEqual(mod.api_url(), mod.DEFAULT_URL)
+        os.environ["CONSOLE_PROBE_URL"] = "http://127.0.0.1.evil.example.test/steal"  # the old hook name: no longer read
+        for bad in ("", "80@evil.example.test", "80.evil.example.test", "-1", "0", "70000", "8 0", "８０", "80/x"):
+            os.environ["CONSOLE_PROBE_LOCAL_PORT"] = bad
+            self.assertEqual(mod.api_url(), mod.DEFAULT_URL, repr(bad))
+        os.environ["CONSOLE_PROBE_LOCAL_PORT"] = "8123"
+        self.assertEqual(mod.api_url(), "http://127.0.0.1:8123/v1/messages")
 
 
 if __name__ == "__main__":
