@@ -54,6 +54,15 @@ def is_sealed_dir(name):
     return bool(SEALED_DIR.match(name))
 
 
+def covers_workspace(target, roots, home):
+    """True when hiding `target` would blank a searched root or the home folder: the folder is one of them, or holds one."""
+    for keep in list(roots) + [home]:
+        keep = os.path.realpath(keep)
+        if keep == target or keep.startswith(target.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def hide_list(roots, home):
     """Return ([files], [dirs]) under the roots plus the fixed home folders. Raises OverflowError past MAX_PATHS."""
     files, dirs, seen = [], [], set()
@@ -75,6 +84,8 @@ def hide_list(roots, home):
                 if is_sealed_dir(s):
                     # A link is hidden by what it points at: a bind mount follows the link.
                     target = os.path.realpath(full) if os.path.islink(full) else full
+                    if os.path.islink(full) and covers_workspace(target, roots, home):
+                        continue  # a link must not make the lane blank its own working folders
                     if os.path.isdir(target) and target not in seen:
                         seen.add(target)
                         dirs.append(target)
