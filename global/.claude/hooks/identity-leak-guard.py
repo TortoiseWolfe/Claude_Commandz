@@ -23,10 +23,11 @@ What counts as sending (Bash): the address appears anywhere in the command AND t
   Reading the address from git config or an environment variable into a sink counts as well.
   A script this hook can't find, can't read or can't read in full counts as a sink; it is never assumed safe. Every token
   after the interpreter is tried as a file, in the working folder and in any folder a cd in the line moves to.
-Binary files named after the script (a zip, pdf, image or audio attachment for a mail tool, a data file for any script) are data:
-  they are not scanned as code, however large. A file counts as binary when its first 8 KB hold a null byte or it starts with the magic
-  bytes of a known binary type. Only a file that is not the first file named (the first one is the program the interpreter runs; a zip
-  there could be a zipapp) is skipped, so the script is still read and judged, and a text file is always read.
+Binary attachments for a mail tool are data: when the program is a mail tool the hook trusts (the plain form above), a binary file named
+  after it (a zip, pdf, image or audio attachment) is not scanned as code, however large. Binary means a null byte in the first 8 KB, or
+  the magic bytes of a non-text format (zip, png, jpg, gzip, 7z, rar, xz), or an ASCII magic (%PDF-, GIF8, ID3, RIFF, OggS, fLaC, BZh)
+  followed by bytes that are not text. Any other program (a script of an agent's own, an interpreter at an odd path, a line that cd's or
+  sets interpreter variables) reads every file it names as before, so a big binary there still blocks, and a text file is always read.
 Allowed: the address in grep, echo, git, local files, and the mail tools gmail_api.py and calendar_api.py (plus names under
   allow_scripts). A mail tool is allowed by its real path in ~/.claude/scripts, never by file name alone, so a copy or a link
   with the same name somewhere else is judged like any other script.
@@ -35,6 +36,7 @@ through ssh, docker exec or a language this hook does not list.
 This is a guard against accidents and plain mistakes, not a sandbox: a line written on purpose to defeat a text reading of the
 command can still win. A mail tool is trusted only in its plainest form, so anything odd falls to the stricter script judging.
 """
+import codecs
 import html
 import json
 import os
@@ -50,8 +52,8 @@ DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 SCRIPTS_DIR = "~/.claude/scripts"
 BINARY_SNIFF_BYTES = 8192
-BINARY_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"%PDF-", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"ID3", b"RIFF", b"OggS", b"fLaC",
-                b"\x1f\x8b", b"7z\xbc\xaf", b"Rar!", b"BZh", b"\xfd7zXZ")
+BINARY_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"\x89PNG", b"\xff\xd8\xff", b"\x1f\x8b", b"7z\xbc\xaf", b"Rar!", b"\xfd7zXZ")
+BINARY_TEXTY_MAGIC = (b"%PDF-", b"GIF8", b"ID3", b"RIFF", b"OggS", b"fLaC", b"BZh")  # these start with text, so the rest must not be text too
 NOT_A_FILE = ("-", "<", "$", "(", ">", "|", ";", "&")
 SEPARATOR = re.compile(r"\|\||&&|[;|&]")
 # Settings that make an interpreter load other code, and the env wrapper that sets them, so a mail tool is not trusted beside them.
@@ -193,13 +195,20 @@ def candidate_files(tokens, cwd, cmd):
 
 
 def is_binary(path):
-    """True for a file that is data, not a script: a null byte in its first 8 KB, or the magic bytes of a known binary type."""
+    """True for a file that is data, not a script: a null byte in its first 8 KB, a non-text magic, or a text-looking magic followed by non-text."""
     try:
         with open(path, "rb") as f:
             head = f.read(BINARY_SNIFF_BYTES)
     except OSError:
         return False
-    return b"\0" in head or head.startswith(BINARY_MAGIC)
+    if b"\0" in head or head.startswith(BINARY_MAGIC):
+        return True
+    if head.startswith(BINARY_TEXTY_MAGIC):
+        try:
+            codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+        except UnicodeDecodeError:
+            return True
+    return False
 
 
 def sinks(cmd, cwd, allowed):
@@ -231,11 +240,17 @@ def sinks(cmd, cwd, allowed):
                 found.append("a script this hook can't find")
             continue
         first = words[0] if words and not inline else None
-        for n, (tok, path) in enumerate(files):
-            if tok == first and not odd_interpreter and toks and toks[0].strip("'\"") == first and os.path.isabs(os.path.expanduser(first)) \
-                    and not hijackable and is_allowed_tool(path, allowed):
+        plain_form = first is not None and not odd_interpreter and toks and toks[0].strip("'\"") == first \
+            and os.path.isabs(os.path.expanduser(first)) and not hijackable
+        trusted = False  # the program is a mail tool in its plainest form: the files it is given are its data
+        for tok, path in files:
+            if tok == first and plain_form and is_allowed_tool(path, allowed):
+                trusted = True
+                break
+        for tok, path in files:
+            if tok == first and plain_form and is_allowed_tool(path, allowed):
                 continue
-            if n > 0 and is_binary(path):  # an attachment or data file after the program: not code, so not scanned
+            if trusted and tok != first and is_binary(path):  # an attachment for a mail tool: data, not code, so not scanned
                 continue
             try:
                 with open(path, errors="replace") as f:
