@@ -392,5 +392,84 @@ if args[0:2] == ["api", "-X"] and args[2] == "GET":
         self.assertIn("finished notes_check run", log_text)
 
 
+class TestNotesPoll(unittest.TestCase):
+    """--poll: one line, NEW <ids> or NONE, the same searches the Haiku check prompt ran."""
+
+    # the plain check's fixture and helpers, reused without inheriting its tests
+    setUp = TestNotesCheck.setUp
+    add_message_detail = TestNotesCheck.add_message_detail
+    run_check = TestNotesCheck.run_check
+
+    def run_poll(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = nc.main(["--poll", "--processed", str(self.processed_file), "--log", str(self.log_file)])
+        return code, out.getvalue(), err.getvalue()
+
+    def put_draft(self, did, mid, subject, date="Sun, 25 Oct 2026 14:15:00 -0400", labels=None, query=None):
+        q = query or nc.POLL_DRAFT_QUERIES[0]
+        self.fake.drafts_by_query.setdefault(q, []).append({"id": did, "message": {"id": mid}})
+        self.add_message_detail(mid, subject=subject, date_hdr=date, label_ids=labels)
+
+    def test_nothing_new_prints_none(self):
+        code, out, err = self.run_poll()
+        self.assertEqual((code, out, err), (0, "NONE\n", ""))
+
+    def test_new_notes_print_ids_oldest_first_on_one_line(self):
+        self.put_draft("r-2", "m-2", "[MUSE>CC] second", date="Sun, 25 Oct 2026 15:00:00 -0400")
+        self.put_draft("r-1", "m-1", "[MUSE>CC] first", date="Sun, 25 Oct 2026 14:00:00 -0400")
+        code, out, err = self.run_poll()
+        self.assertEqual((code, out, err), (0, "NEW r-1 r-2\n", ""))
+
+    def test_a_note_this_machine_wrote_is_skipped(self):
+        self.put_draft("r-mine", "m-mine", "[NX-01>NCC-74656] Re: [NCC-74656>NX-01] topic")
+        self.assertEqual(self.run_poll()[1], "NONE\n")
+
+    def test_a_tower_note_that_quotes_our_tag_later_still_counts(self):
+        self.put_draft("r-tower", "m-tower", "[NCC-74656>NX-01] re: [NX-01>NCC-74656] topic")
+        self.assertEqual(self.run_poll()[1], "NEW r-tower\n")
+
+    def test_hatch_answering_the_tower_is_skipped_but_a_reply_to_us_counts(self):
+        q = nc.POLL_DRAFT_QUERIES[2]
+        self.put_draft("r-tower", "m-tower", "Re: [CC>MUSE] NCC-74656: ledger", query=q)
+        self.put_draft("r-us", "m-us", "Re: [CC>MUSE] ledger", query=q)
+        self.assertEqual(self.run_poll()[1], "NEW r-us\n")
+
+    def test_handled_ids_and_label_32_are_not_new(self):
+        self.put_draft("r-done", "m-done", "[MUSE>CC] done")
+        self.put_draft("r-lab", "m-lab", "[MUSE>CC] labelled", labels=["Label_32"])
+        self.processed_file.write_text("r-done\n", encoding="utf-8")
+        self.assertEqual(self.run_poll()[1], "NONE\n")
+
+    def test_sent_mail_notes_count_too(self):
+        self.fake.messages_by_query[nc.POLL_MAIL_QUERIES[0]] = [{"id": "m-sent"}]
+        self.add_message_detail("m-sent", subject="[MUSE>CC] sent one", label_ids=["SENT"])
+        self.assertEqual(self.run_poll()[1], "NEW m-sent\n")
+
+    def test_the_searches_use_the_two_day_window_and_keep_tower_notes_out(self):
+        for q in nc.POLL_DRAFT_QUERIES + nc.POLL_MAIL_QUERIES:
+            self.assertIn("newer_than:2d", q)
+            self.assertNotIn("newer_than:3d", q)
+        self.assertIn('-subject:"NCC-74656"', nc.POLL_DRAFT_QUERIES[-1])
+        self.assertIn('-subject:"NCC-74656"', nc.POLL_MAIL_QUERIES[-1])
+        self.run_poll()
+        asked = {c[2].get("q") for c in self.fake.calls if c[1] in ("/drafts", "/messages")}
+        self.assertEqual(asked, set(nc.POLL_DRAFT_QUERIES + nc.POLL_MAIL_QUERIES))
+
+    def test_a_gmail_failure_prints_neither_new_nor_none_and_exits_1(self):
+        self.fake.error_to_raise = g.GmailError("Network connect failed: 503 Service Unavailable")
+        code, out, err = self.run_poll()
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("503", err)
+
+    def test_the_plain_check_is_unchanged(self):
+        self.put_draft("r-mine", "m-mine", "[NX-01>NCC-74656] still printed by the plain check", query=nc.DRAFT_QUERIES[0])
+        code, out, err = self.run_check()
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("NOTE r-mine | draft"))
+
+
 if __name__ == "__main__":
     unittest.main()
