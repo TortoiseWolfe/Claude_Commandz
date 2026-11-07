@@ -19,6 +19,7 @@ ZEN=opencode/big-pickle
 # day (OpenRouter's per-day message), nodelay (a refusal with no delay and no daily wording).
 cat >"$TMP/opencode" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_ARGS"
 model=""; while [ $# -gt 0 ]; do [ "$1" = --model ] && { model="$2"; shift; }; shift; done
 echo "$model" >>"$STUB_CALLS"
 n=$(grep -cFx "$model" "$STUB_CALLS")
@@ -41,7 +42,7 @@ count() { grep -cFx -- "$2" "$1" || true; }
 # The existing cases run with both provider keys present; the keyless cases at the end remove them. (Key files hold a placeholder.)
 mkdir -p "$HOME_T/.config/gemini" "$HOME_T/.config/openrouter"; printf 'placeholder\n' >"$HOME_T/.config/gemini/api-key"; printf 'placeholder\n' >"$HOME_T/.config/openrouter/api-key"
 export HOME="$HOME_T" OPENCODE_BIN="$TMP/opencode" OPENCODE_QUOTA_DIR="$TMP/quota" OPENCODE_RETRY_SCALE=0.01 OPENCODE_LANE_POLL=0.05
-export STUB_CALLS="$TMP/calls" STUB_PLAN="$TMP/plan"
+export STUB_CALLS="$TMP/calls" STUB_PLAN="$TMP/plan" STUB_ARGS="$TMP/args"
 run() {  # <plan lines...>: runs the wrapper with a fresh call log; sets OUT and STATUS
   : >"$STUB_CALLS"; printf '%s\n' "$@" >"$STUB_PLAN"
   set +e; OUT="$(bash "$SCRIPT" "$REPO" "$HAND" "$GEMINI" "$PROMPT" 2>&1)"; STATUS=$?; set -e
@@ -136,5 +137,53 @@ rm -f "$HOME_T/.config/openrouter/api-key"; : >"$STUB_CALLS"; : >"$STUB_PLAN"
 set +e; OUT="$(bash "$SCRIPT" "$REPO" "$HAND" "$ROUTER" "$PROMPT" 2>&1)"; STATUS=$?; set -e
 CASES=$((CASES + 1))
 [ "$STATUS" = 0 ] && [ "$(count "$STUB_CALLS" "$ZEN")" = 1 ] || fail "a named unkeyed model falls to Zen ($STATUS): $OUT"
+
+# 11. Secrets (6 Nov 2026: a password from an env file reached the shared OpenCode log): the lane config is valid JSON that denies the read and edit
+# tools on env and key files, denies shell commands naming an env file, still allows ordinary files and keeps the old folder rules.
+: >"$STUB_ARGS"; run
+CASES=$((CASES + 1))
+python3 -I - "$HAND/opencode.json" <<'PYEOF' || fail "lane config does not deny env files"
+import fnmatch, json, sys
+cfg = json.load(open(sys.argv[1]))
+perm = cfg["permission"]
+def last_match(rules, text):  # OpenCode: the last matching rule wins
+    out = None
+    for pat, act in rules.items():
+        if fnmatch.fnmatchcase(text, pat): out = act
+    return out
+for tool in ("read", "edit"):
+    for denied in (".env", "sub/dir/.env", "/x/y/.env.local", ".env.supabase.local", "ci/.tmp-seed.env", "/h/.config/gemini/api-key", "k.pem"):
+        assert last_match(perm[tool], denied) == "deny", (tool, denied)
+    for ok in ("README.md", "src/environment.ts", "docs/env-notes.md", "src/index.js"):
+        assert last_match(perm[tool], ok) == "allow", (tool, ok)
+for denied in ("cat .env", "cat ./.env.local", "echo hi && cat sub/.env", ".env", "source .env.test"):
+    assert last_match(perm["bash"], denied) == "deny", denied
+for ok in ("npm test", "grep -n process.env src/a.js", "git status", "ls docs"):
+    assert last_match(perm["bash"], ok) == "allow", ok
+assert perm["external_directory"]["*"] == "deny" and perm["*"] == "allow"
+PYEOF
+
+# 12. The run asks OpenCode for its quietest log: at INFO it writes every permission check with the whole command text the model typed.
+grep -qF -- '--log-level ERROR' "$STUB_ARGS" || fail "opencode must run with --log-level ERROR: $(cat "$STUB_ARGS")"
+
+# 13. The prompt the model gets starts with the rule never to open env files or key files, then the lane's own prompt.
+grep -qF 'never open, print, copy or type into a command the contents of an environment file' "$STUB_ARGS" || fail "the no-env-file rule is missing from the prompt"
+grep -qF 'do the thing' "$STUB_ARGS" || fail "the lane's own prompt must still follow the rule"
+CASES=$((CASES + 1))
+
+# 14. After the run the shared OpenCode log is scrubbed (best effort): a fake scrubber is called on that folder; with no scrubber the run is unharmed.
+mkdir -p "$HOME_T/.claude/scripts" "$HOME_T/.local/share/opencode/log"
+cat >"$HOME_T/.claude/scripts/scrub_known_secrets.py" <<'PYEOF'
+import sys
+open(sys.argv[0] + ".called", "w").write(" ".join(sys.argv[1:]))
+PYEOF
+run
+CASES=$((CASES + 1))
+[ "$STATUS" = 0 ] || fail "run with a scrubber should exit 0, got $STATUS: $OUT"
+[ "$(cat "$HOME_T/.claude/scripts/scrub_known_secrets.py.called" 2>/dev/null)" = "$HOME_T/.local/share/opencode/log" ] || fail "the shared log folder should be scrubbed after the run"
+rm -f "$HOME_T/.claude/scripts/scrub_known_secrets.py"
+run
+[ "$STATUS" = 0 ] || fail "a missing scrubber must not fail the run, got $STATUS: $OUT"
+CASES=$((CASES + 1))
 
 echo "ok: $CASES cases"
