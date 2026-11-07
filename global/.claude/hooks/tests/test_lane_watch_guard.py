@@ -123,6 +123,34 @@ class LaneWatchGuardTests(unittest.TestCase):
         self.marker("hub-1")
         self.assertEqual(self.run_hook(session_id="hub-1"), "")
 
+    def write_pid_file(self, pid, start=None):
+        pid_file = self.state / "lanes" / ".lane_watch.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        content = str(pid) + (f" {start}" if start is not None else "")
+        pid_file.write_text(content + "\n", encoding="utf-8")
+
+    def test_pid_file_from_another_session_allows_stop(self):
+        """A watcher started before /clear writes its pid; the new session must still find it."""
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            stat = Path(f"/proc/{proc.pid}/stat").read_text(encoding="utf-8")
+            start = stat.rsplit(") ", 1)[-1].split()[19]
+            self.write_pid_file(proc.pid, start)
+            self.assertEqual(self.run_hook(running="0", session_id="new-session"), "")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+    def test_pid_file_with_dead_pid_still_blocks(self):
+        self.write_pid_file(999999)
+        data = json.loads(self.run_hook(running="0", session_id="hub-1"))
+        self.assertEqual(data["decision"], "block")
+
+    def test_recycled_pid_is_not_a_watcher(self):
+        self.write_pid_file(os.getpid(), start="0")
+        data = json.loads(self.run_hook(running="0", session_id="hub-1"))
+        self.assertEqual(data["decision"], "block")
+
 
 if __name__ == "__main__":
     unittest.main()

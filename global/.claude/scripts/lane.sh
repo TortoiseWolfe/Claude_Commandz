@@ -36,6 +36,9 @@
 # --engine agy runs agy -p --mode accept-edits --sandbox (Google Antigravity, free quota). It is EDIT-ONLY:
 # headless agy cannot run commands and --dangerously-skip-permissions is never used. The prompt copy gets a
 # header telling the lane to write report.md with the commands the hub must run. Same client guard as above.
+# Deny rules (6 Nov 2026): every start writes <hand-off folder>/agy-settings.json with agy_deny.py (secret files unreadable, no push to main, no git
+# config) and passes it as --settings. Before this the only guard was the prompt header, so a secrets file in the checkout was readable.
+# agy_deny.py's header comment has the limits.
 # The model is passed through when it is one of agy's own (gemini-*, gpt-oss-*, claude-*-4-6*); any other
 # name (a Claude Code alias) becomes gemini-3.8-flash-high (see agy_model).
 # --engine opencode runs opencode_lane.sh (beside this script): OpenCode, headless, edit files AND run commands, on a free API key read from
@@ -2494,7 +2497,8 @@ if [ "$engine" != claude ]; then
     cmd="cd $(printf %q "$dir") && $(printf %q "$SCRIPT_DIR/local_lane.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$(local_model "$model")") $(printf %q "$lprompt")"
     cmd+=" >$out_cmd 2>&1"
   elif [ "$engine" = agy ]; then
-    cmd="cd $(printf %q "$dir") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --add-dir $(printf %q "$hand") $adsf--model $(printf %q "$(agy_model "$model")")"
+    # The deny rules are written at every start and restart (agy_deny.py lists the secret files in the checkout at that moment); if they cannot be written, agy does not run.
+    cmd="cd $(printf %q "$dir") && python3 -I $(printf %q "$SCRIPT_DIR/agy_deny.py") $(printf %q "$dir") $(printf %q "$hand/agy-settings.json") && agy -p \"$prompt_cmd\" --mode accept-edits --sandbox --print-timeout 0 --settings $(printf %q "$hand/agy-settings.json") --add-dir $(printf %q "$hand") $adsf--model $(printf %q "$(agy_model "$model")")"
     cmd+=" >$out_cmd 2>&1"
   else
     cmd="cd $(printf %q "$dir") && copilot -p \"$prompt_cmd\" --allow-all-tools --log-dir $(printf %q "$hand") --add-dir $(printf %q "$hand") ${adsf%% }"

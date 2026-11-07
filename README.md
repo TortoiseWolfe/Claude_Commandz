@@ -87,6 +87,12 @@ mkdir -p ~/.claude/hooks && cp -a global/.claude/hooks/. ~/.claude/hooks/
 uv tool install graphifyy==0.9.23 && graphify install --platform claude   # graphify is third-party: reinstall it, don't back it up
 ```
 
+### How changes reach main
+
+`main` is protected (set 6 Nov 2026): nothing is pushed to it directly, every change arrives in a pull request, and the `pytest` and `shell`
+checks must both pass before it merges. The rule applies to admins too, so an emergency push or a merge on a red check needs the protection
+lifted first (repo Settings, Branches).
+
 ### Updating a machine that already runs (install after a merge)
 
 Scenarios A and B are for an empty machine: their `cp -a` lines overwrite every file, so on a machine with live files they
