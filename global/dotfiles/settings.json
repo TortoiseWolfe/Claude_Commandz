@@ -210,6 +210,14 @@
             "command": "bash ~/.claude/hooks/unverified-pending.sh"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/lane-watch-guard.py"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -250,6 +258,34 @@
             "type": "command",
             "command": "bash ~/.claude/hooks/muse-drafts.sh prompt",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/context-warn.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/context-warn.py"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/coop-scrubber.py"
           }
         ]
       }
@@ -298,7 +334,16 @@
     "creative-writing-skills@creative-writing-skills": true,
     "creative-writing@grey-haven-plugins": true,
     "typescript-lsp@claude-plugins-official": true,
-    "pyright-lsp@claude-plugins-official": true
+    "pyright-lsp@claude-plugins-official": true,
+    "afa-mods@afa-mods": true
+  },
+  "extraKnownMarketplaces": {
+    "afa-mods": {
+      "source": {
+        "source": "directory",
+        "path": "/home/TurtleWolfe/repos/Claude_Commandz"
+      }
+    }
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
@@ -319,5 +364,6 @@
   "skipWorkflowUsageWarning": true,
   "theme": "dark-daltonized",
   "remoteControlAtStartup": false,
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "idleCompaction": false
 }
