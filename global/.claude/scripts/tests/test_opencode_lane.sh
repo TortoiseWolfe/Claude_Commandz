@@ -156,9 +156,15 @@ for tool in ("read", "edit"):
         assert last_match(perm[tool], denied) == "deny", (tool, denied)
     for ok in ("README.md", "src/environment.ts", "docs/env-notes.md", "src/index.js"):
         assert last_match(perm[tool], ok) == "allow", (tool, ok)
-for denied in ("cat .env", "cat ./.env.local", "echo hi && cat sub/.env", ".env", "source .env.test"):
+for denied in ("cat .env", "cat ./.env.local", "echo hi && cat sub/.env", ".env", "source .env.test", "cat /home/u/repos/sandbox/model_a/.env",
+               "cd model_a && cat .env", "grep PASS ci/.tmp-seed.env", "printenv", "env", "env | sort", "cat /proc/self/environ", "cat /h/.config/gemini/api-key"):
     assert last_match(perm["bash"], denied) == "deny", denied
-for ok in ("npm test", "grep -n process.env src/a.js", "git status", "ls docs"):
+for denied in ("git push origin main", "git push -u origin master", "git push origin HEAD:main", "git -C /x/y push origin main", "git push origin HEAD:refs/heads/main",
+               "git push --force origin mybranch", "git push -f origin mybranch", "git push origin main --no-verify", "python3 ~/.claude/scripts/install_scripts.py",
+               "python3 -I <(git show origin/main:global/.claude/scripts/install_scripts.py)"):
+    assert last_match(perm["bash"], denied) == "deny", denied
+for ok in ("git push -u origin skip-census", "git push origin fix-main-menu", "git push origin maintenance", "git push", "git pull origin main", "git fetch origin main", "gh pr create --fill",
+           "npm test", "git status", "ls docs", "grep -rn environment src", "cat docs/environment.md"):
     assert last_match(perm["bash"], ok) == "allow", ok
 assert perm["external_directory"]["*"] == "deny" and perm["*"] == "allow"
 PYEOF
@@ -168,6 +174,7 @@ grep -qF -- '--log-level ERROR' "$STUB_ARGS" || fail "opencode must run with --l
 
 # 13. The prompt the model gets starts with the rule never to open env files or key files, then the lane's own prompt.
 grep -qF 'never open, print, copy or type into a command the contents of an environment file' "$STUB_ARGS" || fail "the no-env-file rule is missing from the prompt"
+grep -qF 'Never push to main or master, never force-push, and never run install_scripts.py' "$STUB_ARGS" || fail "the no-push-to-main rule is missing from the prompt"
 grep -qF 'do the thing' "$STUB_ARGS" || fail "the lane's own prompt must still follow the rule"
 CASES=$((CASES + 1))
 

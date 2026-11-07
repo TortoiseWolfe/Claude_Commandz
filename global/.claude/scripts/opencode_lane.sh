@@ -24,11 +24,16 @@
 # <repo>-wf-*) are the outside paths it may use, never another repo's worktree. Shell commands are not sandboxed beyond that: the client guard in
 # lane.sh on the checkout is what keeps client code away from the free APIs.
 # Secrets (6 Nov 2026: a lane read an env file and a password reached the shared OpenCode log and the free model's provider): the config denies the
-# read and edit tools on env files (*.env, *.env.*), key files (*api-key*, *.pem, *.netrc, ssh keys) and denies shell commands that start with, or
-# have an argument starting with, .env (best effort: a command can still reach a file another way), and the prompt tells the model never to open
-# them. OpenCode logs every permission check with the whole command text the model typed, at INFO level into the shared ~/.local/share/opencode/log,
+# read and edit tools on env files (*.env, *.env.*), key files (*api-key*, *.pem, *.netrc, ssh keys) and denies shell commands whose text names an env
+# file or key file or dumps the environment (advisory only: matching command text cannot stop every way a shell reaches a file, and it also blocks a
+# grep for process.env, which the grep tool does without a shell; the sh-skips lane, 6 Nov 8 PM, got a value out of a sandbox env file outside its
+# checkout with a shell command, and the value went into the lane's own out.log as well), and the prompt tells the model never to open them. OpenCode logs every permission check with the whole command text the model typed, at INFO level into the shared ~/.local/share/opencode/log,
 # so the run uses --log-level ERROR (no such lines) and, after the run, scrub_known_secrets.py rewrites that log (best effort: it skips a log
 # written in the last two minutes; values are never printed).
+# Pushes (6 Nov 2026, 8:13 PM: the skip-census lane pushed straight to Claude_Commandz main with no PR, then ran install_scripts.py before CI had
+# run, though its prompt said one PR, merge on green): the config denies shell commands that push to main or master (git push origin main,
+# HEAD:main, refs/heads/main), force pushes, and install_scripts.py; the prompt says a lane pushes a branch and opens a PR and never installs.
+# The deny is on command text, so a bare "git push" from a checkout that is on main is not caught: lane.sh starts opencode lanes on a branch.
 # The config is written to the lane folder (OPENCODE_CONFIG), never into the repo. A wall-clock limit (OPENCODE_LANE_TIMEOUT seconds, default 7200)
 # stops a run that loops.
 set -u
@@ -72,7 +77,7 @@ cat >"$conf" <<JSON
  "permission":{"*":"allow",
   "read":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
   "edit":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
-  "bash":{"*":"allow",".env*":"deny","* .env*":"deny","*/.env*":"deny","*api-key*":"deny"},
+  "bash":{"*":"allow","*.env*":"deny","*api-key*":"deny","*.pem*":"deny","*id_rsa*":"deny","*id_ed25519*":"deny","*git*push*--force*":"deny","*git*push* -f*":"deny","*git*push* main":"deny","*git*push* main *":"deny","*git*push*:main":"deny","*git*push*:main *":"deny","*git*push* master":"deny","*git*push* master *":"deny","*git*push*:master":"deny","*git*push*:master *":"deny","*git*push*refs/heads/main*":"deny","*git*push*refs/heads/master*":"deny","*install_scripts.py*":"deny","printenv*":"deny","env":"deny","env *":"deny","*/proc/*/environ*":"deny","export -p*":"deny"},
   "external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
@@ -128,12 +133,14 @@ write_stamp() {  # <provider>: a per-day refusal; yesterday's stamps for it are 
 }
 
 prompt="$(cat -- "$prompt_file")" || exit 2
-scrub_shared_log() {
+scrub_known() {  # <file or folder>: best effort, never fails the run; a file written in the last two minutes is skipped unless the run is over
   local s="$HOME/.claude/scripts/scrub_known_secrets.py"
-  { [ -r "$s" ] && [ -d "$HOME/.local/share/opencode/log" ] && python3 -I "$s" "$HOME/.local/share/opencode/log" >/dev/null 2>&1; } || true
+  [ -r "$s" ] && [ -e "$1" ] || return 0
+  if [ -f "$1" ]; then python3 -I "$s" --min-age 0 "$1" >/dev/null 2>&1 || true; else python3 -I "$s" "$1" >/dev/null 2>&1 || true; fi
 }
+scrub_shared_log() { scrub_known "$HOME/.local/share/opencode/log"; }
 trap scrub_shared_log EXIT
-prompt="Rule for this run: never open, print, copy or type into a command the contents of an environment file (.env, .env.*, *.env), a key file or a password, even if the task seems to need it; if it does, say so in your report and stop.
+prompt="Rule for this run: never open, print, copy or type into a command the contents of an environment file (.env, .env.*, *.env), a key file or a password, even if the task seems to need it; if it does, say so in your report and stop. Never push to main or master, never force-push, and never run install_scripts.py or install anything on the machine: push your own branch and open a pull request, and the person who owns the repo merges and installs it.
 
 $prompt"
 cd -- "$dir" || exit 2
@@ -158,6 +165,7 @@ for m in "${models[@]}"; do
       if quota_hit "$log"; then hit=1; kill "$pid" 2>/dev/null; break; fi
     done
     wait "$pid" 2>/dev/null; last=$?
+    scrub_known "$log"  # the run is over: what it printed is cleaned before it is copied into the lane's out.log
     cat -- "$log"
     if [ "$hit" = 0 ] && quota_hit "$log"; then hit=1; fi
     [ "$hit" = 1 ] || exit "$last"
