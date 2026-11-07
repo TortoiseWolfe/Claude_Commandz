@@ -2,8 +2,8 @@
 """The hub board's ledger: a state word for every open item, a stale view, work orders and an at-risk check. No model, no network
 unless a line names a GitHub pull request or commit (and then only `gh`, with --no-net to turn that off).
 
-  notes_ledger.py counts [--stale-days 14]           lines by owner, state and age, characters and a token estimate; never prints line text
-  notes_ledger.py stale  [--stale-days 14]           the open items older than that with no change since (the default `open` read hides them)
+  notes_ledger.py counts [--stale-days 10]           lines by owner, state and age, characters and a token estimate; never prints line text
+  notes_ledger.py stale  [--stale-days 10]          the open items older than that with no change since (the default `open` read hides them)
   notes_ledger.py ledger [--owner P] [--state S,S] [--write FILE]  one line per fresh open item: id, state, due, evidence
   notes_ledger.py order  [--match S] [--owner P] [--state S,S] [--include-stale] [--limit N]
                                                      ONE block per open item: state, the decision already made, the deadline, the evidence
@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from hub_inbox_archive import split_blocks  # noqa: E402
 
 HOME = Path(os.environ.get("HOME", str(Path.home())))
-STALE_DAYS = 14
+STALE_DAYS = 10
 EVIDENCE_OLD_H = 24
 # The design proposed 3 hours. Jonathan's own example (queued, due 1 PM, checked at 9 AM) has to flag at 9 AM, and 3 hours would flag it at
 # 10 AM, three hours before an ear-check that needs the morning, so the short margin is 4. The hub can change the number here.
