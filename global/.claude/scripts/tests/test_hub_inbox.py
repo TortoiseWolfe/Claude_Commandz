@@ -41,7 +41,9 @@ BOARD = """- [x] 2026-09-20 10:00 | Job: Old finished thing | detail | aa11aa11
 def run(args, state, **env):
     # The board fixture is dated October 2026; pin "today" so the stale rule (open lines older than
     # HUB_STALE_DAYS are not shown by default) does not depend on the date the suite runs.
-    e = dict(os.environ, MUSE_STATE=str(state), HUB_TODAY="2026-10-20")
+    # HUB_STALE_DAYS is pinned too: these tests are about prefixes, notes and ticks, not the default limit (test_notes_ledger.py
+    # holds that), so a change of the default must not move which fixture lines they see.
+    e = dict(os.environ, MUSE_STATE=str(state), HUB_TODAY="2026-10-20", HUB_STALE_DAYS="14")
     e.update(env)
     e.pop("HUB_INBOX", None)
     e.pop("MUSE_INBOX", None)

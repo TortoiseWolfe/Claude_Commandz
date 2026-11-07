@@ -234,7 +234,7 @@ class Stale(Base):
         r = self.cli("counts")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("open items: 10", r.stdout)
-        self.assertIn("stale (older than 14 days, no change since): 1", r.stdout)
+        self.assertIn("stale (older than 10 days, no change since): 1", r.stdout)
         self.assertIn("by state:", r.stdout)
         for word in ("ear-check", "Estimify", "digest", "ticked"):
             self.assertNotIn(word, r.stdout)
@@ -321,6 +321,21 @@ class OpenRead(Base):
 
     def test_ticked_lines_are_never_in_open(self):
         self.assertNotIn("already ticked", self.rec("open", "--all").stdout)
+
+    def test_the_default_limit_is_ten_days(self):
+        """No HUB_STALE_DAYS: a line dated 11 days before today is stale, one dated exactly 10 days before is not."""
+        self.board.write_text("- [ ] 2026-10-27 09:00 | Job: eleven days old | e-1\n"
+                              "- [ ] 2026-10-28 09:00 | Job: ten days old | e-2\n"
+                              "- [ ] 2026-10-29 09:00 | Job: nine days old | e-3\n")
+        out = self.rec("open").stdout
+        self.assertNotIn("eleven days old", out)
+        self.assertIn("ten days old", out)
+        self.assertIn("nine days old", out)
+        self.assertIn("1 stale open item(s) not shown: older than 10 days", out)
+        counts = subprocess.run(["python3", "-I", LEDGER, "counts", "--inbox", str(self.board), "--lanes-dir", str(self.lanes),
+                                 "--now", "2026-11-07 09:00", "--no-net"], capture_output=True, text=True, timeout=60,
+                                env={k: v for k, v in os.environ.items() if k != "HUB_STALE_DAYS"}).stdout
+        self.assertIn("stale (older than 10 days, no change since): 1", counts)
 
     def test_stale_days_can_be_changed(self):
         e = dict(os.environ, MUSE_STATE=str(self.d), HUB_TODAY="2026-11-07", HUB_STALE_DAYS="1", HOME=str(self.d))

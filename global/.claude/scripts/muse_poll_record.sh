@@ -19,7 +19,7 @@
 #                                                ticks open client lines whose IDs are all absorbed. Also used for routine alerts.
 #   muse_poll_record.sh open [<prefix>] [-v] [--full]  -> prints the open lines only (never the done history), optionally one
 #                                                kind ("Waiting on Hatch"); -v adds each open line's indented notes.
-#                                                This is how a model reads the board: never read the whole file. Items older than 14 days with no
+#                                                This is how a model reads the board: never read the whole file. Items older than 10 days with no
 #                                                change since (HUB_STALE_DAYS) are left out and counted in a last line; --stale lists only
 #                                                them, --all lists both.
 #   muse_poll_record.sh ledger|order|risk|counts|stale  -> notes_ledger.py (state word per open item from checked facts, one work-order
@@ -177,10 +177,10 @@ case "${1:-}" in
     done
     [[ -f "$INBOX" ]] || exit 0
     # An open item is stale when its last change (the date on its line, or on the head of any note under it) is more than
-    # HUB_STALE_DAYS (default 14) days before today (HUB_TODAY overrides today, for tests). The default read leaves stale items out and says
+    # HUB_STALE_DAYS (default 10) days before today (HUB_TODAY overrides today, for tests). The default read leaves stale items out and says
     # how many; --stale lists only them; --all lists both. A line with no readable date is never stale.
     today=${HUB_TODAY:-$(date +%F)}
-    cutoff=$(date -d "$today -${HUB_STALE_DAYS:-14} days" +%F)
+    cutoff=$(date -d "$today -${HUB_STALE_DAYS:-10} days" +%F)
     # One awk program, run twice: once for what is shown, once (mode "count") to count the stale items the default read leaves out.
     # shellcheck disable=SC2016
     OPEN_AWK='
@@ -211,7 +211,7 @@ case "${1:-}" in
       else printf '%s\n' "$out" | python3 -I "$(dirname "$(readlink -f "$0")")/big_output.py" --name inbox-open --group-by '^- \[ \] [^|]*\| ([A-Za-z][A-Za-z ]*[A-Za-z])[:|]'; fi
     fi
     if [[ $hidden -gt 0 ]]; then
-      echo "($hidden stale open item(s) not shown: older than ${HUB_STALE_DAYS:-14} days with no change since. List them with: muse_poll_record.sh open --stale)"
+      echo "($hidden stale open item(s) not shown: older than ${HUB_STALE_DAYS:-10} days with no change since. List them with: muse_poll_record.sh open --stale)"
     fi
     ;;
   stale|counts|ledger|order|risk)

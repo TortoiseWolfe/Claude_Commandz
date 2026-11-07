@@ -228,7 +228,7 @@ It prints line 1 of `report.md` with the file's time and the same report verdict
 Every Claude session used to read the whole hub list (`~/.claude/state/hub-inbox.md`, about 46,000 tokens at 544 open lines), and a note saying "being built" was relayed as fact. `global/.claude/scripts/notes_ledger.py` gives each open item exactly one state word, set by the script and never by a note or a model: QUEUED (the default), STARTED (a lane folder exists for it, or a pull request or commit it names exists), BLOCKED or DONE (that lane's `report.md` line 1, a merged pull request, or a "done" note), and AT-RISK (still QUEUED with a `due:` deadline closer than the margin: 4 hours when the deadline was set under a day ahead, 24 hours otherwise). The board's format is unchanged and the ledger never writes to it.
 
 ```bash
-muse_poll_record.sh open              # fresh open items only; the last line counts the stale ones left out (older than 14 days, no change since)
+muse_poll_record.sh open              # fresh open items only; the last line counts the stale ones left out (older than 10 days, no change since)
 muse_poll_record.sh open --stale      # only the stale ones (--all shows both)
 muse_poll_record.sh counts            # numbers only: lines by owner, state and age; never line text
 muse_poll_record.sh order [--state QUEUED,AT-RISK] [--match word] [--limit N]   # ONE block per item: state, the decision already made, the deadline, the evidence
