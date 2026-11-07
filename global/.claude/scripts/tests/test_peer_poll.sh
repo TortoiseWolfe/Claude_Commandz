@@ -121,6 +121,14 @@ check "ccseen refuses a bad id" '! rec ccseen "bad id;rm" 2>/dev/null'
 check "ccseen does not touch the processed record" '[ ! -e "$R/peer-notes-processed.txt" ]'
 rec inbox "[MUSE>CC] note unhandled 30+ min (NX-01 may be down): s | g | r789012"
 check "inbox queues the line" 'grep -q "NX-01 may be down" "$R/peer-inbox.md"'
+rec inbox "[MUSE>CC] note unhandled 30+ min (NX-01 may be down): s | g | r789012"
+check "the same note id queued twice writes one line" '[ "$(grep -c "| r789012\$" "$R/peer-inbox.md")" = 1 ]'
+check "a repeat says it was already queued" '[ "$(rec inbox "x | y | r789012")" = "already queued: r789012" ]'
+rec inbox "another note | what | r555555"
+check "a different id is still queued" '[ "$(grep -c "| r555555\$" "$R/peer-inbox.md")" = 1 ]'
+rec inbox "a line with no id field"
+rec inbox "a line with no id field"
+check "a line with no id-shaped last field is always added" '[ "$(grep -c "a line with no id field" "$R/peer-inbox.md")" = 2 ]'
 rec processed r111111
 check "processed still works" 'grep -qxF r111111 "$R/peer-notes-processed.txt"'
 check "an unknown verb is refused" '! rec nonsense 2>/dev/null'

@@ -86,6 +86,24 @@ class Board(unittest.TestCase):
             self.assertEqual(run(["inbox", p + ": x | y | z"], self.st).returncode, 0, p)
         self.assertEqual(self.board.read_text().count("\n"), BOARD.count("\n") + 10)
 
+    def test_the_same_note_id_is_queued_once(self):
+        line = "Job: fresh thing | for the director | abcdef123456"
+        self.assertEqual(run(["inbox", line], self.st).returncode, 0)
+        r = run(["inbox", "Job: the same note again, reworded | more words | abcdef123456"], self.st)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "already queued: abcdef123456")
+        self.assertEqual(self.board.read_text().count("abcdef123456"), 1)
+
+    def test_an_id_on_a_ticked_line_also_counts(self):
+        # the fixture's ticked line for Recent done ends in bb22bb22
+        r = run(["inbox", "Hub: again | x | bb22bb22"], self.st)
+        self.assertEqual(r.stdout.strip(), "already queued: bb22bb22")
+
+    def test_a_short_or_missing_id_is_never_a_duplicate(self):
+        for _ in range(2):
+            self.assertEqual(run(["inbox", "Hub: twice | x | y"], self.st).returncode, 0)
+        self.assertEqual(self.board.read_text().count("Hub: twice | x | y"), 2)
+
     def test_done_through_the_old_name_keeps_the_symlink(self):
         r = run(["done", "r-1234567890"], self.st, HUB_INBOX=str(self.link))
         self.assertEqual(r.stdout.strip(), "ticked 1")
