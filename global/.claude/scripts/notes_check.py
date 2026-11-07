@@ -44,6 +44,15 @@ MAIL_QUERIES = [
     '"H-7CH" -subject:"[CC>MUSE]" newer_than:3d -in:draft -label:agent-notes-cc-processed',
 ]
 
+# --poll: the same four searches the Haiku check prompt (muse_poll.check.prompt) runs, over its 2-day window, with the
+# prompt's extra exclusion on the H-7CH search (Hatch's notes to the second tower are not ours). Subjects it skips after
+# the fetch: a note this machine wrote, and Hatch answering the tower.
+POLL_DRAFT_QUERIES = [q.replace("newer_than:3d", "newer_than:2d") for q in DRAFT_QUERIES]
+POLL_MAIL_QUERIES = [q.replace("newer_than:3d", "newer_than:2d") for q in MAIL_QUERIES]
+POLL_DRAFT_QUERIES[-1] = '"H-7CH" -subject:"[CC>MUSE]" -subject:"NCC-74656" newer_than:2d'
+POLL_MAIL_QUERIES[-1] = '"H-7CH" -subject:"[CC>MUSE]" -subject:"NCC-74656" newer_than:2d -in:draft -label:agent-notes-cc-processed'
+POLL_SKIP_SUBJECT_PREFIXES = ("[NX-01>", "Re: [CC>MUSE] NCC-74656:")
+
 LABEL_CC_PROCESSED = "Label_32"
 
 
@@ -130,15 +139,17 @@ def get_message_ids(query):
     return results
 
 
-def check_notes(processed_path, log):
-    log.write("start notes_check run")
+def check_notes(processed_path, log, poll=False):
+    log.write("start notes_check run" + (" (poll)" if poll else ""))
+    draft_queries = POLL_DRAFT_QUERIES if poll else DRAFT_QUERIES
+    mail_queries = POLL_MAIL_QUERIES if poll else MAIL_QUERIES
 
     # Step 1: Collect IDs and dedupe across queries
     candidates = []
     seen_draft_ids = set()
     seen_message_ids = set()
 
-    for q in DRAFT_QUERIES:
+    for q in draft_queries:
         drafts = get_draft_ids(q)
         log.write(f"query drafts {q!r}: {len(drafts)} result(s)")
         for did, mid in drafts:
@@ -157,7 +168,7 @@ def check_notes(processed_path, log):
                 "message_id": mid,
             })
 
-    for q in MAIL_QUERIES:
+    for q in mail_queries:
         messages = get_message_ids(q)
         log.write(f"query mail {q!r}: {len(messages)} result(s)")
         for mid in messages:
@@ -219,6 +230,9 @@ def check_notes(processed_path, log):
         date_val = h.get("date", "")
         dt = parse_date(date_val)
         note_id = c["draft_id"] if c["kind"] == "draft" else c["message_id"]
+        if poll and subject_val.startswith(POLL_SKIP_SUBJECT_PREFIXES):
+            log.write(f"drop {c['kind']} {note_id}: subject starts with a skipped prefix")
+            continue
         remaining_notes.append({
             "id": note_id,
             "kind": c["kind"],
@@ -230,13 +244,16 @@ def check_notes(processed_path, log):
 
     # Output to stdout: oldest first
     remaining_notes.sort(key=lambda x: x["dt"])
-    if not remaining_notes:
+    if poll:
+        print("NEW " + " ".join(n["id"] for n in remaining_notes) if remaining_notes else "NONE")
+    elif not remaining_notes:
         print("notes: none new")
     else:
         for n in remaining_notes:
             print(f"NOTE {n['id']} | {n['kind']} | {n['from']} | {n['subject']} | {n['date']}")
 
     log.write(f"finished notes_check run: {len(remaining_notes)} note(s) reported")
+    return remaining_notes
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -791,6 +808,8 @@ def main(argv=None):
     parser.add_argument("--sweep", action="store_true",
                         help="Delete handled fleet-note drafts (dry run unless --apply); prints counts, never note bodies")
     parser.add_argument("--apply", action="store_true", help="With --sweep: really delete")
+    parser.add_argument("--poll", action="store_true",
+                        help="Print one line: NEW <ids> or NONE (the muse_poll check, without a model). A Gmail failure exits 1 with the reason on stderr and prints neither")
     parser.add_argument("--reader-record", action="append", default=None, metavar="PARTY=PATH",
                         help="With --sweep: a reader's published read record (draft or message IDs, one per line); repeat for several. "
                              "Default: NCC-74656=~/repos/hub/tower/peer-notes-processed.txt")
@@ -828,7 +847,7 @@ def main(argv=None):
                     rr[party] = os.path.expanduser(path)
             sweep(args.processed, log, apply=args.apply, reader_records=rr, status_path=STATUS_FILE)
             return 0
-        check_notes(args.processed[0], log)
+        check_notes(args.processed[0], log, poll=args.poll)
         return 0
     except gmail_api.GmailError as e:
         print(str(e), file=sys.stderr)
