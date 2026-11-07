@@ -176,6 +176,26 @@ class Deadlines(Base):
         self.assertEqual(self.due("go due: 12 PM"), datetime(2026, 11, 7, 12, 0))
         self.assertEqual(self.due("go due: 2026-11-08"), datetime(2026, 11, 8, 17, 0))
 
+    def test_written_out_dates_the_tower_uses(self):
+        self.assertEqual(self.due("go due Sat 7 Nov 6 PM ET"), datetime(2026, 11, 7, 18, 0))
+        self.assertEqual(self.due("go, due Sat 7 Nov 6:30 pm"), datetime(2026, 11, 7, 18, 30))
+        self.assertEqual(self.due("go due Sat Nov 7, 6 PM"), datetime(2026, 11, 7, 18, 0))
+        self.assertEqual(self.due("go due 7 November"), datetime(2026, 11, 7, 17, 0))
+        self.assertEqual(self.due("go due Thu 5 Nov AM", created="2026-11-03 09:00"), datetime(2026, 11, 5, 12, 0))
+        self.assertEqual(self.due("go due Thu 5 Nov PM", created="2026-11-03 09:00"), datetime(2026, 11, 5, 17, 0))
+        self.assertEqual(self.due("go due 2nd Jan", created="2026-12-20 09:00"), datetime(2027, 1, 2, 17, 0))  # next year when the date is long past
+        self.assertEqual(self.due("go due 7 Nov 2027 9 AM"), datetime(2027, 11, 7, 9, 0))
+
+    def test_written_out_dates_that_are_not_deadlines(self):
+        self.assertIsNone(self.due("go due Fri 7 Nov 6 PM"))       # 7 Nov 2026 is a Saturday: no deadline rather than a wrong one
+        self.assertIsNone(self.due("go due 31 Feb"))
+        self.assertIsNone(self.due("go due 7 Novelties"))
+        self.assertIsNone(self.due("go due 7 Nov 13 PM"))             # an impossible hour: no deadline rather than a guess
+        self.assertIsNone(self.due("the due date of 7 Nov"))
+
+    def test_numeric_form_still_wins(self):
+        self.assertEqual(self.due("go due: 2026-11-08 1 PM, not due 7 Nov"), datetime(2026, 11, 8, 13, 0))
+
     def test_not_a_deadline(self):
         self.assertIsNone(self.due("nothing to see"))
         self.assertIsNone(self.due("go due 3 things"))

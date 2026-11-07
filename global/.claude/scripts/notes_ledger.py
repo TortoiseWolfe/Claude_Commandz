@@ -191,8 +191,56 @@ def gh_resolver(kind, repo, ref):
         return None
 
 
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_WD = r"(?:(?P<wd>mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"
+_MON = r"(?P<mon>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])\.?"
+_TIME = r"(?:,?\s+(?:at\s+|by\s+)?(?:(?P<h>\d{1,2})(?::(?P<m>\d\d))?\s*)?(?P<ap>[ap]\.?m\.?)(?![a-z]))?"
+# "due Sat 7 Nov 6 PM ET", "due Thu 5 Nov AM", "due Nov 7, 6:30 pm": the free-text form the tower's lines use (no separate deadline field).
+DUE_WORDS = [
+    re.compile(r"\bdue:?\s+" + _WD + r"(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+" + _MON + r"(?:,?\s+(?P<y>\d{4}))?" + _TIME, re.I),
+    re.compile(r"\bdue:?\s+" + _WD + _MON + r"\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?!\d)(?:,?\s+(?P<y>\d{4}))?" + _TIME, re.I),
+]
+
+
+def parse_due_words(item):
+    """-> a datetime or None for a written-out date. A bare AM means noon, a bare PM or no time means 5:00 PM (the numeric form's own
+    default), the zone letters are ignored because both machines keep Eastern time, and a weekday that does not match its date means no
+    deadline (a wrong deadline is worse than none)."""
+    if item.created is None:
+        return None
+    for rx in DUE_WORDS:
+        for m in rx.finditer(item.full_text()):
+            mon = MONTHS.index(m.group("mon").lower()[:3]) + 1
+            year = int(m.group("y")) if m.group("y") else item.created.year
+            try:
+                day = datetime(year, mon, int(m.group("day")))
+                if not m.group("y") and day < item.created - timedelta(days=60):
+                    day = day.replace(year=year + 1)
+            except ValueError:
+                continue
+            if m.group("wd") and WEEKDAYS[day.weekday()] != m.group("wd").lower()[:3]:
+                continue
+            h, mi, ap = m.group("h"), m.group("m"), m.group("ap")
+            if ap is None:
+                hour, minute = 17, 0
+            elif h is None:
+                hour, minute = (12, 0) if ap[0].lower() == "a" else (17, 0)
+            else:
+                hour, minute = int(h), int(mi or 0)
+                if hour > 12 or hour < 1 or minute > 59:
+                    continue
+                hour = hour % 12 + (12 if ap[0].lower() == "p" else 0)
+            return day.replace(hour=hour, minute=minute)
+    return None
+
+
 def parse_due(item):
-    """-> a datetime or None. Reads the first "due" in the line and its notes."""
+    """-> a datetime or None. The first numeric "due" in the line and its notes; when that gives none, a written-out date."""
+    return parse_due_numeric(item) or parse_due_words(item)
+
+
+def parse_due_numeric(item):
     m = DUE.search(item.full_text())
     if not m:
         return None
@@ -294,6 +342,12 @@ def short(s, n):
 def context(a):
     now = datetime.strptime(a.now, "%Y-%m-%d %H:%M") if a.now else datetime.now().replace(second=0, microsecond=0)
     items = read_items(a.inbox)
+    seen = {i.id for i in items}
+    for extra in getattr(a, "extra_inbox", None) or []:  # a second list file (the tower's peer-inbox.md); a repeated line counts once
+        for i in read_items(extra):
+            if i.id not in seen:
+                seen.add(i.id)
+                items.append(i)
     folders = lane_folders(a.lanes_dir)
     return now, items, folders
 

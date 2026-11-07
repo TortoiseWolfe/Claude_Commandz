@@ -19,6 +19,9 @@ a secret word. The export is a draft for the hub to read; this script never send
 line is malformed, when the sender is not the expected peer or is this machine, when it is older than the one already saved, or
 when it is dated more than 10 minutes ahead of now (a far-future date would block every later real note). For client owners the
 evidence goes out as its kind only (lane, pr or commit), because a lane or repo name can carry a client's name.
+The tower keeps two list files in the same line shape (hub-inbox.md, and peer-inbox.md whose first field is a note subject with its
+tag instead of an owner word); the export reads both when peer-inbox.md sits beside the inbox, counts a repeated line once, drops the
+leading [tag] from a subject title, and reads a written-out deadline such as "due Sat 7 Nov 6 PM ET" (notes_ledger.parse_due).
 There is no signature: the note travels through Jonathan's own mailbox, and every field is a closed format shown as data only.
 """
 import argparse
@@ -91,6 +94,8 @@ def safe_title(owner, text):
         return "(withheld)"
     body = text.split(":", 1)[1] if text.startswith(owner + ":") else text
     body = re.sub(r"\s+", " ", body.split("|", 1)[0]).strip()
+    if owner == "other":  # the tower's peer-inbox.md lines start with a note subject and its tag, e.g. "[NX-01>NCC-74656] Subject"
+        body = re.sub(r"^\[[A-Za-z0-9>-]{1,40}\]\s*", "", body)
     if not body or unsafe_title(body):
         return "(withheld)"
     body = body[:50].rstrip()
@@ -256,7 +261,12 @@ def main(argv=None):
     ap.add_argument("--no-net", action="store_true")
     ap.add_argument("--all", action="store_true", help="export: every fresh open item, not only those with a state, a deadline or aimed at the peer")
     ap.add_argument("--state")
+    ap.add_argument("--extra-inbox", action="append", default=None,
+                    help="export: another list file to include (repeat it). Default: peer-inbox.md beside --inbox, which only the tower has")
+    ap.add_argument("--no-peer-inbox", action="store_true", help="export: read only --inbox")
     a = ap.parse_args(argv)
+    if a.extra_inbox is None:
+        a.extra_inbox = [] if a.no_peer_inbox else [str(Path(a.inbox).parent / "peer-inbox.md")]
     a.peer = a.peer or default_peer()
     a.owner = a.match = None
     a.include_stale = False

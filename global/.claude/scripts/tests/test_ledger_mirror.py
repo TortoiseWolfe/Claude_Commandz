@@ -271,5 +271,82 @@ class Import(Base):
         self.assertIn("saved", r.stdout)
 
 
+TOWER_HUB = """- [ ] 2026-11-06 10:00 | Job: write the weekly digest, lane digestwork | detail | j-1
+- [ ] 2026-11-06 12:00 | Waiting on NX-01: send the example result | detail | j-2
+- [ ] 2026-11-02 09:00 | Client talk: the florist asked about an invoice | detail | j-3
+- [x] 2026-11-05 09:00 | Job: already done | detail [closed ok] | j-4
+"""
+TOWER_PEER = """- [ ] 2026-11-05 09:00 | [NX-01>NCC-74656] Estimate the stage lights | one-line need, due Sat 7 Nov 6 PM ET | r-1
+- [ ] 2026-11-06 09:00 | [NX-01>NCC-74656] Check the loading dock plan | one-line need | r-2
+- [ ] 2026-11-06 12:00 | Waiting on NX-01: send the example result | detail | j-2
+"""
+
+
+class TowerShape(Base):
+    """The tower's two list files: hub-inbox.md in our shape, peer-inbox.md led by a note subject, deadlines written out."""
+
+    def setUp(self):
+        super().setUp()
+        self.board.write_text(TOWER_HUB)
+        (self.d / "peer-inbox.md").write_text(TOWER_PEER)
+
+    def tower(self, *extra):
+        e = dict(os.environ, HOME=str(self.d), AFA_MACHINE="NCC-74656")
+        e.pop("HUB_INBOX", None)
+        e.pop("MUSE_INBOX", None)
+        return subprocess.run(["python3", "-I", MIRROR, "export", "--inbox", str(self.board), "--lanes-dir", str(self.lanes),
+                               "--now", NOW, "--no-net", "--all", *extra], capture_output=True, text=True, env=e, timeout=60)
+
+    def test_both_files_are_read_and_every_line_is_valid(self):
+        r = self.tower()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Subject: [NCC-74656>NX-01] ledger 2026-11-07", r.stdout)
+        body = self.note(r)
+        for ln in body:
+            self.assertTrue(lm.LINE.match(ln), ln)
+        text = "\n".join(body)
+        self.assertIn("write the weekly digest", text)
+        self.assertIn("Estimate the stage lights", text)       # from peer-inbox.md, tag dropped
+        self.assertIn("Check the loading dock plan", text)
+        self.assertNotIn("NX-01>", text)
+        self.assertNotIn("already done", text)
+        self.assertNotIn("florist", text)
+
+    def test_a_line_in_both_files_counts_once(self):
+        ids = [ln[:8] for ln in self.note(self.tower())]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(ids), 5)  # 3 open hub lines (digest, example result, client talk) + 2 peer-only lines; "send the example result" is in both files and counts once
+
+    def test_a_written_out_deadline_makes_the_queued_item_at_risk(self):
+        row = next(ln for ln in self.note(self.tower()) if "stage lights" in ln)
+        self.assertEqual(row.split(" | ")[1], "AT-RISK")
+        self.assertEqual(row.split(" | ")[3], "2026-11-07 18:00")
+        self.assertEqual(row.split(" | ")[2], "other")
+
+    def test_the_note_imports_on_nx_01_and_the_board_is_untouched(self):
+        out = self.tower().stdout
+        before = (self.board.read_text(), (self.d / "peer-inbox.md").read_text())
+        r = self.cli("import", "-", "--peer", "NCC-74656", "--peer-file", str(self.peerfile), "--now", NOW, stdin=out, machine="NX-01")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        s = self.cli("show", "--peer", "NCC-74656", "--peer-file", str(self.peerfile), "--now", NOW, "--state", "AT-RISK")
+        self.assertIn("[NCC-74656]", s.stdout)
+        self.assertIn("stage lights", s.stdout)
+        self.assertEqual(before, (self.board.read_text(), (self.d / "peer-inbox.md").read_text()))
+
+    def test_no_peer_inbox_flag_and_extra_inbox_flag(self):
+        self.assertNotIn("stage lights", "\n".join(self.note(self.tower("--no-peer-inbox"))))
+        other = self.d / "other.md"
+        other.write_text("- [ ] 2026-11-06 09:00 | Job: a third file item | detail | k-1\n")
+        text = "\n".join(self.note(self.tower("--no-peer-inbox", "--extra-inbox", str(other))))
+        self.assertIn("a third file item", text)
+        self.assertNotIn("stage lights", text)
+
+    def test_a_machine_without_a_peer_inbox_is_unchanged(self):
+        (self.d / "peer-inbox.md").unlink()
+        r = self.tower()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("stage lights", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
