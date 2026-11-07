@@ -23,6 +23,12 @@
 # Permissions: everything allowed except paths outside the checkout; the lane folder and this repo's own worktrees (~/repos/.worktrees/<repo>--*,
 # <repo>-wf-*) are the outside paths it may use, never another repo's worktree. Shell commands are not sandboxed beyond that: the client guard in
 # lane.sh on the checkout is what keeps client code away from the free APIs.
+# Secrets (6 Nov 2026: a lane read an env file and a password reached the shared OpenCode log and the free model's provider): the config denies the
+# read and edit tools on env files (*.env, *.env.*), key files (*api-key*, *.pem, *.netrc, ssh keys) and denies shell commands that start with, or
+# have an argument starting with, .env (best effort: a command can still reach a file another way), and the prompt tells the model never to open
+# them. OpenCode logs every permission check with the whole command text the model typed, at INFO level into the shared ~/.local/share/opencode/log,
+# so the run uses --log-level ERROR (no such lines) and, after the run, scrub_known_secrets.py rewrites that log (best effort: it skips a log
+# written in the last two minutes; values are never printed).
 # The config is written to the lane folder (OPENCODE_CONFIG), never into the repo. A wall-clock limit (OPENCODE_LANE_TIMEOUT seconds, default 7200)
 # stops a run that loops.
 set -u
@@ -63,7 +69,11 @@ mkdir -p -- "$hand"
 conf="$hand/opencode.json"
 cat >"$conf" <<JSON
 {"\$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
- "permission":{"*":"allow","external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
+ "permission":{"*":"allow",
+  "read":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
+  "edit":{"*":"allow","*.env":"deny","*.env.*":"deny","*api-key*":"deny","*.pem":"deny","*.netrc":"deny","*id_rsa*":"deny","*id_ed25519*":"deny"},
+  "bash":{"*":"allow",".env*":"deny","* .env*":"deny","*/.env*":"deny","*api-key*":"deny"},
+  "external_directory":{"*":"deny","$hand/**":"allow","$dir/**":"allow","$HOME/repos/.worktrees/$repo_name--*/**":"allow","$HOME/repos/.worktrees/$repo_name-wf-*/**":"allow"}}}
 JSON
 export OPENCODE_CONFIG="$conf"
 
@@ -118,6 +128,14 @@ write_stamp() {  # <provider>: a per-day refusal; yesterday's stamps for it are 
 }
 
 prompt="$(cat -- "$prompt_file")" || exit 2
+scrub_shared_log() {
+  local s="$HOME/.claude/scripts/scrub_known_secrets.py"
+  { [ -r "$s" ] && [ -d "$HOME/.local/share/opencode/log" ] && python3 -I "$s" "$HOME/.local/share/opencode/log" >/dev/null 2>&1; } || true
+}
+trap scrub_shared_log EXIT
+prompt="Rule for this run: never open, print, copy or type into a command the contents of an environment file (.env, .env.*, *.env), a key file or a password, even if the task seems to need it; if it does, say so in your report and stop.
+
+$prompt"
 cd -- "$dir" || exit 2
 log="$hand/.opencode-run.log"
 last=0
@@ -132,7 +150,7 @@ for m in "${models[@]}"; do
     echo "opencode: model $m"
     : >"$log"
     # In the background so a loop on a rate-limit error (OpenCode retries and compacts forever) is caught while it runs, not after the time limit.
-    timeout "$LIMIT" "$OPENCODE_BIN" run --model "$m" --auto --dir "$dir" "$prompt" >"$log" 2>&1 &
+    timeout "$LIMIT" "$OPENCODE_BIN" run --model "$m" --auto --log-level ERROR --dir "$dir" "$prompt" >"$log" 2>&1 &
     pid=$!
     hit=0
     while kill -0 "$pid" 2>/dev/null; do
