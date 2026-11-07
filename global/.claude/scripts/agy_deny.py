@@ -27,6 +27,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # python3 -I does not add the script's folder
+import lane_secret_paths as shared  # noqa: E402  the one list of settings files (issue 332)
+
 # File names that hold secrets, matched against the base name.
 SECRET_NAME = re.compile(
     r"^(\.env(\..*)?|.*\.env|.*\.pem|\.netrc|id_rsa.*|id_ed25519.*|.*api-key.*)$"
@@ -68,9 +71,12 @@ COMMAND_DENY = [
 def secret_files(checkout):
     found = []
     for root, dirs, files in os.walk(checkout):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for d in dirs:
+            if shared.is_sealed_dir(d):
+                found.append(os.path.join(root, d) + "/")
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not shared.is_sealed_dir(d))
         for f in sorted(files):
-            if SECRET_NAME.match(f):
+            if SECRET_NAME.match(f) or shared.is_secret_file(f):
                 found.append(os.path.join(root, f))
                 if len(found) >= MAX_FILES:
                     return found

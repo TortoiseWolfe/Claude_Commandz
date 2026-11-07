@@ -52,6 +52,13 @@
 # with "local: ..." in out.log. Same client guard as the others for now; the ~/repos rule does not apply (nothing is sent out). Not in the dispatcher's
 # engine order (it is chosen by hand). Pilot numbers: the PR that added it.
 #
+# Settings files (issue 332): every engine that is not Claude (codex, copilot, agy, opencode, local) starts behind lane_hide_secrets.sh. It scans the
+# prompt and the hand-off folder for real secret values (exit 98 on a match), hides every settings file from the engine and its children with a
+# mount namespace (env files, key files, sealed-key folders, ~/.config/afa/secrets, ~/.config/afa/rotated-test-users; the list is lane_secret_paths.py),
+# and refuses to start the engine if it cannot. A secret a test needs is granted by name: set LANE_SECRET_ENV to NAME (or NAME,NAME) when starting the
+# lane and it reaches that lane as an environment variable, read from ~/.config/afa/secrets/NAME, never as a file the model can open.
+# See README.md, "Lanes never see settings files".
+#
 # 3D work tier (his rule, 19 Oct): a Claude lane whose prompt file names data/sites/, site-model, band-wagon/stage or turnaround (3D fitting, photo
 # matching, site models, Blender character work) starts or resumes only on fable or opus, each at effort high.
 # sonnet, haiku or any other model name is refused, on start, --console, --headless and --resume alike. --allow-low-tier bypasses it.
@@ -2518,6 +2525,18 @@ if [ "$engine" != claude ]; then
   # A failed run with no report.md gets "FAILED exit <code> | <last error line>" as line 1 (so lane_watch wakes the hub), and an engine that
   # says it is out of quota with a reset time is refused at the next start until then (#234: agy sat dead for 70 minutes unnoticed).
   cmd+="; lane_rc=\$?; printf 'exit %s\\n' \"\$lane_rc\" >>$out_cmd; [ \"\$lane_rc\" -eq 0 ] || python3 -I $(printf %q "$SCRIPT_DIR/lane_fail_report.py") $(printf %q "$hand/report.md") $out_cmd \"\$lane_rc\" $engine $(printf %q "$HOME/.claude/state") || true; exit \"\$lane_rc\""
+  # Issue 332: one rule for every engine that is not Claude. The whole command runs behind lane_hide_secrets.sh, which scans the prompt and the hand-off
+  # folder for real secret values, hides every settings file (env files, key files, sealed-key folders, ~/.config/afa/secrets, rotated test users) with a
+  # mount namespace, drops capabilities and only then starts the engine. If it cannot set that up, the engine does not run. The per-engine denies
+  # (opencode_lane.sh, agy_deny.py) stay as a second layer, built from the same list (lane_secret_paths.py).
+  # A secret a test needs is granted by name, LANE_SECRET_ENV=NAME[,NAME] (read from ~/.config/afa/secrets/NAME), and reaches the lane as an environment variable.
+  hide_roots="$(ad_merge "${ad_start:--}")"; hide_roots="${hide_roots#-}"
+  hide_prefix=""; sq="'\\''"  # a single quote inside a single-quoted string
+  [ -z "$hide_roots" ] || hide_prefix+="LANE_HIDE_EXTRA_ROOTS=$(printf %q "$hide_roots") "
+  [ -z "${LANE_SECRET_ENV:-}" ] || hide_prefix+="LANE_SECRET_ENV=$(printf %q "$LANE_SECRET_ENV") "
+  [ -z "${LANE_SCAN_REPOS:-}" ] || hide_prefix+="LANE_SCAN_REPOS=$(printf %q "$LANE_SCAN_REPOS") "
+  [ -z "${LANE_HIDE_REPOS:-}" ] || hide_prefix+="LANE_HIDE_REPOS=$(printf %q "$LANE_HIDE_REPOS") "
+  cmd="${hide_prefix}$(printf %q "$SCRIPT_DIR/lane_hide_secrets.sh") $(printf %q "$dir") $(printf %q "$hand") $(printf %q "$lprompt") -- bash -c '${cmd//\'/$sq}'"
   denv="$(lane_docker_env)"; [ -n "$denv" ] && cmd="export $denv; $cmd"
 elif [ "$headless" = 1 ]; then
   out="$hand/out.log"
