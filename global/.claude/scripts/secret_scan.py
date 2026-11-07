@@ -49,16 +49,24 @@ def run_gitleaks(target, workdir):
     # false positives in .gitleaksignore are written ("<file>:<rule>:<line>"), and an absolute path would never match them.
     cwd = t0 if t0.is_dir() else t0.parent
     sub = "." if t0.is_dir() else t0.name
+    # gitleaks reads a rules file named .gitleaks.toml from the folder it scans, so the scanned text could switch its own rules
+    # off. The pre-push hook uses the default rules; so does this: a folder that carries its own rules file is refused, not trusted.
+    if (cwd / ".gitleaks.toml").exists():
+        print("secret_scan: the scanned folder has its own .gitleaks.toml, which could switch rules off; not trusting it", file=sys.stderr)
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GITLEAKS_CONFIG")}
     if local:
         cmd = local + ["dir", sub] + flags + ["--report-path", str(report)]
     else:
         if not shutil.which("docker"):
             print("secret_scan: no gitleaks program and no docker", file=sys.stderr)
             return None
-        cmd = ["timeout", str(TIMEOUT), "docker", "run", "--rm", "-w", "/scan", "-v", "%s:/scan:ro" % cwd,
+        # Run as the caller, so the 0700 work folder needs no wider permission for the container to write its report.
+        cmd = ["timeout", str(TIMEOUT), "docker", "run", "--rm", "--user", "%d:%d" % (os.getuid(), os.getgid()),
+               "-w", "/scan", "-v", "%s:/scan:ro" % cwd,
                "-v", "%s:/out" % workdir, "zricethezav/gitleaks:latest", "dir", sub] + flags + ["--report-path", "/out/gitleaks-report.json"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT + 30, cwd=str(cwd))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT + 30, cwd=str(cwd), env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print("secret_scan: gitleaks did not run: %s" % e, file=sys.stderr)
         return None
@@ -81,7 +89,9 @@ def run_known(target):
         print("secret_scan: known_secrets_scan.py not found", file=sys.stderr)
         return None
     try:
-        r = subprocess.run([sys.executable, "-I", prog, str(target)], capture_output=True, text=True, timeout=TIMEOUT)
+        # --strict is what the pre-push hook passes: it walks every folder and counts an unreadable file as a finding,
+        # so a file this scan could not open never reads as clean.
+        r = subprocess.run([sys.executable, "-I", prog, "--strict", str(target)], capture_output=True, text=True, timeout=TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as e:
         print("secret_scan: known_secrets_scan.py did not run: %s" % e, file=sys.stderr)
         return None
@@ -113,7 +123,6 @@ def main(argv=None):
     ap.add_argument("--index", action="store_true")
     a = ap.parse_args(argv)
     with tempfile.TemporaryDirectory(prefix="secret-scan-") as work:
-        os.chmod(work, 0o755)  # the Docker route mounts it
         if a.paths and not a.index:
             worst = 0
             for p in a.paths:
