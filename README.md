@@ -192,6 +192,27 @@ Claude lanes start lean, because a lane re-reads everything it starts with on ev
 
 3D fitting, photo matching and site-model work runs only on `fable` or `opus` (each at effort high). When a Claude lane's prompt file contains `data/sites/` or `site-model`, lane.sh refuses `sonnet`, `haiku` or any other model on start, `--console`, `--headless` and `--resume`, and names the rule in `~/repos/hub/lane-rules.md`. `--allow-low-tier` overrides it. Jonathan's rule of 19 Oct 2026: a cheap model on work it can't do is no saving.
 
+### Lanes never see settings files (issue 332)
+
+Every lane that is not Claude (codex, copilot, agy, opencode, local) starts behind `global/.claude/scripts/lane_hide_secrets.sh`, which `lane.sh` puts in front of the engine's command. It does four things, in order:
+
+1. **Scans** the prompt file and the lane's hand-off folder for real secret values on this machine (`known_secrets_scan.py`, the scanner from workspace issue 20). A match refuses the start with exit 98 and prints names only, never values. A scanner that cannot run also refuses.
+2. **Hides** every settings file from the engine and everything it starts: env files (`.env`, `.env.*`, `*.env`, `.envrc`, but not `.env.example`), key files (`*.pem`, `*.p12`, `*.pfx`, `.netrc`, `id_rsa*`, `id_ed25519*`, `*api-key*`), sealed-key folders, `~/.config/afa/secrets` and `~/.config/afa/rotated-test-users`. The one list is `lane_secret_paths.py`; `agy_deny.py` and `opencode_lane.sh` (the earlier per-engine denies) remain a second layer built from the same names. The hiding is a user and mount namespace (`unshare -Urm`) with capabilities dropped (`setpriv`), so the engine cannot unmount it.
+3. **Refuses to start** the engine if any of that cannot be set up (exit 97).
+4. **Scrubs** the lane's `out.log` afterwards (`scrub_known_secrets.py`).
+
+**A secret a test needs** goes to that one process as an environment variable, never through a file the model can open: put it in `~/.config/afa/secrets/NAME` (one line), then start the lane with the variable `LANE_SECRET_ENV` set to `NAME` (comma-separated for several). The file stays hidden; the value is in the lane's environment only.
+
+What this does not cover, plainly:
+- A settings file created after the lane started is not hidden until the next start.
+- A secret granted by name is in the lane's environment, so the lane can print it (the log scrub catches it in `out.log`, not elsewhere).
+- The engine's own provider key files (`~/.config/gemini`, `~/.config/openrouter`) stay readable because the engine needs them.
+- Inside a lane, `docker compose` reading `.env` sees an empty file.
+- Claude lanes are outside this guard; their own secret-guard hook covers them.
+- Needs unprivileged user namespaces (Linux). On Ubuntu 24.04: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The tests (`tests/test_lane_secret_guard.sh`, one run per engine) fail, never skip, when they are off.
+
+Install on a machine: `cp global/.claude/scripts/lane_secret_paths.py global/.claude/scripts/lane_hide_secrets.sh global/.claude/scripts/lane.sh global/.claude/scripts/agy_deny.py ~/.claude/scripts/` (or the person-run `install_scripts.py` command above).
+
 ### Where is this lane?
 
 `global/.claude/scripts/lane_brief.py` answers "where is this lane and does it need me?" in one call, in place of `lane.sh --status`, a `tmux capture-pane`, a read of `report.md` and `lane.sh --recycle-point`. It is read-only: it sends no keys and writes no file.
