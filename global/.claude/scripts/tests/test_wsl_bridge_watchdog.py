@@ -3,6 +3,7 @@ a heal that fails or a probe that fails wakes the hub (alert file), and nothing 
 
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -45,6 +46,7 @@ class Box:
         self.files = {"/proc/buddyinfo": buddy, "/proc/meminfo": meminfo, **(SYSCTL_OK if sysctl is None else sysctl)}
         self.effects = effects or {}  # substring of the script -> (buddy, meminfo) it leaves behind
         self.root_ok = root_ok
+        self.root_route = "docker"
         self.scripts = []
 
     def read(self, path):
@@ -62,7 +64,7 @@ class Box:
         for k, v in wd.DESIRED.items():
             if "echo %d > %s" % (v, wd.sysctl_path(k)) in script:
                 self.files[wd.sysctl_path(k)] = "%d\n" % v
-        return True, "docker"
+        return True, self.root_route
 
 
 class Watchdog(unittest.TestCase):
@@ -91,6 +93,110 @@ class Watchdog(unittest.TestCase):
     def heal_log(self):
         p = os.path.join(self.sd, "heal.log")
         return open(p).read() if os.path.exists(p) else ""
+
+    # ---- local Alpine selection (#312: a pruned alpine:3 tag must not strand the Docker route)
+    def test_run_root_uses_an_existing_alpine_tag_without_pulling(self):
+        image_id = "sha256:" + "a" * 64
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "image" in argv:
+                return mock.Mock(returncode=0, stdout="%s alpine latest\n" % image_id)
+            return mock.Mock(returncode=0, stdout=b"")
+
+        with mock.patch.object(wd.subprocess, "run", side_effect=run):
+            self.assertEqual(wd.run_root("echo ok"), (True, "docker"))
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn(image_id, calls[1][0])
+        self.assertIn("--pull=never", calls[1][0])
+        self.assertFalse(any("pull" in argv for argv, _ in calls))
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], "timeout")
+            self.assertIn("timeout", kwargs)
+
+    def test_run_root_pulls_alpine_three_once_when_no_alpine_is_tagged(self):
+        image_id = "sha256:" + "b" * 64
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "image" in argv:
+                return mock.Mock(returncode=0, stdout="%s busybox latest\n" % image_id)
+            return mock.Mock(returncode=0, stdout=b"")
+
+        with mock.patch.object(wd.subprocess, "run", side_effect=run):
+            self.assertEqual(wd.run_root("echo ok"), (True, "docker-pulled"))
+
+        pull_calls = [(argv, kwargs) for argv, kwargs in calls if "pull" in argv]
+        self.assertEqual(len(pull_calls), 1)
+        self.assertEqual(pull_calls[0][0][-2:], ["pull", wd.IMAGE])
+        self.assertIn(wd.IMAGE, calls[-1][0])
+        self.assertIn("--pull=never", calls[-1][0])
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], "timeout")
+            self.assertIn("timeout", kwargs)
+
+    def test_run_root_does_not_pull_when_local_image_lookup_fails(self):
+        for listing in (mock.Mock(returncode=1, stdout=""), subprocess.TimeoutExpired("docker image ls", 20)):
+            with self.subTest(listing=type(listing).__name__):
+                calls = []
+
+                def run(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    if len(calls) == 1:
+                        if isinstance(listing, BaseException):
+                            raise listing
+                        return listing
+                    return mock.Mock(returncode=0, stdout=b"")
+
+                with mock.patch.object(wd.subprocess, "run", side_effect=run):
+                    self.assertEqual(wd.run_root("echo ok"), (True, "wsl"))
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1][0][2], "wsl.exe")
+                self.assertTrue(all(argv[0] == "timeout" and "timeout" in kwargs for argv, kwargs in calls))
+
+    def test_run_root_uses_wsl_when_pull_fails(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "image" in argv:
+                return mock.Mock(returncode=0, stdout="")
+            if "pull" in argv:
+                return mock.Mock(returncode=1, stdout=b"")
+            return mock.Mock(returncode=0, stdout=b"")
+
+        with mock.patch.object(wd.subprocess, "run", side_effect=run):
+            self.assertEqual(wd.run_root("echo ok"), (True, "wsl-after-pull-failed"))
+
+        self.assertEqual(sum("pull" in argv for argv, _ in calls), 1)
+        self.assertFalse(any("run" in argv for argv, _ in calls))
+        self.assertEqual(calls[-1][0][2], "wsl.exe")
+        self.assertTrue(all(argv[0] == "timeout" and "timeout" in kwargs for argv, kwargs in calls))
+
+    def test_run_root_records_a_successful_pull_before_wsl_fallback(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "image" in argv or "pull" in argv:
+                return mock.Mock(returncode=0, stdout="" if "image" in argv else b"")
+            if "docker" in argv:
+                return mock.Mock(returncode=1, stdout=b"")
+            return mock.Mock(returncode=0, stdout=b"")
+
+        with mock.patch.object(wd.subprocess, "run", side_effect=run):
+            self.assertEqual(wd.run_root("echo ok"), (True, "wsl-after-docker-pull"))
+        self.assertEqual(sum("pull" in argv for argv, _ in calls), 1)
+
+    def test_heal_log_records_when_docker_pulled_alpine(self):
+        box = Box(effects={"drop_caches": (HEALED, HIGH_FREE)})
+        box.root_route = "docker-pulled"
+        rc, _ = self.go(box)
+        self.assertEqual(rc, 0)
+        self.assertIn("route=docker-pulled", self.heal_log())
 
     # ---- the measurement
     def test_the_19_oct_buddyinfo_has_no_big_block_and_the_healed_one_has_plenty(self):
