@@ -202,6 +202,21 @@ python3 ~/.claude/scripts/lane_brief.py <lane> [--lines N] [--json]   # exit 2 f
 
 It prints line 1 of `report.md` with the file's time and the same report verdict `lane.sh --status` shows (written, stale, or not yet), the engine and model, the context in K against the lane's recycle line, whether the pane is still running claude (`DEAD (pane shows bash)` when not), whether a dialog is waiting (the lane_watch.sh rule) with the dialog's first lines, and the last N (default 12) screen lines joined with `-J`, so a long line is not cut at the screen width. A grey suggestion in an idle input box is marked `(suggestion, not typed)`. A headless lane (agy, codex, copilot, opencode) has no pane: it prints the tail of `out.log` and the time the engine is blocked until, in Eastern time, from `openclaw-dispatch.json`. `--json` prints the same facts as one object with nothing cut.
 
+### The notes ledger (what state is each open note in, from facts a script can check)
+
+Every Claude session used to read the whole hub list (`~/.claude/state/hub-inbox.md`, about 46,000 tokens at 544 open lines), and a note saying "being built" was relayed as fact. `global/.claude/scripts/notes_ledger.py` gives each open item exactly one state word, set by the script and never by a note or a model: QUEUED (the default), STARTED (a lane folder exists for it, or a pull request or commit it names exists), BLOCKED or DONE (that lane's `report.md` line 1, a merged pull request, or a "done" note), and AT-RISK (still QUEUED with a `due:` deadline closer than the margin: 4 hours when the deadline was set under a day ahead, 24 hours otherwise). The board's format is unchanged and the ledger never writes to it.
+
+```bash
+muse_poll_record.sh open              # fresh open items only; the last line counts the stale ones left out (older than 14 days, no change since)
+muse_poll_record.sh open --stale      # only the stale ones (--all shows both)
+muse_poll_record.sh counts            # numbers only: lines by owner, state and age; never line text
+muse_poll_record.sh order [--state QUEUED,AT-RISK] [--match word] [--limit N]   # ONE block per item: state, the decision already made, the deadline, the evidence
+muse_poll_record.sh ledger            # one line per fresh open item
+muse_poll_record.sh risk              # one escalation line per at-risk item; empty output means nothing is at risk
+```
+
+`muse_poll_record.sh archive [days]` (already there) moves ticked-done blocks older than the limit into `hub-inbox-archive/YYYY-MM.md`, and now also logs each block moved (id, month file, date; no text) in `hub-inbox-archive/archive.log`. Add `--no-net` to any ledger command to skip the GitHub lookups. The stale rule alone hides few lines (14 of 544 on 7 Nov); the saving comes from reading `order --state ...` or `ledger` instead of the whole list.
+
 ### The hub starts lean too
 
 The hub (`claude` started in `~/repos`) used to carry about 80K tokens before its first reply, against about 47K for a lane. `global/.claude/scripts/hub_lean.py` closes most of that gap with no new flags: it writes a project settings file in `~/repos/.claude/` (untracked, the workspace `.gitignore` is an allowlist) that Claude Code reads whenever a session starts there. The file switches off the plugins in lane.sh's `LANE_PLUGINS_OFF`, withholds the Artifact tools (`LANE_TOOLS_OFF`, via `permissions.deny`) and disconnects every claude.ai connector except Gmail, Google Calendar and Google Drive, the only three the hub called in its 16-19 Oct transcripts. Plugins and tools are read out of lane.sh, so there is one list. The hub keeps its own `CLAUDE.md`, user skills, slash commands and agents.

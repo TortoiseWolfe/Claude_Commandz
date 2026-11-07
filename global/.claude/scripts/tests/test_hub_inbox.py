@@ -39,7 +39,10 @@ BOARD = """- [x] 2026-09-20 10:00 | Job: Old finished thing | detail | aa11aa11
 
 
 def run(args, state, **env):
-    e = dict(os.environ, MUSE_STATE=str(state), **env)
+    # The board fixture is dated October 2026; pin "today" so the stale rule (open lines older than
+    # HUB_STALE_DAYS are not shown by default) does not depend on the date the suite runs.
+    e = dict(os.environ, MUSE_STATE=str(state), HUB_TODAY="2026-10-20")
+    e.update(env)
     e.pop("HUB_INBOX", None)
     e.pop("MUSE_INBOX", None)
     e.update({k: v for k, v in env.items()})
@@ -270,6 +273,19 @@ class Archive(unittest.TestCase):
         (self.adir / "2026-09.md").write_text("- [x] 2026-09-20 10:00 | Job: Old finished thing | detail | aa11aa11\n")
         self.go()
         self.assertEqual((self.adir / "2026-09.md").read_text().count("Old finished thing"), 1)
+
+    def test_each_move_is_logged_without_line_text(self):
+        self.go()
+        log = (self.adir / "archive.log").read_text().splitlines()
+        self.assertEqual(len(log), 1)
+        self.assertIn("archived aa11aa11 -> 2026-09.md (last change 2026-09-21)", log[0])
+        self.assertNotIn("Old finished thing", log[0])
+        self.go()  # nothing left to move: nothing more is logged
+        self.assertEqual(len((self.adir / "archive.log").read_text().splitlines()), 1)
+
+    def test_dry_run_logs_nothing(self):
+        self.go(dry_run=True)
+        self.assertFalse((self.adir / "archive.log").exists())
 
     def test_symlink_survives_the_rewrite(self):
         link = self.st / "muse-inbox.md"
