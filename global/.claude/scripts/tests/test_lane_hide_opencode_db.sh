@@ -14,7 +14,7 @@
 #   for f in lane_hide_secrets.sh lane_secret_paths.py known_secrets_scan.py scrub_known_secrets.py scrub_sqlite_secrets.py; do git show <commit before this change>:global/.claude/scripts/$f >$d/$f; done
 #   chmod +x $d/lane_hide_secrets.sh; bash $d/tests/test_lane_hide_opencode_db.sh
 set -euo pipefail
-unset LANE_SECRET_ENV LANE_HIDE_EXTRA_ROOTS LANE_HIDE_REPOS LANE_SCAN_REPOS LANE_TOOL_OUTPUT_DIR LANE_OPENCODE_DB
+unset LANE_SECRET_ENV LANE_HIDE_EXTRA_ROOTS LANE_HIDE_REPOS LANE_SCAN_REPOS LANE_TOOL_OUTPUT_DIR LANE_OPENCODE_DB SCRUB_OPENCODE_DIR SCRUB_OPENCODE_PROGRAM
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_hide_secrets.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-hide-opencode-db.XXXXXX")"
@@ -120,13 +120,46 @@ HOME="$HOME_TEST" LANE_SCAN_REPOS="$HOME_TEST/repos" LANE_HIDE_REPOS="$HOME_TEST
   LANE_OPENCODE_DB="$DB" LANE_TOOL_OUTPUT_DIR="$TMP/none" \
   bash "$SCRIPT" "$REPO" "$HAND" "$PROMPT" -- bash -c 'exit 0' >"$TMP/run2.out" 2>&1 || fail "a held database stopped the lane: $(cat "$TMP/run2.out")"
 ok
-grep -qF 'another OpenCode process holds' "$TMP/run2.out" || fail "a held database was not reported: $(cat "$TMP/run2.out")"
+grep -qF 'an OpenCode process is alive or holds' "$TMP/run2.out" || fail "a held database was not reported: $(cat "$TMP/run2.out")"
 ok
 [ "$({ cat "$DB" "$DB-wal" 2>/dev/null || true; } | sha256sum)" = "$before" ] || fail 'the database changed while another process held it'
 ok
 kill -0 "$HOLDER_PID" 2>/dev/null || fail 'the scrub ended the process that held the database'
 ok
 if grep -qF -- "$V_KNOWN" "$TMP/run2.out"; then fail 'the held-database run printed a secret value'; fi
+ok
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+HOLDER_PID=""
+
+# 3. A process called opencode is alive but holds no file (a lane between two database opens): the post-run step must still leave the
+# database alone, and scrub it once that process has ended. 8 Nov: a second lane's OpenCode failed with "Failed to execute statement".
+# The program name is made up and handed to the script, so a real OpenCode lane running on this machine cannot change the result.
+PROG="ocstub$$"
+mkdir -p "$TMP/bin"
+# A symlink to bash, not to sleep: some sleep programs (uutils on the CI machine) refuse to run under another name.
+ln -s "$(command -v bash)" "$TMP/bin/$PROG"
+"$TMP/bin/$PROG" -c 'while :; do sleep 1; done' &
+HOLDER_PID=$!
+sleep 0.3
+before="$({ cat "$DB" "$DB-wal" 2>/dev/null || true; } | sha256sum)"
+HOME="$HOME_TEST" LANE_SCAN_REPOS="$HOME_TEST/repos" LANE_HIDE_REPOS="$HOME_TEST/repos" KNOWN_SECRETS_DIR="$HOME_TEST/.config/afa/secrets" \
+  LANE_OPENCODE_DB="$DB" LANE_TOOL_OUTPUT_DIR="$TMP/none" SCRUB_OPENCODE_DIR="$TMP" SCRUB_OPENCODE_PROGRAM="$PROG" \
+  bash "$SCRIPT" "$REPO" "$HAND" "$PROMPT" -- bash -c 'exit 0' >"$TMP/run3.out" 2>&1 || fail "a live opencode process stopped the lane: $(cat "$TMP/run3.out")"
+ok
+[ "$({ cat "$DB" "$DB-wal" 2>/dev/null || true; } | sha256sum)" = "$before" ] || fail 'the post-run step changed the database while an opencode process was alive'
+ok
+grep -qF 'an OpenCode process is alive' "$TMP/run3.out" || fail "a live opencode process was not reported: $(cat "$TMP/run3.out")"
+ok
+if ! files_have_value; then fail 'the stand-in test did not leave a value to scrub, so it proves nothing'; fi
+ok
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+HOLDER_PID=""
+HOME="$HOME_TEST" LANE_SCAN_REPOS="$HOME_TEST/repos" LANE_HIDE_REPOS="$HOME_TEST/repos" KNOWN_SECRETS_DIR="$HOME_TEST/.config/afa/secrets" \
+  LANE_OPENCODE_DB="$DB" LANE_TOOL_OUTPUT_DIR="$TMP/none" SCRUB_OPENCODE_DIR="$TMP" SCRUB_OPENCODE_PROGRAM="$PROG" \
+  bash "$SCRIPT" "$REPO" "$HAND" "$PROMPT" -- bash -c 'exit 0' >"$TMP/run4.out" 2>&1 || fail "the lane failed after the process ended: $(cat "$TMP/run4.out")"
+if files_have_value; then fail "the value stayed in the database after the opencode process ended: $(cut -c1-200 "$TMP/run4.out")"; fi
 ok
 
 echo "All $checks checks passed"

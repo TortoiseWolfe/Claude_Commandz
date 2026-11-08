@@ -8,7 +8,9 @@ there for the next lane, and scrub_known_secrets.py cannot touch it: a byte rewr
 allows. In order:
   1. Looks for the secret values (the same ones scrub_known_secrets.py uses) in the database file and its write-ahead log with grep -F. None found:
      it stops, and the database is not opened for writing.
-  2. Refuses (exit 3) while any other process holds the database, its -wal or its -shm file open. It never ends a process.
+  2. Refuses (exit 3) while any other process holds the database, its -wal or its -shm file open, and, for the database in OpenCode's own data
+     folder, while any process called opencode is alive (a lane can sit between two database opens). It never ends a process. --dry-run opens the
+     database read-only and never takes the write lock, so a running lane is never blocked by it.
   3. Copies the database with SQLite's own backup call (a copy that is consistent even with the log active) next to it, mode 0600.
   4. In one transaction, rewrites every text value that holds a secret (UPDATE ... SET column = <value with the secret replaced> WHERE rowid = ...).
      Raw, JSON-escaped, URL-encoded and base64 forms are all replaced, so JSON columns stay valid JSON. Checks again that nothing else opened the
@@ -58,6 +60,26 @@ def holders(paths):
                         found.add(int(pid))
         except OSError:
             continue   # the process ended, or belongs to someone else
+    return sorted(found)
+
+
+def program_pids(name="opencode"):
+    """PIDs (other than this one) of running processes whose program is called `name`: the process name, or the last part of argv[0].
+    Only the program name is read, never the arguments, so a prompt carrying a password is never looked at."""
+    me = os.getpid()
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            with open("/proc/%s/comm" % pid) as fh:
+                comm = fh.read().strip()
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                argv0 = fh.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+        except OSError:
+            continue
+        if comm == name or os.path.basename(argv0) == name:
+            found.append(int(pid))
     return sorted(found)
 
 
@@ -139,10 +161,18 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="count what would change; write nothing, make no backup")
     ap.add_argument("--no-vacuum", action="store_true", help="skip VACUUM (the rescan then fails if old pages still hold a value)")
     ap.add_argument("--keep-backup", action="store_true")
+    ap.add_argument("--opencode-program", default=os.environ.get("SCRUB_OPENCODE_PROGRAM") or "opencode",
+                    help="program name that counts as a running OpenCode (tests use a made-up name so a real lane on the host cannot change the result)")
+    ap.add_argument("--opencode-dir", default=os.environ.get("SCRUB_OPENCODE_DIR") or os.path.expanduser("~/.local/share/opencode"),
+                    help="OpenCode's data folder; a real run on a database in this folder is refused while any process called opencode is alive")
     a = ap.parse_args(argv)
     db = os.path.abspath(a.database)
     if not os.path.lexists(db):
         return 0
+    live_dir = os.path.realpath(os.path.expanduser("~/.local/share/opencode"))
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.path.dirname(os.path.realpath(db)) == live_dir:
+        print("sqlite scrub: a test was pointed at the live OpenCode database; refusing, nothing opened", file=sys.stderr)
+        return 7
     pinned = unsafe_paths([db, db + "-wal", db + "-shm"])
     if isinstance(pinned, str):
         print("sqlite scrub: %s is a symlink or not a regular file; refusing, nothing changed" % pinned, file=sys.stderr)
@@ -158,6 +188,12 @@ def main(argv=None):
         return 0
     files = [db, db + "-wal", db + "-shm"]
     busy = holders(files)
+    if not a.dry_run and not busy and os.path.dirname(os.path.realpath(db)) == os.path.realpath(os.path.expanduser(a.opencode_dir)):
+        alive = program_pids(a.opencode_program)   # a lane can be between two database opens, so holding no file is not proof that it has finished
+        if alive:
+            print("sqlite scrub: an OpenCode process is alive (pids %s); nothing changed, the last lane to end scrubs it"
+                  % ", ".join(map(str, alive)), file=sys.stderr)
+            return 3
     if busy and not a.dry_run:
         print("sqlite scrub: %d other process(es) hold %s open (pids %s); nothing changed, try again when they have ended"
               % (len(busy), os.path.basename(db), ", ".join(map(str, busy))), file=sys.stderr)
@@ -179,10 +215,18 @@ def main(argv=None):
             dst.close()
             src.close()
 
-    con = sqlite3.connect(db, isolation_level=None, timeout=10)
+    if a.dry_run:
+        # A dry run only reads: a read-only connection and a plain read transaction never take the write lock, so a running lane is not blocked.
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, isolation_level=None, timeout=10)
+        con.execute("PRAGMA query_only=ON")
+    else:
+        con = sqlite3.connect(db, isolation_level=None, timeout=10)
     try:
-        con.execute("PRAGMA secure_delete=ON")   # freed pages are zeroed whatever the build default is; VACUUM below is the second layer
-        con.execute("BEGIN IMMEDIATE")
+        if a.dry_run:
+            con.execute("BEGIN")
+        else:
+            con.execute("PRAGMA secure_delete=ON")   # freed pages are zeroed whatever the build default is; VACUUM below is the second layer
+            con.execute("BEGIN IMMEDIATE")
         counts, rows, skipped = rewrite(con, nds, a.dry_run)
         if a.dry_run:
             con.execute("ROLLBACK")

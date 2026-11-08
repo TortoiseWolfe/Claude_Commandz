@@ -128,7 +128,7 @@ if [ -f "$oc_db" ]; then
   db_rc=$?
   case "$db_rc" in
     0) ;;
-    3) echo "lane_hide_secrets: another OpenCode process holds $oc_db; the last lane to end scrubs it" >&2 ;;
+    3) echo "lane_hide_secrets: an OpenCode process is alive or holds $oc_db; the last lane to end scrubs it" >&2 ;;
     *) echo "lane_hide_secrets: WARNING the database scrub failed (exit $db_rc); check $oc_db for secret values" >&2 ;;
   esac
 fi

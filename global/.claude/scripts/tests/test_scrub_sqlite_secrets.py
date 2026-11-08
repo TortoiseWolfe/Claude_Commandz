@@ -226,6 +226,107 @@ class ScrubSqlite(unittest.TestCase):
         r = self.run_cli()
         self.assertEqual(r.returncode, 0)
 
+    def test_a_dry_run_never_blocks_a_writer(self):
+        # 8 Nov incident: a dry run took the write lock for as long as it read the whole database, and a running lane's
+        # OpenCode got "Failed to execute statement". The dry run is held mid-read here, and a second connection must still be able to write.
+        import importlib.util
+        import threading
+        spec = importlib.util.spec_from_file_location("scrub_sqlite_secrets_under_test", SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(SCRIPT)))
+        spec.loader.exec_module(mod)
+        mkdb(self.db)
+        reading, release = threading.Event(), threading.Event()
+        real_rewrite = mod.rewrite
+
+        def slow_rewrite(con, nds, dry):
+            reading.set()                    # the dry run is now inside its transaction
+            release.wait(30)
+            return real_rewrite(con, nds, dry)
+
+        mod.rewrite = slow_rewrite
+        result = {}
+        t = threading.Thread(target=lambda: result.update(rc=mod.main(
+            ["--repos", self.repos, "--secrets-dir", self.secrets, "--ignore", "/nonexistent", "--dry-run", self.db])))
+        t.start()
+        try:
+            self.assertTrue(reading.wait(30), "the dry run never reached its read")
+            writer = sqlite3.connect(self.db, timeout=1)
+            try:
+                writer.execute("INSERT INTO message VALUES ('w1', 's9', 'written while the dry run reads')")
+                writer.commit()
+            except sqlite3.OperationalError as e:
+                self.fail("the dry run blocked a writer: %s" % e)
+            finally:
+                writer.close()
+        finally:
+            release.set()
+            t.join(60)
+        self.assertEqual(result.get("rc"), 0)
+        self.assertEqual(self.rows("SELECT data FROM message WHERE id='w1'"), [("written while the dry run reads",)])
+
+    def stand_in_opencode(self):
+        """A process called opencode that holds no file: a symlink to sleep, started with that name."""
+        # The name is made up and handed to the script, so a real OpenCode lane running on the host cannot change the result.
+        self.prog = "ocstub%d" % os.getpid()
+        link = os.path.join(self.tmp.name, "bin", self.prog)
+        os.makedirs(os.path.dirname(link))
+        os.symlink(shutil.which("bash"), link)   # not sleep: some sleep programs (uutils) refuse to run under another name
+        proc = subprocess.Popen([link, "-c", "while :; do sleep 1; done"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        return proc
+
+    def test_a_real_run_waits_while_any_opencode_process_is_alive_even_if_it_holds_no_file(self):
+        mkdb(self.db)
+        self.stand_in_opencode()
+        before = self.files_bytes()
+        r = self.run_cli("--opencode-dir", self.tmp.name, "--opencode-program", self.prog)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("OpenCode process is alive", r.stderr)
+        self.assertEqual(self.files_bytes(), before)
+        self.assertEqual([f for f in os.listdir(self.tmp.name) if ".pre-scrub-" in f], [])
+        # A database outside OpenCode's data folder (every other test) is not held back by a lane that is running elsewhere.
+        r = self.run_cli("--opencode-dir", os.path.join(self.tmp.name, "bin"), "--opencode-program", self.prog)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(PW.encode(), self.files_bytes())
+
+    def test_a_dry_run_goes_ahead_while_an_opencode_process_is_alive(self):
+        mkdb(self.db)
+        self.stand_in_opencode()
+        r = self.run_cli("--opencode-dir", self.tmp.name, "--opencode-program", self.prog, "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would scrub", r.stdout)
+
+    def test_a_test_pointed_at_the_live_database_is_refused(self):
+        home = os.path.join(self.tmp.name, "home")
+        live = os.path.join(home, ".local", "share", "opencode")
+        os.makedirs(live)
+        self.db = os.path.join(live, "opencode.db")
+        mkdb(self.db)
+        before = self.files_bytes()
+        env = dict(os.environ, HOME=home, PYTEST_CURRENT_TEST="tests/x.py::t (call)")
+        r = subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--secrets-dir", self.secrets, "--ignore", "/nonexistent", self.db],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertEqual(self.files_bytes(), before)
+        env.pop("PYTEST_CURRENT_TEST")
+        r = subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--secrets-dir", self.secrets, "--ignore", "/nonexistent",
+                            "--opencode-dir", self.tmp.name, "--opencode-program", "ocstub-none", self.db], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)   # outside a test, the same path is scrubbed as usual
+
+    def test_no_test_file_names_the_live_opencode_folder(self):
+        needle = "." + "local/share/" + "opencode"
+        here = os.path.dirname(os.path.abspath(__file__))
+        offenders = []
+        for name in sorted(os.listdir(here)):
+            if name.startswith("test_") and name.endswith(".py"):   # the shell tests build that path under a fake HOME of their own
+                with open(os.path.join(here, name), encoding="utf-8", errors="replace") as fh:
+                    for n, line in enumerate(fh, 1):
+                        if needle in line and not line.lstrip().startswith("#"):
+                            offenders.append("%s:%d" % (name, n))
+        self.assertEqual(offenders, [], "a test names the live OpenCode folder; use a temp folder")
+
 
 if __name__ == "__main__":
     unittest.main()
