@@ -13,7 +13,10 @@
 #   4. Enters a new user and mount namespace (unshare -Urm), binds /dev/null over each settings file and an empty tmpfs over each settings folder,
 #      checks each one now reads empty, then drops every capability (setpriv) so nothing the engine runs can unmount them or mount over them, and runs
 #      the command. Any failure before the command starts exits 97 and the command never runs.
-#   5. After the command ends, rewrites the lane's out.log with scrub_known_secrets.py (best effort).
+#   5. After the command ends, rewrites the lane's out.log with scrub_known_secrets.py (best effort), and does the same to every file in OpenCode's
+#      tool-output folder (~/.local/share/opencode/tool-output, LANE_TOOL_OUTPUT_DIR overrides it) that was written since step 4 began: OpenCode saves
+#      the full output of each tool call there, so a password a command printed stays readable to the next lane until it is scrubbed. Older files
+#      there are not touched, and a lane can still read a file from its own run while it runs.
 #
 # Limits, stated plainly: a settings file created after the lane starts is not hidden until the next start; a secret the lane is granted by name sits in
 # the environment of that lane, so it can print it; the engine's own provider key files (~/.config/gemini, ~/.config/openrouter) stay readable because
@@ -95,6 +98,8 @@ if [ -n "${LANE_SECRET_ENV:-}" ]; then
 fi
 
 # 4. Run the command with the settings files hidden.
+started="$(mktemp)"; touch -d '1 second ago' "$started"
+trap 'rm -f "$scan_err" "$scan_out" "$listfile" "$started"' EXIT
 unshare -Urm "$SELF" --inner "$listfile" -- "$@"
 rc=$?
 # A failure to set up shows as exit 97 or 98 from the inner step; the command's own exit code passes through.
@@ -102,5 +107,12 @@ rc=$?
 # 5. Scrub the run's log.
 if [ -f "$hand/out.log" ]; then
   python3 -I "$SCRIPT_DIR/scrub_known_secrets.py" --min-age 0 --repos "${LANE_SCAN_REPOS:-$HOME/repos}" "$hand/out.log" >/dev/null 2>&1 || true
+fi
+# Tool-output files the run wrote (OpenCode keeps each tool call's full output there).
+tool_out="${LANE_TOOL_OUTPUT_DIR:-$HOME/.local/share/opencode/tool-output}"
+if [ -d "$tool_out" ]; then
+  find "$tool_out" -type f -newer "$started" -print0 2>/dev/null |
+    xargs -0 -r python3 -I "$SCRIPT_DIR/scrub_known_secrets.py" --min-age 0 --repos "${LANE_SCAN_REPOS:-$HOME/repos}" >&2 ||
+    echo "lane_hide_secrets: WARNING the tool-output scrub failed; check $tool_out for secret values" >&2
 fi
 exit "$rc"

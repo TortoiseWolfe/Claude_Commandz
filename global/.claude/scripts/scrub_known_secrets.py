@@ -42,16 +42,31 @@ def shortlist(paths, values):
     return [os.fsdecode(f) for f in r.stdout.splitlines() if f]
 
 
-def scrub_file(path, nds, dry):
-    data = open(path, "rb").read()
+def scrub_file(path, nds, dry, expect=None):
+    """expect is the (device, inode) the caller saw with lstat. The file is opened without following a link, checked on the
+    descriptor it will be read from, and checked again just before it is replaced, so a link swapped in between is left alone."""
     counts = Counter()
+    try:
+        fd0 = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return counts
+    with os.fdopen(fd0, "rb") as src:
+        st = os.fstat(src.fileno())
+        if not stat.S_ISREG(st.st_mode) or (expect is not None and (st.st_dev, st.st_ino) != tuple(expect)):
+            return counts
+        data = src.read()
     for needle, rep, key in nds:
         n = data.count(needle)
         if n:
             data = data.replace(needle, rep)
             counts[key] += n
     if counts and not dry:
-        st = os.stat(path)
+        try:
+            now = os.lstat(path)
+        except OSError:
+            return Counter()
+        if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+            return Counter()
         d = os.path.dirname(path)
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".scrub-")
         with os.fdopen(fd, "wb") as fh:
@@ -86,7 +101,7 @@ def main(argv=None):
     total, files, skipped = Counter(), 0, 0
     for f in shortlist(paths, sorted({n for n, _, _ in nds})):
         try:
-            st = os.stat(f)
+            st = os.lstat(f)   # lstat: a symbolic link someone planted is never followed or replaced
         except OSError:
             continue
         if st.st_size > MAX_BYTES or not stat.S_ISREG(st.st_mode):
@@ -94,7 +109,7 @@ def main(argv=None):
         if st.st_mtime > cutoff:
             skipped += 1
             continue
-        c = scrub_file(f, nds, a.dry_run)
+        c = scrub_file(f, nds, a.dry_run, (st.st_dev, st.st_ino))
         if c:
             files += 1
             total.update(c)

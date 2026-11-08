@@ -72,6 +72,37 @@ class Scrub(unittest.TestCase):
         self.assertNotIn(PW, open(old).read())
         self.assertEqual([f for f in os.listdir(self.tmp.name) if f.startswith(".scrub-patterns-")], [])
 
+    def test_a_symbolic_link_named_on_the_command_line_is_left_alone(self):
+        # (security review of 7 Nov 2026) the scrub must not follow a link a lane planted and write a copy of its target
+        target = self.log("target.jsonl", [{"out": PW}])
+        link = os.path.join(self.tmp.name, "link.jsonl")
+        os.symlink(target, link)
+        r = subprocess.run([sys.executable, SCRIPT, "--repos", self.repos, "--secrets-dir", self.secrets,
+                            "--ignore", "/nonexistent", "--min-age", "0", link], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.islink(link), "the link was replaced by a regular file")
+        self.assertIn(PW, open(target).read())
+
+    def test_a_file_swapped_for_a_link_after_the_check_is_not_read_or_replaced(self):
+        # (second security review of 7 Nov 2026) lstat then open leaves a gap; the open itself must refuse a link
+        # and the inode seen at the check must be the one that is read
+        sys.path.insert(0, os.path.dirname(SCRIPT))
+        import scrub_known_secrets as sks
+        nds = [(PW.encode(), b"<redacted:K>", "K")]
+        target = self.log("t2.jsonl", [{"out": PW}])
+        real = self.log("r2.jsonl", [{"out": PW}])
+        link = os.path.join(self.tmp.name, "swap.jsonl")
+        os.symlink(target, link)
+        st = os.lstat(real)
+        self.assertEqual(sks.scrub_file(link, nds, False, (st.st_dev, st.st_ino)), {})
+        self.assertTrue(os.path.islink(link))
+        self.assertIn(PW, open(target).read())
+        other = os.lstat(target)   # the inode the check saw is not the file now at the path
+        self.assertEqual(sks.scrub_file(real, nds, False, (other.st_dev, other.st_ino)), {})
+        self.assertIn(PW, open(real).read())
+        self.assertEqual(dict(sks.scrub_file(real, nds, False, (st.st_dev, st.st_ino))), {"K": 1})
+        self.assertNotIn(PW, open(real).read())
+
     def test_scrubs_secret_values_from_the_overridden_secrets_directory(self):
         value = "K1m3P5r7" + "T9v2X4z6" + "B8d0F2h5"
         with open(os.path.join(self.secrets, "stream.key"), "w") as fh:
