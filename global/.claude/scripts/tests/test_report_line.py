@@ -70,6 +70,10 @@ class ReportLine(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         r = self.run_tool("set", str(self.f), "--state", "STEP-FOR-JONATHAN", "--text", "open https://example.test/p in the fleet tab")
         self.assertEqual(r.returncode, 0, r.stderr)
+        # The stamp is forced to 9:05 AM, but check reads the file's real change time. Move the change time to 9:05 AM
+        # local so the test does not depend on the time of day it runs (it failed on a UTC runner before 9:03 AM UTC).
+        at = report_line.datetime.datetime.now().replace(hour=9, minute=5, second=0, microsecond=0).timestamp()
+        os.utime(self.f, (at, at))
         self.assertEqual(self.run_tool("check", str(self.f)).stdout, "ok\n")
 
     def test_multi_line_text_is_refused(self):
