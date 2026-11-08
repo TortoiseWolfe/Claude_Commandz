@@ -287,6 +287,11 @@ printf '%s\trk-lane\t%s\tsonnet\tsubscription\t%s\t%s\tsess-rk\t%s\thigh\toff\t9
 lane --recycle-point rk-lane; [ "$LAST_OUT" = 90 ] || fail "--recycle-point reads 90, got $LAST_OUT"; ok
 lane --dry-run --recycle rk-lane
 assert_contains "$LAST_OUT" 'recycle line 90K' 'the dry run shows the line the new row will carry'
+lane --dry-run --recycle-at 140 --recycle rk-lane
+assert_contains "$LAST_OUT" 'recycle line 140K' '--recycle-at before --recycle sets the line the new row carries'
+lane --dry-run --recycle-at 160 --recycle rk-lane
+assert_exit 1 "$LAST_RC" '160K on a lane with the connectors off is refused'
+assert_contains "$LAST_OUT" 'only for lanes with the connectors on' 'the refusal says why (rk-lane has them off)'
 printf '%s\trk-old\t%s\tsonnet\tsubscription\t%s\t%s\tsess-old2\t-\thigh\toff\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
 lane --dry-run --recycle rk-old
 assert_contains "$LAST_OUT" 'recycle line 100K' 'a row without the column shows the default line'
@@ -434,6 +439,10 @@ lane --dry-run --recycle conn-lane
 assert_contains "$LAST_OUT" 'recycle line 127K' 'the recycle dry run shows the connector line for the new row'
 printf '%s\tconn-high\t%s\tsonnet\tsubscription\t%s\t%s\tsess-ch\t-\thigh\ton\t160\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" >>"$INDEX"
 lane --recycle-point conn-high; [ "$LAST_OUT" = 160 ] || fail "a connector lane's stored line above 150 is kept, got: $LAST_OUT"; ok
+lane --dry-run --recycle-at 165 --recycle conn-high
+assert_contains "$LAST_OUT" 'recycle line 165K' 'a connector lane may be given a line above 150 with --recycle-at'
+lane --dry-run --recycle-at 166 --recycle conn-high
+assert_exit 1 "$LAST_RC" 'a line above 165K is refused even with the connectors on'
 lane --dry-run --recycle conn-high
 assert_contains "$LAST_OUT" 'recycle line 160K' 'the recycle carries a connector lane line above 150 into the new row'
 

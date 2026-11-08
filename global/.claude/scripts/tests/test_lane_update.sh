@@ -220,6 +220,14 @@ assert_contains "$LAST_OUT" "by exact PID" "dry run says the stop is by PID"
 assert_contains "$LAST_OUT" "the restart passes its own --dry-run" "the restart is pre-checked"
 [ ! -e "$ST/sent.log" ] && alive "$OLDPID" || fail "--dry-run changed something"; ok
 
+# --recycle-at <K> before --update sets the line the restart writes (7 Nov: the hub had to hand-edit a lane's row to 160).
+lane --dry-run --recycle-at 140 --update up-lane
+[ "$LAST_RC" = 0 ] || fail "--recycle-at is accepted with --update ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" "--recycle-at 140 up-lane $REPO sonnet" "the restart carries the new line, not the row's 120"
+assert_not_contains "$LAST_OUT" "--recycle-at 120" "the old line is replaced"
+lane --dry-run --recycle-at 160 --update up-lane
+[ "$LAST_RC" = 1 ] || fail "160K on a lane with the connectors off is refused ($LAST_OUT)"; assert_contains "$LAST_OUT" "only for lanes with the connectors on" "says why"
+
 # The own-repo tier rule (agy default) must not stop an update: an update continues the same lane, so the restart reuses the reason last
 # logged for it, or the one given before --update. A lane with no logged reason and none given is still refused while it is alive.
 mkdir -p "$HOME_T/repos/hub"; printf 'id\trepo_dir\nacme\t~/repos/client-app\n' >"$HOME_T/repos/hub/client-senders.tsv"; printf '# clients\n' >"$HOME_T/repos/hub/client-repos.txt"

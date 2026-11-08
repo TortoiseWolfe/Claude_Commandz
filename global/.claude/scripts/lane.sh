@@ -446,10 +446,11 @@ if [ "$recycle_at_set" = 1 ]; then
   # A connector lane starts near 77K, and with large tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
   # go to LANE_RECYCLE_MAX_CONN_K (165, just under where Claude Code compacts, about 168K); the 150 ceiling holds for the rest.
   # A resume's connectors come from its index row, so it is checked again once they are known.
-  rk_max=150; { [ "$connectors_opt" = 1 ] || [ "$mode" = resume ]; } && rk_max=${LANE_RECYCLE_MAX_CONN_K:-165}
+  # --recycle and --update read the lane's connectors from its index row, so they check the 150 ceiling there.
+  rk_max=150; { [ "$connectors_opt" = 1 ] || [ "$mode" = resume ] || [ "$mode" = recycle ] || [ "$mode" = update ]; } && rk_max=${LANE_RECYCLE_MAX_CONN_K:-165}
   [[ "$recycle_at_opt" =~ ^[0-9]+$ ]] && [ "$recycle_at_opt" -ge 40 ] && [ "$recycle_at_opt" -le "$rk_max" ] \
     || { echo "--recycle-at needs a whole number of K tokens from 40 to 150 (up to ${LANE_RECYCLE_MAX_CONN_K:-165} with --connectors; Claude Code compacts at about 168K), got: $recycle_at_opt" >&2; exit 1; }
-  case "$mode" in start|resume) ;; *) echo "--recycle-at only applies when starting or resuming a lane" >&2; exit 1 ;; esac
+  case "$mode" in start|resume|recycle|update) ;; *) echo "--recycle-at only applies when starting, resuming, recycling or updating a lane" >&2; exit 1 ;; esac
 fi
 # --add-dir folders: each must be an existing folder; a path is stored in index column 15 as a colon list, so it may hold no colon, tab or newline.
 add_dirs_new=()
@@ -1750,9 +1751,15 @@ if [ "$mode" = recycle ]; then
   id="$(follow_session "$name" "$dir" "${id:-}" "${st:-0}")"
   hand="$(dirname "$rep")"; handoff="$hand/handoff.md"
   ctxk="$([ -n "${id:-}" ] && [ "$id" != - ] && ctx_k "$dir" "$id" || echo '?')"
+  # --recycle-at <K> before --recycle sets the line the new row carries (the hub hand-edited a row to 160 on 7 Nov); a lane
+  # without connectors stays at 150 or under (they start light), as at start.
+  if [ "$recycle_at_set" = 1 ]; then
+    if [ "${conn:--}" != on ] && [ "$recycle_at_opt" -gt 150 ]; then echo "--recycle-at above 150K is only for lanes with the connectors on ($name has them off), got: $recycle_at_opt" >&2; exit 1; fi
+    rk="$recycle_at_opt"
+  fi
   rk_now="$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")"
   rk_next="$rk_now"
-  if [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ]; then
+  if [ "$recycle_at_set" != 1 ] && [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ]; then
     rk_next=$(( rk_now + 20 )); rk_ceiling=$(( ${LANE_WINDOW_CAP:-200000} * 84 / 100000 - 40 ))
     [ "$rk_next" -le "$rk_ceiling" ] || rk_next=$(( rk_ceiling > rk_now ? rk_ceiling : rk_now ))
   fi
@@ -2121,6 +2128,10 @@ if [ "$mode" = update ]; then
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
+  if [ "$recycle_at_set" = 1 ]; then   # --recycle-at <K> --update <name>: the restart writes K as the lane's line
+    if [ "${conn:--}" != on ] && [ "$recycle_at_opt" -gt 150 ]; then echo "--recycle-at above 150K is only for lanes with the connectors on ($name has them off), got: $recycle_at_opt" >&2; exit 1; fi
+    rk="$recycle_at_opt"
+  fi
   case "${b:-subscription}" in subscription|console) ;; *) echo "update refused: $name runs on engine ${b}, not an interactive Claude session" >&2; exit 1 ;; esac
   is_headless_billing "${b:-}" && { echo "update refused: $name is a headless lane" >&2; exit 1; }
   [ -n "${rep:-}" ] && [ "$rep" != - ] || { echo "update refused: $name has no hand-off folder recorded in $INDEX" >&2; exit 1; }
