@@ -1,7 +1,8 @@
 # Reviewed 2026-10-01: a 17-char placeholder in a BEFORE/AFTER teaching example, not a key.
 global/.claude/commands/secrets-scan.md:generic-api-key:207
 # Reviewed 2026-10-01: synthetic fixtures in the secret-guard / redactor tests, not real keys.
-global/.claude/scripts/tests/test_redact_view.py:private-key:85
+global/.claude/scripts/tests/test_redact_view.py:private-key:91
+global/.claude/scripts/tests/test_redact_view.py:private-key:180
 # test_secret_guard.py's two placeholder tokens are built at runtime now (2026-10-10), so they need no entry.
 # Reviewed 2026-10-10: the same teaching example as above, at the path it had before the move to
 # global/.claude/commands/. History scans (gitleaks detect) still reach it in commit 20deb74.

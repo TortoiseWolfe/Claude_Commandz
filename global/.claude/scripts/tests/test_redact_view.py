@@ -26,8 +26,14 @@ class Fixture(unittest.TestCase):
             fh.write(text)
         return p
 
-    def run_cli(self, *args):
-        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+    def run_cli(self, *args, stdin=None, env=None):
+        # Hermetic: the known-value pass reads an empty folder, never this machine's real env files.
+        quiet = os.path.join(self.tmp.name, "no-env-files")
+        os.makedirs(quiet, exist_ok=True)
+        e = dict(os.environ, REDACT_VIEW_REPOS=quiet, KNOWN_SECRETS_DIR=quiet,
+                 REDACT_VIEW_IGNORE=os.path.join(quiet, "none"))
+        e.update(env or {})
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, input=stdin, env=e)
 
 
 class Json(Fixture):
@@ -246,6 +252,123 @@ class BareKey(Fixture):
         self.assertNotIn(key, out)
         self.assertEqual(out.count("<redacted:"), 3)
         self.assertIn("rtmps://live.twitch.tv/app/", out)
+
+
+CI_LOG = os.path.join(os.path.dirname(__file__), "fixtures", "ci_log_env.txt")
+# Every made-up secret in the fixture; none may survive masking.
+CI_SECRETS = ["FakePass-Alpha-0001", "FakePass-Beta-0002", "fake-service-role-0003", "fakepw0004",
+              "fakedsn0005", "FakePass-Gamma-0006", "fake-auth-token-0007", "fake-client-secret-0008",
+              "FakePass-Delta-0009"]
+
+
+class NameValueLines(Fixture):
+    """'NAME: value' lines (YAML and CI-log env style) were printed in full on 7 Nov 2026:
+    `gh run view <id> --log | redact_view.py /dev/stdin` showed two TEST_USER_*_PASSWORD values."""
+
+    def check_log(self, out):
+        for secret in CI_SECRETS:
+            self.assertNotIn(secret, out)
+        # what is not secret stays readable
+        self.assertIn("NODE_VERSION: 22", out)
+        self.assertIn("tester-one@example.invalid", out)
+        self.assertIn("MAX_OUTPUT_TOKENS: 32000", out)
+        self.assertIn("NEXT_PUBLIC_API_KEY: ${{ secrets.NEXT_PUBLIC_API_KEY }}", out)
+        self.assertIn("TEST_USER_PRIMARY_PASSWORD: <redacted:%d>" % len(CI_SECRETS[0]), out)
+        self.assertIn("export TEST_USER_TERTIARY_PASSWORD=<redacted:", out)
+        self.assertIn('"client_secret": "<redacted:', out)
+        self.assertIn('"dbPassword": "<redacted:', out)
+        self.assertIn("GITHUB_TOKEN: ***", out)
+
+    def test_ci_log_file(self):
+        self.check_log(self.run_cli(CI_LOG).stdout)
+
+    def test_ci_log_through_stdin_like_gh_run_view(self):
+        with open(CI_LOG) as fh:
+            r = self.run_cli("/dev/stdin", stdin=fh.read())
+        self.assertEqual(r.returncode, 0)
+        self.check_log(r.stdout)
+
+    def test_name_forms(self):
+        for line in ("TEST_USER_A_PASSWORD: " + PW, "  TEST_USER_A_PASSWORD: " + PW,
+                     "2026-11-07T20:30:00.1Z   TEST_USER_A_PASSWORD: " + PW,
+                     "TEST_USER_A_PASSWORD=" + PW, "export TEST_USER_A_PASSWORD=" + PW,
+                     '"TEST_USER_A_PASSWORD": "%s"' % PW, "'TEST_USER_A_PASSWORD': '%s'," % PW,
+                     "DATABASE_URL: " + PW, "SENTRY_DSN=" + PW, "apiKey: " + PW, "PRIVATE: " + PW):
+            self.assertNotIn(PW, rv.scrub(line), line)
+            self.assertNotIn(PW, rv.mask_text(line), line)
+
+    def test_no_tail_is_left_showing(self):
+        # (the code-review findings of 7 Nov 2026) an escaped quote, a value with spaces, an unterminated quote
+        for secret, line in (("tail-after-escape", 'PASSWORD: "ab\\"tail-after-escape"'),
+                             ("two words", "TEST_USER_A_PASSWORD: two words"),
+                             ("tail-unterminated", 'TEST_USER_A_PASSWORD: "tail-unterminated'),
+                             ("tail-sq", "TOKEN: 'a\\'tail-sq'")):
+            out = rv.scrub(line)
+            self.assertNotIn(secret, out, line)
+            self.assertNotIn(secret.split()[-1], out, line)
+        # shell style keeps the command that follows the value
+        self.assertEqual(rv.scrub("AUTH_TOKEN=fakevalue npm run e2e"), "AUTH_TOKEN=<redacted:9> npm run e2e")
+
+    def test_a_plain_name_does_not_hide_a_later_pair(self):
+        # (the code-review finding of 7 Nov 2026) a name that is not a secret must not swallow the rest of the line
+        for fake, line in (("zq1fake", "Error: x DB_PASSWORD: zq1fake"),
+                           ("zq2fake", "FOO=bar DSN=zq2fake cmd"),
+                           ("zq3fake", "a: b: c PASSWORD=zq3fake"),
+                           ("zq4fake", "FOO=bar API_KEY=zq4fake AUTH_TOKEN=zq4fake npm test")):
+            out = rv.scrub(line)
+            self.assertNotIn(fake, out, line)
+        self.assertEqual(rv.scrub("FOO=bar DSN=zq2fake cmd"), "FOO=bar DSN=<redacted:7> cmd")
+        self.assertEqual(rv.scrub("Error: x DB_PASSWORD: zq1fake"), "Error: x DB_PASSWORD: <redacted:7>")
+
+    def test_names_without_a_secret_word_stay(self):
+        for line in ("NODE_VERSION: 22", "USER_EMAIL: a@b.invalid", "keys_only: yes", "monkey: george",
+                     "see https://example.com/docs", "time 20:30:01 done", "max_tokens: 4096",
+                     "TOKEN_COUNT: 12", "PASSWORD: ${{ secrets.PW }}", "KEY: $KEY"):
+            self.assertEqual(rv.scrub(line), line)
+
+
+class KnownValues(Fixture):
+    """A value from this machine's env files is masked wherever it appears, with no NAME next to it."""
+
+    def test_known_value_without_a_name(self):
+        repo = os.path.join(self.tmp.name, "repos", "app")
+        os.makedirs(repo)
+        known = "FakeKnown-Value-0010"
+        with open(os.path.join(repo, ".env"), "w") as fh:
+            fh.write("LEGACY_PASSWORD=%s\nPORT=3000\n" % known)
+        log = self.write("run.log", "login as %s failed\nlisten on 3000\n" % known)
+        r = self.run_cli(log, env={"REDACT_VIEW_REPOS": os.path.join(self.tmp.name, "repos")})
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn(known, r.stdout)
+        self.assertIn("<redacted:LEGACY_PASSWORD>", r.stdout)
+        self.assertIn("listen on 3000", r.stdout)
+
+    def test_known_value_inside_json(self):
+        repo = os.path.join(self.tmp.name, "repos", "app")
+        os.makedirs(repo)
+        known = "FakeKnown-Value-0011"
+        with open(os.path.join(repo, ".env"), "w") as fh:
+            fh.write("LEGACY_PASSWORD=%s\n" % known)
+        p = self.write("c.json", json.dumps({"note": "user typed " + known, "n": 1}))
+        out = self.run_cli(p, env={"REDACT_VIEW_REPOS": os.path.join(self.tmp.name, "repos")}).stdout
+        self.assertNotIn(known, out)
+
+    def test_overlapping_known_values_leave_no_tail(self):
+        needles = [("abcdefgh", "ONE"), ("defghijk", "TWO"), ("zz", "THREE")]
+        out = rv.mask_known("x abcdefghijk y zz", needles)
+        self.assertEqual(out, "x <redacted:ONE> y <redacted:THREE>")
+        self.assertEqual(rv.mask_known("nothing here", needles), "nothing here")
+
+    def test_switch_off(self):
+        repo = os.path.join(self.tmp.name, "repos", "app")
+        os.makedirs(repo)
+        known = "FakeKnown-Value-0012"
+        with open(os.path.join(repo, ".env"), "w") as fh:
+            fh.write("LEGACY_PASSWORD=%s\n" % known)
+        log = self.write("run.log", "login as %s failed\n" % known)
+        out = self.run_cli(log, "--no-known-secrets",
+                           env={"REDACT_VIEW_REPOS": os.path.join(self.tmp.name, "repos")}).stdout
+        self.assertIn(known, out)
 
 
 if __name__ == "__main__":
