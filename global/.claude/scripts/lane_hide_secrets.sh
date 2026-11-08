@@ -17,6 +17,9 @@
 #      tool-output folder (~/.local/share/opencode/tool-output, LANE_TOOL_OUTPUT_DIR overrides it) that was written since step 4 began: OpenCode saves
 #      the full output of each tool call there, so a password a command printed stays readable to the next lane until it is scrubbed. Older files
 #      there are not touched, and a lane can still read a file from its own run while it runs.
+#   6. Scrubs OpenCode's database (~/.local/share/opencode/opencode.db, LANE_OPENCODE_DB overrides it) with SQL: scrub_sqlite_secrets.py takes a
+#      backup, replaces the values in a transaction, checks integrity, vacuums, and rescans the file for 0 values. It refuses (exit 3) while any
+#      other process holds the database, and never ends one; a later lane's end scrubs it.
 #
 # Limits, stated plainly: a settings file created after the lane starts is not hidden until the next start; a secret the lane is granted by name sits in
 # the environment of that lane, so it can print it; the engine's own provider key files (~/.config/gemini, ~/.config/openrouter) stay readable because
@@ -114,5 +117,19 @@ if [ -d "$tool_out" ]; then
   find "$tool_out" -type f -newer "$started" -print0 2>/dev/null |
     xargs -0 -r python3 -I "$SCRIPT_DIR/scrub_known_secrets.py" --min-age 0 --repos "${LANE_SCAN_REPOS:-$HOME/repos}" >&2 ||
     echo "lane_hide_secrets: WARNING the tool-output scrub failed; check $tool_out for secret values" >&2
+fi
+
+# 6. OpenCode's database (~/.local/share/opencode/opencode.db, LANE_OPENCODE_DB overrides it) keeps every message and tool result of every session.
+# scrub_sqlite_secrets.py replaces the values with SQL, inside a transaction, after a backup, and only when no other process holds the database
+# (exit 3: the last lane to end scrubs it). It never ends a process.
+oc_db="${LANE_OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+if [ -f "$oc_db" ]; then
+  python3 -I "$SCRIPT_DIR/scrub_sqlite_secrets.py" --repos "${LANE_SCAN_REPOS:-$HOME/repos}" "$oc_db" >&2
+  db_rc=$?
+  case "$db_rc" in
+    0) ;;
+    3) echo "lane_hide_secrets: another OpenCode process holds $oc_db; the last lane to end scrubs it" >&2 ;;
+    *) echo "lane_hide_secrets: WARNING the database scrub failed (exit $db_rc); check $oc_db for secret values" >&2 ;;
+  esac
 fi
 exit "$rc"
