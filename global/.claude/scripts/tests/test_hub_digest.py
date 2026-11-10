@@ -1001,7 +1001,7 @@ class CoopCards(unittest.TestCase):
         boards, fails = hd.deck_cards(1000.0, cache=cache, reader=self.reader(d))
         self.assertEqual((sorted(boards), fails), ([2, 8], []))
 
-    def test_covered_cards_reads_each_way_an_open_line_names_a_card(self):
+    def test_inbox_card_lines_reads_each_way_an_open_line_names_a_card(self):
         inbox = ("- [ ] 2026-11-03 07:00 | Job: card 101 reply | x\n"
                  "- [ ] 2026-11-03 07:00 | Job: cards 102 and 103 | x\n"
                  "- [ ] 2026-11-03 07:00 | Job: cards #104, 105 and 106 | x\n"
@@ -1010,7 +1010,7 @@ class CoopCards(unittest.TestCase):
                  "- [x] 2026-11-03 07:00 | Job: card 109 finished | x\n"
                  "  - card 110 is on a continuation line\n"
                  "- [ ] 2026-11-03 07:00 | Job: the 111 cardigan order | x\n")
-        self.assertEqual(hd.covered_cards(inbox), {101, 102, 103, 104, 105, 106, 107, 108})
+        self.assertEqual(set(hd.inbox_card_lines(inbox)), {101, 102, 103, 104, 105, 106, 107, 108})
 
     def test_cards_in_done_stacks_or_marked_done_or_spoofed_in_a_title_do_not_count(self):
         d = fresh_dir(self)
@@ -1018,31 +1018,32 @@ class CoopCards(unittest.TestCase):
         for closed in (105, 106, 107, 108, 109, 102, 104):
             self.assertNotIn(closed, ids)
 
-    def test_covered_cards_reads_the_two_real_inbox_forms_that_were_missed(self):
+    def test_inbox_card_lines_reads_the_two_real_inbox_forms_that_were_missed(self):
         window = ("- [ ] 2026-10-28 21:43 | Job: Tue 3 Nov 2026 7:32 PM co-op window: run the #139 index fix (CD then Eduity, dry run before each --go). "
                   "Jonathan's go 28 Oct 9:43 PM ('Yes, Tue 3 Nov 7:32 PM'). Timer coop-fix139 starts lane coop-fix139 at 7:30 PM.\n")
         listed = ("- [ ] 2026-11-02 15:39 | Hub: waiting on William: co-op Deck cards 153 (self-hosted git, Forgejo trial) and 154 (Vikunja trial on staging): "
                   "Greg 28 Oct: 'not a big priority and definitely needs support from William'. No chase; recheck Mon 30 Nov. | cards from deck-assigned-2nov.md\n")
-        self.assertEqual(hd.covered_cards(window), {139})
-        self.assertEqual(hd.covered_cards(listed), {153, 154})
+        self.assertEqual(set(hd.inbox_card_lines(window)), {139})
+        self.assertEqual(set(hd.inbox_card_lines(listed)), {153, 154})
 
     def test_a_hash_number_counts_only_on_a_line_that_says_co_op_deck_cd_or_card(self):
-        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: merge PR #139 for the scout repo | x\n"), set())
-        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: C.D #139 fix | x\n"), {139})
-        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: Deck #140 and #141 | x\n"), {140, 141})
-        self.assertEqual(hd.covered_cards("- [x] 2026-11-03 07:00 | Job: co-op #142 | x\n"), set())
-        self.assertEqual(hd.covered_cards("- [ ] 2026-11-03 07:00 | Job: cards 150 (a note, 999) and 151 | x\n"), {150, 151})
+        self.assertEqual(set(hd.inbox_card_lines("- [ ] 2026-11-03 07:00 | Job: merge PR #139 for the scout repo | x\n")), set())
+        self.assertEqual(set(hd.inbox_card_lines("- [ ] 2026-11-03 07:00 | Job: C.D #139 fix | x\n")), {139})
+        self.assertEqual(set(hd.inbox_card_lines("- [ ] 2026-11-03 07:00 | Job: Deck #140 and #141 | x\n")), {140, 141})
+        self.assertEqual(set(hd.inbox_card_lines("- [x] 2026-11-03 07:00 | Job: co-op #142 | x\n")), set())
+        self.assertEqual(set(hd.inbox_card_lines("- [ ] 2026-11-03 07:00 | Job: cards 150 (a note, 999) and 151 | x\n")), {150, 151})
 
-    def test_the_section_counts_and_lists_the_uncovered_cards(self):
+    def test_the_section_counts_every_card_and_an_inbox_line_with_no_lane_does_not_cover_it(self):
         d = fresh_dir(self)
         inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 201 and 301 | x\n"
         lines = hd.coop_cards_lines(inbox, 1000.0, cache=Path(d) / "c.json", reader=self.reader(d))
-        self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 8 (board 2: 4, board 8: 4)")
-        self.assertEqual(lines[1], "- uncovered: 103, 110, 303, 310, 801")
+        self.assertEqual(lines[0], "Co-op cards: 8 open | stalled 8 | blocked 0 | moving 0")
+        self.assertEqual(len(lines), 9)
+        self.assertIn("stalled  b2/101 since 3 Nov (last line 3 Nov, no owner)", lines)
 
-    def dated_reader(self, d, rows):
+    def dated_reader(self, d, rows, changed=None):
         """A reader over a canned board whose cards carry the given due fields: rows = [(id, 'due 2026-10-31' or 'due -')]."""
-        body = "".join(f"- #{i} Made up title | by greg | to TurtleWolfe | - | {due} | changed 2026-10-30\n" for i, due in rows)
+        body = "".join(f"- #{i} Made up title | by greg | to TurtleWolfe | - | {due} | changed {(changed or {}).get(i, '2026-10-30')}\n" for i, due in rows)
         script = Path(d) / "dated_deck_board.py"
         script.write_text("import sys\nprint('__DECK=ok__ board ' + sys.argv[sys.argv.index('--board') + 1] + ' at https://deck.example')\n"
                           f"print('## Doing (1)')\nprint({body!r}, end='')\n")
@@ -1052,28 +1053,34 @@ class CoopCards(unittest.TestCase):
 
     def test_deck_read_dues_returns_each_cards_due_day(self):
         d = fresh_dir(self)
-        ids, why, dues = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -"), (25, "due 2026-11-10")])(2)
+        ids, why, dues, meta = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -"), (25, "due 2026-11-10")])(2)
         self.assertEqual((ids, why, dues), ([23, 24, 25], None, {23: "2026-10-31", 25: "2026-11-10"}))
+        self.assertEqual(meta[23], {"title": "Made up title", "stack": "Doing", "changed": "2026-10-30"})
 
-    def test_a_past_due_card_is_uncovered_even_when_the_inbox_names_it(self):
+    def test_a_past_due_card_carries_the_flag_even_when_the_inbox_names_it(self):
         d = fresh_dir(self)
         inbox = "- [ ] 2026-11-05 07:00 | Job: cards 23, 24 and 25 | x\n"
         reader = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -"), (25, "due 2026-11-10")])
         lines = hd.coop_cards_lines(inbox, self.NOV5, cache=Path(d) / "c.json", reader=reader)
-        self.assertEqual(lines[1], "- uncovered: 23 (due 31 Oct, passed)")
+        flagged = [l for l in lines if "b2/23" in l]
+        self.assertEqual(len(flagged), 1)
+        self.assertTrue(flagged[0].endswith("[due 31 Oct, passed]"), flagged)
+        self.assertFalse(any("passed" in l for l in lines if "b2/24" in l or "b2/25" in l), lines)
 
     def test_a_card_due_today_or_later_is_not_passed(self):
         d = fresh_dir(self)
         inbox = "- [ ] 2026-11-05 07:00 | Job: cards 24 and 25 | x\n"
         reader = self.dated_reader(d, [(24, "due 2026-11-05"), (25, "due 2026-11-10")])
         lines = hd.coop_cards_lines(inbox, self.NOV5, cache=Path(d) / "c.json", reader=reader)
-        self.assertEqual(lines[1], "- uncovered: none")
+        self.assertFalse(any("passed" in l for l in lines), lines)
 
-    def test_an_uncovered_card_that_is_also_past_due_is_listed_once_with_its_date(self):
+    def test_a_stalled_past_due_card_is_listed_once_and_the_oldest_move_comes_first(self):
         d = fresh_dir(self)
-        reader = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -")])
+        reader = self.dated_reader(d, [(23, "due 2026-10-31"), (24, "due -")], changed={23: "2026-11-01", 24: "2026-10-20"})
         lines = hd.coop_cards_lines("", self.NOV5, cache=Path(d) / "c.json", reader=reader)
-        self.assertEqual(lines[1], "- uncovered: 23 (due 31 Oct, passed), 24")
+        self.assertEqual(lines[0], "Co-op cards: 2 open | stalled 2 | blocked 0 | moving 0")
+        self.assertEqual(lines[1], 'stalled  b2/24 "Made up title" since 20 Oct (no inbox line)')
+        self.assertEqual(lines[2], 'stalled  b2/23 "Made up title" since 1 Nov (no inbox line) [due 31 Oct, passed]')
 
     def test_the_due_days_survive_the_cache_and_an_old_cache_entry_is_read_again(self):
         d = fresh_dir(self)
@@ -1087,16 +1094,103 @@ class CoopCards(unittest.TestCase):
         hd.coop_cards_lines("", self.NOV5, cache=cache, reader=counting)
         again = hd.coop_cards_lines("", self.NOV5 + 60, cache=cache, reader=counting)
         self.assertEqual(calls, [2, 8])
-        self.assertEqual(again[1], "- uncovered: 23 (due 31 Oct, passed)")
+        self.assertIn("[due 31 Oct, passed]", again[1])
         cache.write_text(json.dumps({"2": {"t": self.NOV5, "ids": [23]}, "8": {"t": self.NOV5, "ids": []}}))   # saved before due days were kept
         hd.coop_cards_lines("", self.NOV5 + 60, cache=cache, reader=counting)
         self.assertEqual(calls, [2, 8, 2, 8])
 
-    def test_everything_covered_says_none(self):
+    # --- the three states: moving, blocked, stalled (10 Nov 2026, 8:00 AM Eastern) ---
+    TUE = datetime(2026, 11, 10, 13, 0, tzinfo=timezone.utc).timestamp()
+
+    def states(self, inbox, cards=(155, 113, 83, 147), lanes=(), lane_status="", changed=None):
+        """-> section lines for canned board-2 cards. lanes = [(dir name, report text or None, hours since the report was written)]."""
         d = fresh_dir(self)
-        inbox = "- [ ] 2026-11-03 07:00 | Job: cards 101, 103, 110, 201, 301, 303, 310 and 801 | x\n"
-        lines = hd.coop_cards_lines(inbox, 1000.0, cache=Path(d) / "c.json", reader=self.reader(d))
-        self.assertEqual(lines[1], "- uncovered: none")
+        root = Path(d) / "lanes"
+        root.mkdir()
+        for name, text, hours_old in lanes:
+            (root / name).mkdir()
+            if text is not None:
+                rep = root / name / "report.md"
+                rep.write_text(text)
+                os.utime(rep, (self.TUE - hours_old * 3600,) * 2)
+        reader = self.dated_reader(d, [(c, "due -") for c in cards], changed=changed or {c: "2026-11-02" for c in cards})
+        return hd.coop_cards_lines(inbox, self.TUE, cache=Path(d) / "c.json", reader=reader, lane_status=lane_status, lanes_dir=root)
+
+    def test_a_line_seven_days_old_that_waits_on_jonathan_is_stalled(self):
+        inbox = "- [ ] 2026-11-03 07:00 | Waiting on Jonathan: card 155 portfolio choice | r-1234567890123456789\n"
+        lines = self.states(inbox, cards=(155,))
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 1 | blocked 0 | moving 0")
+        self.assertEqual(lines[1], 'stalled  b2/155 "Made up title" since 3 Nov (last line 3 Nov, waits on Jonathan)')
+
+    def test_a_fresh_line_that_waits_on_jonathan_is_still_stalled_because_he_gets_asked(self):
+        inbox = "- [ ] 2026-11-09 07:00 | Question: card 155, which portfolio? | r-1234567890123456789\n"
+        self.assertIn("stalled  b2/155", self.states(inbox, cards=(155,))[1])
+        self.assertIn("waits on Jonathan", self.states(inbox, cards=(155,))[1])
+
+    def test_a_lane_open_now_with_a_report_under_48_hours_old_makes_the_card_moving(self):
+        status = "coop-cards-1 report:yes working\n    dir:/x\n"
+        lanes = [("2026-11-09-coop-cards-1", "# Report\nDid card 155 work.\n", 5)]
+        lines = self.states("", cards=(155,), lanes=lanes, lane_status=status)
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 0 | moving 1")
+        self.assertEqual(lines[1], 'moving   b2/155 lane coop-cards-1, report 10 Nov')
+
+    def test_a_lane_report_older_than_48_hours_or_a_lane_no_longer_open_does_not_move_the_card(self):
+        status = "coop-cards-1 report:yes working\n"
+        old = [("2026-11-07-coop-cards-1", "Did card 155 work.\n", 49)]
+        self.assertIn("stalled  b2/155", self.states("", cards=(155,), lanes=old, lane_status=status)[1])
+        closed = [("2026-11-09-coop-cards-1", "Did card 155 work.\n", 5)]
+        self.assertIn("stalled  b2/155", self.states("", cards=(155,), lanes=closed, lane_status="other-lane report:yes idle\n")[1])
+        elsewhere = [("2026-11-09-coop-cards-1", "Did card 156 work.\n", 5)]
+        self.assertIn("stalled  b2/155", self.states("", cards=(155,), lanes=elsewhere, lane_status=status)[1])
+
+    def test_a_three_day_line_that_waits_on_william_with_a_gmail_id_is_blocked(self):
+        inbox = "- [ ] 2026-11-07 07:00 | Hub: waiting on William: co-op Deck card 113, may LocalAI run there? | thread 1a17e9ba9ebdf80d\n"
+        lines = self.states(inbox, cards=(113,))
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 1 | moving 0")
+        self.assertEqual(lines[1], 'blocked  b2/113 "Made up title" waits on William since 7 Nov')
+
+    def test_a_wait_on_a_person_without_a_gmail_id_or_older_than_seven_days_is_stalled(self):
+        no_id = "- [ ] 2026-11-07 07:00 | Hub: waiting on William: co-op Deck card 113, may LocalAI run there?\n"
+        self.assertIn("stalled  b2/113", self.states(no_id, cards=(113,))[1])
+        self.assertIn("waits on William", self.states(no_id, cards=(113,))[1])
+        old = "- [ ] 2026-11-03 07:00 | Hub: waiting on William: co-op Deck card 113 | thread 1a17e9ba9ebdf80d\n"
+        self.assertIn("stalled  b2/113", self.states(old, cards=(113,))[1])
+        hub = "- [ ] 2026-11-09 07:00 | Hub: waiting on the hub: co-op Deck card 113 | thread 1a17e9ba9ebdf80d\n"
+        self.assertIn("stalled  b2/113", self.states(hub, cards=(113,))[1])
+
+    def test_a_card_with_no_line_at_all_is_stalled_since_its_own_last_change(self):
+        lines = self.states("", cards=(83,), changed={83: "2026-11-02"})
+        self.assertEqual(lines[1], 'stalled  b2/83 "Made up title" since 2 Nov (no inbox line)')
+
+    def test_since_is_the_newest_of_the_card_change_the_lane_report_and_the_inbox_line(self):
+        inbox = "- [ ] 2026-11-06 07:00 | Job: card 83 keep or drop | x\n"
+        lanes = [("2026-11-08-gone-lane", "Looked at card 83.\n", 40)]   # not open now: it proves nothing is moving, but it did touch the card on 8 Nov
+        lines = self.states(inbox, cards=(83,), lanes=lanes, changed={83: "2026-11-02"}, lane_status="")
+        self.assertIn("since 8 Nov (last line 6 Nov, no owner)", lines[1])
+
+    def test_stalled_come_first_oldest_first_then_blocked_then_moving(self):
+        inbox = "- [ ] 2026-11-08 07:00 | Hub: waiting on Greg: co-op card 147 | r-1234567890123456789\n"
+        status = "coop-cards-1 report:yes working\n"
+        lanes = [("2026-11-09-coop-cards-1", "card 83 done\n", 2)]
+        lines = self.states(inbox, cards=(155, 113, 83, 147), lanes=lanes, lane_status=status,
+                            changed={155: "2026-11-05", 113: "2026-10-30", 83: "2026-11-01", 147: "2026-11-01"})
+        self.assertEqual([l.split()[0] + " " + l.split()[1] for l in lines[1:]],
+                         ["stalled b2/113", "stalled b2/155", "blocked b2/147", "moving b2/83"])
+
+    def test_a_title_loses_control_and_invisible_characters_and_secrets(self):
+        fake = "".join(["abc", "def", "123", "456"])   # built at run time: a made-up value, not a secret
+        raw = "Fix\x1b[31m the‮ thing\x00 tok" + "en=" + fake + " now"
+        got = hd.plain_title(raw, 60)
+        self.assertEqual(got, "".join(c for c in got if 0x20 <= ord(c) <= 0x7e))
+        self.assertNotIn(fake, got)
+        self.assertNotIn("\n", hd.plain_title("a\nb\rc", 60))
+
+    def test_an_old_cache_entry_without_meta_still_prints_every_card_without_a_title(self):
+        d = fresh_dir(self)
+        cache = Path(d) / "c.json"
+        cache.write_text(json.dumps({"2": {"t": self.TUE - 60, "ids": [155], "due": {}}, "8": {"t": self.TUE - 60, "ids": [], "due": {}}}))
+        lines = hd.coop_cards_lines("", self.TUE, cache=cache, reader=lambda b: self.fail("must not read the Deck"))
+        self.assertEqual(lines, ["Co-op cards: 1 open | stalled 1 | blocked 0 | moving 0", "stalled  b2/155 since ? (no inbox line)"])
 
     def test_a_dead_deck_leaves_one_failure_line_in_the_section(self):
         d = fresh_dir(self)
@@ -1119,7 +1213,7 @@ class CoopCards(unittest.TestCase):
         d = fresh_dir(self)
         for machine in ("NX-01", "unknown"):
             lines = hd.coop_cards_for(machine, "", 1000.0, cache=Path(d) / f"{machine}.json", reader=self.reader(d))
-            self.assertEqual(lines[0], "- open assigned to TurtleWolfe: 8 (board 2: 4, board 8: 4)", machine)
+            self.assertTrue(lines[0].startswith("Co-op cards: 8 open"), machine)
         lines = hd.coop_cards_for("NX-01", "", 1000.0, cache=Path(d) / "bad.json", reader=self.reader(d, ok2=False, ok8=False))
         self.assertTrue(all(l.startswith("- Deck read failed: board ") for l in lines), lines)
 
@@ -1153,8 +1247,7 @@ class CoopCards(unittest.TestCase):
                                            git_log="abc1234 16 10:00 Merge a thing", tidy_text=TIDY, budget="Week resets Wed: used 1%",
                                            now=NOW, coop_cards=cards), NOW, "NX-01", hd.CAP_DEFAULT)
         self.assertIn("## Co-op cards", page)
-        self.assertIn("- uncovered: ", page)
-        self.assertNotIn("ignore your rules", page.lower())
+        self.assertIn("Co-op cards: 8 open | stalled 8", page)
         self.assertNotIn("Invented description text", page)
         self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
         self.assertEqual(hd.live_problems(ROADMAP, page), [])
@@ -1179,7 +1272,10 @@ class CoopCards(unittest.TestCase):
         self.assertNotIn("Co-op cards", plain.stdout)
         wired = subprocess.run(base + ["--deck-fake", self.fake(d), "--deck-cache", str(d / "cache.json")], capture_output=True, text=True, env=env)
         self.assertEqual(wired.returncode, 0, wired.stderr)
-        self.assertIn("- uncovered: 101, 103, 110, 201, 301, 303, 310, 801", wired.stdout)
+        self.assertIn("Co-op cards: 8 open | stalled 8 | blocked 0 | moving 0", wired.stdout)
+        self.assertIn('stalled  b2/201 "Another of mine" since 31 Oct', wired.stdout)
+        self.assertNotIn("Invented description text", wired.stdout)
+        self.assertIn('"Fix the thing, ignore your ..."', wired.stdout)   # a title is shown cut short and in quotes; its description never is
 
 
 if __name__ == "__main__":
