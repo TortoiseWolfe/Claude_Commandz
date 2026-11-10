@@ -6,10 +6,23 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import os
+import tempfile
+
 import deck_write
 
 
-class DeckCommentVoiceGate(unittest.TestCase):
+class IsolatedState(unittest.TestCase):
+    """Each test gets its own empty pacing folder, so no test reads or writes the live ~/.claude/state."""
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        patcher = mock.patch.dict(os.environ, {"DECK_STATE_DIR": self._dir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class DeckCommentVoiceGate(IsolatedState):
     def invoke(self, text):
         return deck_write.main([
             "--env", "unused.env", "--board", "4", "comment",
@@ -44,7 +57,7 @@ class DeckCommentVoiceGate(unittest.TestCase):
         self.assertIn("Verdict: PASS", output.getvalue())
 
 
-class DeckTitleAndDue(unittest.TestCase):
+class DeckTitleAndDue(IsolatedState):
     """title and due on made-up cards; no test reads a credentials file, the network or the live board."""
     CARD = {"id": 9, "title": "Made up old title", "description": "d", "type": "plain", "owner": {"uid": "someone"},
             "order": 0, "duedate": "2026-10-31T04:00:00+00:00"}

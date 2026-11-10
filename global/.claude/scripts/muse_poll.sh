@@ -92,6 +92,12 @@ fi
 # The fleet heartbeat (fleet-up.sh): stamped every minute, before any gate below can exit. This is the one job that runs every minute here.
 [ -x "$HOME/.claude/scripts/fleet-up.sh" ] && timeout 100 "$HOME/.claude/scripts/fleet-up.sh" --heartbeat >/dev/null 2>&1
 
+# Co-op Deck writes go out one at a time, minutes apart, like a person (10 Nov 2026: 13 comments in seconds looked like a bot).
+# deck_write.py drain posts at most one queued write, only 9:00 AM to 9:00 PM Eastern and only when its random 6 to 18 minute wait
+# has passed; with nothing due it prints nothing and returns at once. Here, before the gates and the poll lock, so a quiet hour or a
+# long handler never holds it up. A failure is logged and never stops the poll.
+[ -f "$HOME/.claude/scripts/deck_write.py" ] && timeout 90 python3 "$HOME/.claude/scripts/deck_write.py" drain >>"$HOME/.claude/state/muse-poll.log" 2>&1
+
 H=$(date +%-H)
 exec 9>"${MUSE_POLL_LOCK:-/tmp/muse-poll.lock}"   # a test passes its own, so it never waits on the live poller
 flock -n 9 || exit 0
