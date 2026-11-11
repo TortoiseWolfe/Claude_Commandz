@@ -1,11 +1,13 @@
 name: scripts tests
 
-# Runs the hub scripts' and hooks' test suites on every push to main and every pull request.
+# Runs the hub scripts' and hooks' test suites on every push to main and every pull request,
+# and on demand (gh workflow run) so a push that GitHub does not trigger can still be tested.
 # Tests run with an empty HOME, so none of them can read or write a developer's live ~/.claude.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
