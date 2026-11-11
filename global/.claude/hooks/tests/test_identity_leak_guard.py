@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,35 @@ os.environ["IDENTITY_GUARD_SCRIPTS_DIR"] = TOOLS
 ME = "owner.name@example.org"  # a made-up address: the real one is never written in this repo
 ADDRS = {ME}
 ALLOWED = set(g.DEFAULT_ALLOWED_SCRIPTS)
+
+
+PLACEHOLDER_DOMAINS = {"example.com", "example.org", "example.net", "users.noreply.github.com"}
+
+
+def _private_values():
+    """Real values this machine holds privately (his address, client terms), lower-cased.
+
+    Read at run time from ~/.config/afa so the repo never carries them. Empty on a
+    machine without those files (CI): the address-shape check still runs there.
+    """
+    values = []
+    for name in ("identity-guard.json", "public-repo-terms.json"):
+        path = Path(os.path.expanduser("~/.config/afa")) / name
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        stack = [data]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, str):
+                if len(item) >= 4:
+                    values.append(item.lower())
+            elif isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+    return values
 
 
 def bash(cmd, cwd="/tmp"):
@@ -449,8 +479,16 @@ class Registration(unittest.TestCase):
         self.assertEqual(set(entries[0]["matcher"].split("|")), {"Bash", "WebFetch", "WebSearch", "mcp__.*"})
 
     def test_the_hook_file_carries_no_real_address(self):
-        text = SRC.read_text() + Path(__file__).read_text()
-        self.assertNotIn("zq" + "xj", text.lower())
+        text = (SRC.read_text() + Path(__file__).read_text()).lower()
+        real = _private_values()
+        for value in real:
+            # Never print the value: the failure message says only which one by position.
+            self.assertNotIn(value, text, "private value #%d found in guard source or test" % real.index(value))
+        # Whatever the machine holds, the text itself carries no address outside placeholder domains.
+        for found in re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", text):
+            domain = found.rsplit("@", 1)[1]
+            ok = domain in PLACEHOLDER_DOMAINS or domain.endswith(".example.org") or "noreply" in found
+            self.assertTrue(ok, "an address outside the placeholder domains is in the guard text")
 
 
 if __name__ == "__main__":
