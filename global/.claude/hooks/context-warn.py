@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Warn the hub before its context reaches the hand-off line (330K tokens by default, the last tenth before auto-compact at 367K; Jonathan 31 Oct at 157K: "still too soon, fifty seven percent left").
+"""Warn the hub before its context reaches the hand-off line (150K tokens by default, at the first natural break and never mid-task; Jonathan raised it from 330K on 11 Nov; auto-compact is at 367K).
 
 The hub (cwd = ~/repos) gets a short "Hub context: NNNK of 367K" line once per prompt, plus three tiers.
 The line comes with the UserPromptSubmit event; a PostToolUse call prints it only when no prompt event has shown it in this session
 (a resumed session's first tool call), because every print lands in the hub's own context (issue 224, 5 Nov 2026: it printed after
 every tool call). A tier warning still arrives on whichever event first sees the crossing, with the line above it.
 All come from absolute token counts, not percentages of an auto-compaction window:
-  - AFA_HANDOFF_FRESH_K (default 200): from this size on, a warning that no hub-handoff-*.md newer than 30 minutes exists in the state
+  - AFA_HANDOFF_FRESH_K (default 100): from this size on, a warning that no hub-handoff-*.md newer than 30 minutes exists in the state
     folder (silent when one does), repeated at most every 10 minutes until the file is there (issue 227: three sessions on 4 Nov reached
     the hand-off line with no running file);
-  - AFA_HANDOFF_START_K (default 250): "start the running hand-off file now", once per session;
-  - hand-off line minus 20K (310K by default): "start wrapping up", once per session;
-  - AFA_HANDOFF_K (default 330): "hand off and end, no new work" with the marker to touch,
+  - AFA_HANDOFF_START_K (default 125): "start the running hand-off file now", once per session;
+  - hand-off line minus 20K (130K by default): "start wrapping up", once per session;
+  - AFA_HANDOFF_K (default 150): "hand off and end, no new work" with the marker to touch,
     repeated on every call past the line (lane-watch-guard.py lets the session stop once
     ~/.claude/state/hub-handed-off.<session id> exists and a fresh hub-handoff-*.md does).
 A setting that is not a positive whole number falls back to its default. Lanes (any other cwd) see nothing.
@@ -28,9 +28,9 @@ import sys
 import time
 
 READ_LIMIT = 512 * 1024
-DEFAULT_HANDOFF_K = 330
-DEFAULT_HANDOFF_START_K = 250
-DEFAULT_HANDOFF_FRESH_K = 200
+DEFAULT_HANDOFF_K = 150
+DEFAULT_HANDOFF_START_K = 125
+DEFAULT_HANDOFF_FRESH_K = 100
 FRESH_HANDOFF_SECS = 30 * 60   # a hand-off file touched within this long counts as the running one
 NAG_EVERY_SECS = 10 * 60       # the no-file warning repeats at most this often
 EARLY_MARGIN_K = 20  # the early warning comes this many thousand tokens before the hand-off line
@@ -138,7 +138,7 @@ def main():
                 line_mark.write_text("1", encoding="ascii")
             except OSError:
                 pass
-        # No running hand-off file yet: say so from the fresh-file point on, at most every 10 minutes (the 330K tier already says it past that).
+        # No running hand-off file yet: say so from the fresh-file point on, at most every 10 minutes (the 150K tier already says it past that).
         note = None
         fresh_k = get_setting("AFA_HANDOFF_FRESH_K", DEFAULT_HANDOFF_FRESH_K)
         if fresh_k * 1000 <= size < handoff_k * 1000 and not has_fresh_handoff(state_dir, time.time()):
@@ -194,7 +194,7 @@ def main():
             stamp.parent.mkdir(parents=True, exist_ok=True)
             stamp.write_text(str(threshold_k), encoding="ascii")
 
-        # The hand-off warning repeats every turn past 330K
+        # The hand-off warning repeats every turn past 150K
         if threshold_k >= handoff_k:
             extra = (
                 f"Hub context {tokens_k}K: hand off and end, no new work. "

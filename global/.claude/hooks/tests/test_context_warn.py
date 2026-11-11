@@ -57,14 +57,17 @@ class ContextWarnTests(unittest.TestCase):
             contents += "\n"
         self.transcript.write_text(contents, encoding="utf-8")
 
-    def call_hook(self, *, cwd=None, event="UserPromptSubmit", session=None, extra_env=None):
+    def call_hook(self, *, cwd=None, event="UserPromptSubmit", session=None, extra_env=None, real_defaults=False):
         env = os.environ.copy()
         env.update({
             "AFA_HUB_DIR": str(self.hub),
             "AFA_STATE_DIR": str(self.state),
         })
-        env.pop("AFA_HANDOFF_K", None)
-        env.pop("AFA_HANDOFF_FRESH_K", None)
+        for name in ("AFA_HANDOFF_K", "AFA_HANDOFF_START_K", "AFA_HANDOFF_FRESH_K"):
+            env.pop(name, None)
+        if not real_defaults:
+            # The tier logic is tested at the old 100/250/200/330K sizes; the shipped defaults (150K line) have their own test below.
+            env.update({"AFA_HANDOFF_K": "330", "AFA_HANDOFF_START_K": "250", "AFA_HANDOFF_FRESH_K": "200"})
         env.update(extra_env or {})
         payload = {
             "session_id": session or self.session_id,
@@ -202,6 +205,24 @@ class ContextWarnTests(unittest.TestCase):
         self.write_transcript((100_000, 0, 0))
         output = self.call_hook(extra_env={"AFA_HANDOFF_K": "100"})
         self.assertIn("hand off and end, no new work", self.warning(output)["additionalContext"])
+
+    def test_shipped_defaults_put_the_hand_off_line_at_150k(self):
+        # Jonathan, 11 Nov: hand off at about 150K, at the first natural break (was 330K).
+        self.handoff.unlink()
+        self.write_transcript((99_000, 0, 0))
+        self.assertEqual(self.warning(self.call_hook(real_defaults=True))["additionalContext"], "Hub context: 99K of 367K")
+        self.write_transcript((100_000, 0, 0))
+        out = self.warning(self.call_hook(real_defaults=True, session="s100"))["additionalContext"]
+        self.assertIn("no hub-handoff", out)
+        self.write_transcript((125_000, 0, 0))
+        out = self.warning(self.call_hook(real_defaults=True, session="s125"))["additionalContext"]
+        self.assertIn("start the running hand-off file now", out)
+        self.write_transcript((130_000, 0, 0))
+        out = self.warning(self.call_hook(real_defaults=True, session="s130"))["additionalContext"]
+        self.assertIn("Hand-off line is 150K: start wrapping up", out)
+        self.write_transcript((150_000, 0, 0))
+        out = self.warning(self.call_hook(real_defaults=True, session="s150"))["additionalContext"]
+        self.assertIn("hand off and end, no new work", out)
 
     def test_bad_setting_falls_back_to_defaults(self):
         self.write_transcript((330_000, 0, 0))

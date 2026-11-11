@@ -3,7 +3,7 @@ description: Hand the hub session off in one go (hand-off file, open question to
 ---
 # /handoff
 
-Ends a hub session (~/repos) cleanly before 330K of context, as one motion with no stops for permission
+Ends a hub session (~/repos) cleanly at about 150K of context, at the first natural break and never mid-task, as one motion with no stops for permission
 (Jonathan approved the routine on 5 Nov: "we need a shortened command for that whole process like /handoff").
 Outside the hub, write the repo's own hand-off note and stop. Lanes never run this; they write handoff.md and
 get recycled (hub/rules/lanes.md).
