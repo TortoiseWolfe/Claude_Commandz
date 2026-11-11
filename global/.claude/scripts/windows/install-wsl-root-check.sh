@@ -7,7 +7,7 @@
 #
 #   install-wsl-root-check.sh           register (or replace) the task
 #   install-wsl-root-check.sh --print   print the filled-in XML and register nothing (the word print works too; the XML comment cannot hold "--")
-# Before it registers, it copies wsl_root_check.py and wsl_reserve.py into /usr/local/lib/afa-root-check (owned by root, mode 755) through
+# Before it registers, it copies wsl_root_check.py, wsl_reserve.py and docker_volume_backup.py into /usr/local/lib/afa-root-check (owned by root, mode 755) through
 # wsl.exe -u root, because the task runs as root and root must not run code from a folder a person's own processes can write.
 # A changed script takes effect only when this is run again. The copy is a person-run step: read the two files first.
 # Test hooks: WHOAMI, SCHTASKS, WSLPATH, WSLEXE (commands), XML (the task file), ROOT_LIB (target folder).
@@ -37,11 +37,11 @@ PY
 case "${1:-}" in --print|print) printf '%s\n' "$filled"; exit 0 ;; esac
 lib=${ROOT_LIB:-/usr/local/lib/afa-root-check}
 src=$(cd "$here/.." && pwd)
-for f in wsl_root_check.py wsl_reserve.py; do
+for f in wsl_root_check.py wsl_reserve.py docker_volume_backup.py; do
   [ -f "$src/$f" ] || { echo "install-wsl-root-check: $src/$f is missing; install the scripts first" >&2; exit 1; }
 done
-${WSLEXE:-wsl.exe} -d Debian -u root -e sh -c 'set -e; lib=$1; shift; install -d -m 0755 -o root -g root "$lib"; for f in "$@"; do install -m 0755 -o root -g root "$f" "$lib/$(basename "$f")"; done' sh "$lib" "$src/wsl_root_check.py" "$src/wsl_reserve.py"
-echo "copied wsl_root_check.py and wsl_reserve.py into $lib (root-owned)"
+${WSLEXE:-wsl.exe} -d Debian -u root -e sh -c 'set -e; lib=$1; shift; install -d -m 0755 -o root -g root "$lib"; for f in "$@"; do install -m 0755 -o root -g root "$f" "$lib/$(basename "$f")"; done' sh "$lib" "$src/wsl_root_check.py" "$src/wsl_reserve.py" "$src/docker_volume_backup.py"
+echo "copied wsl_root_check.py, wsl_reserve.py and docker_volume_backup.py into $lib (root-owned)"
 tmp=$(mktemp "${TMPDIR:-/tmp}/AFA-WslRootCheck.XXXXXX.xml")
 trap 'rm -f "$tmp"' EXIT
 printf '%s\n' "$filled" | iconv -f UTF-8 -t UTF-16 >"$tmp"

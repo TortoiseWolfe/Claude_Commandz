@@ -24,7 +24,8 @@ Checks, in this order (the first one is what every later Windows call needs):
                  only when the gateway container runs or step 2 just saw the distro running with the mask in place (otherwise its
                  refresh could boot the distro unprotected), so it stays Disabled until one of those holds.
   5. docker      Docker Desktop runs but the Linux docker command does not answer on two checks in a row: restart Docker Desktop
-                 through its own "docker desktop restart", only when no container runs, at most once an hour.
+                 through its own "docker desktop restart", only when no container runs, at most once an hour, and only after
+                 docker_volume_backup.py has copied the named volumes (a failed copy blocks the restart).
 
 Anything it changes is one line in <home>/.claude/state/wsl-root-check.log and in the recovery record (the newest one when it is
 under an hour old, else a new one). A run that changes nothing writes only wsl-root-check.last there. The state folder is found
@@ -61,6 +62,7 @@ GATEWAY_GUARDED_TASKS = ["\\AFA\\OpenClawStatus"]
 GATEWAY_CONTAINER = "openclaw-openclaw-gateway-1"
 DOCKER_RESTART_GAP_S = 3600
 DOCKER_FAILS_NEEDED = 2
+BACKUP_TIMEOUT_S = 1500
 
 # Runs inside the gateway distro as root. Idempotent: prints "CHANGED ..." for each thing it repaired and "PROBLEM ..." for
 # anything it could not. ROOT_PREFIX and SYSTEMCTL exist for the tests only.
@@ -230,6 +232,22 @@ def _read_int(path, default=0):
         return default
 
 
+def backup_volumes(ctx):
+    """Copy Docker's named volumes before a Docker Desktop restart (docker_volume_backup.py). -> (ok, one-line note).
+
+    Run as the state folder's owner, so the copies are theirs and root never writes into their home. Exit 0 from the script means copied,
+    nothing to copy, or the engine gave nothing to read; anything else (a failed copy, a missing script, a timeout) blocks the restart."""
+    home = os.path.dirname(os.path.dirname(ctx.state.rstrip("/")))
+    argv = [sys.executable, os.path.join(HERE, "docker_volume_backup.py"), "--docker", ctx.docker_win, "--windows-paths",
+            "--dest", os.path.join(home, ".cache", "docker-volume-backups")]
+    if _OWNER is not None and os.geteuid() == 0:
+        argv = ["setpriv", "--reuid", str(_OWNER[0]), "--regid", str(_OWNER[1]), "--clear-groups"] + argv
+    rc, out = ctx.run(argv, BACKUP_TIMEOUT_S)
+    lines = [l for l in out.splitlines() if l.strip()]
+    last = lines[-1].strip() if lines else "no output"
+    return rc == 0, "exit %d: %s" % (rc, last) if rc != 0 else last
+
+
 def check_docker(ctx):
     changes, problems = [], []
     failf = os.path.join(ctx.state, "wsl-root-check.docker-fails")
@@ -258,11 +276,15 @@ def check_docker(ctx):
     if running:
         problems.append("docker does not answer but %d container(s) run: Docker Desktop not restarted" % len(running))
         return changes, problems
+    ok, note = backup_volumes(ctx)
+    if not ok:
+        problems.append("docker does not answer and no container runs, but the volume backup failed (%s): Docker Desktop not restarted" % note)
+        return changes, problems
     rc, out = ctx.run([ctx.docker_win, "desktop", "restart"], 300)
     _write(stamp, str(int(ctx.now())))
     _remove(failf)
     if rc == 0:
-        changes.append("docker did not answer on %d checks in a row, no container ran: restarted Docker Desktop" % fails)
+        changes.append("docker did not answer on %d checks in a row, no container ran: restarted Docker Desktop (before it: %s)" % (fails, note))
     else:
         problems.append("docker desktop restart failed (exit %d)" % rc)
     return changes, problems

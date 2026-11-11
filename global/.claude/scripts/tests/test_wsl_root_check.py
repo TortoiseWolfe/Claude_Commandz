@@ -284,6 +284,42 @@ class DockerTests(Base):
         self.assertIn("restarted Docker Desktop", changes[0])
         self.assertTrue(fake.ran("docker.exe", "desktop", "restart"))
 
+    def test_volumes_are_backed_up_before_the_restart(self):
+        fake = self.docker_fake()
+        rc.check_docker(self.ctx(fake))
+        changes, problems = rc.check_docker(self.ctx(fake))
+        self.assertEqual(problems, [])
+        idx_backup = [i for i, c in enumerate(fake.calls) if any(x.endswith("docker_volume_backup.py") for x in c)]
+        idx_restart = [i for i, c in enumerate(fake.calls) if c[:3] == ["docker.exe", "desktop", "restart"]]
+        self.assertEqual(len(idx_backup), 1)
+        self.assertEqual(len(idx_restart), 1)
+        self.assertLess(idx_backup[0], idx_restart[0])
+        call = fake.calls[idx_backup[0]]
+        self.assertIn("--windows-paths", call)
+        self.assertEqual(call[call.index("--docker") + 1], "docker.exe")
+        self.assertTrue(call[call.index("--dest") + 1].endswith("/.cache/docker-volume-backups"))  # the folder two levels above the state folder = the home
+        self.assertIn("before it:", changes[0])
+
+    def test_a_failed_volume_backup_blocks_the_restart(self):
+        fake = Fake([(["timeout"], (1, "")), (["tasklist.exe"], (0, TASKLIST_RUNNING)), (["docker.exe", "ps"], (0, "")),
+                     ([sys.executable], (1, "copied wp-data\ndocker_volume_backup: FAILED, 1 copied, 1 not copied (db-data) in /x\n")),
+                     (["docker.exe", "desktop"], (0, ""))])
+        rc.check_docker(self.ctx(fake))
+        changes, problems = rc.check_docker(self.ctx(fake))
+        self.assertEqual(changes, [])
+        self.assertFalse(fake.ran("docker.exe", "desktop", "restart"))
+        self.assertIn("volume backup failed", problems[0])
+        self.assertIn("not copied (db-data)", problems[0])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "wsl-root-check.docker-restart")))  # tried again next run
+
+    def test_a_missing_backup_script_blocks_the_restart(self):
+        fake = Fake([(["timeout"], (1, "")), (["tasklist.exe"], (0, TASKLIST_RUNNING)), (["docker.exe", "ps"], (0, "")),
+                     ([sys.executable], (127, ""))])
+        rc.check_docker(self.ctx(fake))
+        _, problems = rc.check_docker(self.ctx(fake))
+        self.assertIn("exit 127", problems[0])
+        self.assertFalse(fake.ran("docker.exe", "desktop", "restart"))
+
     def test_a_running_container_blocks_the_restart(self):
         fake = self.docker_fake(containers="abc123\ndef456\n")
         rc.check_docker(self.ctx(fake))

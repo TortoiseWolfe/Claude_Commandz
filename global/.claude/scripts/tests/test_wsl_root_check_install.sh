@@ -42,7 +42,7 @@ grep -q 'python3 -I /usr/local/lib/afa-root-check/wsl_root_check.py' "$TMP/regis
 # The copy into the root-owned folder goes through wsl.exe as root, with both files, owner root, mode 0755.
 grep -q -- '-d Debian -u root -e sh -c' "$TMP/wsl.args" || fail "the copy runs as root in Debian through -e, so no shell expands the $ text ($(cat "$TMP/wsl.args"))"; ok
 grep -q 'install -m 0755 -o root -g root' "$TMP/wsl.args" && grep -q 'install -d -m 0755 -o root -g root' "$TMP/wsl.args" || fail "files and folder are installed root-owned, mode 0755"; ok
-grep -q "$SRC/wsl_root_check.py $SRC/wsl_reserve.py" "$TMP/wsl.args" && grep -q ' /usr/local/lib/afa-root-check ' "$TMP/wsl.args" || fail "both scripts go to /usr/local/lib/afa-root-check"; ok
+grep -q "$SRC/wsl_root_check.py $SRC/wsl_reserve.py $SRC/docker_volume_backup.py" "$TMP/wsl.args" && grep -q ' /usr/local/lib/afa-root-check ' "$TMP/wsl.args" || fail "all three scripts go to /usr/local/lib/afa-root-check"; ok
 
 # 3. A task file that already has a user (a second run on a filled copy) ends with one, not two.
 run --print >"$TMP/filled.xml"
