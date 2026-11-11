@@ -13,7 +13,29 @@ dg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dg)
 
 GM = "mcp__claude_ai_Gmail__"
-SELF = "owner@example.com"
+SELF = "owner@example.com"  # a placeholder; the guard reads the owner's real address at run time from its private config
+
+_cfg_dir = None
+_old_env = None
+
+
+def setUpModule():
+    """The guard reads the owner's address from a private file. These tests point it at a temporary one holding the placeholder."""
+    global _cfg_dir, _old_env
+    import tempfile
+    _cfg_dir = tempfile.TemporaryDirectory()
+    path = Path(_cfg_dir.name) / "identity-guard.json"
+    path.write_text(json.dumps({"draft_recipient": SELF}))
+    _old_env = os.environ.get("IDENTITY_GUARD_CONFIG")
+    os.environ["IDENTITY_GUARD_CONFIG"] = str(path)
+
+
+def tearDownModule():
+    if _old_env is None:
+        os.environ.pop("IDENTITY_GUARD_CONFIG", None)
+    else:
+        os.environ["IDENTITY_GUARD_CONFIG"] = _old_env
+    _cfg_dir.cleanup()
 
 
 def call(tool, **args):
@@ -74,6 +96,43 @@ class Update(unittest.TestCase):
         self.assertIn("existing recipients", dg.check(call("update_draft", draftId="r1", htmlBody="<p>x</p>")))
 
 
+class OwnerAddressAtRunTime(unittest.TestCase):
+    """The owner's address lives in ~/.config/afa/identity-guard.json, never in the repo. Without it the guard cannot tell his drafts from a
+    client's, so it denies every draft (fail closed)."""
+
+    def with_config(self, text):
+        import tempfile
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "identity-guard.json"
+        if text is not None:
+            p.write_text(text)
+        old = os.environ["IDENTITY_GUARD_CONFIG"]
+        self.addCleanup(os.environ.__setitem__, "IDENTITY_GUARD_CONFIG", old)
+        os.environ["IDENTITY_GUARD_CONFIG"] = str(p)
+
+    def test_a_missing_file_denies_even_a_draft_to_the_placeholder(self):
+        self.with_config(None)
+        r = dg.check(call("create_draft", to=[SELF]))
+        self.assertIn("identity-guard.json", r)
+
+    def test_a_file_without_the_key_or_unreadable_denies(self):
+        for text in ("{}", "not json", "[1]", '{"draft_recipient": 5}', '{"draft_recipient": "no-at-sign"}', '{"addresses": ["' + SELF + '"]}'):
+            with self.subTest(text=text):
+                self.with_config(text)
+                self.assertTrue(dg.check(call("create_draft", to=[SELF])))
+
+    def test_the_address_in_the_file_is_the_one_allowed(self):
+        self.with_config(json.dumps({"draft_recipient": "Someone.Else@Example.NET"}))
+        self.assertIsNone(dg.check(call("create_draft", to=["someone.else@example.net"])))
+        self.assertIn("is not to Jonathan", dg.check(call("create_draft", to=[SELF])))
+
+    def test_the_source_carries_no_address_of_its_own(self):
+        import re
+        found = set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", SRC.read_text()))
+        self.assertEqual(found, set(), "the guard must not hold an address: it reads it from the private config")
+
+
 class Untouched(unittest.TestCase):
     def test_other_tools_pass(self):
         for p in (
@@ -119,9 +178,13 @@ class Wiring(unittest.TestCase):
         shutil.copy(SRC, hooks / "draft-recipient-guard.py")
         shutil.copy(FIXTURE, hooks / "block-outbound.sh")
         self.hook = hooks / "block-outbound.sh"
+        cfg = self.home / ".config" / "afa"
+        cfg.mkdir(parents=True)
+        (cfg / "identity-guard.json").write_text(json.dumps({"draft_recipient": SELF}))
 
     def run_hook(self, payload):
         env = {**os.environ, "HOME": str(self.home)}
+        env.pop("IDENTITY_GUARD_CONFIG", None)  # the guard must find the config under this HOME
         return subprocess.run(["bash", str(self.hook)], input=json.dumps(payload), capture_output=True, text=True, env=env)
 
     def test_client_create_and_update_are_denied_by_the_hook(self):
@@ -161,8 +224,15 @@ class LiveHook(unittest.TestCase):
 
     HOOK = Path.home() / ".claude" / "hooks" / "block-outbound.sh"
 
+    def setUp(self):
+        # The live guard reads the owner's address from this HOME's private config. No skip: a missing file means the wiring is broken.
+        cfg = Path.home() / ".config" / "afa" / "identity-guard.json"
+        self.assertTrue(cfg.is_file(), f"{cfg} is missing: the live draft guard has no owner address and denies every draft")
+        self.me = json.loads(cfg.read_text())["draft_recipient"]
+
     def run_hook(self, payload):
-        return subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload), capture_output=True, text=True)
+        env = {k: v for k, v in os.environ.items() if k != "IDENTITY_GUARD_CONFIG"}
+        return subprocess.run(["bash", str(self.HOOK)], input=json.dumps(payload), capture_output=True, text=True, env=env)
 
     def test_client_create_and_update_are_denied_by_the_live_hook(self):
         for tool, args in (("create_draft", {"to": ["client@example.org"]}), ("update_draft", {"draftId": "r1", "to": ["client@example.org"]})):
@@ -172,7 +242,7 @@ class LiveHook(unittest.TestCase):
                 self.assertIn("gmail_api.py draft-create", r.stderr)
 
     def test_self_draft_and_bash_pass_the_live_hook(self):
-        self.assertEqual(self.run_hook(call("create_draft", to=[SELF], body="x")).returncode, 0)
+        self.assertEqual(self.run_hook(call("create_draft", to=[self.me], body="x")).returncode, 0)
         self.assertEqual(self.run_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}}).returncode, 0)
 
     def test_the_live_send_block_is_unchanged(self):
