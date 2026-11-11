@@ -2,8 +2,8 @@
 import importlib.util
 import subprocess
 import sys
-import tempfile
 import unittest
+from tmpdirs import fresh_dir
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parents[4] / ".github" / "scripts" / "email_guard.py"
@@ -12,8 +12,8 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
 
-def make_repo(files):
-    root = Path(tempfile.mkdtemp(prefix="email-guard-"))
+def make_repo(case, files):
+    root = Path(fresh_dir(case, prefix="email-guard-"))
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     for name, text in files.items():
         p = root / name
@@ -47,12 +47,12 @@ class Allowed(unittest.TestCase):
 
 class Cli(unittest.TestCase):
     def test_clean_repo_exits_zero(self):
-        r = run(make_repo({"a.py": "ME = 'owner@example.org'\n"}))
+        r = run(make_repo(self, {"a.py": "ME = 'owner@example.org'\n"}))
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_a_real_looking_address_fails_and_is_never_echoed(self):
         planted = "someone.real" + "@" + "mailbox-provider.net"  # built at run time so this file holds no address
-        r = run(make_repo({"docs/x.md": "line one\ncontact " + planted + "\n"}))
+        r = run(make_repo(self, {"docs/x.md": "line one\ncontact " + planted + "\n"}))
         self.assertEqual(r.returncode, 1)
         self.assertIn("docs/x.md:2", r.stdout)
         self.assertNotIn(planted, r.stdout + r.stderr)
@@ -60,12 +60,12 @@ class Cli(unittest.TestCase):
 
     def test_allow_file_lets_a_reviewed_fixture_through(self):
         files = {"t.py": "x = 'bob" + "@client.test.corp'\n", ".github/email-guard-allow.txt": "@client.test.corp\n"}
-        self.assertEqual(run(make_repo(files)).returncode, 0)
+        self.assertEqual(run(make_repo(self, files)).returncode, 0)
         files[".github/email-guard-allow.txt"] = "# nothing allowed\n"
-        self.assertEqual(run(make_repo(files)).returncode, 1)
+        self.assertEqual(run(make_repo(self, files)).returncode, 1)
 
     def test_untracked_files_are_not_scanned(self):
-        root = make_repo({"ok.py": "pass\n"})
+        root = make_repo(self, {"ok.py": "pass\n"})
         (root / "later.txt").write_text("someone" + "@" + "mailbox-provider.net\n")
         self.assertEqual(run(root).returncode, 0)
 
