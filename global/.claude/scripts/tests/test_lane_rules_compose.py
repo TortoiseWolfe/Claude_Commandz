@@ -1,4 +1,5 @@
 """lane_rules_compose.py: a lane gets core plus the parts its name, folder, prompt or connectors might need."""
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,15 +19,19 @@ def rules_dir(tmp):
     return d
 
 
-def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False):
+def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, keywords=None):
     with tempfile.TemporaryDirectory() as tmp:
         d = rules_dir(tmp)
+        kf = Path(tmp) / "keywords.json"  # never the live private file: a missing one adds no words
+        if keywords is not None:
+            kf.write_text(keywords)
+        env = {**os.environ, "LANE_RULES_KEYWORDS": str(kf)}
         pf = Path(tmp) / ("nope.md" if missing_prompt else "prompt.md")
         if not missing_prompt:
             pf.write_text(prompt)
         out = Path(tmp) / "rules.md"
         r = subprocess.run([sys.executable, "-I", str(SCRIPT), "--name", "x", "--dir", folder, "--connectors", connectors,
-                            "--prompt", str(pf), "--out", str(out), "--rules-dir", str(d)], capture_output=True, text=True)
+                            "--prompt", str(pf), "--out", str(out), "--rules-dir", str(d)], capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr
         return r.stdout.strip().split(","), out.read_text()
 
@@ -57,6 +62,26 @@ class ComposeTest(unittest.TestCase):
 
     def test_missing_prompt_gets_every_part(self):
         self.assertEqual(run("", missing_prompt=True)[0], PARTS)
+
+    def test_private_words_add_parts_and_the_public_list_holds_no_names(self):
+        # Placeholder words stand in for the client names that live in ~/.config/afa/lane-rules-keywords.json.
+        prompt = "Reply about the zebracorp account."
+        self.assertEqual(run(prompt)[0], ["core"])
+        parts, text = run(prompt, keywords='{"coop": ["zebracorp"], "mail": ["\\\\bquokka\\\\b"]}')
+        self.assertIn("coop", parts)
+        self.assertNotIn("mail", parts)
+        self.assertIn("mail", run("The quokka rota.", keywords='{"mail": ["\\\\bquokka\\\\b"]}')[0])
+
+    def test_a_bad_or_unknown_private_entry_is_skipped_not_fatal(self):
+        for bad in ("not json", '["a"]', '{"nonsense": ["zebracorp"]}', '{"coop": ["(unclosed", 5]}', '{"coop": "zebracorp"}'):
+            self.assertEqual(run("Reply about the zebracorp account.", keywords=bad)[0], ["core"], bad)
+
+    def test_the_public_trigger_lists_name_no_client_or_person(self):
+        src = SCRIPT.read_text()
+        start, end = src.index("TRIGGERS = {"), src.index("WORKSPACE_DIRS")
+        lists = src[start:end].lower()
+        for word in ("greg", "william", "eduity", "chattanooga", "techjoy", "consemble", "peermentor", "elev8tek", "harmonic", "scout"):
+            self.assertNotIn(word, lists)
 
     def test_all_flag_and_missing_core(self):
         with tempfile.TemporaryDirectory() as tmp:
