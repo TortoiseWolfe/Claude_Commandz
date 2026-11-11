@@ -84,6 +84,30 @@ def compose(parts, rules_dir):
     return "\n\n".join(chunks) + "\n"
 
 
+def routes_for(name, dirpath, prompt_text, routes_file=None):
+    """Sections of hub/routes.md whose site words appear in the lane's name, folder or prompt (empty when none or no file)."""
+    try:
+        raw = Path(routes_file or os.environ.get("HUB_ROUTES_FILE") or HOME / "repos/hub/routes.md").read_text()
+    except OSError:
+        return ""
+    text = f"{name}\n{dirpath}\n{prompt_text[:30000]}".lower()
+    out = []
+    for sec in re.split(r"(?m)^(?=## )", raw):
+        m = re.match(r"## (.+)", sec)
+        if not m:
+            continue
+        head = m.group(1)
+        main = re.sub(r"\s*\(.*$", "", head).strip()
+        words = main.split()
+        names = [words[0]] if words else []  # the site's own name is the first word of the main name
+        names += [n.strip().strip('"') for n in re.findall(r"\(([^)]*)\)", head) for n in n.split(",")]
+        if any(n and re.search(r"(?<![a-z0-9])" + re.escape(n.lower()) + r"(?![a-z0-9])", text) for n in names):
+            out.append(sec.rstrip("\n"))
+    if not out:
+        return ""
+    return "## Routes that worked or failed before (hub/routes.md)\n\n" + "\n\n".join(out) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default="")
@@ -122,6 +146,10 @@ def main():
     if not read_part(rules_dir, "core").strip():
         sys.exit("lane_rules_compose: %s/core.md is missing or empty" % rules_dir)
     text = compose(parts, rules_dir)
+    if pf is not None and pf.is_file() and not a.all:
+        extra = routes_for(a.name, a.dir, pf.read_text(errors="replace"))
+        if extra:
+            text = text.rstrip("\n") + "\n\n" + extra
     out = Path(a.out)
     out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
