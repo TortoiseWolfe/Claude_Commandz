@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows scheduled task that repairs what a WSL restart can leave broken (issue 368): every 15 minutes and at sign-in it starts
+  /usr/local/lib/afa-root-check/wsl_root_check.py as root inside Debian. Windows to Linux needs no interop, so this works exactly when nothing started from
+  WSL can: it re-registers WSLInterop, keeps the OpenClaw gateway's binfmt files switched off, re-enables the keeper tasks,
+  and restarts Docker Desktop (never while a container runs).
+  The script runs from a root-owned folder that install-wsl-root-check.sh fills, never from a home folder: root must not run code
+  that a person's own processes can change. python3 -I keeps the current folder and environment out of its import path.
+  No password is stored: LogonType InteractiveToken runs only while the user is signed in.
+  The checked-in file has no UserId; the install script fills the signed-in user (from whoami.exe) into the LogonTrigger,
+  because a LogonTrigger without one needs administrator rights to register.
+
+  Install (from WSL, as the signed-in user):
+    ~/.claude/scripts/windows/install-wsl-root-check.sh          (give it the argument print to see the filled-in XML and register nothing)
+  Check that no password is stored:  schtasks.exe /query /tn '\AFA\WslRootCheck' /xml
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\AFA\WslRootCheck</URI>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+  </Settings>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+    <TimeTrigger>
+      <StartBoundary>2026-11-11T00:00:00</StartBoundary>
+      <Repetition>
+        <Interval>PT15M</Interval>
+      </Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>conhost.exe</Command>
+      <Arguments>--headless wsl.exe -d Debian -u root -- python3 -I /usr/local/lib/afa-root-check/wsl_root_check.py</Arguments>
+    </Exec>
+  </Actions>
+</Task>

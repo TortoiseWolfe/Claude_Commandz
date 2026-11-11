@@ -37,6 +37,7 @@ import time
 from datetime import datetime
 
 from redact_process import redact_text
+from wsl_reserve import DESIRED, read_file, sysctl_drift, sysctl_path  # noqa: F401  (re-exported: the tests and callers use wd.DESIRED)
 
 ORDER = 7  # 2**7 pages = 512 KB, the vmbus ring allocation
 MIN_BLOCKS = int(os.environ.get("WSL_BRIDGE_MIN_BLOCKS", "200"))  # order-7 equivalents (100 MB). Healthy ~3500, failing 0.
@@ -54,24 +55,11 @@ SWEEP_CAP = 50000  # folders removed per run
 SCAN_CAP = 20000  # /tmp entries read to name the biggest patterns, so a /tmp with millions of entries cannot stall a run
 SWEEP_SCAN_CAP = 2000000  # /tmp entries read looking for sweep candidates (names are cheap to list; only cc-test-* names are stat-ed)
 
-# Reserve of free memory the kernel keeps by reclaiming clean cache, so freed pages can merge back into big blocks.
-#  min_free_kbytes 1 GiB: 2.5% of the 40 GB VM. WSL returns free pages to Windows (free page reporting), so it costs nothing real.
-#  watermark_scale_factor 50: kswapd wakes below min + 0.5% of RAM (~1.2 GB free) and stops at ~1.4 GB; the default 10 left ~50 MB.
-#  compaction_proactiveness 30: the kernel default is 20, WSL's build sets 0. Background compaction starts well before order-7 runs out.
-DESIRED = {
-    "vm.min_free_kbytes": 1048576,
-    "vm.watermark_scale_factor": 50,
-    "vm.compaction_proactiveness": 30,
-}
+# The reserve values (DESIRED), sysctl_path and sysctl_drift live in wsl_reserve.py, which the root-owned copy of the root check also uses.
 
 
 def state_dir():
     return os.environ.get("WSL_BRIDGE_STATE") or os.path.join(os.path.expanduser("~"), ".claude", "state", "wsl-bridge")
-
-
-def read_file(path):
-    with open(path) as f:
-        return f.read()
 
 
 def parse_buddyinfo(text):
@@ -92,23 +80,6 @@ def big_blocks(text, order=ORDER):
 def mem_free_kb(meminfo):
     m = re.search(r"^MemFree:\s+(\d+)\s+kB", meminfo, re.M)
     return int(m.group(1)) if m else 0
-
-
-def sysctl_path(key):
-    return "/proc/sys/" + key.replace(".", "/")
-
-
-def sysctl_drift(read=read_file):
-    """{key: current} for each reserve value that is not what DESIRED says (a missing file counts as drift)."""
-    drift = {}
-    for key, want in DESIRED.items():
-        try:
-            cur = int(read(sysctl_path(key)).strip())
-        except (OSError, ValueError):
-            cur = None
-        if cur != want:
-            drift[key] = cur
-    return drift
 
 
 def sysctl_conf():
@@ -145,6 +116,14 @@ def run_root(script, timeout=100):
     Returns (ok, route). Docker does not need the bridge; wsl.exe -u root is the fallback.
     """
     cwd = "/mnt/c" if os.path.isdir("/mnt/c") else "/"
+    if os.geteuid() == 0:
+        # Already root (started by wsl_root_check.py from Windows): no container and no interop needed (issue 368).
+        try:
+            r = subprocess.run(["sh", "-c", script], capture_output=True, timeout=timeout, cwd="/")
+            if r.returncode == 0:
+                return True, "root"
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     image, lookup_ok = local_alpine_image(timeout=min(timeout, 20))
     pulled = False
     pull_failed = False
@@ -470,7 +449,7 @@ def run(argv=None, read=read_file, root=run_root, probe=probe_bridge, now=time.t
             ok, route = root("; ".join("echo %d > %s" % (v, sysctl_path(k)) for k, v in DESIRED.items()))
             notes.append("sysctl-reapplied(%s)" % route if ok else "sysctl-reapply-failed")
             if not ok:
-                write_alert(sd, t, "wsl bridge watchdog: cannot reach root to re-apply the memory reserve (docker and wsl.exe -u root both failed)")
+                write_alert(sd, t, "wsl bridge watchdog: cannot reach root to re-apply the memory reserve (docker and wsl.exe -u root both failed; the 15-minute root check, wsl_root_check.py, re-applies it without interop)")
 
     # A low block count starts a heal, but it is not proof the bridge is down (19 Oct 9:27 PM: 7 blocks at one instant, cmd.exe still
     # answered in 0.05 s): only the probe decides whether the hub is woken. Inside the heal gap the probe decides whether to heal anyway.
