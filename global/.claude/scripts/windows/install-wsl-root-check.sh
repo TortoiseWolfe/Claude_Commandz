@@ -40,7 +40,7 @@ src=$(cd "$here/.." && pwd)
 for f in wsl_root_check.py wsl_reserve.py; do
   [ -f "$src/$f" ] || { echo "install-wsl-root-check: $src/$f is missing; install the scripts first" >&2; exit 1; }
 done
-${WSLEXE:-wsl.exe} -d Debian -u root -- sh -c 'set -e; lib=$1; shift; install -d -m 0755 -o root -g root "$lib"; for f in "$@"; do install -m 0755 -o root -g root "$f" "$lib/$(basename "$f")"; done' sh "$lib" "$src/wsl_root_check.py" "$src/wsl_reserve.py"
+${WSLEXE:-wsl.exe} -d Debian -u root -e sh -c 'set -e; lib=$1; shift; install -d -m 0755 -o root -g root "$lib"; for f in "$@"; do install -m 0755 -o root -g root "$f" "$lib/$(basename "$f")"; done' sh "$lib" "$src/wsl_root_check.py" "$src/wsl_reserve.py"
 echo "copied wsl_root_check.py and wsl_reserve.py into $lib (root-owned)"
 tmp=$(mktemp "${TMPDIR:-/tmp}/AFA-WslRootCheck.XXXXXX.xml")
 trap 'rm -f "$tmp"' EXIT

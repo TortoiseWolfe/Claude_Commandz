@@ -40,7 +40,7 @@ grep -q 'wsl.exe -d Debian -u root' "$TMP/registered.xml" || fail "the task runs
 grep -q 'python3 -I /usr/local/lib/afa-root-check/wsl_root_check.py' "$TMP/registered.xml" || fail "the task runs the root-owned copy, isolated"; ok
 ! grep -q '/home/' "$TMP/registered.xml" || fail "the task never runs code from a home folder"; ok
 # The copy into the root-owned folder goes through wsl.exe as root, with both files, owner root, mode 0755.
-grep -q -- '-d Debian -u root -- sh -c' "$TMP/wsl.args" || fail "the copy runs as root in Debian ($(cat "$TMP/wsl.args"))"; ok
+grep -q -- '-d Debian -u root -e sh -c' "$TMP/wsl.args" || fail "the copy runs as root in Debian through -e, so no shell expands the $ text ($(cat "$TMP/wsl.args"))"; ok
 grep -q 'install -m 0755 -o root -g root' "$TMP/wsl.args" && grep -q 'install -d -m 0755 -o root -g root' "$TMP/wsl.args" || fail "files and folder are installed root-owned, mode 0755"; ok
 grep -q "$SRC/wsl_root_check.py $SRC/wsl_reserve.py" "$TMP/wsl.args" && grep -q ' /usr/local/lib/afa-root-check ' "$TMP/wsl.args" || fail "both scripts go to /usr/local/lib/afa-root-check"; ok
 

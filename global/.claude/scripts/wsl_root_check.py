@@ -170,7 +170,7 @@ def check_gateway(ctx):
         return [], ["cannot list running distros (wsl.exe -l failed), gateway not checked"]
     if GATEWAY not in names:
         return [], []  # never start the gateway, never touch it when it is down
-    rc, out = ctx.run([ctx.wsl, "-d", GATEWAY, "-u", "root", "--", "sh", "-c", GATEWAY_SCRIPT], 60)
+    rc, out = ctx.run([ctx.wsl, "-d", GATEWAY, "-u", "root", "-e", "sh", "-c", GATEWAY_SCRIPT], 60)
     changes = [l[8:].strip() for l in out.splitlines() if l.startswith("CHANGED ")]
     problems = [l[8:].strip() for l in out.splitlines() if l.startswith("PROBLEM ")]
     ctx.mask_proven = rc == 0 and not problems and any(l.strip() == "MASKED" for l in out.splitlines())
