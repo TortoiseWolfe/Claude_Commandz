@@ -130,6 +130,19 @@ class GatewayStepTests(Base):
         self.assertEqual(problems, ["gateway: could not neutralize binfmt.d/x.conf"])
         self.assertTrue(fake.ran("wsl.exe", "-d", "OpenClawGateway", "-u", "root"))
 
+    def test_the_mask_is_proven_only_when_the_snippet_says_masked_and_nothing_failed(self):
+        for out, rcode, want in (("MASKED\n", 0, True), ("", 0, False), ("MASKED\nPROBLEM x\n", 0, False), ("MASKED\n", 1, False)):
+            fake = Fake([(["wsl.exe", "-l"], (0, "OpenClawGateway\n")), (["wsl.exe", "-d"], (rcode, out))])
+            ctx = self.ctx(fake)
+            rc.check_gateway(ctx)
+            self.assertEqual(ctx.mask_proven, want, (out, rcode))
+
+    def test_a_stopped_gateway_proves_nothing(self):
+        fake = Fake([(["wsl.exe", "-l"], (0, "Debian\n"))])
+        ctx = self.ctx(fake)
+        rc.check_gateway(ctx)
+        self.assertFalse(ctx.mask_proven)
+
     def test_a_failed_distro_list_is_a_problem_not_a_gateway_start(self):
         fake = Fake([(["wsl.exe", "-l"], (1, ""))])
         changes, problems = rc.check_gateway(self.ctx(fake))
@@ -160,6 +173,7 @@ class GatewayScriptTests(Base):
         out = run()
         self.assertIn("CHANGED systemd-binfmt.service masked (was enabled)", out)
         self.assertIn("mask systemd-binfmt.service", open(log).read())
+        self.assertNotIn("MASKED", out.splitlines())  # this fake keeps saying "enabled", so the mask is not proven
         for n in ("python3.12.conf", "WSLInterop.conf"):
             link = os.path.join(root, "etc/binfmt.d", n)
             self.assertTrue(os.path.islink(link) and os.readlink(link) == "/dev/null", n)
@@ -169,7 +183,7 @@ class GatewayScriptTests(Base):
     def test_second_run_changes_nothing(self):
         root, log, run = self.run_snippet("masked")
         run()
-        self.assertEqual(run().strip(), "")
+        self.assertEqual(run().strip(), "MASKED")  # the proof line only; no CHANGED or PROBLEM line
         self.assertNotIn("mask", open(log).read())  # masked already: never asked to mask
 
 
@@ -192,10 +206,50 @@ class TaskTests(Base):
         def query(argv):
             return (0, "Scheduled Task State:   Disabled\n") if argv[3] == "\\AFA\\OpenClawStatus" else (1, "ERROR: not found")
         fake = Fake([(["schtasks.exe", "/query"], query)])
-        changes, problems = rc.check_tasks(self.ctx(fake))
+        ctx = self.ctx(fake)
+        ctx.mask_proven = True
+        changes, problems = rc.check_tasks(ctx)
         self.assertEqual(problems, [])
         self.assertEqual(changes, ["task \\AFA\\OpenClawStatus was Disabled: enabled it"])
         self.assertTrue(fake.ran("schtasks.exe", "/change", "/tn", "\\AFA\\OpenClawStatus", "/enable"))
+
+    def disabled_status_only(self, container_out=(0, ""), extra=()):
+        def query(argv):
+            return (0, "Scheduled Task State:   Disabled\n") if argv[3] == "\\AFA\\OpenClawStatus" else (1, "ERROR: not found")
+        return Fake([(["schtasks.exe", "/query"], query), (["docker", "ps"], container_out)] + list(extra))
+
+    def test_openclawstatus_stays_disabled_with_no_container_and_no_proven_mask(self):
+        fake = self.disabled_status_only()
+        self.assertEqual(rc.check_tasks(self.ctx(fake)), ([], []))
+        self.assertFalse(fake.ran("schtasks.exe", "/change"))
+
+    def test_openclawstatus_is_enabled_when_the_gateway_container_runs(self):
+        fake = self.disabled_status_only((0, "openclaw-openclaw-gateway-1\n"))
+        changes, problems = rc.check_tasks(self.ctx(fake))
+        self.assertEqual(changes, ["task \\AFA\\OpenClawStatus was Disabled: enabled it"])
+        self.assertTrue(fake.ran("schtasks.exe", "/change", "/tn", "\\AFA\\OpenClawStatus", "/enable"))
+
+    def test_another_container_or_a_failed_docker_does_not_count(self):
+        for out in ((0, "openclaw-stage-openclaw-gateway-1\nsomething\n"), (1, "Cannot connect")):
+            fake = self.disabled_status_only(out)
+            self.assertEqual(rc.check_tasks(self.ctx(fake)), ([], []))
+            self.assertFalse(fake.ran("schtasks.exe", "/change"))
+
+    def test_openclawstatus_is_enabled_when_the_mask_was_proven_this_run(self):
+        fake = self.disabled_status_only()
+        ctx = self.ctx(fake)
+        ctx.mask_proven = True
+        changes, _ = rc.check_tasks(ctx)
+        self.assertEqual(changes, ["task \\AFA\\OpenClawStatus was Disabled: enabled it"])
+        self.assertFalse(fake.ran("docker", "ps"))  # the mask proof is enough; docker is not asked
+
+    def test_towerkeeper_is_never_guarded(self):
+        def query(argv):
+            return (0, "Scheduled Task State:   Disabled\n") if argv[3] == "\\AFA\\TowerKeeper" else (1, "ERROR: not found")
+        fake = Fake([(["schtasks.exe", "/query"], query)])
+        changes, _ = rc.check_tasks(self.ctx(fake))
+        self.assertEqual(changes, ["task \\AFA\\TowerKeeper was Disabled: enabled it"])
+        self.assertFalse(fake.ran("docker", "ps"))
 
     def test_enabled_or_absent_tasks_are_not_touched(self):
         fake = Fake([(["schtasks.exe", "/query"], (0, "Scheduled Task State:   Enabled\n"))])
@@ -205,7 +259,9 @@ class TaskTests(Base):
     def test_refused_enable_names_the_exact_command(self):
         fake = Fake([(["schtasks.exe", "/query"], (0, "Scheduled Task State:   Disabled\n")),
                      (["schtasks.exe", "/change"], (1, "ERROR: Access is denied.\n"))])
-        changes, problems = rc.check_tasks(self.ctx(fake))
+        ctx = self.ctx(fake)
+        ctx.mask_proven = True
+        changes, problems = rc.check_tasks(ctx)
         self.assertEqual(changes, [])
         self.assertIn("schtasks.exe /change /tn '\\AFA\\OpenClawStatus' /enable", problems[0])
 

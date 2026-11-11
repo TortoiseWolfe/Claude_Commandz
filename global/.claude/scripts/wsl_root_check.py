@@ -20,7 +20,9 @@ Checks, in this order (the first one is what every later Windows call needs):
   2. gateway     when the OpenClawGateway distro is ALREADY running (never started, never terminated): systemd-binfmt.service
                  stays masked and every binfmt.d file is pointed at /dev/null, so no unit can rewrite the table.
   3. sysctl      the memory reserve wsl_bridge_watchdog.py keeps (it needs root; this process is root, so no interop is needed).
-  4. tasks       \\AFA\\OpenClawStatus and \\AFA\\TowerKeeper (whichever exist) are re-enabled when found Disabled.
+  4. tasks       \\AFA\\OpenClawStatus and \\AFA\\TowerKeeper (whichever exist) are re-enabled when found Disabled; OpenClawStatus
+                 only when the gateway container runs or step 2 just saw the distro running with the mask in place (otherwise its
+                 refresh could boot the distro unprotected), so it stays Disabled until one of those holds.
   5. docker      Docker Desktop runs but the Linux docker command does not answer on two checks in a row: restart Docker Desktop
                  through its own "docker desktop restart", only when no container runs, at most once an hour.
 
@@ -52,6 +54,11 @@ import wsl_reserve as w  # noqa: E402  (beside this file; standard library only)
 WSL_INTEROP_ENTRY = ":WSLInterop:M::MZ::/init:PF"
 GATEWAY = "OpenClawGateway"
 KEEPER_TASKS = ["\\AFA\\OpenClawStatus", "\\AFA\\TowerKeeper"]
+# A task that can boot the gateway distro (openclaw_status_refresh.sh asks the gateway through openclaw_gateway.py, which boots the distro
+# when no container answers) is re-enabled only while that is safe: the gateway container runs, or this run saw the distro running with
+# systemd-binfmt.service masked. TowerKeeper is not guarded: it is the keeper-only variant for a machine that never touches the gateway.
+GATEWAY_GUARDED_TASKS = ["\\AFA\\OpenClawStatus"]
+GATEWAY_CONTAINER = "openclaw-openclaw-gateway-1"
 DOCKER_RESTART_GAP_S = 3600
 DOCKER_FAILS_NEEDED = 2
 
@@ -63,7 +70,9 @@ SC="${SYSTEMCTL:-systemctl}"
 st=$($SC is-enabled systemd-binfmt.service 2>/dev/null || true)
 if [ "$st" != masked ]; then
   if $SC mask systemd-binfmt.service >/dev/null 2>&1; then echo "CHANGED systemd-binfmt.service masked (was ${st:-unknown})"; else echo "PROBLEM could not mask systemd-binfmt.service"; fi
+  st=$($SC is-enabled systemd-binfmt.service 2>/dev/null || true)
 fi
+[ "$st" = masked ] && echo "MASKED"
 mkdir -p "$R/etc/binfmt.d"
 names=""
 for f in "$R"/usr/lib/binfmt.d/*.conf "$R"/etc/binfmt.d/*.conf; do
@@ -105,6 +114,7 @@ class Ctx:
         self.now = now
         self.proc = proc  # prefix for /proc/sys paths (tests)
         self.gateway_env = gateway_env or {}
+        self.mask_proven = False  # set by check_gateway when it saw the distro running with the mask in place
 
     def run(self, argv, timeout=30):
         """-> (returncode, text). A missing program or a timeout is (127, '') / (124, '')."""
@@ -163,6 +173,7 @@ def check_gateway(ctx):
     rc, out = ctx.run([ctx.wsl, "-d", GATEWAY, "-u", "root", "--", "sh", "-c", GATEWAY_SCRIPT], 60)
     changes = [l[8:].strip() for l in out.splitlines() if l.startswith("CHANGED ")]
     problems = [l[8:].strip() for l in out.splitlines() if l.startswith("PROBLEM ")]
+    ctx.mask_proven = rc == 0 and not problems and any(l.strip() == "MASKED" for l in out.splitlines())
     if rc != 0 and not problems:
         problems.append("gateway check did not run (exit %d)" % rc)
     return ["gateway: " + c for c in changes], ["gateway: " + p for p in problems]
@@ -182,8 +193,14 @@ def check_sysctl(ctx):
     return changes, problems
 
 
+def gateway_container_running(ctx):
+    rc, out = ctx.run([ctx.docker, "ps", "--filter", "name=" + GATEWAY_CONTAINER, "--format", "{{.Names}}"], 30)
+    return rc == 0 and GATEWAY_CONTAINER in out.split()
+
+
 def check_tasks(ctx):
     changes, problems = [], []
+    safe = None  # worked out once, and only when a guarded task is actually found Disabled
     for task in KEEPER_TASKS:
         rc, out = ctx.run([ctx.schtasks, "/query", "/tn", task, "/fo", "list", "/v"], 30)
         if rc != 0:
@@ -191,6 +208,11 @@ def check_tasks(ctx):
         m = re.search(r"Scheduled Task State:\s*(\w+)", out)
         if not m or m.group(1).lower() != "disabled":
             continue
+        if task in GATEWAY_GUARDED_TASKS:
+            if safe is None:
+                safe = ctx.mask_proven or gateway_container_running(ctx)
+            if not safe:
+                continue  # left Disabled on purpose: enabling it could boot the gateway distro with the mask unproven
         rc, out = ctx.run([ctx.schtasks, "/change", "/tn", task, "/enable"], 30)
         if rc == 0:
             changes.append("task %s was Disabled: enabled it" % task)
