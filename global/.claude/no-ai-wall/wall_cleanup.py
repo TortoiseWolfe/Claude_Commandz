@@ -11,9 +11,11 @@ and reported while it is an ordinary file with one name, and is a stray when it 
 size and, for a regular file up to 1 MB, a sha256; a dash for anything else; never file content). The holding folder is made new for
 each run, and a stray is not moved over a name that already sits there.
 
-What it will never do: touch a manifest file, the no-AI list, or any file outside its own folder; delete anything; start any program
-but itself (once, under python3 -I, when it was not started that way); take a path, a folder or a file name from the caller; read the HOME setting. It refuses to run anywhere but an installed wall
-(a folder named no-ai-wall inside a folder named .claude, holding all manifest files, with no .git entry in it or above it).
+What it will never do: touch a manifest file, the no-AI list, or any file outside its own folder (apart from its own holding
+folder and its log under ~/.claude/state); delete anything; start any program but itself
+(once, under python3 -I, when it was not started that way); take a path, a folder or a file name from the caller; read the HOME setting.
+It refuses to run anywhere but an installed wall (a folder named no-ai-wall inside a folder named .claude, holding all manifest
+files, with no .git entry in it or above it).
 
 Run: python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            (dry run: list only, change nothing)
      python3 -I ~/.claude/no-ai-wall/wall_cleanup.py --apply    (move the strays)
