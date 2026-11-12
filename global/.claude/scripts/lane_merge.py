@@ -22,8 +22,9 @@ What it cannot see: a known non-test job passes on its green badge alone, and so
 (no log to read), as long as one other job shows a summary. Each is named after "no test summary in:" or "not readable:".
 After the merge it re-reads the pull request, and only then appends one line to <state dir>/merge-rollup-YYYY-MM-DD.md.
 Exit codes: 0 = merged (or, with --check, would merge); 1 = refused or not confirmed.
-Test hooks only: GH (the gh program), MERGE_GATE_NOW (pins the time), LANE_MERGE_STATE_DIR (default ~/.claude/state),
-LANE_MERGE_OWN_REVIEW (default ~/.config/afa/own-review-repos.txt), LANE_MERGE_REPOS (default ~/.config/afa/merge-repos.txt).
+Fixed in the file, never read from the environment: the gh program (gh on the PATH), the two lists
+(~/.config/afa/own-review-repos.txt and ~/.config/afa/merge-repos.txt) and the state folder (~/.claude/state). The tests load
+this file as a module and set those four names. MERGE_GATE_NOW pins only the time printed in the roll-up line.
 """
 import argparse
 import datetime
@@ -41,6 +42,13 @@ import merge_gate  # noqa: E402
 FIELDS = "number,title,state,mergeable,mergeCommit,statusCheckRollup,url,isDraft,headRefOid,baseRefName"
 REPO_RX = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# Fixed on purpose: nothing in the environment can point this script at another gh, another list or another state folder.
+# The tests load this file as a module and set these four names; running the file itself always uses the values below.
+GH_PROGRAM = "gh"
+OWN_REVIEW_PATH = "~/.config/afa/own-review-repos.txt"
+MERGE_REPOS_PATH = "~/.config/afa/merge-repos.txt"
+STATE_DIR = "~/.claude/state"
+
 
 class Refused(Exception):
     pass
@@ -53,7 +61,7 @@ def refuse(why) -> NoReturn:
 def gh(args, timeout=120):
     """(exit code, stdout, stderr). A gh that cannot run gives exit code 127."""
     try:
-        r = subprocess.run([os.environ.get("GH", "gh")] + args, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([GH_PROGRAM] + args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 127, "", "cannot run gh: %s" % e
     return r.returncode, r.stdout, r.stderr
@@ -72,11 +80,11 @@ def read_pr(number, repo):
 # ---- 1. the two repo lists ---------------------------------------------------------------------------------------------
 
 def own_review_path():
-    return os.path.expanduser(os.environ.get("LANE_MERGE_OWN_REVIEW") or "~/.config/afa/own-review-repos.txt")
+    return os.path.expanduser(OWN_REVIEW_PATH)
 
 
 def merge_repos_path():
-    return os.path.expanduser(os.environ.get("LANE_MERGE_REPOS") or "~/.config/afa/merge-repos.txt")
+    return os.path.expanduser(MERGE_REPOS_PATH)
 
 
 def read_patterns(path, what):
@@ -438,7 +446,7 @@ def run(number, repo, check_only):
         return 1
     note = "- %s %s squash-merged %s on green (%s; lane_merge.py)." % (
         merge_gate.clock(), text, oid[:8], detail)
-    state_dir = os.path.expanduser(os.environ.get("LANE_MERGE_STATE_DIR") or "~/.claude/state")
+    state_dir = os.path.expanduser(STATE_DIR)
     os.makedirs(state_dir, exist_ok=True)
     path = os.path.join(state_dir, "merge-rollup-%s.md" % datetime.date.today().isoformat())
     with open(path, "a", encoding="utf-8") as f:

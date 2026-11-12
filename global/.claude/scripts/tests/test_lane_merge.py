@@ -62,6 +62,18 @@ else:
     sys.stderr.write("unexpected gh call\\n"); sys.exit(9)
 '''
 
+# The script reads nothing from the environment that could point it at another gh, list or state folder, so the tests load it
+# as a module and set those four names themselves. Running the file itself (TOOL) always uses the real ones.
+RUNNER = '''import os, sys
+sys.path.insert(0, os.environ["T_SCRIPTS"])
+import lane_merge
+lane_merge.GH_PROGRAM = os.environ["T_GH"]
+lane_merge.OWN_REVIEW_PATH = os.environ["T_OWN_REVIEW"]
+lane_merge.MERGE_REPOS_PATH = os.environ["T_MERGE_REPOS"]
+lane_merge.STATE_DIR = os.environ["T_STATE_DIR"]
+sys.exit(lane_merge.main(sys.argv[1:]))
+'''
+
 PYTEST_OK = "2026-11-11T10:00:01.1234567Z \x1b[32m============ 521 passed in 3.2s ============\x1b[0m\n"
 DIFF_OK = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
 
@@ -105,12 +117,12 @@ class Base(unittest.TestCase):
         if self.calls.exists():
             self.calls.unlink()
         (self.d / "scenario.json").write_text(json.dumps(sc))
-        e = dict(os.environ, GH=str(self.gh), FAKE_GH_SCENARIO=str(self.d / "scenario.json"), FAKE_GH_CALLS=str(self.calls),
-                 MERGE_GATE_NOW="8:05 PM", LANE_MERGE_STATE_DIR=str(self.state),
-                 LANE_MERGE_OWN_REVIEW=str(self.listfile if listed else self.d / "missing.txt"),
-                 LANE_MERGE_REPOS=str(self.allowfile if allowed else self.d / "missing-repos.txt"))
+        e = dict(os.environ, T_SCRIPTS=str(SCRIPTS), T_GH=str(self.gh), FAKE_GH_SCENARIO=str(self.d / "scenario.json"),
+                 FAKE_GH_CALLS=str(self.calls), MERGE_GATE_NOW="8:05 PM", T_STATE_DIR=str(self.state),
+                 T_OWN_REVIEW=str(self.listfile if listed else self.d / "missing.txt"),
+                 T_MERGE_REPOS=str(self.allowfile if allowed else self.d / "missing-repos.txt"))
         e.update(env or {})
-        return subprocess.run([sys.executable, TOOL, "51", "-R", repo, *extra], capture_output=True, text=True, env=e)
+        return subprocess.run([sys.executable, "-c", RUNNER, "51", "-R", repo, *extra], capture_output=True, text=True, env=e)
 
     def calls_made(self):
         if not self.calls.exists():
@@ -535,6 +547,28 @@ class NoWayAround(Base):
         env = {"LANE_MERGE_SKIP_CHECKS": "1", "LANE_MERGE_FORCE": "1", "LANE_MERGE_ADMIN": "1", "MERGE_GATE_SKIP": "1", "FORCE": "1"}
         r = self.go(scenario(pr=pr_json([job("pytest", 101), job("shell", 102, "SKIPPED")])), env=env)
         self.refused(r, "SKIPS")
+
+    def test_the_environment_cannot_point_the_real_file_at_another_list_gh_or_state_folder(self):
+        # Run the file itself, the way a lane would, with every old hook name set and a home folder that holds no lists.
+        home = self.d / "home"
+        (home / ".config" / "afa").mkdir(parents=True)
+        empty = self.d / "empty-bin"
+        empty.mkdir()
+        (self.d / "scenario.json").write_text(json.dumps(scenario()))
+        env = dict(os.environ, HOME=str(home), PATH=str(empty), GH=str(self.gh), LANE_MERGE_OWN_REVIEW=str(self.listfile),
+                   LANE_MERGE_REPOS=str(self.allowfile), LANE_MERGE_STATE_DIR=str(self.state),
+                   FAKE_GH_SCENARIO=str(self.d / "scenario.json"), FAKE_GH_CALLS=str(self.calls), MERGE_GATE_NOW="8:05 PM")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "own-review list not found at", str(home / ".config" / "afa" / "own-review-repos.txt"))
+        (home / ".config" / "afa" / "own-review-repos.txt").write_text("example-org/other-*\n")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "list of repos we merge in not found at", str(home / ".config" / "afa" / "merge-repos.txt"))
+        # With both real lists in place the script goes on to gh, and it is the gh on the PATH (none here), not the one in GH.
+        (home / ".config" / "afa" / "merge-repos.txt").write_text("example-org/*\n")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "could not read the pull request", "cannot run gh")
+        self.assertEqual(self.calls_made(), [], "the gh named in the environment must never be run")
+        self.assertFalse(self.state.exists())
 
     def test_a_bad_repo_name_is_refused_before_anything_runs(self):
         r = self.go(None, repo="not-a-repo")
