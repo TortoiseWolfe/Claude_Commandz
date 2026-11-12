@@ -5,6 +5,9 @@ into place (the scripts installer never touches settings files), so a hook that 
 here is a hook a rebuilt machine silently lacks. These tests read only the repo copy.
 """
 import json
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -82,6 +85,46 @@ class SettingsHookTests(unittest.TestCase):
         # public repo on purpose, so only the four named here are checked.
         for name in ("lane-watch-guard.py", "context-warn.py", "coop-scrubber.py", "output-scrubber.py"):
             self.assertTrue((HOOKS_DIR / name).exists(), f"no copy of {name}")
+
+    def test_outbound_guard_refuses_when_its_file_is_missing(self):
+        # bash on a missing file exits 127, and Claude Code treats any hook exit but 2 as "carry on",
+        # so a deleted block-outbound.sh would let every mail and shell call through with no guard.
+        # The entry therefore checks for the file first and exits 2 (refuse) when it is gone.
+        guard = "~/.claude/hooks/block-outbound.sh"
+        found = [c for m, c in commands("PreToolUse") if m == "mcp__claude_ai_Gmail__.*|Bash"]
+        self.assertEqual(len(found), 1)
+        command = found[0]
+        self.assertTrue(command.startswith(f"test -f {guard} || {{"), command)
+        self.assertTrue(command.endswith(f"bash {guard}"), command)
+        missing_branch = command[command.index("{"):command.rindex("}") + 1]
+        self.assertIn("exit 2", missing_branch)
+        self.assertIn(">&2", missing_branch)
+
+    def test_outbound_guard_entry_run_for_real(self):
+        # Run the entry's own text in an empty home folder, then with a stand-in guard file there.
+        command = [c for m, c in commands("PreToolUse") if m == "mcp__claude_ai_Gmail__.*|Bash"][0]
+        with tempfile.TemporaryDirectory() as home:
+            env = {"HOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+            gone = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, input="{}")
+            self.assertEqual(gone.returncode, 2)
+            self.assertIn("BLOCKED", gone.stderr)
+            hooks = Path(home) / ".claude" / "hooks"
+            hooks.mkdir(parents=True)
+            (hooks / "block-outbound.sh").write_text("cat >/dev/null; echo stand-in-ran; exit 0\n")
+            there = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, input="{}")
+            self.assertEqual(there.returncode, 0)
+            self.assertEqual(there.stdout.strip(), "stand-in-ran")
+            (hooks / "block-outbound.sh").write_text("cat >/dev/null; echo refused >&2; exit 2\n")
+            refused = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, input="{}")
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(refused.stderr.strip(), "refused")
+
+    def test_identity_leak_guard_covers_every_connector(self):
+        # A connector (MCP tool) can send text to an outside service as easily as Bash or a web call can.
+        self.assertIn(
+            ("Bash|WebFetch|WebSearch|mcp__.*", "python3 ~/.claude/hooks/identity-leak-guard.py"),
+            commands("PreToolUse"),
+        )
 
     def test_afa_mods_marketplace_and_plugin(self):
         data = json.loads(SETTINGS.read_text())
