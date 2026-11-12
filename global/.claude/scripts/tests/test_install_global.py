@@ -138,6 +138,37 @@ class InstallGlobal(unittest.TestCase):
         self.assertEqual(self.live("scripts/stale_py"), "s2")
         self.assertEqual(self.live("scripts/edit_py"), "e-live")
 
+    def gate_env(self, **env):
+        old = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(old)))
+        os.environ.pop("INSTALL_GATE_OVERRIDE", None)
+        os.environ.update(env)
+
+    def test_a_placeholder_guard_is_refused_with_exit_4_and_copies_nothing(self):
+        self.gate_env()
+        self.commit(a__x="1")
+        self.commit(**{"hooks__draft-recipient-guard.py": 'SELF = "owner@example.com"\n'})
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()) as err:
+            ig.main(["--repo", self.repo, "--home", self.home, "--from", "HEAD~1"])
+        self.assertEqual(cm.exception.code, 4)
+        self.assertIn("identity-guard.json", err.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.home, "hooks", "draft-recipient-guard.py")))
+
+    def test_a_guard_that_reads_the_private_file_is_not_refused(self):
+        self.gate_env()
+        self.commit(a__x="1")
+        self.commit(**{"hooks__draft-recipient-guard.py": 'SELF = None  # identity-guard.json\n'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ig.main(["--repo", self.repo, "--home", self.home, "--from", "HEAD~1"]), 0)
+        self.assertTrue(os.path.exists(os.path.join(self.home, "hooks", "draft-recipient-guard.py")))
+
+    def test_the_override_switch_lets_a_person_install_anyway(self):
+        self.gate_env(INSTALL_GATE_OVERRIDE="1")
+        self.commit(a__x="1")
+        self.commit(**{"hooks__draft-recipient-guard.py": 'SELF = "owner@example.com"\n'})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ig.main(["--repo", self.repo, "--home", self.home, "--from", "HEAD~1"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
