@@ -1,5 +1,7 @@
 """lane_rules_compose.py: a lane gets core plus the parts its name, folder, prompt or connectors might need."""
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -100,7 +102,19 @@ class ComposeTest(unittest.TestCase):
         src = SCRIPT.read_text()
         start, end = src.index("TRIGGERS = {"), src.index("WORKSPACE_DIRS")
         lists = src[start:end].lower()
-        for word in ("greg", "william", "eduity", "chattanooga", "techjoy", "consemble", "peermentor", "elev8tek", "harmonic", "scout"):
+        # Made-up names stand in for the real ones; the live private file (when this machine has one) is checked too,
+        # so a real name pasted into the public lists fails here without being written into this test.
+        words = {"client-a", "person-b"}
+        live = Path(os.path.expanduser("~/.config/afa/lane-rules-keywords.json"))
+        try:
+            data = json.loads(live.read_text())
+        except (OSError, ValueError):
+            data = {}
+        for entries in (data.values() if isinstance(data, dict) else ()):
+            for entry in (entries if isinstance(entries, list) else ()):
+                if isinstance(entry, str):
+                    words.update(w for w in re.split(r"[^a-z0-9]+", re.sub(r"\\[a-z]", " ", entry.lower())) if len(w) >= 4)
+        for word in sorted(words):
             self.assertNotIn(word, lists)
 
     def test_routes_for_a_site_the_prompt_names_ride_along(self):
