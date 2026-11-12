@@ -1330,10 +1330,10 @@ pane_spinner() { command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$1"; }
 
 if [ "$mode" = status ]; then
   command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
-  # A lane or the hub session (AFA_BIG_OUT=1) sees a short count and the path of the full list when it is over 8,000 characters; --full and
+  # A lane or the hub session (AFA_BIG_OUT=1) sees a short count and the path of the full list (one file, out-lane-status-latest.txt, replaced on each call) when it is over 8,000 characters; --full and
   # every script that parses this list (lane_watch.sh, hub_digest.py, the dispatcher) get the whole list as before.
   if [ "$full_out" != 1 ] && [ "${AFA_BIG_OUT:-}" = 1 ] && [ -z "${LANE_STATUS_INNER:-}" ]; then
-    LANE_STATUS_INNER=1 "$0" --status | python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/big_output.py" --name lane-status --group-by '^[^[:space:]]+ +report:[^ ]+ +([a-z]+)'
+    LANE_STATUS_INNER=1 "$0" --status | python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/big_output.py" --name lane-status --latest --group-by '^[^[:space:]]+ +report:[^ ]+ +([a-z]+)'
     exit "${PIPESTATUS[0]}"
   fi
   fill_ids
