@@ -1,6 +1,7 @@
 """Tests for .github/scripts/ci_test_coverage.py: CI must fail when a test file is never run."""
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -90,3 +91,55 @@ def test_the_workflow_takes_its_lists_from_the_tool():
                    "pytest-ran \"$RUNNER_TEMP/collected.out\" scripts", "pytest-ran \"$RUNNER_TEMP/hooks-collected.out\" hooks"):
         assert needle in wf, needle
     assert "tests/test_*.sh" not in wf
+
+
+# The shell tests run as N slices side by side. A slice nobody runs is a set of tests that always "passes".
+
+def test_the_parts_together_are_the_whole_list_and_share_no_file():
+    items = ["tests/test_%02d.sh" % i for i in range(11)]
+    for n in (1, 2, 3, 4, 5, 11, 12):
+        parts = [cov.part_of(items, "%d/%d" % (i, n)) for i in range(n)]
+        flat = [f for p in parts for f in p]
+        assert sorted(flat) == items, n
+        assert len(flat) == len(set(flat)), n
+
+
+def test_a_bad_part_is_refused_rather_than_read_as_an_empty_list():
+    items = ["a", "b", "c"]
+    for bad in ("3/3", "4/3", "0/0", "-1/3", "1", "1/", "/3", "a/b", "", "1/3/5", " 1/3"):
+        assert cov.part_of(items, bad) is None, bad
+    for argv in (["list", "shell", "--part", "3/3"], ["list", "shell", "--part", "x"], ["list", "shell", "--part"],
+                 ["list", "shell", "--slice", "0/3"]):
+        r = subprocess.run([sys.executable, "-I", TOOL] + argv, cwd=REPO, capture_output=True, text=True)
+        assert r.returncode == 2, argv
+        assert r.stdout == "", argv
+
+
+def test_the_real_parts_add_up_to_the_real_list():
+    def run(*args):
+        r = subprocess.run([sys.executable, "-I", TOOL, "list", "shell"] + list(args), cwd=REPO, capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return r.stdout.split()
+    whole = run()
+    assert whole
+    assert sorted(f for i in range(3) for f in run("--part", "%d/3" % i)) == whole
+
+
+def test_the_workflow_runs_every_part_it_cuts():
+    """The slice count sits in two places in the workflow: the matrix list and the "/N" handed to the tool. If only one changes, a slice never runs."""
+    wf = open(os.path.join(REPO, ".github", "workflows", "scripts-tests.yml"), encoding="utf-8").read()
+    matrix = re.findall(r"^\s+part: \[([0-9, ]+)\]\s*$", wf, re.M)
+    cut = re.findall(r'list shell --part "\$PART/(\d+)"', wf)
+    assert len(matrix) == 1 and len(cut) == 1, (matrix, cut)
+    parts = [int(x) for x in matrix[0].split(",")]
+    assert sorted(parts) == list(range(int(cut[0]))), (parts, cut)
+    assert "PART: ${{ matrix.part }}" in wf
+    # No step may list the shell tests whole or cut them another way beside the matrix.
+    assert len(re.findall(r"list shell", wf)) == 1
+    # The required check is the job named "shell": it must wait for the parts, run even when one failed, and fail unless all passed.
+    shell_job = wf.split("\n  shell:\n", 1)[1]
+    assert "needs: shell-part" in shell_job
+    assert re.search(r"^    if: always\(\)$", shell_job, re.M)
+    assert "PARTS_RESULT: ${{ needs.shell-part.result }}" in shell_job
+    assert 'if [ "$PARTS_RESULT" != "success" ]; then' in shell_job
+    assert "fail-fast: false" in wf
