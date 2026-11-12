@@ -195,7 +195,12 @@ class OwnReviewList(Base):
 
     def test_a_repo_on_the_list_is_refused_in_any_letter_case(self):
         r = self.go(None, repo="Example-Org/Other-App")
-        self.refused(r, "keeps its own review process")
+        self.refused(r, "keeps its own review process", "nobody here merges in it", "not a lane and not the hub")
+
+    def test_an_own_review_refusal_never_says_the_hub_merges_it(self):
+        r = self.go(None, repo="example-org/other-app")
+        self.refused(r, "ask for a review the way that repo's own team does")
+        self.assertNotIn("the hub merges this one", r.stdout + r.stderr)
 
     def test_comments_and_blank_lines_in_the_list_are_ignored(self):
         self.listfile.write_text("# example-org/*\n\n   \n")
