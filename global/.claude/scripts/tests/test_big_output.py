@@ -108,6 +108,27 @@ class BigOutputTest(unittest.TestCase):
         self.run_emit(BIG, folder=self.tmp, latest=True)
         self.assertEqual([n for n in self.names() if n.endswith(".tmp")], [])
 
+    def test_two_callers_at_once_do_not_share_a_temporary_file(self):
+        # Two status calls can land in one folder in the same moment. With one shared temporary name the second caller
+        # empties the first one's half-written file, and whoever swaps second finds its file already gone and crashes.
+        os.environ["AFA_BIG_OUT"] = "1"
+        seen = []
+        real_replace, real_getpid = os.replace, os.getpid
+
+        def spy(src, dst):
+            seen.append(Path(src).name)
+            return real_replace(src, dst)
+        os.replace = spy
+        try:
+            for pid in (4101, 4102):
+                os.getpid = lambda pid=pid: pid
+                self.run_emit(BIG, folder=self.tmp, latest=True)
+        finally:
+            os.replace, os.getpid = real_replace, real_getpid
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertEqual(self.names(), ["out-t-latest.txt"])
+
     def test_latest_note_names_the_latest_path(self):
         os.environ["AFA_BIG_OUT"] = "1"
         out, p = self.run_emit(BIG, folder=self.tmp, latest=True)
@@ -160,6 +181,22 @@ class BigOutputTest(unittest.TestCase):
         _, p = self.run_emit(BIG, folder=self.tmp)
         self.assertFalse(old.exists())
         self.assertTrue(p.exists())
+
+    def test_pruning_clears_a_dead_callers_temporary_file_after_a_day(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        d = Path(self.tmp)
+        dead = d / "out-t-latest.txt.4242.tmp"
+        fresh = d / "out-t-latest.txt.4243.tmp"
+        other = d / "notes.txt.4242.tmp"
+        for f in (dead, fresh, other):
+            f.write_text("x")
+        self.age(dead, 2 * 86400)
+        self.age(other, 2 * 86400)
+        self.age(fresh, 60)
+        self.run_emit(BIG, folder=self.tmp, latest=True)
+        self.assertFalse(dead.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(other.exists())
 
     def test_under_the_limit_writes_and_prunes_nothing(self):
         os.environ["AFA_BIG_OUT"] = "1"

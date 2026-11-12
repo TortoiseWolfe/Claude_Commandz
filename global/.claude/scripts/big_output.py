@@ -13,6 +13,8 @@ file, not one per call. Without it the name carries the time, out-<name>-HHMMSS.
 Pruning: each time a file is written (either mode) this tool deletes its own old files from that same folder: a regular file
 (never a symlink, never a folder) named exactly out-<name>-<six digits>.txt whose last change is over 24 hours ago
 (PRUNE_AFTER_SECONDS). The latest file and every file of any other name are left alone. A delete that fails is ignored.
+The temporary file carries the caller's process number (out-<name>-latest.txt.<number>.tmp), so two calls in the same moment
+never write the same file; one left behind by a caller that died is pruned by the same 24 hour rule.
 
 When it applies: only for a session that asked for it, with AFA_BIG_OUT=1 in its environment (lane.sh sets that for every new
 Claude lane, and hub_lean.py for the hub session). Everything else, the scheduled jobs and every script that parses another
@@ -34,6 +36,7 @@ LIMIT = 8000
 SUMMARY_MAX = 500
 PRUNE_AFTER_SECONDS = 86400
 TIMED_NAME = re.compile(r"out-[A-Za-z0-9_.-]{1,40}-[0-9]{6}\.txt")  # exactly what a time-named file is called
+LEFT_TMP = re.compile(r"out-[A-Za-z0-9_.-]{1,40}-(?:[0-9]{6}|latest)\.txt\.[0-9]{1,10}\.tmp")  # a writer that died before its swap
 PATH_NOTE = "full output ({chars:,} chars, {lines:,} lines): {path}  (add --full to print it all)"
 
 
@@ -89,7 +92,7 @@ def prune_old(d, now=None):
             entries = list(it)
         for e in entries:
             try:
-                if not TIMED_NAME.fullmatch(e.name) or e.is_symlink() or not e.is_file(follow_symlinks=False):
+                if not (TIMED_NAME.fullmatch(e.name) or LEFT_TMP.fullmatch(e.name)) or e.is_symlink() or not e.is_file(follow_symlinks=False):
                     continue
                 if e.stat(follow_symlinks=False).st_mtime < cutoff:
                     os.unlink(e.path)
@@ -111,7 +114,7 @@ def emit(text, name, *, latest=False, full=False, limit=LIMIT, folder=None, summ
     d.mkdir(mode=0o700, parents=True, exist_ok=True)  # a folder made here is owner-only; a lane folder that exists keeps its mode
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", name)[:40] or "out"
     path = d / ("out-%s-%s.txt" % (safe, "latest" if latest else time.strftime("%H%M%S")))
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))  # one per caller: two calls at once must not write one file
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # the text can hold mail and board lines: owner only
     with os.fdopen(fd, "w") as fh:
         fh.write(text)
