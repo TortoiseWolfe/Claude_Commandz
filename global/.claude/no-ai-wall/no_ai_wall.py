@@ -820,13 +820,17 @@ def _read_only_listing(command):
     """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands, or runs the wall's cleanup
     command wall_cleanup.py (which takes no path and moves only strays out of the wall's folder), with no redirection, no command substitution and no program outside the
     short list. A Python file on that list is there to be run as itself and nothing else: _runs_listed_python holds the rule. This is the only gate for such a command
-    (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file."""
+    (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file.
+    The program is the first word of each part of the command, so a part that starts by setting a variable is refused: that word is not a program, and
+    the real one after it would go unread."""
     if re.search(r"[<>`]|\$\(", command):
         return False
     for seg in _segments(command):
         words = _words(seg)
         if not words:
             continue
+        if "=" in words[0]:
+            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls
         prog = os.path.basename(words[0])
         if prog in _READ_ONLY_PROGRAMS:
             continue

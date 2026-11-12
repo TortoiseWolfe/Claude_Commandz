@@ -190,7 +190,7 @@ def print_wall_help(sha):
     print()
     print(f"    bash <(git -C ~/repos/Claude_Commandz show {sha}:global/.claude/no-ai-wall/install.sh) {sha}")
     print()
-    print("What it changes: it puts the wall's three files in ~/.claude/no-ai-wall/, points the wall's hook entry in")
+    print("What it changes: it puts the wall's four files in ~/.claude/no-ai-wall/, points the wall's hook entry in")
     print("~/.claude/settings.json at that folder (only the path changes), removes the three old copies from ~/.claude/hooks and")
     print("~/.claude/scripts, brings the other global files up to date with the repo's usual install step, then runs a smoke test and")
     print("undoes itself if that fails (backup and undo.sh under ~/.claude/state/no-ai-wall-backups/). Run this script again after it.")

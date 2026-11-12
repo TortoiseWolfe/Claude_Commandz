@@ -377,6 +377,16 @@ class SecurityFindingTests(Fixture):
         for cmd in ("python3 %s /tmp/somewhere" % clean, "python3 %s --apply /tmp/somewhere" % clean, "python3 %s --force" % clean, "python3 -I %s -- --apply" % clean,
                     "python3-config %s" % mod, "pythonw %s status" % mod):
             self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # A variable set in front of the program is not the program, even when its value ends in a trusted name.
+        for target in (mod, clean, rv + " " + self.pfile):
+            for first in ("A=/ls", "A=/usr/bin/wc", "A=/stat", "A=/x/python3", "A=1 B=/ls", "A=ls", "A=1"):
+                for run in ("python3 -m somemodule", "python3 -cpass", "python3 -I", "python3"):
+                    cmd = "%s %s %s" % (first, run, target)
+                    r = self.call("Bash", command=cmd)
+                    self.assertIsNotNone(r, cmd)
+                    self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("A=/ls cat %s" % mod, "ls %s; A=/wc python3 -m somemodule %s" % (mod, mod), "A=/ls ls %s" % clean):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
 
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))

@@ -127,7 +127,7 @@ class InstallTests(unittest.TestCase):
         self.assertRegex(self.last(r), r"^WALL OK %s refused (\d+)/\1 ordinary (\d+)/\2$" % self.B[:7])
         m = re.match(r"WALL OK \S+ refused (\d+)/", self.last(r))
         self.assertIsNotNone(m)
-        self.assertEqual(int(m.group(1)) if m else 0, 2 + 1 + 12)  # two list entries, the bash helper, twelve tamper probes
+        self.assertEqual(int(m.group(1)) if m else 0, 2 + 1 + 13)  # two list entries, the bash helper, thirteen tamper probes
         wall = os.path.join(self.live, "no-ai-wall")
         self.assertEqual(sorted(os.listdir(wall)), sorted(WALL_FILES))  # the wall's four files and nothing else
         for f in WALL_FILES:
