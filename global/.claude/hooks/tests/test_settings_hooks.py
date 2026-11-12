@@ -132,6 +132,14 @@ class SettingsHookTests(unittest.TestCase):
         self.assertIn(("Bash", "python3 ~/.claude/hooks/own-review-merge-guard.py"), commands("PreToolUse"))
         self.assertTrue((HOOKS_DIR / "own-review-merge-guard.py").exists())
 
+    def test_list_file_guard_covers_bash_and_the_edit_tools(self):
+        found = [m for m, c in commands("PreToolUse") if c == "python3 ~/.claude/hooks/list-file-guard.py"]
+        self.assertEqual(len(found), 1)
+        matched = found[0].split("|")
+        for tool in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+            self.assertIn(tool, matched)
+        self.assertTrue((HOOKS_DIR / "list-file-guard.py").exists(), "no copy of list-file-guard.py")
+
     def test_afa_mods_marketplace_and_plugin(self):
         data = json.loads(SETTINGS.read_text())
         self.assertIs(data["enabledPlugins"].get("afa-mods@afa-mods"), True)
