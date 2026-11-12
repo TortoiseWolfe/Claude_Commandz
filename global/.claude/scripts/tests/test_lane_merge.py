@@ -62,6 +62,18 @@ else:
     sys.stderr.write("unexpected gh call\\n"); sys.exit(9)
 '''
 
+# The script reads nothing from the environment that could point it at another gh, list or state folder, so the tests load it
+# as a module and set those four names themselves. Running the file itself (TOOL) always uses the real ones.
+RUNNER = '''import os, sys
+sys.path.insert(0, os.environ["T_SCRIPTS"])
+import lane_merge
+lane_merge.GH_PROGRAM = os.environ["T_GH"]
+lane_merge.OWN_REVIEW_PATH = os.environ["T_OWN_REVIEW"]
+lane_merge.MERGE_REPOS_PATH = os.environ["T_MERGE_REPOS"]
+lane_merge.STATE_DIR = os.environ["T_STATE_DIR"]
+sys.exit(lane_merge.main(sys.argv[1:]))
+'''
+
 PYTEST_OK = "2026-11-11T10:00:01.1234567Z \x1b[32m============ 521 passed in 3.2s ============\x1b[0m\n"
 DIFF_OK = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
 
@@ -97,17 +109,20 @@ class Base(unittest.TestCase):
         self.state = self.d / "state"
         self.listfile = self.d / "own-review.txt"
         self.listfile.write_text("# repos that keep their own review\nexample-org/other-*\n\n")
+        self.allowfile = self.d / "merge-repos.txt"
+        self.allowfile.write_text("# repos we merge in\nexample-org/*\n\n")
 
-    def go(self, sc=None, *extra, env=None, repo=REPO, listed=True):
+    def go(self, sc=None, *extra, env=None, repo=REPO, listed=True, allowed=True):
         sc = sc if sc is not None else scenario()
         if self.calls.exists():
             self.calls.unlink()
         (self.d / "scenario.json").write_text(json.dumps(sc))
-        e = dict(os.environ, GH=str(self.gh), FAKE_GH_SCENARIO=str(self.d / "scenario.json"), FAKE_GH_CALLS=str(self.calls),
-                 MERGE_GATE_NOW="8:05 PM", LANE_MERGE_STATE_DIR=str(self.state),
-                 LANE_MERGE_OWN_REVIEW=str(self.listfile if listed else self.d / "missing.txt"))
+        e = dict(os.environ, T_SCRIPTS=str(SCRIPTS), T_GH=str(self.gh), FAKE_GH_SCENARIO=str(self.d / "scenario.json"),
+                 FAKE_GH_CALLS=str(self.calls), MERGE_GATE_NOW="8:05 PM", T_STATE_DIR=str(self.state),
+                 T_OWN_REVIEW=str(self.listfile if listed else self.d / "missing.txt"),
+                 T_MERGE_REPOS=str(self.allowfile if allowed else self.d / "missing-repos.txt"))
         e.update(env or {})
-        return subprocess.run([sys.executable, TOOL, "51", "-R", repo, *extra], capture_output=True, text=True, env=e)
+        return subprocess.run([sys.executable, "-c", RUNNER, "51", "-R", repo, *extra], capture_output=True, text=True, env=e)
 
     def calls_made(self):
         if not self.calls.exists():
@@ -189,6 +204,51 @@ class OwnReviewList(Base):
     def test_the_list_is_checked_before_gh_is_asked_anything(self):
         self.go(None, repo="example-org/other-app")
         self.assertEqual(self.calls_made(), [])
+
+
+class MergeRepoList(Base):
+    """Only a repo named on the list of repos we merge in gets through; every other repo is refused."""
+
+    def test_a_repo_that_is_not_on_the_list_is_refused_before_gh_is_asked_anything(self):
+        r = self.go(None, repo="someone-else/their-app")
+        self.refused(r, "not on the list of repos we merge in", "merge-repos.txt", "the hub merges this one")
+        self.assertEqual(self.calls_made(), [])
+
+    def test_a_missing_list_refuses_fail_closed(self):
+        r = self.go(allowed=False)
+        self.refused(r, "list of repos we merge in not found at", "missing-repos.txt", "the hub merges this one")
+        self.assertEqual(self.calls_made(), [])
+
+    def test_a_list_with_no_patterns_refuses_every_repo(self):
+        self.allowfile.write_text("# nothing yet\n\n   \n")
+        self.refused(self.go(), "not on the list of repos we merge in")
+
+    def test_an_owner_wildcard_line_lets_that_owners_repos_through_in_any_letter_case(self):
+        self.allowfile.write_text("Example-Org/*\n")
+        self.assertEqual(self.go(None, "--check").returncode, 0)
+        self.assertEqual(self.go(None, "--check", repo="EXAMPLE-ORG/Reviewed-App").returncode, 0)
+
+    def test_a_line_naming_one_repo_lets_only_that_repo_through(self):
+        self.allowfile.write_text("example-org/reviewed-app\n")
+        self.assertEqual(self.go(None, "--check").returncode, 0)
+        self.refused(self.go(None, repo="example-org/reviewed-app-2"), "not on the list of repos we merge in")
+
+    def test_an_owner_whose_name_only_starts_the_same_is_refused(self):
+        self.refused(self.go(None, repo="example-org-evil/reviewed-app"), "not on the list of repos we merge in")
+
+    def test_the_own_review_list_wins_when_a_repo_is_on_both(self):
+        self.allowfile.write_text("example-org/*\nexample-org/other-app\n")
+        self.refused(self.go(None, repo="example-org/other-app"), "keeps its own review process")
+
+    def test_a_line_that_does_not_name_its_owner_in_full_refuses_even_a_repo_another_line_allows(self):
+        for bad in ("*/*", "*", "exam*/reviewed-app", "example-or?/reviewed-app", "[e]xample-org/*", "reviewed-app",
+                    "example-org/sub/app", "/reviewed-app"):
+            self.allowfile.write_text("example-org/*\n%s\n" % bad)
+            if self.calls.exists():
+                self.calls.unlink()
+            r = self.go()
+            self.refused(r, "does not name its owner in full", repr(bad))
+            self.assertEqual(self.calls_made(), [], bad)
 
 
 class PullRequestState(Base):
@@ -286,6 +346,31 @@ class LogSkips(Base):
         r = self.go(scenario(logs={"101": PYTEST_OK, "102": "lint ok\n"}))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(r.stdout.splitlines()[1:], ["not readable: none; no test summary in: shell", "MERGED"])
+
+    def test_a_quiet_job_that_is_not_a_known_non_test_job_is_refused(self):
+        # A test job that ran nothing prints no summary either, so only the named non-test jobs may be quiet.
+        for name in ("unit", "e2e", "shell-tests", "gitleaks2", "lint"):
+            if self.calls.exists():
+                self.calls.unlink()
+            r = self.go(scenario(pr=pr_json([job("pytest", 101), job(name, 102)]), logs={"101": PYTEST_OK, "102": "all done\n"}))
+            self.refused(r, "job %r is green but its log shows no test summary" % name, "not a known non-test job",
+                         "email-guard, gitleaks, shell", "zero skips is not proven")
+
+    def test_each_known_non_test_job_may_be_quiet_in_any_letter_case(self):
+        rollup = [job("pytest", 101), job("gitleaks", 102), job("Email-Guard", 103), job("SHELL", 104)]
+        logs = {"101": PYTEST_OK, "102": "no leaks found\n", "103": "ok\n", "104": "lint ok\n"}
+        r = self.go(scenario(pr=pr_json(rollup), logs=logs), "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("no test summary in: gitleaks, Email-Guard, SHELL", r.stdout)
+
+    def test_a_known_non_test_job_still_has_its_skips_read(self):
+        r = self.go(scenario(logs={"101": PYTEST_OK, "102": "# tests 5\n# pass 3\n# skipped 2\n"}))
+        self.refused(r, "'shell'", "skipped 2")
+
+    def test_a_skip_is_still_named_when_another_job_is_quiet_and_unknown(self):
+        rollup = [job("unit", 101), job("pytest", 102)]
+        r = self.go(scenario(pr=pr_json(rollup), logs={"101": "all done\n", "102": "=== 5 passed, 2 skipped in 1.0s ===\n"}))
+        self.refused(r, "'pytest'", "2 skipped")
 
     def test_a_summary_with_subtests_counts_as_a_suite_that_ran(self):
         for text in ("3501 passed, 227 subtests passed in 275.53s (0:04:35)\n", "153 passed, 89 subtests passed in 4.58s\n",
@@ -462,6 +547,28 @@ class NoWayAround(Base):
         env = {"LANE_MERGE_SKIP_CHECKS": "1", "LANE_MERGE_FORCE": "1", "LANE_MERGE_ADMIN": "1", "MERGE_GATE_SKIP": "1", "FORCE": "1"}
         r = self.go(scenario(pr=pr_json([job("pytest", 101), job("shell", 102, "SKIPPED")])), env=env)
         self.refused(r, "SKIPS")
+
+    def test_the_environment_cannot_point_the_real_file_at_another_list_gh_or_state_folder(self):
+        # Run the file itself, the way a lane would, with every old hook name set and a home folder that holds no lists.
+        home = self.d / "home"
+        (home / ".config" / "afa").mkdir(parents=True)
+        empty = self.d / "empty-bin"
+        empty.mkdir()
+        (self.d / "scenario.json").write_text(json.dumps(scenario()))
+        env = dict(os.environ, HOME=str(home), PATH=str(empty), GH=str(self.gh), LANE_MERGE_OWN_REVIEW=str(self.listfile),
+                   LANE_MERGE_REPOS=str(self.allowfile), LANE_MERGE_STATE_DIR=str(self.state),
+                   FAKE_GH_SCENARIO=str(self.d / "scenario.json"), FAKE_GH_CALLS=str(self.calls), MERGE_GATE_NOW="8:05 PM")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "own-review list not found at", str(home / ".config" / "afa" / "own-review-repos.txt"))
+        (home / ".config" / "afa" / "own-review-repos.txt").write_text("example-org/other-*\n")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "list of repos we merge in not found at", str(home / ".config" / "afa" / "merge-repos.txt"))
+        # With both real lists in place the script goes on to gh, and it is the gh on the PATH (none here), not the one in GH.
+        (home / ".config" / "afa" / "merge-repos.txt").write_text("example-org/*\n")
+        r = subprocess.run([sys.executable, TOOL, "51", "-R", REPO], capture_output=True, text=True, env=env)
+        self.refused(r, "could not read the pull request", "cannot run gh")
+        self.assertEqual(self.calls_made(), [], "the gh named in the environment must never be run")
+        self.assertFalse(self.state.exists())
 
     def test_a_bad_repo_name_is_refused_before_anything_runs(self):
         r = self.go(None, repo="not-a-repo")

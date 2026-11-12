@@ -6,19 +6,25 @@
 
 -R is required. There is no flag or environment variable that skips a check, widens the merge or picks another merge method.
 It refuses (one line starting "REFUSED: ", exit 1), in this order, when:
-  1. the repo is on the own-review list (a missing list refuses too), 2. the pull request is not open, is a draft or conflicts,
+  1. the repo is on the own-review list, or is not on the list of repos we merge in (a missing list refuses too, and so does
+  a line there that does not name its owner in full), 2. the pull request is not open, is a draft or conflicts,
   3. merge_gate.py does not say GREEN, 4. the CI (continuous integration, the automatic checks) logs show any skipped,
-  deselected, expected-fail, rerun or todo test, or show no test summary at all, or a log cannot be fetched,
+  deselected, expected-fail, rerun or todo test, or show no test summary at all, or a log cannot be fetched, or a job whose
+  log shows no test summary is not one of the known non-test jobs (gitleaks, email-guard, shell),
   5. the diff touches a database migration or a deploy step, or anything under .github/ (a change to the CI itself can make
   its own checks pass); old names count too, so a renamed or deleted file is seen, 6. the branch moved while it was checked,
   7. gh itself will not merge (branch protection that needs a review ends here).
 The merge is pinned to the commit that was checked (--match-head-commit), so what was checked is what merges.
-What it cannot see: a job whose log holds no test summary it knows (a lint job, or a test runner it has no pattern for) passes
-on its green badge alone, as long as one other job shows a summary. Each such job is named after "no test summary in:".
+The two lists are private files, one pattern per line (OWNER/REPO or OWNER/*, any letter case, # starts a comment):
+merge-repos.txt names the repos we merge in, and everything else is refused; own-review-repos.txt names repos that keep
+their own review, and it wins when a repo is on both.
+What it cannot see: a known non-test job passes on its green badge alone, and so does a check that is not an Actions job
+(no log to read), as long as one other job shows a summary. Each is named after "no test summary in:" or "not readable:".
 After the merge it re-reads the pull request, and only then appends one line to <state dir>/merge-rollup-YYYY-MM-DD.md.
 Exit codes: 0 = merged (or, with --check, would merge); 1 = refused or not confirmed.
-Test hooks only: GH (the gh program), MERGE_GATE_NOW (pins the time), LANE_MERGE_STATE_DIR (default ~/.claude/state),
-LANE_MERGE_OWN_REVIEW (default ~/.config/afa/own-review-repos.txt).
+Fixed in the file, never read from the environment: the gh program (gh on the PATH), the two lists
+(~/.config/afa/own-review-repos.txt and ~/.config/afa/merge-repos.txt) and the state folder (~/.claude/state). The tests load
+this file as a module and set those four names. MERGE_GATE_NOW pins only the time printed in the roll-up line.
 """
 import argparse
 import datetime
@@ -36,6 +42,13 @@ import merge_gate  # noqa: E402
 FIELDS = "number,title,state,mergeable,mergeCommit,statusCheckRollup,url,isDraft,headRefOid,baseRefName"
 REPO_RX = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# Fixed on purpose: nothing in the environment can point this script at another gh, another list or another state folder.
+# The tests load this file as a module and set these four names; running the file itself always uses the values below.
+GH_PROGRAM = "gh"
+OWN_REVIEW_PATH = "~/.config/afa/own-review-repos.txt"
+MERGE_REPOS_PATH = "~/.config/afa/merge-repos.txt"
+STATE_DIR = "~/.claude/state"
+
 
 class Refused(Exception):
     pass
@@ -48,7 +61,7 @@ def refuse(why) -> NoReturn:
 def gh(args, timeout=120):
     """(exit code, stdout, stderr). A gh that cannot run gives exit code 127."""
     try:
-        r = subprocess.run([os.environ.get("GH", "gh")] + args, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([GH_PROGRAM] + args, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 127, "", "cannot run gh: %s" % e
     return r.returncode, r.stdout, r.stderr
@@ -64,25 +77,44 @@ def read_pr(number, repo):
         return None, "gh gave something that is not JSON"
 
 
-# ---- 1. own-review list ------------------------------------------------------------------------------------------------
+# ---- 1. the two repo lists ---------------------------------------------------------------------------------------------
 
 def own_review_path():
-    return os.path.expanduser(os.environ.get("LANE_MERGE_OWN_REVIEW") or "~/.config/afa/own-review-repos.txt")
+    return os.path.expanduser(OWN_REVIEW_PATH)
 
 
-def check_own_review(repo):
-    path = own_review_path()
+def merge_repos_path():
+    return os.path.expanduser(MERGE_REPOS_PATH)
+
+
+def read_patterns(path, what):
+    """The patterns in one list file: one per line, blank lines and # comments left out. A file that cannot be read refuses."""
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except (OSError, UnicodeDecodeError):
-        refuse("own-review list not found at %s; the hub merges this one" % path)
-    for line in lines:
-        pat = line.strip()
-        if not pat or pat.startswith("#"):
-            continue
-        if fnmatch.fnmatchcase(repo.lower(), pat.lower()):
+        refuse("%s not found at %s; the hub merges this one" % (what, path))
+    return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+
+
+def check_repo(repo):
+    """Refuse unless the repo is named on the list of repos we merge in, and is not on the own-review list. Both lists must exist."""
+    low = repo.lower()
+    for pat in read_patterns(own_review_path(), "own-review list"):
+        if fnmatch.fnmatchcase(low, pat.lower()):
             refuse("this repo keeps its own review process (it matches %r on the own-review list); the hub merges this one" % pat)
+    path = merge_repos_path()
+    allowed = False
+    for pat in read_patterns(path, "list of repos we merge in"):
+        owner = pat.split("/")[0]
+        # The owner is always written out. A line such as */* would let every repo through, which is what this list is here to stop.
+        if pat.count("/") != 1 or not owner or any(ch in owner for ch in "*?["):
+            refuse("the list of repos we merge in at %s holds %r, which does not name its owner in full (OWNER/REPO or OWNER/*); "
+                   "the hub merges this one" % (path, pat))
+        if fnmatch.fnmatchcase(low, pat.lower()):
+            allowed = True
+    if not allowed:
+        refuse("this repo is not on the list of repos we merge in (%s); the hub merges this one" % path)
 
 
 # ---- 2. pull request state ---------------------------------------------------------------------------------------------
@@ -124,6 +156,10 @@ TAP_SKIP = re.compile(r"^\s*ok \d+\b.*#\s*skip", re.I)
 TAP_PLAN = re.compile(r"^\s*1\.\.\d+\s*$")
 GO_SKIP = re.compile(r"^\s*--- SKIP:")
 GO_SUMMARY = re.compile(r"^\s*(ok|FAIL)\s+\S+\s+[\d.]+s|^\s*--- PASS:")
+
+# Jobs that are known not to print a test summary (a secret scan, a mail check, a shell lint). Any other job whose log shows
+# no summary refuses, because a test job that ran nothing looks the same as a lint job. Compared in lower case, whole name.
+QUIET_JOBS = frozenset({"gitleaks", "email-guard", "shell"})
 
 
 def clean_line(raw):
@@ -218,6 +254,11 @@ def check_logs(repo, pr):
             quiet.append(name)
     if not ran:
         refuse("could not find a test summary in the CI logs, so zero skips is not proven; the hub checks this one")
+    unknown = [name for name in quiet if name.strip().lower() not in QUIET_JOBS]
+    if unknown:
+        refuse("job %r is green but its log shows no test summary, and it is not a known non-test job (%s); it may be a test "
+               "job that ran nothing, so zero skips is not proven; the hub checks this one"
+               % (unknown[0], ", ".join(sorted(QUIET_JOBS))))
     return jobs, unreadable, quiet
 
 
@@ -371,7 +412,7 @@ def facts(repo, pr, c, jobs, unreadable, quiet):
 def run(number, repo, check_only):
     if not REPO_RX.match(repo):
         refuse("-R must look like OWNER/REPO")
-    check_own_review(repo)
+    check_repo(repo)
     pr, why = read_pr(number, repo)
     if pr is None:
         refuse("could not read the pull request (%s)" % why[:200])
@@ -405,7 +446,7 @@ def run(number, repo, check_only):
         return 1
     note = "- %s %s squash-merged %s on green (%s; lane_merge.py)." % (
         merge_gate.clock(), text, oid[:8], detail)
-    state_dir = os.path.expanduser(os.environ.get("LANE_MERGE_STATE_DIR") or "~/.claude/state")
+    state_dir = os.path.expanduser(STATE_DIR)
     os.makedirs(state_dir, exist_ok=True)
     path = os.path.join(state_dir, "merge-rollup-%s.md" % datetime.date.today().isoformat())
     with open(path, "a", encoding="utf-8") as f:
