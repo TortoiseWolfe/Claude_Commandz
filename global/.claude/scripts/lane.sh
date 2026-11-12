@@ -2424,7 +2424,7 @@ report="$hand/report.md"
 # lprompt is the file the lane reads as its first message. prompt.md is write-once: a different prompt for a folder that already has one is
 # a restart note, stored as prompt-<HHMM>.md; the index keeps pointing at prompt.md, so every recycle re-primes from the original mission.
 lprompt="$hprompt"; restart_note=0
-if [ -e "$hprompt" ] && [ "$prompt" != "$hprompt" ] && ! cmp -s -- "$prompt" "$hprompt"; then
+if [ -e "$hprompt" ] && [ "$prompt" != "$hprompt" ] && ! cmp -s -n "$(wc -c <"$prompt")" -- "$prompt" "$hprompt"; then  # first bytes only: the start appends a tools section to prompt.md
   restart_note=1
   lprompt="$hand/prompt-$(date +%H%M).md"
   [ ! -e "$lprompt" ] || lprompt="$hand/prompt-$(date +%H%M%S).md"
@@ -2449,11 +2449,20 @@ if [ "$dry" = 1 ]; then
   echo "mkdir -p $hand"
   if [ "$restart_note" = 1 ]; then echo "# restart: $hprompt stays as it is; the new prompt is stored as $lprompt"; echo "cp $prompt $lprompt"
   elif [ "$prompt" != "$hprompt" ]; then echo "cp $prompt $hprompt"; fi
+  if ! grep -qF -- '## Tools you already have for this job' "$prompt" 2>/dev/null; then
+    echo "# would append to $lprompt (from tools_catalog.py match):"
+    timeout 20 python3 -I "$SCRIPT_DIR/tools_catalog.py" match "$prompt" 2>/dev/null || true
+  fi
   [ "$engine" != agy ] || echo "# prepend the agy edit-only header to $lprompt"
 else
   mkdir -p "$hand"
   if [ "$restart_note" = 1 ]; then { restart_header; cat -- "$prompt"; } >"$lprompt"
   elif [ "$prompt" != "$hprompt" ]; then cp "$prompt" "$hprompt"; fi
+  # Once only, and never a reason for a lane not to start: the existing tools for this job (tools_catalog.py), named in the prompt the lane reads.
+  if ! grep -qF -- '## Tools you already have for this job' "$lprompt" 2>/dev/null; then
+    tools_sec="$(timeout 20 python3 -I "$SCRIPT_DIR/tools_catalog.py" match "$lprompt" 2>/dev/null)" || tools_sec=""
+    [ -z "$tools_sec" ] || printf '\n%s\n' "$tools_sec" >>"$lprompt" 2>/dev/null || true
+  fi
   # Once only: a restarted lane's prompt already in the hand-off folder keeps its one header.
   if [ "$engine" = agy ] && ! head -n1 -- "$lprompt" | grep -q '^You can edit files but cannot run commands'; then
     { printf 'You can edit files but cannot run commands. Make the change, then write %s/report.md: files changed, what each change does, and the exact commands the hub must run to test and commit. Open only files in this checkout and in %s: any other read is refused and ends the run, so leave the live copies a task names under ~/.claude alone.\n\n' "$hand" "$hand"

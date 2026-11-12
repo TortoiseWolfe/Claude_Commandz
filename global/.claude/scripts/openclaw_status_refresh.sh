@@ -44,6 +44,9 @@ timeout 120 "$here/lane_watch.sh" --recycle-once >/dev/null 2>&1 9>&- || echo "o
 # Done lines older than 7 days leave the hub's inbox for hub-inbox-archive/YYYY-MM.md (no model; takes the inbox lock; open lines are never touched).
 timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "openclaw_status_refresh: inbox archive failed" >&2
 
+# The tools catalog (~/.claude/scripts/TOOLS.md) follows the scripts and hooks on this machine; lane starts and the hub graph read it. No model, about a third of a second.
+timeout 60 python3 "$here/tools_catalog.py" build >/dev/null 2>&1 || echo "openclaw_status_refresh: tools catalog failed" >&2
+
 # One machine switch (28 Oct 2026, fleet review finding 3): NX-01 owns the OpenClaw gateway, the Gmail sweeps, the CI runners and the hours
 # jobs, so it runs everything below. Any other machine (the tower, NCC-74656) is a keeper only: the steps above, plus its own hub digest, and
 # stops here. The name comes from ~/.config/afa/machine; a missing file counts as another machine, because doing less is the safe mistake.

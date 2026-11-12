@@ -1,0 +1,32 @@
+# Reviewed 2026-11-11: fake addresses used in tests and docs. Each entry stands for a made-up mailbox or a
+# non-mail use of the @ sign (git@github.com SSH URLs). Never add a real person's or client's address here:
+# code that needs one reads it at run time from ~/.config/afa. @domain entries cover the domain and its subdomains.
+
+@acme-planted.org
+@b.co
+@b.com
+@client.com
+@corp.io
+@d.co
+@evil-example.com
+@ex.co
+@example.co
+@example.com.evil.io
+@example.com.evil.net
+@example.digital
+@f.co
+@github.com
+@i.co
+@notanthropic.com
+@planted-mail.org
+@test.com
+@x.org
+
+# Single made-up mailboxes at a real mail provider (the whole domain is NOT allowed).
+a@gmail.com
+abc@mail.gmail.com
+b@gmail.com
+jon@gmail.com
+na@gmail.com
+nb@gmail.com
+nc@gmail.com
