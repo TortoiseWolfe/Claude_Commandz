@@ -502,6 +502,46 @@ def publish_budget(value, repo=HUB_REPO, run=subprocess.run):
     return True
 
 
+def _rules_files():
+    return [("workspace rule file", HOME / "repos/CLAUDE.md", 8000),
+            # Claude Code names a project's folder after its path with the slashes turned to dashes.
+            ("memory index", HOME / ".claude/projects" / str(HOME / "repos").replace(os.sep, "-") / "memory/MEMORY.md", 3000),
+            ("lane core", HOME / "repos/hub/lane-rules/core.md", 9000)]
+
+
+def rules_size_lines(files=None):
+    """One line per always-loaded rules file that is over its byte limit; a missing file is skipped; empty when all are within."""
+    out = []
+    for label, path, limit in (files if files is not None else _rules_files()):
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            continue
+        if size > limit:
+            shown = str(path)
+            home = str(HOME)
+            if shown == home or shown.startswith(home + os.sep):
+                shown = "~" + shown[len(home):]
+            out.append(f"Rules size: the {label} is {size:,} bytes, over its {limit:,} limit ({shown}). "
+                       "Move the new text to hub/rules/ or a memory file; the monthly rules pass decides what is always loaded.")
+    return out
+
+
+def rules_pass_line(now, efficiency_dir=None):
+    """The monthly rules pass is due from 12:00 PM Eastern on the first Wednesday of the month until the month ends; empty before
+    that, or when rules-pass-<YYYY-MM>.md exists in the efficiency folder."""
+    et = datetime.fromtimestamp(now.timestamp(), ZoneInfo("America/New_York"))
+    first = et.replace(day=1)
+    first_wed = first + timedelta(days=(2 - first.weekday()) % 7)
+    if (et.day, et.hour) < (first_wed.day, 12):
+        return ""
+    folder = Path(efficiency_dir) if efficiency_dir is not None else HOME / "repos/hub/efficiency"
+    if (folder / f"rules-pass-{et:%Y-%m}.md").exists():
+        return ""
+    return (f"Rules pass due for {et:%B %Y}: start a lane with hub/efficiency/rules-pass-prompt.md "
+            "(three weeks of corrections, numbered adds and removals for Jonathan).")
+
+
 def phase_note(now):
     """The token week's phase (openclaw_dispatch.week_phase, the one place its boundaries live), as the line the Budget section adds.
     Phase 3 (Tuesday 6:00 AM to the reset) holds no reserve: Jonathan, 28 Oct about 9:20 AM, "the closer we get the the reset, the
@@ -978,7 +1018,7 @@ def coop_cards_for(machine, inbox_text, now_ts, cache=None, reader=deck_read_due
 
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
                    report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
-                   mail=None, machine="NX-01", drafts=None, coop_cards=None):
+                   mail=None, machine="NX-01", drafts=None, coop_cards=None, rules_lines=None):
     sections = []
 
     if open_questions_error:
@@ -1086,7 +1126,10 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     sections.append(("Budget this week", bl))
     gl = [one_line(x, 88) for x in (git_log or "").splitlines() if x.strip()][:10]
     sections.append(("~/repos, last 10 commits", [f"- {g}" for g in gl] or ["- git log unavailable"]))
-    sections.append(("Tidy report (hub/scripts/tidy-report.sh; counts)", [f"- {x}" for x in tidy_summary(tidy_text or "")] or ["- clean"]))
+    tidy_lines = [f"- {x}" for x in tidy_summary(tidy_text or "")]
+    tidy_lines += [f"- {x}" for x in (rules_lines or []) if x]
+    tidy_lines = tidy_lines or ["- clean"]
+    sections.append(("Tidy report (hub/scripts/tidy-report.sh; counts)", tidy_lines))
     return sections
 
 
@@ -1230,7 +1273,8 @@ def main(argv=None):
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
-                          coop_cards=coop_cards)
+                          coop_cards=coop_cards,
+                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)

@@ -257,6 +257,32 @@ class Parts(unittest.TestCase):
         self.assertEqual(hd.tidy_summary(TIDY), ["Worktrees to move or remove: 2", "Uncommitted changes: 1"])
         self.assertEqual(hd.tidy_summary(""), [])
 
+    def test_rules_size_over_limit_gives_one_worded_line(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(hd, "HOME", Path(d)):
+            f = Path(d) / "CLAUDE.md"
+            f.write_bytes(b"x" * 8123)
+            self.assertEqual(hd.rules_size_lines([("workspace rule file", f, 8000)]), [
+                "Rules size: the workspace rule file is 8,123 bytes, over its 8,000 limit (~/CLAUDE.md). "
+                "Move the new text to hub/rules/ or a memory file; the monthly rules pass decides what is always loaded."])
+
+    def test_rules_size_within_limit_or_missing_gives_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "core.md"
+            f.write_bytes(b"x" * 9000)
+            self.assertEqual(hd.rules_size_lines([("lane core", f, 9000)]), [])
+            self.assertEqual(hd.rules_size_lines([("lane core", Path(d) / "absent.md", 9000)]), [])
+
+    def test_rules_pass_line_due_from_first_wednesday_noon(self):
+        et = ZoneInfo("America/New_York")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(hd.rules_pass_line(datetime(2026, 12, 1, 15, 0, tzinfo=et), d), "")
+            self.assertEqual(hd.rules_pass_line(datetime(2026, 12, 2, 11, 0, tzinfo=et), d), "")
+            due = hd.rules_pass_line(datetime(2026, 12, 2, 12, 30, tzinfo=et), d)
+            self.assertTrue(due.startswith("Rules pass due for December 2026: start a lane with hub/efficiency/rules-pass-prompt.md"))
+            self.assertTrue(hd.rules_pass_line(datetime(2026, 12, 20, 9, 0, tzinfo=et), d))
+            (Path(d) / "rules-pass-2026-12.md").write_text("done")
+            self.assertEqual(hd.rules_pass_line(datetime(2026, 12, 20, 9, 0, tzinfo=et), d), "")
+
     def test_lane_reports_window_and_order(self):
         with tempfile.TemporaryDirectory() as d:
             for name, age_h in (("2026-10-16-new-lane", 1), ("2026-10-16-mid-lane", 5), ("2026-10-10-stale-lane", 100)):
