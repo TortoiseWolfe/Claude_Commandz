@@ -9,6 +9,8 @@ and the workflow takes its shell and node lists from it, so the lists cannot dri
                                             in .github/ci_not_run.tsv (a listed file is left out of its runner's list); a listed line for a
                                             file that no longer exists fails too
   ci_test_coverage.py list shell|node       the files the shell / node step must run, one per line, relative to global/.claude/scripts
+  ci_test_coverage.py list shell --part I/N the I-th of N equal slices of that list (I counts from 0); the N slices together are the whole
+                                            list and no file is in two, so N jobs can each run one slice side by side
   ci_test_coverage.py pytest-ran FILE scripts|hooks
                                             FILE is the output of `pytest --collect-only -q` (one "path::test" line per test); every file that
                                             suite must run needs at least one line in it, so a file that collected no tests (or was ignored) fails
@@ -100,6 +102,17 @@ def listing(files, runner, not_run):
     return sorted(f[len(rel):] for f in files if f.startswith(rel) and runner_of(f) == runner and f not in not_run)
 
 
+def part_of(items, spec):
+    """Slice I of N ("I/N", I from 0) of a list: every N-th item starting at I. None when the spec is not a valid slice."""
+    m = re.match(r"^(\d+)/(\d+)$", spec or "")
+    if not m:
+        return None
+    i, n = int(m.group(1)), int(m.group(2))
+    if n < 1 or i >= n:
+        return None
+    return list(items)[i::n]
+
+
 def pytest_missing(files, output, suite, not_run=()):
     """Files the pytest suite must run that have no collected test ("path::name" line) in `pytest --collect-only -q` output."""
     runner = "pytest-" + suite
@@ -130,6 +143,15 @@ def main(argv):
         return 0
     if cmd == "list" and len(argv) == 3 and argv[2] in ("shell", "node"):
         for f in listing(files, argv[2], read_not_run()[0]):
+            print(f)
+        return 0
+    if cmd == "list" and len(argv) == 5 and argv[2] in ("shell", "node") and argv[3] == "--part":
+        part = part_of(listing(files, argv[2], read_not_run()[0]), argv[4])
+        if part is None:
+            # A bad slice must stop the job: printing nothing would look like "no tests in this part" and run none.
+            print("::error::--part wants I/N with I from 0 to N-1, got %r" % argv[4], file=sys.stderr)
+            return 2
+        for f in part:
             print(f)
         return 0
     if cmd == "pytest-ran" and len(argv) == 4 and argv[3] in ("scripts", "hooks"):
