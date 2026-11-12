@@ -800,20 +800,34 @@ def _segments(command):
 _PY_RUN_OPTIONS = ("-I", "-B", "-s", "-S", "-u")  # the only options a run of a listed Python file may carry: none can name code, a module or another file to run. -E is left out: bash_writes_guarded reads it as another interpreter's inline-code option, and -I already covers it
 
 
-def _runs_listed_python(words):
+def _runs_listed_python(words, seg):
     """True for `python [options] <file> [the file's own arguments]`, where <file> is redact_view.py, the module or the cleanup command and every word before it is one of
     _PY_RUN_OPTIONS written alone. Anything else before the file is refused, whether or not it is joined to a value: an option that names code or a module to run, a lone
     dash, an interactive run, a bundle of option letters. With one of those Python runs something other than the file, and the file would only be an argument handed to
-    it. The cleanup command takes no path, so nothing may follow it but --apply."""
+    it. The cleanup command takes no path, so nothing may follow it but --apply.
+    seg is the raw text of the part of the command the words came from. The path the rule compares must be the path the machine opens, so the file's word must be:
+    written plainly, with no quote, backslash or odd white space before or in it (the shell would hand Python other text than the rule read);
+    a full path from /, ~/ or $HOME/ (a relative path is opened against the working folder, not against /), with no other variable (the shell's value may differ from the
+    hook's) and no ".." (it is removed as text here, but the shell follows links first); for $HOME/, a home with no white space or wildcard (the shell would split it);
+    the listed file's own name, never a link to it (a link can be re-pointed between the check and the run, and its name can be a wildcard pattern)."""
     i = 1
     while i < len(words) and words[i] in _PY_RUN_OPTIONS:
         i += 1
     if i >= len(words) or words[i].startswith("-"):
         return False
-    target = os.path.realpath(expand(words[i], "/"))
-    if target == os.path.realpath(os.path.join(wall_dir(), "wall_cleanup.py")):
+    word = words[i]
+    if re.split(r"[ \t]+", seg.strip(" \t"))[:i + 1] != words[:i + 1]:
+        return False
+    if not word.startswith(("/", "~/", "$HOME/")) or "$" in word[1:] or ".." in word.split("/"):
+        return False
+    if word.startswith("$HOME/") and re.search(r"[\s*?\[]", home()):
+        return False
+    p = expand(word, "/")
+    cleanup = os.path.join(wall_dir(), "wall_cleanup.py")
+    if p in (cleanup, os.path.realpath(cleanup)):
         return all(a == "--apply" for a in words[i + 1:])
-    return target in (os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py")))  # run, not edited
+    listed = (os.path.join(home(), ".claude", "scripts", "redact_view.py"), os.path.join(wall_dir(), "no_ai_wall.py"))
+    return p in listed or p in tuple(os.path.realpath(f) for f in listed)  # run, not edited
 
 
 def _read_only_listing(command):
@@ -836,7 +850,7 @@ def _read_only_listing(command):
             return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands (a tilde); nor is a path to any folder but the two system ones, where a program can carry a trusted name
         if prog in _READ_ONLY_PROGRAMS:
             continue
-        if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words):
+        if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words, seg):
             continue
         return False
     return True

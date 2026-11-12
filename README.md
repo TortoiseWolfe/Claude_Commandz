@@ -125,7 +125,7 @@ hooks, workflows, agents and skills. Tests: `python3 -m pytest global/.claude/sc
 the files from git, never from a working folder, so a half-edited checkout can't leak into the live scripts. It prints a
 per-file summary first (new, changed, same, drift) and asks `Install? [y/N]` before it copies anything. A live file that
 matches no earlier repo version is listed as drift and left alone. A script that reads the no-AI wall from
-`~/.claude/no-ai-wall/` (lane.sh) is held back, and not copied, while that folder lacks any of the wall's three files; the
+`~/.claude/no-ai-wall/` (lane.sh) is held back, and not copied, while that folder lacks any of the files lane.sh reads from it; the
 summary then prints the exact `global/.claude/no-ai-wall/install.sh` command a person runs first (6 Nov: a lane.sh installed
 without that folder refused to start any lane). No-AI-wall files and settings files are skipped without
 being read. It backs up every file it replaces and writes an `undo.sh` beside the backup under

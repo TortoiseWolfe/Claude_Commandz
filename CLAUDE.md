@@ -37,7 +37,7 @@ Restore is always a direct `cp -a` with no path rewriting. Because of this:
 ## The no-AI wall has its own folder, and a person installs it
 
 `global/.claude/no-ai-wall/` mirrors `~/.claude/no-ai-wall/` for four files only: `no_ai_wall.py`, `no_ai_wall.sh`, `no-ai-wall-guard.py` and `wall_cleanup.py` (the wall's own cleanup command: it moves files that do not belong in that folder into `~/.claude/state/no-ai-wall-strays/`, never deletes, and takes no path).
-Sessions are refused any change there, to the no-AI list and to settings files, and to nothing else in scripts or hooks.
+Sessions are refused any change there, to the no-AI list and to settings files, and to nothing else in scripts or hooks. The one exception is the cleanup command, which a session may run: it moves only stray files out.
 `install.sh` and `smoke.py` sit beside them in the repo but are never copied live, and `install_global.py` does not touch this folder.
 The install is a person-only step, run in a terminal and never by a session (README.md, "Installing the no-AI wall"). Do not add a `cp` line for it to the refresh list.
 

@@ -1,10 +1,12 @@
 """The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir."""
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "no-ai-wall")  # the wall's own folder in the repo (mirror of ~/.claude/no-ai-wall)
@@ -403,6 +405,38 @@ class SecurityFindingTests(Fixture):
             self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
         # The honest forms still pass: a lone look, two looks, a look and then the module's own check.
         for cmd in ("ls -la %s" % mod, "sha256sum %s" % clean, "ls %s; wc -l %s" % (mod, clean), "ls %s && python3 -I %s status" % (wall, mod), "/usr/bin/stat %s" % mod):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        # The path the rule compares must be the path the machine opens: quotes, white space, links, relative paths and other variables are refused.
+        os.makedirs(wall, exist_ok=True)
+        os.makedirs(os.path.dirname(rv), exist_ok=True)
+        for f in (mod, clean, rv):
+            if not os.path.exists(f):
+                open(f, "w").close()
+        x = tempfile.mkdtemp(dir=self.tmp)
+        self.addCleanup(shutil.rmtree, x, ignore_errors=True)
+        os.makedirs(os.path.join(x, "far", "sub"))
+        os.symlink(os.path.join(x, "far", "sub"), os.path.join(x, "l"))
+        os.symlink(mod, os.path.join(x, "no_ai_wall.py"))
+        os.symlink(clean, os.path.join(x, "wall_cleanup.py"))
+        os.symlink(mod, os.path.join(x, "w[x]"))
+        refused = ('python3 " %s" status' % mod, 'python3 "%s " status' % mod, 'python3 " %s" --keys-only %s' % (rv, self.pfile),
+                   "python3 '~/.claude/no-ai-wall/no_ai_wall.py' status", 'python3 "~/.claude/scripts/redact_view.py" --keys-only %s' % self.pfile,
+                   "python3 '$HOME/.claude/no-ai-wall/no_ai_wall.py' status", "python3 \\~/.claude/no-ai-wall/no_ai_wall.py status",
+                   "python3 \r%s status" % mod, "python3 %s check-path %s" % (mod.lstrip("/"), mod),
+                   "python3 -I %s/l/../wall_cleanup.py --apply" % x, "python3 %s/l/../no_ai_wall.py status" % x,
+                   "python3 %s/no_ai_wall.py status" % x, "python3 %s/w[x] status" % x)
+        for cmd in refused:
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+        with mock.patch.dict(os.environ, {"WALLX": wall}):
+            cmd = "python3 $WALLX/no_ai_wall.py status"
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("python3 ~/.claude/no-ai-wall/no_ai_wall.py status", "python3 $HOME/.claude/scripts/redact_view.py --keys-only %s" % self.pfile,
+                    "python3 -I $HOME/.claude/no-ai-wall/wall_cleanup.py --apply", 'python3 %s --keys-only "%s"' % (rv, self.pfile),
+                    "python3\t-I\t%s\tstatus" % mod):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
     def test_a_listing_program_is_a_bare_name_or_a_system_path(self):
