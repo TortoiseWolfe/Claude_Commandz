@@ -27,18 +27,48 @@ ORDER = ["core", "mail", "browser", "streams", "coop", "fleet"]
 
 # Plain word lists. Matched against lower-case "name + folder + first 30000 characters of the prompt".
 TRIGGERS = {
-    "mail": r"gmail|e-?mail|inbox|draft|calendar|newsletter|recruiter|greg|william|invoice|outreach|"
+    "mail": r"gmail|e-?mail|inbox|draft|calendar|newsletter|recruiter|invoice|outreach|"
             r"listmonk|resend|mailbox|\bmail\b|reply to|client reply|absorb",
     "browser": r"browser|sign[- ]?in|log ?in|login|chromium|playwright|puppeteer|\bcdp\b|cloudflare|captcha|passkey|"
-               r"\bapply\b|job form|application form|\bforms? (?:fill|submit|answers)|scout|lever|greenhouse|ashby|rippling|"
+               r"\bapply\b|job form|application form|\bforms? (?:fill|submit|answers)|lever|greenhouse|ashby|rippling|"
                r"upwork|godaddy|stripe|resume|career|cover letter|agent_browser|oauth|2fa|\bsudo\b|collaborator|webauthn|\bsso\b",
     "streams": r"\bstreams?\b|twitch|youtube|\bband\b|wagon|\bsongs?\b|music|lyric|jingle|blender|sketchup|site[- ]model|"
                r"data/sites|photogrammetry|\bobs\b|rtmp|album|ffmpeg|turnaround|poem|\b3d\b",
-    "coop": r"co-?op|chattanooga|william|\bgreg\b|eduity|\bcd-|nextcloud|\bdeck\b|hubzilla|civicrm|techjoy|"
-            r"consemble|peermentor|elev8tek|harmonic ?egg|\bjoc\b|talk post",
+    "coop": r"co-?op|\bcd-|nextcloud|\bdeck\b|hubzilla|civicrm|talk post",
     "fleet": r"lane\.sh|lane_watch|lane_session|dispatch|openclaw|--engine|\bcodex\b|opencode|\bagy\b|copilot|budget|"
              r"usage_calibrate|claude_commandz|hub_digest|hub_lean",
 }
+# Client, organisation and people names live in a private file, never in this public repo:
+#   ~/.config/afa/lane-rules-keywords.json   {"mail": ["word", ...], "coop": ["word", ...], ...}   (mode 600; LANE_RULES_KEYWORDS overrides the path)
+# Each entry is a plain word or a regular-expression fragment. A missing file adds nothing; a bad entry is skipped.
+KEYWORDS_FILE = "~/.config/afa/lane-rules-keywords.json"
+
+
+def load_private_triggers(path=None):
+    """The part -> regex of private extra trigger words (only parts in TRIGGERS), or {} when there is no readable file."""
+    import json
+    where = Path(os.path.expanduser(path or os.environ.get("LANE_RULES_KEYWORDS") or KEYWORDS_FILE))
+    try:
+        data = json.loads(where.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for part, words in (data.items() if isinstance(data, dict) else ()):
+        if part not in TRIGGERS or not isinstance(words, list):
+            continue
+        good = []
+        for w in words:
+            try:
+                if isinstance(w, str) and w.strip():
+                    re.compile(w)
+                    good.append(w)
+            except re.error:
+                continue
+        if good:
+            out[part] = "|".join(good)
+    return out
+
+
 WORKSPACE_DIRS = ("/repos", "/repos/hub")
 
 
@@ -52,10 +82,11 @@ def read_part(rules_dir, name):
 def pick(name, dirpath, connectors, prompt_text):
     text = f"{name}\n{dirpath}\n{prompt_text[:30000]}".lower()
     got = ["core"]
+    private = load_private_triggers()
     for part in ORDER[1:]:
         if part == "mail" and connectors == "on":
             got.append(part)
-        elif re.search(TRIGGERS[part], text):
+        elif re.search(TRIGGERS[part], text) or (part in private and re.search(private[part], text)):
             got.append(part)
     d = (dirpath or "").rstrip("/")
     if d.endswith(WORKSPACE_DIRS) and "fleet" not in got:  # a lane started in the workspace or hub folder may run the fleet

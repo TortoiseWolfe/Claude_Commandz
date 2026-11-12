@@ -1,5 +1,7 @@
 """lane_rules_compose.py: a lane gets core plus the parts its name, folder, prompt or connectors might need."""
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,13 +37,17 @@ ROUTES = """# Routes
 """
 
 
-def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, routes=None):
+def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, routes=None, keywords=None):
     with tempfile.TemporaryDirectory() as tmp:
         d = rules_dir(tmp)
         rf = Path(tmp) / "routes.md"
         if routes is not None:
             rf.write_text(routes)
-        env = {**os.environ, "HUB_ROUTES_FILE": str(rf)}  # a missing file means no routes section, never the live one
+        kf = Path(tmp) / "keywords.json"  # never the live private file: a missing one adds no words
+        if keywords is not None:
+            kf.write_text(keywords)
+        # a missing routes file means no routes section, never the live one
+        env = {**os.environ, "HUB_ROUTES_FILE": str(rf), "LANE_RULES_KEYWORDS": str(kf)}
         pf = Path(tmp) / ("nope.md" if missing_prompt else "prompt.md")
         if not missing_prompt:
             pf.write_text(prompt)
@@ -78,6 +84,38 @@ class ComposeTest(unittest.TestCase):
 
     def test_missing_prompt_gets_every_part(self):
         self.assertEqual(run("", missing_prompt=True)[0], PARTS)
+
+    def test_private_words_add_parts_and_the_public_list_holds_no_names(self):
+        # Placeholder words stand in for the client names that live in ~/.config/afa/lane-rules-keywords.json.
+        prompt = "Reply about the zebracorp account."
+        self.assertEqual(run(prompt)[0], ["core"])
+        parts, text = run(prompt, keywords='{"coop": ["zebracorp"], "mail": ["\\\\bquokka\\\\b"]}')
+        self.assertIn("coop", parts)
+        self.assertNotIn("mail", parts)
+        self.assertIn("mail", run("The quokka rota.", keywords='{"mail": ["\\\\bquokka\\\\b"]}')[0])
+
+    def test_a_bad_or_unknown_private_entry_is_skipped_not_fatal(self):
+        for bad in ("not json", '["a"]', '{"nonsense": ["zebracorp"]}', '{"coop": ["(unclosed", 5]}', '{"coop": "zebracorp"}'):
+            self.assertEqual(run("Reply about the zebracorp account.", keywords=bad)[0], ["core"], bad)
+
+    def test_the_public_trigger_lists_name_no_client_or_person(self):
+        src = SCRIPT.read_text()
+        start, end = src.index("TRIGGERS = {"), src.index("WORKSPACE_DIRS")
+        lists = src[start:end].lower()
+        # Made-up names stand in for the real ones; the live private file (when this machine has one) is checked too,
+        # so a real name pasted into the public lists fails here without being written into this test.
+        words = {"client-a", "person-b"}
+        live = Path(os.path.expanduser("~/.config/afa/lane-rules-keywords.json"))
+        try:
+            data = json.loads(live.read_text())
+        except (OSError, ValueError):
+            data = {}
+        for entries in (data.values() if isinstance(data, dict) else ()):
+            for entry in (entries if isinstance(entries, list) else ()):
+                if isinstance(entry, str):
+                    words.update(w for w in re.split(r"[^a-z0-9]+", re.sub(r"\\[a-z]", " ", entry.lower())) if len(w) >= 4)
+        for word in sorted(words):
+            self.assertNotIn(word, lists)
 
     def test_routes_for_a_site_the_prompt_names_ride_along(self):
         _, text = run("Add a DNS record in the Cloudflare dashboard.", routes=ROUTES)
