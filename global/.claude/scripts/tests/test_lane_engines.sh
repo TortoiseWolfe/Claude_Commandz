@@ -940,7 +940,7 @@ assert_not_contains "$(hand_status)" 'hand-off (newer' '--status hides an older 
 touch "$HD/handoff.md"
 assert_contains "$(hand_status)" 'hand-off (newer than report): Done: merged the widget fix' '--status shows a hand-off written after the report'
 
-# 19 Oct: "report:yes idle" got tigard-trace closed while it was mid-work. A report is the last word only when it is newer than
+# 19 Oct: "report:yes idle" got sample-trace closed while it was mid-work. A report is the last word only when it is newer than
 # every input the lane got and no background job is running; otherwise --status says report:stale.
 # Times relative to now: lane_report_state.py calls a job lost after LOST_JOB_HOURS (12), so fixed 19 Oct stamps went red on 20 Oct.
 T_REP="$(date -u -d '-2 hours' '+%F %T UTC')"
@@ -972,7 +972,7 @@ assert_contains "$STATUS_STALE" 'report stale: a background job it started has n
 
 # 3D work tier: a prompt naming data/sites/ or site-model runs on fable or opus only (his rule, 19 Oct).
 SITE_PROMPT="$TMP/site-prompt.md"
-printf '%s\n' 'Fit the walls in data/sites/tigard-01 against the overlay gate.' >"$SITE_PROMPT"
+printf '%s\n' 'Fit the walls in data/sites/sample-01 against the overlay gate.' >"$SITE_PROMPT"
 SKILL_PROMPT="$TMP/skill-prompt.md"
 printf '%s\n' 'Read the site-model skill, then rebuild the porch.' >"$SKILL_PROMPT"
 for low in sonnet haiku claude-sonnet-5-5 default none; do

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Site-model work runs on Fable or Opus, at effort high, on every way the dispatcher starts a lane (his rule, 19 Oct; the tier-3d lane's
-report found openclaw_dispatch still sent Tigard asks to Sonnet). A start that lane.sh refuses on tier is reported once and never
+report found openclaw_dispatch still sent Sample asks to Sonnet). A start that lane.sh refuses on tier is reported once and never
 started again on another tier. The PC and OpenClaw are fakes: no lane, window or session is touched."""
 import sys
 import time
@@ -18,8 +18,8 @@ import test_openclaw_reply as tr  # noqa: E402
 
 NOW = td.NOW
 ASK = tp.ASK
-SITE_ASKS = ("fit the Tigard site model to the porch photos", "extend the site-model skill with a roof step",
-             "compare data/sites/tigard/footprints.json with the survey", "export the house to SketchUp geometry")
+SITE_ASKS = ("fit the Sample site model to the porch photos", "extend the site-model skill with a roof step",
+             "compare data/sites/sample/footprints.json with the survey", "export the house to SketchUp geometry")
 REFUSAL = "refusing model sonnet: the prompt names data/sites/ or site-model, and 3D fitting, photo matching and site-model work runs only on fable or opus"
 
 
@@ -106,12 +106,12 @@ class Restart(td.Base):
             f.write("\t".join(row) + "\n")
 
     def test_a_fable_lane_restarts_on_fable_not_sonnet(self):
-        self.row("tigard-fit", "fable", "subscription", "Fit the Tigard site model.\n")
-        dp.restart_lane(self.ctx, self.host, "tigard-fit", "go on", NOW + 60)
-        self.assertEqual((self.host.started[-1][0],) + self.host.started[-1][2:4], ("tigard-fit-2", "claude", "fable"))
+        self.row("sample-fit", "fable", "subscription", "Fit the Sample site model.\n")
+        dp.restart_lane(self.ctx, self.host, "sample-fit", "go on", NOW + 60)
+        self.assertEqual((self.host.started[-1][0],) + self.host.started[-1][2:4], ("sample-fit-2", "claude", "fable"))
 
     def test_a_site_lane_whose_row_says_sonnet_or_codex_restarts_on_opus(self):
-        self.row("old-sonnet", "sonnet", "subscription", "Work in data/sites/tigard.\n")
+        self.row("old-sonnet", "sonnet", "subscription", "Work in data/sites/sample.\n")
         self.row("old-codex", "sonnet", "codex", "Extend the site-model skill.\n")
         dp.restart_lane(self.ctx, self.host, "old-sonnet", "go on", NOW + 60)
         dp.restart_lane(self.ctx, self.host, "old-codex", "go on", NOW + 61)
@@ -186,7 +186,7 @@ class TheWaitingRoom(tp.PassBase):
         (self.room / (name + ".md")).write_text("dir: %s\nmodel: sonnet\napproved: x\n\n# %s\n\n%s\n" % (self.root / "own-app", name, brief))
 
     def test_a_site_entry_asking_for_sonnet_starts_on_opus(self):
-        self.entry("fd-site", "Fit the Tigard site model to the porch.")
+        self.entry("fd-site", "Fit the Sample site model to the porch.")
         dp.room_due(self.ctx, self.host, NOW)
         self.assertEqual(self.host.started[-1][2:4], ("claude", "opus"))
 
@@ -216,7 +216,7 @@ class TheHost(unittest.TestCase):
 
     def test_a_site_lane_is_started_at_effort_high(self):
         host, seen = self.host(self.ok())
-        host.start_lane("oc-x", "/tmp", "claude", "opus", self.prompt("Fit the Tigard site model."))
+        host.start_lane("oc-x", "/tmp", "claude", "opus", self.prompt("Fit the Sample site model."))
         argv = seen["argv"]
         self.assertEqual(argv[argv.index("--effort") + 1], "high")
         self.assertEqual(argv[-2], "opus")
@@ -250,7 +250,7 @@ class TheHost(unittest.TestCase):
             self.assertEqual(argv[-2], model)
 
     def test_no_high_tier_reason_for_sonnet_site_model_or_mail(self):
-        cases = [("oc-x", "sonnet", "Count the issues."), ("oc-x", "opus", "Fit the Tigard site model."),
+        cases = [("oc-x", "sonnet", "Count the issues."), ("oc-x", "opus", "Fit the Sample site model."),
                  ("acme-mail", "opus", "Review the router design."), ("oc-x", "opus", "Draft a reply to Greg's email.")]
         for name, model, text in cases:
             host, seen = self.host(self.ok())

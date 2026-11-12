@@ -5,7 +5,7 @@
   job    a background command or agent the lane started has not reported back
   ?      no transcript to read (a headless lane, or the session is not known): the caller falls back to "the file exists"
 
-19 Oct: the hub closed tigard-trace because lane.sh --status said "report:yes idle". The report was from 12:20 PM; at 12:40 PM Jonathan's
+19 Oct: the hub closed sample-trace because lane.sh --status said "report:yes idle". The report was from 12:20 PM; at 12:40 PM the owner's
 complaint was forwarded into the lane, and by 1:05 PM it was running the test suite in the background. Closing it killed that work.
 
 usage: lane_report_state.py <report.md> <transcript.jsonl>"""

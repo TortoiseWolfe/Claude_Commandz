@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import openclaw_dispatch as dp  # noqa: E402
 from test_openclaw_dispatch import NOW, Base, FakeHost  # noqa: E402
 
-AMES = "need to proof read and edit the email back to lawyer  Ames on the Orchard"
+AMES = "need to proof read and edit the email back to contact  Ames on the Orchard"
 FOLLOW = "I didn't ask you to do it driectly, the Hub know more about it and it can see his former messages"
 FIRST_TS, SECOND_TS = NOW - 20 * 60, NOW - 20 * 60 + 60
 
@@ -94,7 +94,7 @@ class TheAmesAsksOf19Oct(MailBase):
 
     def test_the_pass_start_and_the_script_start_turn_gmail_on_for_a_mail_task(self):
         self.ctx.hand_off_first = False
-        kind_line = dp.do_start(self.ctx, self.host, "orchard-case", "proofread the email to the lawyer", NOW)
+        kind_line = dp.do_start(self.ctx, self.host, "orchard-case", "proofread the email to the contact", NOW)
         self.assertIn(" | started ", kind_line[0])
         self.assertIn("--connectors", self.host.argvs[-1])
         self.assertEqual(self.host.started[-1][2], "claude")
@@ -183,7 +183,7 @@ class AWorktreeOfAListedRepoIsARepo(MailBase):
         room = self.ctx.room_dir
         self.host.proj = 50  # the week is on pace
         room.mkdir(parents=True, exist_ok=True)
-        (room / "tigard-porch-finish.md").write_text("dir: %s\nmodel: sonnet\napproved: x\n\nfinish the porch\n" % self.wt)
+        (room / "sample-porch-finish.md").write_text("dir: %s\nmodel: sonnet\napproved: x\n\nfinish the porch\n" % self.wt)
         out = dp.room_due(self.ctx, self.host, NOW)
         self.assertEqual(len(self.host.started), 1, out)
         self.assertEqual(self.host.started[0][1], str(self.wt))

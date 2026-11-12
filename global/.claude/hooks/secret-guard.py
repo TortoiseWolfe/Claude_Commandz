@@ -36,7 +36,7 @@ NAME_NOT_SECRET = re.compile(r"(?:file|path|dir|url|uri|name|type|mode|host|port
 FLAG_SP = re.compile(r"(?<![\w-])--(?:password|passwd|token|secret|api-?key|auth-token|access-token"
                      r"|client-secret|private-key)\s+(?P<val>" + VAL + ")", re.I)
 # A URL query parameter (the same unspaced word holds ://, so a shell & does not count) whose value is a plain 7 to 10 digit number is an id, not a secret (Greenhouse's public job id in
-# job-boards.greenhouse.io/embed/job_app?for=x&token=8257322). The digits must end at a non-word character, so a value that goes on into
+# job-boards.greenhouse.io/embed/job_app?for=x&token=4567891). The digits must end at a non-word character, so a value that goes on into
 # letters (a mixed token) still counts. A bare digit value was already allowed; this covers the same id with punctuation after it.
 URL_ID = re.compile(r"\d{7,10}(?![A-Za-z0-9_-])")
 PLACEHOLDER = re.compile(r"placeholder|example|dummy|changeme|redacted|xxx+|^<.*>$|your[-_]", re.I)

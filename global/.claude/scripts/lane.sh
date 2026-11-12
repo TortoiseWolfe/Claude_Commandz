@@ -958,7 +958,7 @@ mail_tier_ok() {  # <model> <name> <prompt-file> [verb]
 }
 
 # Opus and fable cost several times sonnet, and a lane that stays on one all day is what ran up the bill (his rule, 22 Oct: ten lanes on Opus,
-# only tigard-fable entitled; coop-mail on Fable). So a Claude lane may run on opus or fable only with a reason WRITTEN DOWN: the
+# only sample-fable entitled; coop-mail on Fable). So a Claude lane may run on opus or fable only with a reason WRITTEN DOWN: the
 # --allow-high-tier "<reason>" given at start, resume or --model goes into index.tsv column 13 (ent, "-" = none). Site-model prompts need none
 # (their own rule above) and mail lanes are settled by mail_tier_ok. A recycle puts a lane without a reason back on sonnet (policy_model),
 # and lane_watch.sh names any live lane on opus or fable with no reason (lane.sh --tier prints "<model> TAB <reason>").

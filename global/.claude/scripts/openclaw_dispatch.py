@@ -2484,7 +2484,7 @@ def do_reply(ctx, host, lane_word, text, now, ask_id=None, context=None, depth=0
     name = hit[0] if hit else None
     if not name:
         # a lane whose window has closed: one restarted already carries on under its successor's name, else it is restarted now from its
-        # hand-off folder with his words (19 Oct 3:35 PM: six replies to tigard-porch-finish bounced because its window had closed)
+        # hand-off folder with his words (19 Oct 3:35 PM: six replies to sample-porch-finish bounced because its window had closed)
         old = closed_lane_name(ctx, lane_word, live, now)
         succ = successor(state, old) if old else None
         if succ and succ != old and depth < 3:

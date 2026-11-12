@@ -1,4 +1,4 @@
-"""19 Oct: the hub closed tigard-trace on "report:yes idle". Its report.md was from 12:20 PM, but at 12:40 PM Jonathan's complaint was forwarded
+"""19 Oct: the hub closed sample-trace on "report:yes idle". Its report.md was from 12:20 PM, but at 12:40 PM the owner's complaint was forwarded
 into the lane and by 1:05 PM it was running the test suite in the background. The report is the lane's last word only when it is newer than
 every input the lane got and no background job is pending. The timeline below is that lane's (UTC stamps, Eastern + 4 h)."""
 
@@ -47,7 +47,7 @@ def notice(t, tool_id, op="enqueue"):
             "content": f"<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>{tool_id}</tool-use-id>\n<status>completed</status>\n</task-notification>"}
 
 
-class Tigard(unittest.TestCase):
+class Sample(unittest.TestCase):
     """12:20 PM report (16:20 UTC); 12:40 PM forwarded complaint; 12:43 PM compaction; 1:05 PM suite in the background; 1:15 PM it ends."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -133,12 +133,12 @@ class Tigard(unittest.TestCase):
 
 
 class TheStatusTextIsRead(unittest.TestCase):
-    STATUS = ("tigard-trace       report:stale idle    ✻ Worked for 3m\n    report stale: the lane got input after report.md was written\n"
+    STATUS = ("sample-trace       report:stale idle    ✻ Worked for 3m\n    report stale: the lane got input after report.md was written\n"
               "    dir:/x model:sonnet\nother-lane        report:yes  idle    done\n")
 
     def test_the_parsers_keep_a_stale_lane_live_and_not_done(self):
         live, _dead = osd.parse_lane_status(self.STATUS)
-        self.assertEqual(live, [("tigard-trace", "stale", "idle"), ("other-lane", "yes", "idle")])
+        self.assertEqual(live, [("sample-trace", "stale", "idle"), ("other-lane", "yes", "idle")])
 
     def test_the_digest_says_report_stale(self):
         self.assertIn("stale", hd.REPORT_WORD["stale"])
