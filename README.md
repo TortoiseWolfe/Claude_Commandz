@@ -161,7 +161,7 @@ A script can drop a file into `~/.claude/no-ai-wall/` unseen, and no session may
 cleanup command does it. It looks only at its own folder, leaves the four wall files alone, and takes no path or file name from
 whoever runs it. A dry run lists what does not belong; `--apply` moves each stray (never deletes it) into
 `~/.claude/state/no-ai-wall-strays/<date-time>/` and adds one line per move to `~/.claude/state/no-ai-wall-cleanup.log`
-(name, kind, size and a checksum; never file content). It refuses to move anything when the holding folder or the log is a
+(name, kind, size and, for an ordinary file up to 1 MB, a checksum; never file content). It refuses to move anything when the holding folder or the log is a
 link or the wrong kind of thing.
 
 ```bash

@@ -797,10 +797,30 @@ def _segments(command):
     return [seg for seg in re.split(r"\|\||&&|[;|&\n]", command) if seg.strip()]
 
 
+_PY_RUN_OPTIONS = ("-I", "-B", "-s", "-S", "-u")  # the only options a run of a listed Python file may carry: none can name code, a module or another file to run. -E is left out: bash_writes_guarded reads it as another interpreter's inline-code option, and -I already covers it
+
+
+def _runs_listed_python(words):
+    """True for `python [options] <file> [the file's own arguments]`, where <file> is redact_view.py, the module or the cleanup command and every word before it is one of
+    _PY_RUN_OPTIONS written alone. Anything else before the file is refused, whether or not it is joined to a value: an option that names code or a module to run, a lone
+    dash, an interactive run, a bundle of option letters. With one of those Python runs something other than the file, and the file would only be an argument handed to
+    it. The cleanup command takes no path, so nothing may follow it but --apply."""
+    i = 1
+    while i < len(words) and words[i] in _PY_RUN_OPTIONS:
+        i += 1
+    if i >= len(words) or words[i].startswith("-"):
+        return False
+    target = os.path.realpath(expand(words[i], "/"))
+    if target == os.path.realpath(os.path.join(wall_dir(), "wall_cleanup.py")):
+        return all(a == "--apply" for a in words[i + 1:])
+    return target in (os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py")))  # run, not edited
+
+
 def _read_only_listing(command):
     """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands, or runs the wall's cleanup
     command wall_cleanup.py (which takes no path and moves only strays out of the wall's folder), with no redirection, no command substitution and no program outside the
-    short list. The three Python files below are on the list to be run; an edit of any of them is still refused elsewhere."""
+    short list. A Python file on that list is there to be run as itself and nothing else: _runs_listed_python holds the rule. This is the only gate for such a command
+    (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file."""
     if re.search(r"[<>`]|\$\(", command):
         return False
     for seg in _segments(command):
@@ -810,11 +830,8 @@ def _read_only_listing(command):
         prog = os.path.basename(words[0])
         if prog in _READ_ONLY_PROGRAMS:
             continue
-        if prog.startswith("python"):
-            rest = [w for w in words[1:] if not w.startswith("-")]
-            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py")), os.path.realpath(os.path.join(wall_dir(), "wall_cleanup.py"))]  # run, not edited
-            if rest and os.path.realpath(expand(rest[0], "/")) in ok:
-                continue
+        if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words):
+            continue
         return False
     return True
 

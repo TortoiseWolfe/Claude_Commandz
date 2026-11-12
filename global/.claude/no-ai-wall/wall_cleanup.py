@@ -7,7 +7,8 @@ every change in that folder). A person runs this command in a terminal instead.
 What it does: looks at the direct entries of its own folder only. The wall's own files (the manifest below) are left alone. Anything
 else is a stray. A dry run lists the strays; with --apply each stray is moved (never deleted) into
 ~/.claude/state/no-ai-wall-strays/<date-time>/ and one line per move is added to ~/.claude/state/no-ai-wall-cleanup.log (name, kind,
-size and, for a small regular file, a sha256; never file content).
+size and, for a regular file up to 1 MB, a sha256; a dash for anything else; never file content). The holding folder is made new for
+each run, and a stray is not moved over a name that already sits there.
 
 What it will never do: touch a manifest file, the no-AI list, or any file outside its own folder; delete anything; start another
 program; take a path, a folder or a file name from the caller; read the HOME setting. It refuses to run anywhere but an installed wall
@@ -50,6 +51,7 @@ STRAYS_NAME = "no-ai-wall-strays"
 LOG_NAME = "no-ai-wall-cleanup.log"
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 LOG_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+HASH_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def refuse(why):
@@ -68,25 +70,46 @@ def kind_of(mode):
 
 
 def sha256_of(path, st):
-    """sha256 of a regular file up to 1 MB, opened without following a link; '-' otherwise."""
+    """sha256 of a regular file up to 1 MB; '-' for anything else. The name is opened without following a link and without waiting (a
+    name swapped for a pipe after the first look would otherwise hang the run), and what was opened is looked at again: it must still be
+    a regular file within the size limit, and reading stops with '-' if it grows past the limit."""
     if not stat.S_ISREG(st.st_mode) or st.st_size > HASH_LIMIT:
         return "-"
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, HASH_FLAGS)
     except OSError:
         return "-"
     try:
+        now = os.fstat(fd)
+        if not stat.S_ISREG(now.st_mode) or now.st_size > HASH_LIMIT:
+            return "-"
         h = hashlib.sha256()
-        with os.fdopen(fd, "rb") as fh:
-            fd = -1
-            for chunk in iter(lambda: fh.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return h.hexdigest()
+            total += len(chunk)
+            if total > HASH_LIMIT:
+                return "-"
+            h.update(chunk)
     except OSError:
         return "-"
     finally:
-        if fd >= 0:
-            os.close(fd)
+        os.close(fd)
+
+
+def move_out(wall, name, dest_fd):
+    """Move the stray `name` out of the wall folder into the open holding folder, under the same name. The holding folder was made new
+    for this run, so the name should be free. If something already sits there under that name, the move is refused (FileExistsError)
+    and both stay where they are, because a plain move would write over it. The look and the move are two steps, so this narrows that
+    gap; it does not close it."""
+    try:
+        os.lstat(name, dir_fd=dest_fd)
+    except FileNotFoundError:
+        os.rename(os.path.join(wall, name), name, dst_dir_fd=dest_fd)
+        return
+    raise FileExistsError(name)
 
 
 def has_git_entry(wall):
@@ -131,7 +154,9 @@ def open_holding(base):
     Returns (holding folder descriptor, log descriptor, holding folder name). Raises OSError when any piece is a link or the wrong kind.
 
     It looks first and creates second. Every piece that already exists is opened and checked before a single folder or file is made, so
-    a refusal over something that was already there leaves the disk as it was. Each piece is opened by its name inside the open folder
+    a refusal over something that was already there and is the wrong kind leaves the disk as it was. A refusal that comes later, when a
+    missing piece cannot be made (a folder nobody may write to, say), can leave behind the pieces made just before it: an empty state
+    folder, an empty holding folder or an empty log. No stray has moved by then. Each piece is opened by its name inside the open folder
     above it, never by a full path, so swapping a folder for a link after the check cannot send a move or a log line somewhere else."""
     held = []
     keep = []
@@ -252,7 +277,7 @@ def main(argv):
             continue
         digest = sha256_of(os.path.join(wall, name), st)
         try:
-            os.rename(os.path.join(wall, name), name, dst_dir_fd=dest_fd)
+            move_out(wall, name, dest_fd)
         except OSError as exc:
             sys.stderr.write("could not move %s: %s\n" % (shown, type(exc).__name__))
             failed += 1

@@ -358,6 +358,26 @@ class SecurityFindingTests(Fixture):
         self.assertIsNotNone(self.call("Bash", command="python3 /tmp/other.py " + self.pfile))
         self.assertIsNotNone(self.call("Bash", command="cat " + self.pfile))  # the contents stay out of the transcript
 
+    def test_python_may_run_a_listed_file_only_as_itself(self):
+        """The read-only rule is the only gate for `python <wall file>`. Every form where Python would run something other than the
+        file (and the file is just an argument handed to it) must be refused, joined to its value or not."""
+        wall = os.path.join(self.home, ".claude/no-ai-wall")
+        mod, clean = os.path.join(wall, "no_ai_wall.py"), os.path.join(wall, "wall_cleanup.py")
+        rv = os.path.join(self.home, ".claude/scripts/redact_view.py")
+        for cmd in ("python3 %s status" % mod, "python3 -I -B %s status" % mod, "python3 -I %s check-path /tmp/x" % mod, "/usr/bin/python3.12 -s -S -u %s status" % mod,
+                    "python3 %s" % clean, "python3 -I %s --apply" % clean, "python3 -I %s --keys-only %s" % (rv, self.pfile)):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        for target in (mod, clean, rv + " " + self.pfile):
+            for before in ("-m somemodule", "-msomemodule", "-I -msomemodule", "-Imsomemodule", "-c pass", "-cpass", "-Bcpass", "-", "-i", "-X dev", "-Xdev", "-W error",
+                           "-Werror", "--version", "-IB", "-E", "/tmp/other.py"):
+                cmd = "python3 %s %s" % (before, target)
+                r = self.call("Bash", command=cmd)
+                self.assertIsNotNone(r, cmd)
+                self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("python3 %s /tmp/somewhere" % clean, "python3 %s --apply /tmp/somewhere" % clean, "python3 %s --force" % clean, "python3 -I %s -- --apply" % clean,
+                    "python3-config %s" % mod, "pythonw %s status" % mod):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))
         self.assertIsNone(self.call("Read", file_path=os.path.join(self.home, ".claude/no-ai-wall/no_ai_wall.py")))

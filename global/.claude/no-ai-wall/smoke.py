@@ -117,6 +117,11 @@ def main():
         ("an edit of the cleanup command", "Edit", dict(file_path=os.path.join(wall, "wall_cleanup.py"))),
         ("a write of the cleanup command", "Write", dict(file_path=os.path.join(wall, "wall_cleanup.py"))),
         ("a shell removal of the cleanup command", "Bash", dict(command="rm %s" % os.path.join(wall, "wall_cleanup.py"))),
+        # Python may run a wall file as itself only: any option that makes it run something else, with the file as a mere argument, is refused.
+        ("Python told to run a module, with the wall's module as its argument", "Bash", dict(command="python3 -msomemodule %s" % os.path.join(wall, "no_ai_wall.py"))),
+        ("Python told to run a module, with the cleanup command as its argument", "Bash", dict(command="python3 -I -msomemodule %s" % os.path.join(wall, "wall_cleanup.py"))),
+        ("Python told to run code from the command line, with the wall's module as its argument", "Bash", dict(command="python3 -cpass %s" % os.path.join(wall, "no_ai_wall.py"))),
+        ("the cleanup command handed a path", "Bash", dict(command="python3 -I %s /tmp/somewhere" % os.path.join(wall, "wall_cleanup.py"))),
     ):
         refused_n += 1
         rc, err = hook(tool, **ti)

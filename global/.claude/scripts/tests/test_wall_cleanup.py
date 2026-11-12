@@ -5,10 +5,12 @@ Each test copies the script into tmp_path/.claude/no-ai-wall beside stand-in man
 """
 import datetime
 import hashlib
+import json
 import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -425,6 +427,160 @@ def test_source_opens_files_only_the_careful_way():
     that was swapped for a link is refused instead of followed."""
     src = open(SCRIPT_SRC).read()
     assert re.search(r"(?<![.\w])open\(", src) is None
-    for line in src.split("\n"):
-        if "os.open(" in line:
-            assert "O_NOFOLLOW" in line or "FLAGS" in line, line
+    flags = dict(re.findall(r"^(\w+_FLAGS) = (.+)$", src, re.M))
+    assert set(flags) == {"DIR_FLAGS", "LOG_FLAGS", "HASH_FLAGS"}
+    for name, value in flags.items():
+        assert "os.O_NOFOLLOW" in value and "os.O_CLOEXEC" in value, name
+    assert "os.O_NONBLOCK" in flags["LOG_FLAGS"] and "os.O_NONBLOCK" in flags["HASH_FLAGS"]
+    assert "O_TRUNC" not in src
+    opens = [line for line in src.split("\n") if "os.open(" in line]
+    assert len(opens) == 4, opens
+    for line in opens:
+        assert re.search(r"os\.open\(\w+, (DIR_FLAGS|LOG_FLAGS|HASH_FLAGS)\b", line), line
+
+
+CALL = """
+import importlib.util, json, os, stat, sys
+spec = importlib.util.spec_from_file_location("wall_cleanup_under_test", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+what = sys.argv[2]
+if what == "sha":
+    print(json.dumps(mod.sha256_of(sys.argv[3], os.lstat(sys.argv[4]))))
+elif what == "move":
+    fd = os.open(sys.argv[5], os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        mod.move_out(sys.argv[3], sys.argv[4], fd)
+        print(json.dumps("moved"))
+    except OSError as exc:
+        print(json.dumps(type(exc).__name__))
+"""
+
+
+def call(*args):
+    """Call one function of the script in a separate isolated Python (loaded that way the script does not restart itself)."""
+    r = subprocess.run([sys.executable, "-I", "-c", CALL, SCRIPT_SRC, *args], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def log_fields(tmp_path):
+    text = open(os.path.join(str(tmp_path), ".claude", "state", "no-ai-wall-cleanup.log"), encoding="utf-8").read()
+    return [line.split("\t") for line in text.split("\n")[:-1]]
+
+
+def test_an_existing_log_is_added_to_never_emptied(tmp_path):
+    wall, log, _ = log_setup(tmp_path)
+    with open(log, "w") as fh:
+        fh.write("an older line\n")
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    lines = open(log).read().split("\n")[:-1]
+    assert lines[0] == "an older line" and len(lines) == 2 and "\tmoved\t" in lines[1]
+
+
+def test_a_stray_over_the_size_limit_is_moved_with_a_dash_for_its_checksum(tmp_path):
+    wall = make_wall(tmp_path)
+    with open(os.path.join(wall, "big.bin"), "wb") as fh:
+        fh.write(b"x" * (1024 * 1024 + 1))
+    with open(os.path.join(wall, "edge.bin"), "wb") as fh:
+        fh.write(b"y" * (1024 * 1024))
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    by_name = {f[2]: f for f in log_fields(tmp_path)}
+    assert by_name['"big.bin"'][3:6] == ["file", str(1024 * 1024 + 1), "-"]
+    assert by_name['"edge.bin"'][5] == hashlib.sha256(b"y" * (1024 * 1024)).hexdigest()
+    (hold,) = holding(wall)
+    assert os.path.getsize(os.path.join(hold, "big.bin")) == 1024 * 1024 + 1
+
+
+def test_a_pipe_stray_is_moved_as_kind_other_without_waiting_on_it(tmp_path):
+    wall = make_wall(tmp_path)
+    os.mkfifo(os.path.join(wall, "a-pipe"))
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    (f,) = log_fields(tmp_path)
+    assert f[2] == '"a-pipe"' and f[3] == "other" and f[5] == "-"
+    (hold,) = holding(wall)
+    assert stat.S_ISFIFO(os.lstat(os.path.join(hold, "a-pipe")).st_mode)
+    assert sorted(os.listdir(wall)) == sorted(MANIFEST)
+
+
+def test_refused_log_is_a_pipe(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    os.mkfifo(log)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert stat.S_ISFIFO(os.lstat(log).st_mode)
+    assert os.path.exists(os.path.join(wall, "stray.txt"))
+    assert not os.path.exists(os.path.join(str(tmp_path), ".claude", "state", "no-ai-wall-strays"))
+    assert open(target).read() == "kept as it was\n"
+
+
+def test_manifest_name_that_is_a_folder_warns_and_is_left_alone(tmp_path):
+    wall = make_wall(tmp_path)
+    os.remove(os.path.join(wall, "no_ai_wall.sh"))
+    os.mkdir(os.path.join(wall, "no_ai_wall.sh"))
+    with open(os.path.join(wall, "no_ai_wall.sh", "inside.txt"), "w") as fh:
+        fh.write("kept")
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert 'WARNING manifest name "no_ai_wall.sh" is not a regular file' in r.stdout
+    assert last(r) == "WALL CLEAN"
+    assert snapshot(tmp_path) == before
+
+
+def test_dry_run_still_lists_when_the_state_folder_is_a_link(tmp_path):
+    wall = make_wall(tmp_path)
+    put_stray(wall)
+    real = os.path.join(str(tmp_path), "elsewhere")
+    os.makedirs(real)
+    os.symlink(real, os.path.join(str(tmp_path), ".claude", "state"))
+    before = snapshot(tmp_path)
+    r = run(wall)
+    assert r.returncode == 0, r.stderr
+    assert 'would move "stray.txt" (file, 1 bytes)' in r.stdout
+    assert last(r) == "WALL STRAYS 1 found, nothing moved (dry run; add --apply)"
+    assert snapshot(tmp_path) == before and os.listdir(real) == []
+
+
+def test_checksum_of_a_name_swapped_for_a_pipe_gives_a_dash_and_does_not_wait(tmp_path):
+    """The first look said "small regular file"; by the time it is opened the name is a pipe with nobody writing to it."""
+    small = os.path.join(str(tmp_path), "small.txt")
+    with open(small, "w") as fh:
+        fh.write("s")
+    pipe = os.path.join(str(tmp_path), "now-a-pipe")
+    os.mkfifo(pipe)
+    assert call("sha", pipe, small) == "-"
+    assert call("sha", small, small) == hashlib.sha256(b"s").hexdigest()
+
+
+def test_checksum_of_a_name_swapped_for_a_bigger_file_or_a_link_gives_a_dash(tmp_path):
+    small = os.path.join(str(tmp_path), "small.txt")
+    with open(small, "w") as fh:
+        fh.write("s")
+    big = os.path.join(str(tmp_path), "big.bin")
+    with open(big, "wb") as fh:
+        fh.write(b"x" * (1024 * 1024 + 1))
+    link = os.path.join(str(tmp_path), "a-link")
+    os.symlink(small, link)
+    assert call("sha", big, small) == "-"
+    assert call("sha", link, small) == "-"
+
+
+def test_a_move_never_writes_over_a_name_already_in_the_holding_folder(tmp_path):
+    src = os.path.join(str(tmp_path), "from")
+    dst = os.path.join(str(tmp_path), "to")
+    os.makedirs(src)
+    os.makedirs(dst)
+    for folder, body in ((src, "the stray"), (dst, "already there")):
+        with open(os.path.join(folder, "same-name"), "w") as fh:
+            fh.write(body)
+    with open(os.path.join(src, "free-name"), "w") as fh:
+        fh.write("moves")
+    assert call("move", src, "same-name", dst) == "FileExistsError"
+    assert open(os.path.join(src, "same-name")).read() == "the stray"
+    assert open(os.path.join(dst, "same-name")).read() == "already there"
+    assert call("move", src, "free-name", dst) == "moved"
+    assert open(os.path.join(dst, "free-name")).read() == "moves" and not os.path.exists(os.path.join(src, "free-name"))
