@@ -55,10 +55,24 @@ class SettingsHookTests(unittest.TestCase):
 
     def test_shell_prefix_points_at_the_scrub_wrapper(self):
         # The wrapper is what masks a Bash call that exits non-zero, so the prefix must name a file in this repo.
-        # It is reached through $HOME, never a home folder written out, so the template holds no username.
+        # The live value must be one bare absolute path: no spaces, no quotes, no $HOME and no ~. Claude Code runs
+        # the prefix through a shell for Bash calls and hooks, but to start a stdio connector (MCP server) it uses
+        # the whole prefix text as the path of one program, so a value like bash -c '... "$HOME/..."' starts no
+        # connector (ENOENT, seen live on Claude Code 2.1.322). This template holds __HOME__ in place of the home
+        # folder, so it carries no username; the restore steps in README.md fill it in.
         prefix = json.loads(SETTINGS.read_text())["env"].get("CLAUDE_CODE_SHELL_PREFIX", "")
-        self.assertIn('"$HOME/.claude/scripts/shell_scrub_prefix.sh"', prefix)
-        self.assertNotIn("/home/", prefix)
+        self.assertEqual(prefix, "__HOME__/.claude/scripts/shell_scrub_prefix.sh")
+        for bad in (" ", "$", "~", "'", '"', "/home/", "/Users/"):
+            self.assertNotIn(bad, prefix)
+
+    def test_restore_steps_fill_in_the_home_folder(self):
+        # Copied as it is, the template's prefix names no real file and every Bash call would exit 127,
+        # so each restore block in README.md must fill __HOME__ in right after it copies the file.
+        readme = (HOOKS_DIR.parent.parent.parent / "README.md").read_text()
+        copies = readme.count("cp global/dotfiles/settings.json ~/.claude/settings.json")
+        fills = readme.count('sed -i "s|__HOME__|$HOME|g" ~/.claude/settings.json')
+        self.assertGreaterEqual(copies, 2)
+        self.assertEqual(copies, fills)
         scripts = HOOKS_DIR.parent / "scripts"
         for name in ("shell_scrub_prefix.sh", "shell_scrub_wrapper.py", "secret_scrubber.py"):
             self.assertTrue((scripts / name).exists(), f"no copy of {name}")

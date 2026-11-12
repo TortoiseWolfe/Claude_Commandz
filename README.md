@@ -37,7 +37,7 @@ Claude_Commandz/
 
 `coop-scrubber.py` (a `PostToolUse` hook) rewrites a tool's result in a co-op folder so every person's name, email address and phone number is a placeholder before a vendor model reads it; elsewhere it does nothing. The work is in `scripts/coop_scrubber.py`; `scripts/coop_roster_build.py` builds the private roster at run time and prints counts only; `scripts/coop_scrubber_install_presidio.sh` sets up the Presidio venv. The folder patterns, the roster and the venv are private and never come into this repo. Register it with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/coop-scrubber.py"}]}]`. Tests: `scripts/tests/test_coop_scrubber.py`, `test_coop_roster_build.py`, `test_coop_scrubber_hook.py`.
 
-`output-scrubber.py` (a `PostToolUse` and `PostToolUseFailure` hook) masks secret values (keys, tokens, passwords) in what any tool printed before a model reads them, then runs the co-op scrub above in the same process, so it is registered in place of `coop-scrubber.py`. A hook can only rewrite a call that succeeded, so Bash calls also run through `scripts/shell_scrub_prefix.sh` (set as `CLAUDE_CODE_SHELL_PREFIX` in `settings.json`), which hands each one to `scripts/shell_scrub_wrapper.py` to filter its output at every exit code. The rules live in `scripts/secret_scrubber.py`. Known gaps: a value split across two lines can pass, and a few lines of ordinary code read through the shell get masked (read that file with the Read tool instead). To turn the Bash filter off, create the file `~/.claude/state/shell-scrub-off`; while it exists, every Bash call says on its error stream that its output is not being masked. The `settings.json` line reaches the script through `$HOME`, so it holds no username.
+`output-scrubber.py` (a `PostToolUse` and `PostToolUseFailure` hook) masks secret values (keys, tokens, passwords) in what any tool printed before a model reads them, then runs the co-op scrub above in the same process, so it is registered in place of `coop-scrubber.py`. A hook can only rewrite a call that succeeded, so Bash calls also run through `scripts/shell_scrub_prefix.sh` (set as `CLAUDE_CODE_SHELL_PREFIX` in `settings.json`), which hands each one to `scripts/shell_scrub_wrapper.py` to filter its output at every exit code. The rules live in `scripts/secret_scrubber.py`. Known gaps: a value split across two lines can pass, and a few lines of ordinary code read through the shell get masked (read that file with the Read tool instead). To turn the Bash filter off, create the file `~/.claude/state/shell-scrub-off`; while it exists, every Bash call says on its error stream that its output is not being masked. The `settings.json` line must be one bare absolute path to the script, with no spaces, quotes, `$HOME` or `~`: Claude Code runs the prefix through a shell for Bash calls and hooks, but to start a connector (an MCP server it launches itself) it uses the whole prefix text as the path of one program, so any other form starts no connector. The copy in this repo holds `__HOME__` where the home folder goes, so it carries no username, and the restore steps below fill it in.
 
 **Totals:** 73 global commands + 3 dotfiles + 90 project commands across 8 repos = **166 backed-up files**.
 
@@ -52,6 +52,7 @@ Clone this repo anywhere, then pick the scenario you need.
 mkdir -p ~/.claude/commands
 cp -a global/.claude/commands/. ~/.claude/commands/
 cp global/dotfiles/settings.json ~/.claude/settings.json
+sed -i "s|__HOME__|$HOME|g" ~/.claude/settings.json   # the shell prefix must be one bare absolute path (see output-scrubber.py above)
 cp global/dotfiles/statusline-command.sh ~/.claude/statusline-command.sh
 chmod +x ~/.claude/statusline-command.sh
 mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
@@ -78,6 +79,7 @@ Use this if you're setting up a new shell environment but don't need the project
 mkdir -p ~/.claude/commands
 cp -a global/.claude/commands/. ~/.claude/commands/
 cp global/dotfiles/settings.json ~/.claude/settings.json
+sed -i "s|__HOME__|$HOME|g" ~/.claude/settings.json   # the shell prefix must be one bare absolute path (see output-scrubber.py above)
 cp global/dotfiles/statusline-command.sh ~/.claude/statusline-command.sh
 chmod +x ~/.claude/statusline-command.sh
 mkdir -p ~/.claude/workflows ~/.claude/agents ~/.claude/skills
@@ -270,6 +272,7 @@ When global or project commands evolve, re-sync into this repo and commit:
 # Global
 for f in ~/.claude/commands/*.md; do case "$(basename "$f")" in email-voice-check.md|weekly-review.md) ;; *) cp -p "$f" global/.claude/commands/ ;; esac; done   # those two name clients: hub/claude-private
 cp ~/.claude/settings.json global/dotfiles/settings.json
+sed -i "s|$HOME/.claude/scripts/shell_scrub_prefix.sh|__HOME__/.claude/scripts/shell_scrub_prefix.sh|" global/dotfiles/settings.json   # keep the home folder out of the public copy; test_settings_hooks.py fails if it is left in
 cp ~/.claude/statusline-command.sh global/dotfiles/statusline-command.sh
 cp ~/.claude/workflows/director.js global/.claude/workflows/   # client-specific workflows stay out (public repo)
 cp -a ~/.claude/agents/. global/.claude/agents/

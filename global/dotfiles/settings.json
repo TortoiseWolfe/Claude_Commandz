@@ -5,7 +5,7 @@
     "ENABLE_STOP_REVIEW": "0",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
     "CLAUDE_CODE_DISABLE_MOUSE_CLICKS": "1",
-    "CLAUDE_CODE_SHELL_PREFIX": "bash -c 'exec \"$HOME/.claude/scripts/shell_scrub_prefix.sh\" \"$0\"'"
+    "CLAUDE_CODE_SHELL_PREFIX": "__HOME__/.claude/scripts/shell_scrub_prefix.sh"
   },
   "permissions": {
     "allow": [
