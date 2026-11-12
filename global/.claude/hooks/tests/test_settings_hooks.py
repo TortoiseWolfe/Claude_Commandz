@@ -34,6 +34,17 @@ class SettingsHookTests(unittest.TestCase):
             [c for _, c in commands("Stop")],
         )
 
+    def test_every_stop_hook_has_a_time_limit(self):
+        # A Stop hook runs at the end of every turn and three of them re-read the whole transcript. With no limit of its
+        # own, one that hangs holds every turn's end for as long as Claude Code's default allows.
+        missing = []
+        for group in json.loads(SETTINGS.read_text())["hooks"]["Stop"]:
+            for hook in group.get("hooks", []):
+                limit = hook.get("timeout")
+                if not (isinstance(limit, int) and 1 <= limit <= 30):
+                    missing.append(hook.get("command", ""))
+        self.assertEqual(missing, [], "Stop hooks with no time limit of 30 seconds or less")
+
     def test_context_warn_runs_on_prompt_and_after_tools(self):
         want = "python3 ~/.claude/hooks/context-warn.py"
         self.assertIn(want, [c for _, c in commands("UserPromptSubmit")])
@@ -146,6 +157,30 @@ class SettingsHookTests(unittest.TestCase):
         source = data["extraKnownMarketplaces"]["afa-mods"]["source"]
         self.assertEqual(source["source"], "directory")
         self.assertTrue(source["path"].endswith("/repos/Claude_Commandz"))
+
+    def test_no_ai_wall_guard_runs_before_every_tool(self):
+        # The wall's entry has no matcher on purpose: a matcher would leave some tool unguarded. On 12 Nov 2026 the
+        # live settings file was overwritten and this entry was missing from the copy here, so a restore from this
+        # repo alone would have brought the machine back with no wall.
+        self.assertIn((None, "python3 -I ~/.claude/no-ai-wall/no-ai-wall-guard.py"), commands("PreToolUse"))
+        self.assertTrue((HOOKS_DIR.parent / "no-ai-wall" / "no-ai-wall-guard.py").exists())
+
+    def test_nextcloud_guard_runs_before_every_shell_call(self):
+        # Like the private inbox watcher, this guard's own file stays out of this public repo, so only its entry
+        # is checked. With the entry in place and the file missing every Bash call is refused, so a restore copies
+        # the file from the private backup first.
+        self.assertIn(("Bash", "python3 ~/.claude/hooks/nextcloud-guard.py"), commands("PreToolUse"))
+
+    def test_vercel_plugin_and_marketplace(self):
+        data = json.loads(SETTINGS.read_text())
+        self.assertIs(data["enabledPlugins"].get("vercel-plugin@vercel"), True)
+        self.assertEqual(data["extraKnownMarketplaces"]["vercel"]["source"], {"source": "github", "repo": "vercel/vercel-plugin"})
+        self.assertEqual(data["env"].get("VERCEL_PLUGIN_TELEMETRY"), "off")
+
+    def test_push_notices_and_model_switch_are_on(self):
+        data = json.loads(SETTINGS.read_text())
+        self.assertIs(data["agentPushNotifEnabled"], True)
+        self.assertIs(data["switchModelsOnFlag"], True)
 
     def test_idle_compaction_is_off(self):
         self.assertIs(json.loads(SETTINGS.read_text())["idleCompaction"], False)

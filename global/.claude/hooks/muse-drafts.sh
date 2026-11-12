@@ -45,7 +45,19 @@ if [ "${1:-}" = prompt ]; then
 else
   WHEN="before other work,"
 fi
-echo "$now" > "$STAMP"
+# The stamp says "this session was reminded at this time", so it is written only where a reminder is printed, never
+# before the notes check. Written up here, a hook stopped mid-check had printed nothing and still kept the session
+# quiet for the next 20 minutes. A hook stopped before it prints now leaves no stamp, and the next prompt tries again.
+NUDGED_AT=$now
+mark_nudged() { echo "$NUDGED_AT" > "$STAMP"; }
+# How long the notes check may run. The settings stop this hook after 10 seconds on a prompt, so there the check gets
+# PROMPT_CHECK_SECONDS and then CHECK_KILL_AFTER more to die; a check cut short prints the long form of the reminder
+# below instead of nothing. tests/test_hub_inbox.py holds these two numbers under the settings limit.
+PROMPT_CHECK_SECONDS=7
+CHECK_KILL_AFTER=1
+START_CHECK_SECONDS=60
+if [ "${1:-}" = prompt ]; then CHECK_SECONDS=$PROMPT_CHECK_SECONDS; else CHECK_SECONDS=$START_CHECK_SECONDS; fi
+[[ "${NOTES_CHECK_TIMEOUT:-}" =~ ^[0-9]{1,3}$ ]] && CHECK_SECONDS=$NOTES_CHECK_TIMEOUT
 # The hub's list (hub-inbox.md): lines the poller, the dispatch pass and our own sessions queued, each starting with the
 # owner of the next move. Counted per owner, never read whole.
 INBOX=${HUB_INBOX:-${MUSE_INBOX:-$HOME/.claude/state/hub-inbox.md}}
@@ -94,6 +106,7 @@ if flock -n -E 75 8; then
 else
   lock_rc=$?
   if [ "$lock_rc" -eq 75 ]; then
+    mark_nudged
     echo "agent-notes ($WHEN): the notes poller is active; it will check new notes when finished.$QUEUED"
     exit 0
   fi
@@ -108,7 +121,9 @@ if [ -n "${NOTES_CHECK_CMD:-}" ]; then
   OUT=$(eval "$NOTES_CHECK_CMD" 2>/dev/null)
   CODE=$?
 elif [ -f "$CHECK_SCRIPT" ]; then
-  OUT=$(timeout 60 python3 "$CHECK_SCRIPT" 2>/dev/null)
+  # 8>&- : the check does not inherit the poll lock. timeout puts the check in a process group of its own, so when this
+  # hook is stopped the check can outlive it; holding the lock, it made the next prompt say "the poller is active".
+  OUT=$(timeout -k "$CHECK_KILL_AFTER" "$CHECK_SECONDS" python3 "$CHECK_SCRIPT" 2>/dev/null 8>&-)
   CODE=$?
 fi
 
@@ -147,6 +162,7 @@ if [ "$CODE" -eq 0 ] && [[ "$OUT" == *$'NOTE '* ]]; then
 fi
 
 TRIMMED=$(printf '%s' "$OUT" | tr -d '\r\n')
+mark_nudged
 if [ "$CODE" -eq 0 ] && [ "$TRIMMED" = "notes: none new" ]; then
   echo "agent-notes ($WHEN): no new notes from Hatch or the tower (notes_check.py)$QUEUED"
 elif [ "$CODE" -eq 0 ] && [[ "$OUT" =~ (^|[[:space:]])NOTE[[:space:]] ]]; then

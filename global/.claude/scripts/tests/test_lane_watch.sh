@@ -475,7 +475,7 @@ case "$1" in
   --ctx) cat "$CTX_FILE" ;;
   --turn) cat "${TURN_FILE:-/dev/null}" ;;
   --recycle-point) cat "${POINT_FILE:-/dev/null}" ;;
-  --send) printf '%s\t%s\n' "$2" "$3" >> "${SEND_LOG:-/dev/null}" ;;
+  --send) printf '%s\t%s\n' "$2" "$3" >> "${SEND_LOG:-/dev/null}"; exit "${FAKE_SEND_EXIT:-0}" ;;
   --recycle)
     echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
     [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
@@ -701,6 +701,31 @@ remind_case "a bare EMPTY on line 1 is left alone" no 90 "EMPTY"
 remind_case "EMPTY: on line 1 is left alone" no 90 "EMPTY: nothing ready"
 remind_case "a word that only starts with EMPTY is still named" yes 90 "EMPTYING the cache now"
 remind_case "BLOCKED on line 1 is left alone" no 90 "BLOCKED (hub: needs the Deck token)"
+# Issue 19 (8 Nov 2026): a line 1 whose first word names who the lane waits on is waiting, not idle.
+remind_case "HUB-ACT on line 1 (waiting on the hub) is left alone" no 90 "HUB-ACT 3:23 AM | the zip is staged, run it in the Sunday window"
+remind_case "NEED-HUB on line 1 is left alone" no 90 "NEED-HUB: one merge"
+remind_case "READY-FOR-HUB on line 1 is left alone" no 90 "READY-FOR-HUB 2:10 PM | two commands below"
+remind_case "STEP-FOR-JONATHAN on line 1 (waiting on a person) is left alone" no 90 "STEP-FOR-JONATHAN https://example.com/page one click"
+remind_case "a bare HUB: on line 1 is left alone" no 90 "HUB: merge the pull request below"
+remind_case "a word that only starts with HUB (HUBRIS) is still named" yes 90 "HUBRIS is not a status"
+remind_case "a word that only contains HUB (GITHUB-PUSH) is still named" yes 90 "GITHUB-PUSH went through"
+remind_case "lower-case 'Hub:' is not a status word, so the lane is named" yes 90 "Hub: please merge"
+remind_case "HUB only later on the line does not count (WORKING ... HUB-ACT)" yes 90 "WORKING 1:00 PM | HUB-ACT comes later"
+# Issue 13 (6 Nov 2026): DONE with no counted ask is a finished lane.
+remind_case "DONE <time>. on line 1 is left alone" no 90 "DONE 2:02 PM. Moved: the pull request merged"
+remind_case "DONE ... needs hub 0 is left alone" no 90 "DONE 11:10 AM | checks 1, 2, 4, 5 pass | needs hub 0"
+remind_case "DONE ... needs Jonathan 0 is left alone" no 90 "DONE 11:10 AM | needs hub 0 | needs Jonathan 0"
+remind_case "a bare DONE on line 1 is left alone" no 90 "DONE"
+remind_case "DONE: on line 1 is left alone" no 90 "DONE: all four merged"
+remind_case "DONE ... needs Jonathan 2 is still named" yes 90 "DONE 11:10 AM | three merged | needs Jonathan 2"
+remind_case "DONE ... needs hub 1 is still named" yes 90 "DONE 11:10 AM | needs hub 1"
+remind_case "DONE ... Needs the hub: 3 (capitals, 'the', a colon) is still named" yes 90 "DONE 4:00 PM | Needs the hub: 3"
+remind_case "DONE ... needs hub 0 and needs Jonathan 1 is still named" yes 90 "DONE 4:00 PM | needs hub 0 | needs Jonathan 1"
+remind_case "a word that only starts with DONE (DONE-ISH) is still named" yes 90 "DONE-ISH, two left"
+remind_case "DONEx is still named" yes 90 "DONEx 1:00 PM"
+remind_case "lower-case 'Done' is not a status word, so the lane is named" yes 90 "Done with the first half"
+LC_ALL=en_US.UTF-8 remind_case "HUB-ACT is still left alone under a UTF-8 locale" no 90 "HUB-ACT 3:23 AM | x" 2>/dev/null
+LC_ALL=en_US.UTF-8 remind_case "an accented capital first word is named under a UTF-8 locale" yes 90 "ÉTAT-HUB 3:23 AM | x" 2>/dev/null
 remind_case "an empty report.md counts as no QUEUE EMPTY, so the lane is named" yes 40 ""
 remind_case "idle only 10 minutes is left alone" no 10 "MERGE Claude_Commandz #1"
 remind_case "a lane still working (spinner) is left alone" no 0 "MERGE x" "$(printf '%s\n' '⏺ Waiting' '✻ Thinking… (12s · esc to interrupt)' '✻ Worked for 1m 9s · done 1:09 AM' '❯ ')"
@@ -967,6 +992,46 @@ sa_tgt "WORKING $(date -d '+11 min' '+%-I:%M %p') | deadline $tgt | done: 1" "$T
 sa_watch "WORKING $(date -d '+11 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out5"
 su_again "$TMP/sa-out6"
 if grep -q '^stamp ahead' "$TMP/sa-out5" && ! grep -q '^stamp ahead' "$TMP/sa-out6" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same ahead-of-clock line is named once, across a re-armed watcher"; else echo "FAIL repeated stamp naming: first=$(cat "$TMP/sa-out5") second=$(cat "$TMP/sa-out6")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
+
+# 11 Nov 2026: the stamp counts only in one fixed place, the head of line 1 (capital status words, separators, at most one parenthesised group,
+# then the time). A schedule time ("nightly 3:17 AM") and a quoted mail time deep in the line were read as stamps and woke the hub for nothing.
+mkdir -p "$su_dir"
+ah="$(date -d '+11 min' '+%-I:%M %p')"; ah2="$(date -d '+12 min' '+%-I:%M %p')"
+sa_tgt "WORKING $ah | done: 1" "$TMP/sf-1" "fixed place: 'WORKING <time>' ahead is a stamp" named
+sa_tgt "QUEUE EMPTY $ah" "$TMP/sf-2" "fixed place: 'QUEUE EMPTY <time>' ahead is a stamp" named
+sa_tgt "QUEUE EMPTY ($nowt Wed) $ah | x" "$TMP/sf-3" "fixed place: a parenthesised group before the time is allowed (time inside it is not the stamp)" named
+sa_tgt "QUEUE EMPTY (the hub: merge it, then one step), $ah Wed 11 Nov. Hub: go" "$TMP/sf-4" "fixed place: a group with words and a comma, then the time, is a stamp" named
+sa_tgt "DONE — $ah" "$TMP/sf-5" "fixed place: an em dash before the time is allowed" named
+sa_tgt "DONE | $ah" "$TMP/sf-6" "fixed place: a pipe before the time is allowed" named
+sa_tgt "DONE at $ah" "$TMP/sf-7" "fixed place: 'at' before the time is allowed" named
+sa_tgt "STEP-FOR-JONATHAN as of $ah open https://x.example" "$TMP/sf-8" "fixed place: hyphenated status word and 'as of' are allowed" named
+sa_tgt "READY 476 0 skipped | nightly $ah Eastern" "$TMP/sf-9" "a schedule time deep in the line is not a stamp" quiet
+sa_tgt "WORKING on the reply; their mail of 9 Nov $ah their CET says x" "$TMP/sf-10" "a quoted mail time deep in the line is not a stamp" quiet
+sa_tgt "QUEUE EMPTY until $ah | last check $ah2" "$TMP/sf-11" "'until <time>' after the status words leaves no stamp" quiet
+sa_tgt "WORKING by $ah" "$TMP/sf-12" "'WORKING by <time>' has no stamp" quiet
+sa_tgt "BLOCKED | Deadline: $ah, waiting" "$TMP/sf-13" "'BLOCKED | Deadline: <time>' has no stamp" quiet
+sa_tgt "Waiting since $ah" "$TMP/sf-14" "lower-case status words give no stamp" quiet
+sa_tgt "WORKING (a) (b $ah) x" "$TMP/sf-15" "a time inside a second parenthesised group is not a stamp" quiet
+sa_tgt "WORKING $(date '+%-H:%M') | deadline $ah" "$TMP/sf-16" "a head time with no AM/PM leaves no stamp" quiet
+sa_tgt "WORKING $nowt | their mail of 9 Nov $ah CET says x" "$TMP/sf-17" "a correct head stamp plus a far-ahead quoted time stays quiet" quiet
+sa_tgt "WAITING UNTIL $ah for the checks" "$TMP/sf-20" "a target word in capitals ('WAITING UNTIL <time>') leaves no stamp" quiet
+sa_tgt "DONE BY $ah" "$TMP/sf-21" "'DONE BY <time>' in capitals leaves no stamp" quiet
+sa_tgt "WORKING ETA: $ah" "$TMP/sf-22" "'WORKING ETA: <time>' leaves no stamp" quiet
+sa_tgt "STANDBY $ah | x" "$TMP/sf-23" "a status word that only contains a target word (STANDBY) still carries a stamp" named
+sa_tgt "BLOCKED (DUE BY noon), $ah Wed" "$TMP/sf-24" "target words inside the parenthesised group do not hide the stamp after it" named
+sa_tgt "WORKING ($ah) x" "$TMP/sf-25" "a time inside the parenthesised group at the head is not a stamp" quiet
+sa_tgt "DUE$ah" "$TMP/sf-26" "a target word with no gap before the time leaves no stamp" quiet
+LC_ALL=en_US.UTF-8 sa_tgt "ÉTAT $ah | x" "$TMP/sf-27" "an accented capital is not a status word under any locale" quiet 2>/dev/null
+LC_ALL=en_US.UTF-8 sa_tgt "WORKING $ah | x" "$TMP/sf-28" "a plain stamp is still read under a UTF-8 locale" named 2>/dev/null
+# Send first, then say what happened: a failing lane.sh --send must not be reported as sent.
+sa_watch "WORKING $ah | x" "$TMP/sf-18"
+if grep -q '^stamp ahead: rl wrote .*; sent the lane its correction$' "$TMP/sf-18" && ! grep -q 'could NOT' "$TMP/sf-18"; then echo "ok   a send that works is reported as sent"; else echo "FAIL send success line: $(cat "$TMP/sf-18")"; failures=$((failures + 1)); fi
+export FAKE_SEND_EXIT=3
+sa_watch "WORKING $ah | x" "$TMP/sf-19"
+unset FAKE_SEND_EXIT
+if grep -q '^stamp ahead: rl wrote .*; could NOT send the lane its correction (lane.sh exit 3)$' "$TMP/sf-19" && ! grep -q 'sent the lane its correction' "$TMP/sf-19"; then echo "ok   a failed send says could NOT send and holds the exit code"; else echo "FAIL send failure line: $(cat "$TMP/sf-19")"; failures=$((failures + 1)); fi
+if grep -q "the watcher reads only that place" "$SEND_LOG"; then echo "ok   the correction tells the lane where to put its time"; else echo "FAIL correction text: $(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
 
 # 6 Nov 2026: the budget reader's Windows task hid its exit code, so a Cloudflare check left the gauge stale with nothing to say so. usage_calibrate.js now

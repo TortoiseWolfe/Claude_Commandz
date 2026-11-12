@@ -3,6 +3,7 @@ the archive of old done lines, the session-start hook's per-owner counts, and th
 Every fixture is invented and lives in a throwaway state folder; nothing here touches the live ~/.claude/state."""
 
 import fcntl
+import json
 import os
 import re
 import subprocess
@@ -423,6 +424,105 @@ class Hook(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("check Hatch's [MUSE>CC] notes (agent-notes skill, read mode: list_drafts", r.stdout)
         self.assertTrue((st / "muse-hook-fallback.stamp").read_text().strip().isdigit())
+
+    # The 20-minute stamp. It used to be written before the notes check ran, so a hook stopped mid-check had already
+    # said "reminded" and stayed silent for 20 minutes without printing a word.
+    SLOW_CHECK = ("import os, time\n"
+                  "open(os.path.join(os.environ['HOME'], 'check-started'), 'w').write(str(os.getpid()))\n"
+                  "time.sleep(60)\n"
+                  "print('notes: none new')\n")
+
+    def nudge_home(self, check_text=None):
+        home = Path(fresh_dir(self))
+        (home / "repos").mkdir()
+        st = home / ".claude/state"
+        st.mkdir(parents=True)
+        (st / "agent-notes-processed.txt").write_text("x\n")
+        if check_text is not None:
+            (home / ".claude/scripts").mkdir()
+            (home / ".claude/scripts/notes_check.py").write_text(check_text)
+        env = dict(os.environ, HOME=str(home), CLAUDE_PROJECT_DIR=str(home / "repos"),
+                   MUSE_POLL_LOCK=str(home / "muse-poll.lock"))
+        for name in ("MUSE_POLL", "HUB_INBOX", "MUSE_INBOX", "NOTES_CHECK_CMD", "NOTES_CHECK_TIMEOUT"):
+            env.pop(name, None)
+        return home, st, env
+
+    def test_a_hook_stopped_mid_check_leaves_no_stamp_and_the_next_prompt_reminds(self):
+        home, st, env = self.nudge_home(self.SLOW_CHECK)
+        env["NOTES_CHECK_TIMEOUT"] = "50"
+        started = home / "check-started"
+
+        def stop_the_left_over_check():
+            # timeout gives the check its own process group, so stopping the hook leaves the check running, as it would live.
+            try:
+                os.kill(int(started.read_text()), 9)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(stop_the_left_over_check)
+        (home / "hook-input.json").write_text("{}")
+        with (home / "hook-input.json").open() as hook_input:
+            p = subprocess.Popen(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], stdin=hook_input,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+        try:
+            deadline = time.time() + 20
+            while not (started.exists() and started.read_text().isdigit()) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(started.exists(), "the notes check never started")
+        finally:
+            os.killpg(p.pid, 9)
+            p.wait(timeout=10)
+        self.assertFalse((st / "agent-notes-last-nudge").exists(), "a hook that printed nothing still wrote its 20-minute stamp")
+        # The check the stopped hook started is still running. It must not hold the lock the next prompt needs.
+        os.kill(int(started.read_text()), 0)
+        (home / ".claude/scripts/notes_check.py").write_text("print('notes: none new')\n")
+        r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], input="{}", capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertIn("no new notes from Hatch or the tower", r.stdout)
+        self.assertTrue((st / "agent-notes-last-nudge").read_text().strip().isdigit())
+
+    def test_a_slow_check_is_cut_short_and_the_reminder_is_still_printed(self):
+        home, st, env = self.nudge_home(self.SLOW_CHECK)
+        env["NOTES_CHECK_TIMEOUT"] = "1"
+        started = time.time()
+        r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], input="{}", capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertLess(time.time() - started, 8)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("check Hatch's [MUSE>CC] notes (agent-notes skill, read mode: list_drafts", r.stdout)
+        self.assertTrue((st / "agent-notes-last-nudge").read_text().strip().isdigit())
+        again = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], input="{}", capture_output=True,
+                               text=True, env=env, timeout=30)
+        self.assertEqual(again.stdout, "", "a reminder that was printed repeats only after 20 minutes")
+
+    def test_the_prompt_checks_time_limit_is_under_the_hooks_own_limit_in_the_settings(self):
+        text = (HOOKS / "muse-drafts.sh").read_text()
+        inner = re.search(r"^PROMPT_CHECK_SECONDS=([0-9]+)$", text, re.M)
+        grace = re.search(r"^CHECK_KILL_AFTER=([0-9]+)$", text, re.M)
+        self.assertTrue(inner and grace, "muse-drafts.sh no longer names its prompt time limit")
+        settings = json.loads((SCRIPTS.parent.parent / "dotfiles" / "settings.json").read_text())
+        limits = [h["timeout"] for group in settings["hooks"]["UserPromptSubmit"] for h in group["hooks"]
+                  if h.get("command", "").endswith("muse-drafts.sh prompt")]
+        self.assertEqual(len(limits), 1)
+        # One second is kept for everything the hook does besides the check.
+        self.assertLessEqual(int(inner.group(1)) + int(grace.group(1)) + 1, limits[0])
+
+    def test_a_bad_time_limit_setting_falls_back_to_the_built_in_one(self):
+        home, st, env = self.nudge_home("print('notes: none new')\n")
+        env["NOTES_CHECK_TIMEOUT"] = "soon; echo no"
+        r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], input="{}", capture_output=True, text=True,
+                           env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no new notes from Hatch or the tower", r.stdout)
+
+    def test_the_poller_holding_the_lock_still_counts_as_a_reminder(self):
+        home, st, env = self.nudge_home("print('notes: none new')\n")
+        with (home / "muse-poll.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh"), "prompt"], input="{}", capture_output=True,
+                               text=True, env=env, timeout=30)
+        self.assertIn("the notes poller is active", r.stdout)
+        self.assertTrue((st / "agent-notes-last-nudge").read_text().strip().isdigit())
 
 
 class Digest(unittest.TestCase):

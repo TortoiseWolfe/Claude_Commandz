@@ -1380,10 +1380,10 @@ pane_spinner() { command grep -aqP '…\s*\(\d+(m \d+)?s' <<<"$1"; }
 
 if [ "$mode" = status ]; then
   command -v tmux >/dev/null || { echo "tmux not installed" >&2; exit 1; }
-  # A lane or the hub session (AFA_BIG_OUT=1) sees a short count and the path of the full list when it is over 8,000 characters; --full and
+  # A lane or the hub session (AFA_BIG_OUT=1) sees a short count and the path of the full list (one file, out-lane-status-latest.txt, replaced on each call) when it is over 8,000 characters; --full and
   # every script that parses this list (lane_watch.sh, hub_digest.py, the dispatcher) get the whole list as before.
   if [ "$full_out" != 1 ] && [ "${AFA_BIG_OUT:-}" = 1 ] && [ -z "${LANE_STATUS_INNER:-}" ]; then
-    LANE_STATUS_INNER=1 "$0" --status | python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/big_output.py" --name lane-status --group-by '^[^[:space:]]+ +report:[^ ]+ +([a-z]+)'
+    LANE_STATUS_INNER=1 "$0" --status | python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/big_output.py" --name lane-status --latest --group-by '^[^[:space:]]+ +report:[^ ]+ +([a-z]+)'
     exit "${PIPESTATUS[0]}"
   fi
   fill_ids
@@ -1786,7 +1786,9 @@ fi
 # (50). A recycle within LANE_RECYCLE_THRASH_SECS (1200) of the lane's previous start or recycle means its working set is bigger than its
 # line: the line goes up at least 20K. Both stop at raise_ceiling_k, and a recycle never lowers a line.
 #   LANE_RECYCLE_IDLE_SECS (300)  how long a dialog may hold the request back
-#   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking
+#   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking, and for the subagents the lane started (issue 35)
+#   LANE_RECYCLE_JOB_SECS (180)   how long to wait for the lane's background shell jobs once handoff.md is written
+#   LANE_RECYCLE_HELPER_QUIET_SECS (1200)  a subagent with no end logged and nothing written for this long is not waited for
 if [ "$mode" = recycle ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --recycle <name>" >&2; exit 1; }
   name="$1"
@@ -1830,7 +1832,7 @@ if [ "$mode" = recycle ]; then
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
-    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. $LANE_STANDING_RULE"
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one.${jobs_note:-} $LANE_STANDING_RULE"
   }
   msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
@@ -1839,6 +1841,7 @@ if [ "$mode" = recycle ]; then
     echo "  1b. keep the current handoff.md as handoff-prev<N>.md and delete all but the newest ${LANE_HANDOFF_PREV_KEEP:-5} handoff-prev files"
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
+    echo "  3a. wait for the helpers the lane started: subagents for the rest of that time (still running at the end: the lane is not cleared), background jobs up to ${LANE_RECYCLE_JOB_SECS:-180}s (then cleared anyway, with a row in recycle.log)"
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
     echo "  4. send: /clear"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
@@ -1971,20 +1974,140 @@ PY
     tmux send-keys -t "$SESSION:$name" C-u; sleep 1
     [ "$(queue_pending)" = 0 ]
   }
+  # Helpers the lane started and has not heard back from: subagents it launched in the background and background shell jobs. A lane that
+  # waits for them shows no spinner, so it looked idle and was cleared, and the helpers' results then reached a fresh session that had never
+  # asked for them (11 Nov, issue 35: one lane cleared twice in nine minutes with three subagents running, about 339K tokens of work). Both
+  # kinds outlive /clear and report to whatever session is there next. Prints "<subagents> <jobs> <quiet>", read from the transcript: a start
+  # is a tool result that carries isAsync with an agentId, or a backgroundTaskId; an end is a queued task notification for that id that has a
+  # status (a Monitor event has none), or a TaskStop result. A subagent whose own transcript has not changed for LANE_RECYCLE_HELPER_QUIET_SECS
+  # (default 1200), and which started longer ago than that, is counted as quiet and not waited for: a session that died and was resumed never
+  # logs an end for the helpers it had. Only ids and times are read, never a helper's text.
+  helpers_running() {
+    [ -n "${id:-}" ] && [ "$id" != - ] || { echo "0 0 0"; return; }
+    python3 -I - "$(transcript_of "$dir" "$id")" "${LANE_RECYCLE_HELPER_QUIET_SECS:-1200}" <<'PY'
+import json, os, re, sys, time
+from datetime import datetime
+path = sys.argv[1]
+try:
+    quiet_after = int(sys.argv[2])
+except ValueError:
+    quiet_after = 1200
+try:
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - 16_000_000))
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+except OSError:
+    print("0 0 0"); sys.exit(0)
+TASK = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+def when(o):
+    try:
+        return datetime.fromisoformat(str(o.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+def ended(text):
+    # the id a task notification closes, or None: only a notification with a status is an end
+    if not isinstance(text, str) or "<task-notification>" not in text or "<status>" not in text:
+        return None
+    m = TASK.search(text)
+    return m.group(1) if m else None
+running = {}  # id -> (kind, start time or None)
+for line in lines:
+    if '"toolUseResult"' not in line and "<task-notification>" not in line:
+        continue
+    try:
+        o = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(o, dict):
+        continue
+    t = o.get("type")
+    if t == "queue-operation":
+        if o.get("operation") == "enqueue":
+            running.pop(ended(o.get("content")), None)
+        continue
+    if t == "attachment":
+        a = o.get("attachment")
+        if isinstance(a, dict) and a.get("type") == "queued_command":
+            running.pop(ended(a.get("prompt")), None)
+        continue
+    r = o.get("toolUseResult")
+    if not isinstance(r, dict):
+        continue
+    if r.get("isAsync") is True and isinstance(r.get("agentId"), str):
+        running[r["agentId"]] = ("agent", when(o))
+    if isinstance(r.get("backgroundTaskId"), str):
+        running[r["backgroundTaskId"]] = ("job", when(o))
+    if isinstance(r.get("task_id"), str) and "task_type" in r:
+        running.pop(r["task_id"], None)   # TaskStop: a stopped helper does not always send a notification
+now = time.time()
+agents = jobs = quiet = 0
+sub = os.path.join(os.path.splitext(path)[0], "subagents")
+for tid, (kind, started) in running.items():
+    if kind == "job":
+        jobs += 1
+        continue
+    last = started
+    if re.fullmatch(r"[A-Za-z0-9_-]+", tid):
+        try:
+            last = max(last or 0, os.stat(os.path.join(sub, "agent-%s.jsonl" % tid)).st_mtime)
+        except OSError:
+            pass
+    if last is not None and now - last > quiet_after:
+        quiet += 1
+    else:
+        agents += 1
+print(agents, jobs, quiet)
+PY
+  }
+  helper_counts() {  # sets h_agents, h_jobs and h_quiet; anything unreadable counts as none, so a broken read never holds a lane
+    local a b c
+    read -r a b c <<<"$(helpers_running 2>/dev/null)" || true
+    [[ "${a:-}" =~ ^[0-9]+$ ]] && [[ "${b:-}" =~ ^[0-9]+$ ]] && [[ "${c:-}" =~ ^[0-9]+$ ]] || { a=0; b=0; c=0; }
+    h_agents=$a; h_jobs=$b; h_quiet=$c
+  }
 
   wait_no_dialog "${LANE_RECYCLE_IDLE_SECS:-300}" || rfail "a dialog stayed on the lane's screen for ${LANE_RECYCLE_IDLE_SECS:-300}s, so the hand-off request was not typed"
   rotate_handoff_prev || rfail "could not keep the old handoff.md as a handoff-prev file in $hand"
+  # A lane with helpers out is told that the clear waits for them, so their results get written into the hand-off instead of lost with the
+  # conversation. A lane with none gets the request word for word as before.
+  h_agents=0; h_jobs=0; h_quiet=0; helper_counts
+  if [ $(( h_agents + h_jobs )) -gt 0 ]; then
+    msg_handoff="$msg_handoff You have $h_agents subagent(s) and $h_jobs background job(s) still running: name each in that file, and when one reports back before I clear you, add its result to the file and stop again. I wait for subagents up to $(( ${LANE_RECYCLE_WAIT_SECS:-600} / 60 )) minutes and for background jobs up to $(( ${LANE_RECYCLE_JOB_SECS:-180} / 60 ))."
+  fi
   before="$(stamp)"; t0="$(date +%s)"
   send_to "$name" "$msg_handoff" >/dev/null || rfail "the hand-off request did not reach the lane"
-  end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} )); written=0
+  handoff_new() { local s; s="$(stamp)"; [ "$s" != none ] && [ "$s" != "$before" ] && [ -s "$handoff" ] && [ "$(stat -c %Y "$handoff")" -ge "$t0" ]; }
+  end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} )); written=0; job_end=0; h_agents=0; h_jobs=0; h_quiet=0
   while [ "$(date +%s)" -lt "$end" ]; do
-    now_stamp="$(stamp)"
-    if [ "$now_stamp" != none ] && [ "$now_stamp" != "$before" ] && [ -s "$handoff" ] && [ "$(stat -c %Y "$handoff")" -ge "$t0" ] && lane_idle; then
-      sleep 2; lane_idle && { written=1; break; }
+    if handoff_new && lane_idle; then
+      # Written and idle is no longer enough: a lane waiting on its helpers is idle too (issue 35). Subagents are waited for until the time
+      # runs out. Background jobs get LANE_RECYCLE_JOB_SECS (default 180) from the first idle look, because a job can be a server that never
+      # ends and its finish notice reaches the fresh session anyway.
+      helper_counts
+      if [ "$h_agents" = 0 ] && [ "$h_jobs" != 0 ] && [ "$job_end" = 0 ]; then job_end=$(( $(date +%s) + ${LANE_RECYCLE_JOB_SECS:-180} )); fi
+      if [ "$h_agents" = 0 ] && { [ "$h_jobs" = 0 ] || [ "$(date +%s)" -ge "$job_end" ]; }; then
+        sleep 2; lane_idle && { written=1; break; }
+      fi
     fi
     sleep 2
   done
+  if [ "$written" != 1 ] && handoff_new && lane_idle; then
+    # The time ran out with the hand-off written and the lane idle, so it was held only by its helpers.
+    helper_counts
+    [ "$h_agents" = 0 ] || rfail "$h_agents subagent(s) the lane started were still running after ${LANE_RECYCLE_WAIT_SECS:-600}s. They outlive a clear and would hand their results to a fresh session that never asked for them, so the lane was NOT cleared; its handoff.md is written and the next try waits again"
+    sleep 2; lane_idle && written=1   # only background jobs are left, and the time for them is up
+  fi
   [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
+  jobs_note=""
+  if [ "$h_jobs" != 0 ]; then
+    echo "recycle $name: $h_jobs background job(s) the lane started were still running after ${LANE_RECYCLE_JOB_SECS:-180}s; clearing anyway, their finish notices reach the fresh session" >&2
+    printf '%s\t%s\tJOBS-RUNNING\t%s background job(s) still running at the clear\n' "$(date -Is)" "$name" "$h_jobs" >>"$rlog"
+    jobs_note=" $h_jobs background job(s) your earlier session started were still running when it was cleared: a finish notice for one of them is meant for you, and handoff.md says what each is for."
+  fi
+  if [ "$h_quiet" != 0 ]; then
+    printf '%s\t%s\tHELPERS-QUIET\t%s subagent(s) with no end logged and nothing written for %ss were not waited for\n' "$(date -Is)" "$name" "$h_quiet" "${LANE_RECYCLE_HELPER_QUIET_SECS:-1200}" >>"$rlog"
+  fi
   drain_queue || rfail "input was still queued in the lane after ${LANE_RECYCLE_QUEUE_SECS:-120}s and Escape did not clear it, so /clear would have carried it into the fresh session; the lane was NOT cleared"
 
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.

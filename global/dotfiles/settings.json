@@ -5,6 +5,7 @@
     "ENABLE_STOP_REVIEW": "0",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
     "CLAUDE_CODE_DISABLE_MOUSE_CLICKS": "1",
+    "VERCEL_PLUGIN_TELEMETRY": "off",
     "CLAUDE_CODE_SHELL_PREFIX": "__HOME__/.claude/scripts/shell_scrub_prefix.sh"
   },
   "permissions": {
@@ -200,7 +201,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/naked-instruction.sh stop"
+            "command": "bash ~/.claude/hooks/naked-instruction.sh stop",
+            "timeout": 10
           }
         ]
       },
@@ -208,7 +210,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/unverified-pending.sh"
+            "command": "bash ~/.claude/hooks/unverified-pending.sh",
+            "timeout": 10
           }
         ]
       },
@@ -216,18 +219,38 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/lane-watch-guard.py"
+            "command": "python3 ~/.claude/hooks/lane-watch-guard.py",
+            "timeout": 10
           }
         ]
       }
     ],
     "PreToolUse": [
       {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I ~/.claude/no-ai-wall/no-ai-wall-guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash|Read|Grep",
         "hooks": [
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/secret-guard.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/nextcloud-guard.py",
+            "timeout": 5
           }
         ]
       },
@@ -369,13 +392,20 @@
     "creative-writing@grey-haven-plugins": true,
     "typescript-lsp@claude-plugins-official": true,
     "pyright-lsp@claude-plugins-official": true,
-    "afa-mods@afa-mods": true
+    "afa-mods@afa-mods": true,
+    "vercel-plugin@vercel": true
   },
   "extraKnownMarketplaces": {
     "afa-mods": {
       "source": {
         "source": "directory",
         "path": "/home/TurtleWolfe/repos/Claude_Commandz"
+      }
+    },
+    "vercel": {
+      "source": {
+        "source": "github",
+        "repo": "vercel/vercel-plugin"
       }
     }
   },
@@ -399,5 +429,7 @@
   "theme": "dark-daltonized",
   "remoteControlAtStartup": false,
   "skipAutoPermissionPrompt": true,
-  "idleCompaction": false
+  "idleCompaction": false,
+  "switchModelsOnFlag": true,
+  "agentPushNotifEnabled": true
 }

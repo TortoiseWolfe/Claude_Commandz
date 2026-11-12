@@ -161,12 +161,59 @@ class ContextWarnTests(unittest.TestCase):
         self.assertIn("start the running hand-off file now", text)
         self.assertEqual(self.call_hook(event="PostToolUse"), "")
 
-    def test_handoff_warning_repeats_on_every_tool_call(self):
+    HAND_OFF = "hand off and end, no new work"
+
+    def tool_calls(self, count):
+        """Outputs of that many tool calls in a row."""
+        return [self.call_hook(event="PostToolUse") for _ in range(count)]
+
+    def test_handoff_warning_arrives_on_the_tool_call_that_crosses_the_line_then_on_every_10th(self):
+        # It printed after every tool call past the line, which adds text exactly when the window is fullest.
         self.write_transcript((100_000, 0, 0))
         self.call_hook(event="UserPromptSubmit")
         self.write_transcript((331_000, 0, 0))
-        for _ in range(2):
-            self.assertIn("hand off and end, no new work", self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+        self.assertEqual(self.tool_calls(9), [""] * 9)
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+        self.assertEqual(self.tool_calls(9), [""] * 9)
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+
+    def test_every_prompt_past_the_line_gets_the_handoff_warning_and_restarts_the_count(self):
+        self.write_transcript((331_000, 0, 0))
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="UserPromptSubmit"))["additionalContext"])
+        self.assertEqual(self.tool_calls(5), [""] * 5)
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="UserPromptSubmit"))["additionalContext"])
+        self.assertEqual(self.tool_calls(9), [""] * 9)
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+
+    def test_dropping_below_the_line_clears_the_count_so_the_next_crossing_warns_at_once(self):
+        self.write_transcript((331_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit")
+        self.assertEqual(self.tool_calls(3), [""] * 3)
+        self.write_transcript((100_000, 0, 0))
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+        self.write_transcript((331_000, 0, 0))
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+
+    def test_sessions_keep_separate_handoff_counts(self):
+        self.write_transcript((331_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit", session="a")
+        self.assertEqual(self.call_hook(event="PostToolUse", session="a"), "")
+        self.assertIn(self.HAND_OFF, self.call_hook(event="PostToolUse", session="b"))
+
+    def test_an_unreadable_count_warns_rather_than_staying_quiet(self):
+        self.write_transcript((331_000, 0, 0))
+        self.call_hook(event="UserPromptSubmit")
+        (self.state / ("context-handoff-calls." + self.session_id)).write_text("not a number", encoding="ascii")
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="PostToolUse"))["additionalContext"])
+        self.assertEqual(self.call_hook(event="PostToolUse"), "")
+
+    def test_the_capped_warning_holds_at_the_shipped_150k_line(self):
+        self.write_transcript((151_000, 0, 0))
+        self.assertIn(self.HAND_OFF, self.warning(self.call_hook(event="UserPromptSubmit", real_defaults=True))["additionalContext"])
+        outputs = [self.call_hook(event="PostToolUse", real_defaults=True) for _ in range(10)]
+        self.assertEqual(outputs[:9], [""] * 9)
+        self.assertIn(self.HAND_OFF, self.warning(outputs[9])["additionalContext"])
 
     def test_sessions_do_not_share_the_mark(self):
         self.write_transcript((100_000, 0, 0))
