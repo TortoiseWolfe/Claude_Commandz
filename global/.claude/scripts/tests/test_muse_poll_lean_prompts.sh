@@ -3,6 +3,7 @@
 # them its rules. The rules those passes act under are written into their own prompts; this holds the prompts to that, so an edit
 # cannot quietly drop one. (The cwd and flags of the calls themselves are held by test_muse_poll_trim.sh.)
 set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 D=$(cd -- "$(dirname -- "$0")/.." && pwd)
 fails=0
 need() {  # <file> <fixed text> <what>

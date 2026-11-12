@@ -3,6 +3,7 @@
 # and the session's window-size is manual with default-size 200x50, so a detached window never falls back to 80x24. An existing session is
 # never touched: lane.sh adds a window to it and sets no option. A fake tmux logs every call; nothing here starts a real tmux.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-tmuxsize.XXXXXX")"

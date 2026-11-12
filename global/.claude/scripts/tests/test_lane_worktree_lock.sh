@@ -5,6 +5,7 @@
 # somebody else made is left alone; `lane.sh --unlock-gone` frees the locks whose lane has no window and no pane inside the worktree.
 # A fake HOME, a fake tmux and a throwaway git repo hold everything: nothing here touches a live lane or a real worktree.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"

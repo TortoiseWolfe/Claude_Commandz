@@ -2,6 +2,7 @@
 # Tests for lane.sh --recycle and --ctx (lanes never auto-compact; his rule, 20 Oct). A fake tmux plays the lane: it writes what is typed
 # into a fake transcript, starts a new transcript on /clear, and writes handoff.md when it sees the hand-off request.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 

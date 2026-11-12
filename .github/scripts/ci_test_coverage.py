@@ -8,6 +8,7 @@ and the workflow takes its shell and node lists from it, so the lists cannot dri
   ci_test_coverage.py check                 every tracked test file is run by a runner below or is listed, with a reason and an issue link,
                                             in .github/ci_not_run.tsv (a listed file is left out of its runner's list); a listed line for a
                                             file that no longer exists fails too
+                                            and every shell test in the CI list sources tests/closed_room_guard.sh (test_closed_room.sh must not)
   ci_test_coverage.py list shell|node       the files the shell / node step must run, one per line, relative to global/.claude/scripts
   ci_test_coverage.py list shell --part I/N the I-th of N equal slices of that list (I counts from 0); the N slices together are the whole
                                             list and no file is in two, so N jobs can each run one slice side by side
@@ -96,6 +97,31 @@ def check(files, not_run, parse_problems=()):
     return problems
 
 
+# Ticket 81: every shell test runs inside the closed room by sourcing tests/closed_room_guard.sh. This file tests the room from outside, so it is the
+# one test that must not.
+GUARD_EXEMPT = {SCRIPTS + "/tests/test_closed_room.sh"}
+GUARD_LINE = re.compile(r"^\s*(\.|source)\s+.*closed_room_guard\.sh\"?\s*$")
+
+
+def unguarded(files, not_run, root=ROOT):
+    """Problems for shell tests in the CI list that do not source closed_room_guard.sh (and for the exempt file if it does)."""
+    problems = []
+    for f in sorted(files):
+        if runner_of(f) != "shell" or f in not_run:
+            continue
+        try:
+            text = open(os.path.join(root, f), encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        sources = any(GUARD_LINE.match(line) for line in text.splitlines())
+        if f in GUARD_EXEMPT and sources:
+            problems.append("%s sources closed_room_guard.sh but tests the room from outside: remove the line" % f)
+        elif f not in GUARD_EXEMPT and not sources:
+            problems.append("%s does not source closed_room_guard.sh: add `. \"$(dirname \"${BASH_SOURCE[0]}\")/closed_room_guard.sh\"` "
+                            "as the first command after `set`, so the test runs inside the closed room" % f)
+    return problems
+
+
 def listing(files, runner, not_run):
     """What a runner's step runs: every file it reaches, except the ones openly listed as not run."""
     rel = SCRIPTS + "/"
@@ -131,7 +157,7 @@ def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "check":
         not_run, parse_problems = read_not_run()
-        problems = check(files, not_run, parse_problems)
+        problems = check(files, not_run, parse_problems) + unguarded(files, not_run)
         for p in problems:
             print("::error::" + p)
         n = sum(1 for f in files if is_test_file(f))

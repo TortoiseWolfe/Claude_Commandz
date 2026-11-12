@@ -3,6 +3,7 @@
 # records the exact flags the poller gives each call (NUL-separated, so the tool list survives intact) and the Gusto variables it was
 # started with; a stub client check queues one mail, payment-kind or not. A fake HOME holds the state. Nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SCRIPT=$(cd -- "$(dirname -- "$0")/.." && pwd)/muse_poll.sh
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state; CALLS=$TMP/calls

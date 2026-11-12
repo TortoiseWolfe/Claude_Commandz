@@ -3,6 +3,7 @@
 # "Picked up: <full original subject>" lines when one reply covers several notes). The rule lives in the unattended poller's handle
 # prompt and in the agent-notes skill; this holds both to it so a prompt edit cannot quietly drop it.
 set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 D=$(cd -- "$(dirname -- "$0")/.." && pwd)
 SKILL=$D/../skills/agent-notes/SKILL.md
 fails=0

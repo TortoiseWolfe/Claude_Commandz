@@ -4,6 +4,7 @@
 # which switches a running lane and puts back the USER default model that /model saves. A fake tmux plays the lane window and a fake HOME
 # holds settings.json, the index and the log: nothing here touches the live lanes or the live settings.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 

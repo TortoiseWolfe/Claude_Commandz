@@ -3,6 +3,7 @@
 # muse_poll_record.sh client-seen refuses anything else. A stub gmail_api.py stands in for the Gmail API;
 # a fake HOME holds the state. Nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 HERE=$(cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state
