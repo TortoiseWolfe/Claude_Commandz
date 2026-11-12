@@ -5,13 +5,14 @@ Why it exists: a script can drop files into the wall's folder unseen, and no ses
 every change in that folder). This command is run instead, by a person in a terminal or by a session: it takes no path, so it can move only strays.
 
 What it does: looks at the direct entries of its own folder only. The wall's own files (the manifest below) are left alone. Anything
-else is a stray. A dry run lists the strays; with --apply each stray is moved (never deleted) into
+else is a stray. One name per wall file is the exception: the half-written copy an install makes (.<wall file>.new) is left alone
+and reported while it is an ordinary file with one name, and is a stray when it is anything else. A dry run lists the strays; with --apply each stray is moved (never deleted) into
 ~/.claude/state/no-ai-wall-strays/<date-time>/ and one line per move is added to ~/.claude/state/no-ai-wall-cleanup.log (name, kind,
 size and, for a regular file up to 1 MB, a sha256; a dash for anything else; never file content). The holding folder is made new for
 each run, and a stray is not moved over a name that already sits there.
 
-What it will never do: touch a manifest file, the no-AI list, or any file outside its own folder; delete anything; start another
-program; take a path, a folder or a file name from the caller; read the HOME setting. It refuses to run anywhere but an installed wall
+What it will never do: touch a manifest file, the no-AI list, or any file outside its own folder; delete anything; start any program
+but itself (once, under python3 -I, when it was not started that way); take a path, a folder or a file name from the caller; read the HOME setting. It refuses to run anywhere but an installed wall
 (a folder named no-ai-wall inside a folder named .claude, holding all manifest files, with no .git entry in it or above it).
 
 Run: python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            (dry run: list only, change nothing)
@@ -273,7 +274,16 @@ def run_in(wall_fd, wall, base, apply_):
                 code = 1
             continue
         if name in IN_FLIGHT:
-            notes.append("left alone %s (an install may be running)" % shown)
+            # An install's half-written copy is always an ordinary file with one name; a link there would be written through by the
+            # installer's copy step. Only that is left alone; anything else under this name is a stray like any other.
+            try:
+                st = os.lstat(name, dir_fd=wall_fd)
+            except OSError:
+                continue  # the install's own move has just taken it: the normal end of an install, not a fault
+            if stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+                notes.append("left alone %s (an install may be running)" % shown)
+                continue
+            strays.append((name, shown, kind_of(st.st_mode), st.st_size, st))
             continue
         try:
             st = os.lstat(name, dir_fd=wall_fd)

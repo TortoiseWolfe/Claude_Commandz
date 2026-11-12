@@ -191,6 +191,72 @@ def test_in_flight_temp_name_is_left_alone(tmp_path):
     assert last(r) == "WALL CLEAN"
 
 
+def test_in_flight_name_that_is_a_link_is_a_stray(tmp_path):
+    wall = make_wall(tmp_path)
+    target = os.path.join(str(tmp_path), "elsewhere.txt")
+    with open(target, "wb") as fh:
+        fh.write(b"outside bytes")
+    name = ".no_ai_wall.py.new"
+    os.symlink(target, os.path.join(wall, name))
+    before = snapshot(tmp_path)
+    r = run(wall)
+    assert r.returncode == 0, r.stderr
+    assert 'would move ".no_ai_wall.py.new" (link,' in r.stdout
+    assert "left alone" not in r.stdout
+    assert snapshot(tmp_path) == before
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    assert "left alone" not in r.stdout
+    assert not os.path.lexists(os.path.join(wall, name))
+    (hold,) = holding(wall)
+    assert os.path.islink(os.path.join(hold, name)) and os.readlink(os.path.join(hold, name)) == target
+    log = open(os.path.join(tmp_path, ".claude", "state", "no-ai-wall-cleanup.log"), encoding="utf-8").read()
+    (line,) = log.split("\n")[:-1]
+    fields = line.split("\t")
+    assert fields[2] == json.dumps(name) and fields[3] == "link"
+    assert open(target, "rb").read() == b"outside bytes"
+
+
+@pytest.mark.parametrize("name", [".wall_cleanup.py.new", ".no_ai_wall.sh.new"])
+def test_in_flight_name_that_is_a_folder_is_a_stray(tmp_path, name):
+    wall = make_wall(tmp_path)
+    os.makedirs(os.path.join(wall, name))
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    assert "left alone" not in r.stdout
+    assert 'moved %s (folder,' % json.dumps(name) in r.stdout
+    assert not os.path.lexists(os.path.join(wall, name))
+    (hold,) = holding(wall)
+    assert os.path.isdir(os.path.join(hold, name))
+
+
+def test_in_flight_name_that_is_a_pipe_is_a_stray(tmp_path):
+    # a pipe has one name, so only the kind test catches it (a folder usually has two or more names and is caught by the count as well)
+    wall = make_wall(tmp_path)
+    name = ".no_ai_wall.py.new"
+    os.mkfifo(os.path.join(wall, name))
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    assert "left alone" not in r.stdout
+    assert 'moved %s (other,' % json.dumps(name) in r.stdout
+    assert not os.path.lexists(os.path.join(wall, name))
+
+
+def test_in_flight_name_with_a_second_name_is_a_stray(tmp_path):
+    wall = make_wall(tmp_path)
+    name = ".no-ai-wall-guard.py.new"
+    other = os.path.join(str(tmp_path), "second-name.txt")
+    with open(os.path.join(wall, name), "wb") as fh:
+        fh.write(b"shared bytes")
+    os.link(os.path.join(wall, name), other)
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    assert "left alone" not in r.stdout
+    assert 'moved %s (file,' % json.dumps(name) in r.stdout
+    assert not os.path.lexists(os.path.join(wall, name))
+    assert open(other, "rb").read() == b"shared bytes"
+
+
 def put_stray(wall):
     with open(os.path.join(wall, "stray.txt"), "w") as fh:
         fh.write("s")
