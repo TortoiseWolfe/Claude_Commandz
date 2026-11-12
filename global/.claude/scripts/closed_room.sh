@@ -120,7 +120,7 @@ fcntl.ioctl(s, 0x8914, struct.pack("16sH14x", b"lo", f | 1))' 2>/dev/null || ech
     if [ "${KEEP_MODES[$i]}" = ro ] && test -w "${KEEP_PATHS[$i]}"; then die "${KEEP_PATHS[$i]} is not read-only"; fi
   done
   # The step that follows the last check must work, or the command would not start after the marker is written.
-  unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs true || die "cannot drop to the real user"
+  unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs env --default-signal=INT,QUIT true || die "cannot drop to the real user, or this env has no --default-signal option"
   echo started >&8
   exec 8>&-
 
