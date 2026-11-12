@@ -2703,6 +2703,10 @@ fi
 if top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [ ! -d "$top/graphify-out" ] \
    && ! grep -qxF -- "$top" "$HOME/.config/afa/graphify-skip" 2>/dev/null; then
   echo "note: no graphify graph in this repo; for sprint work run /graphify-init (code-only, free) first" >&2
+  # A fresh start also tells the lane, once (the stderr note above is never seen by it); not a restart, a recycle or a dry run.
+  if [ "$dry" = 0 ] && [ "$restart_note" = 0 ] && [ "$restart_opt" != 1 ] && ! grep -qxF -- '## Graph' "$lprompt" 2>/dev/null; then
+    printf '\n## Graph\nThis repo has no graphify graph yet. If this is sustained work, run /graphify-init (code-only, free) first; repos skipped on purpose are listed in ~/.config/afa/graphify-skip.\n' >>"$lprompt" 2>/dev/null || true
+  fi
 fi
 
 if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then

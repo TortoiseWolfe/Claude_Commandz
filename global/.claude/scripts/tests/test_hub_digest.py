@@ -732,6 +732,134 @@ class PublishBudget(unittest.TestCase):
             self.assertFalse(marker.exists())
 
 
+class NoHeaderToolsLine(unittest.TestCase):
+    def catalog(self, text):
+        d = Path(fresh_dir(self))
+        p = d / "TOOLS.md"
+        if text is not None:
+            p.write_text(text)
+        return p
+
+    def test_names_the_tools_with_no_header(self):
+        p = self.catalog("# Tools\n\n- /h/s/a.py | (no header)\n- /h/s/b.sh | (no header) | Use when: x\n- /h/s/c.py | Does c.\n")
+        self.assertEqual(hd.no_header_tools_line(p),
+                         "Tools with no header line (2): a.py, b.sh. A new tool starts with a header line and a 'Use when:' line; "
+                         "then run tools_catalog.py build.")
+
+    def test_more_than_five_names_then_and_n_more(self):
+        p = self.catalog("".join(f"- /h/s/t{i}.py | (no header)\n" for i in range(7)))
+        line = hd.no_header_tools_line(p)
+        self.assertIn("(7): t0.py, t1.py, t2.py, t3.py, t4.py and 2 more.", line)
+
+    def test_missing_unreadable_or_clean_gives_nothing(self):
+        self.assertEqual(hd.no_header_tools_line(self.catalog(None)), "")
+        self.assertEqual(hd.no_header_tools_line(self.catalog("- /h/s/c.py | Does c.\n")), "")
+        self.assertEqual(hd.no_header_tools_line(Path(fresh_dir(self))), "")  # a folder cannot be read as a file
+
+
+class PeerReviewLine(unittest.TestCase):
+    ET = ZoneInfo("America/New_York")
+    TUE = datetime(2026, 11, 10, 12, 0, tzinfo=ET)
+    MON = datetime(2026, 11, 9, 12, 0, tzinfo=ET)
+
+    def repos_file(self, text):
+        d = Path(fresh_dir(self))
+        p = d / "peer-review-repos.txt"
+        if text is not None:
+            p.write_text(text)
+        return p
+
+    def checker(self, answer):
+        calls = []
+
+        def check(repos, since):
+            calls.append((repos, since))
+            return answer
+        check.calls = calls
+        return check
+
+    def test_missing_or_empty_list_gives_no_line_and_no_call(self):
+        for text in (None, "", "# only a comment\n\n"):
+            check = self.checker(False)
+            self.assertEqual(hd.peer_review_line(self.TUE, self.repos_file(text), check), "")
+            self.assertEqual(check.calls, [])
+
+    def test_review_found_gives_no_line(self):
+        self.assertEqual(hd.peer_review_line(self.TUE, self.repos_file("acme/widgets\n"), self.checker(True)), "")
+
+    def test_none_found_on_tuesday_gives_the_line_and_asks_since_monday_midnight_eastern(self):
+        check = self.checker(False)
+        line = hd.peer_review_line(self.TUE, self.repos_file("# teams\nacme/widgets  # main\nacme/gadgets\n"), check)
+        self.assertEqual(line, "No peer review posted this week (since Monday): start the weekly peer-review lane.")
+        repos, since = check.calls[0]
+        self.assertEqual(repos, ["acme/widgets", "acme/gadgets"])
+        self.assertEqual(since, datetime(2026, 11, 9, 0, 0, tzinfo=self.ET))
+
+    def test_state_file_remembers_a_found_review_for_the_week(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        self.assertEqual(hd.peer_review_line(self.TUE, repos, self.checker(True), state_file=state), "")
+        later = self.checker(False)
+        self.assertEqual(hd.peer_review_line(self.TUE + timedelta(days=2), repos, later, state_file=state), "")
+        self.assertEqual(later.calls, [], "a review found this week is not looked up again")
+        next_week = self.checker(False)
+        line = hd.peer_review_line(self.TUE + timedelta(days=7), repos, next_week, state_file=state)
+        self.assertTrue(line.startswith("No peer review posted this week"))
+        self.assertEqual(len(next_week.calls), 1, "a new week asks again")
+
+    def test_state_file_rechecks_a_miss_at_most_once_an_hour(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        first = self.checker(False)
+        self.assertTrue(hd.peer_review_line(self.TUE, repos, first, state_file=state))
+        soon = self.checker(True)
+        self.assertTrue(hd.peer_review_line(self.TUE + timedelta(minutes=15), repos, soon, state_file=state))
+        self.assertEqual(soon.calls, [], "a miss is not re-checked within the hour")
+        hour = self.checker(True)
+        self.assertEqual(hd.peer_review_line(self.TUE + timedelta(minutes=61), repos, hour, state_file=state), "")
+        self.assertEqual(len(hour.calls), 1)
+
+    def test_a_failed_check_is_not_remembered(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        self.assertEqual(hd.peer_review_line(self.TUE, repos, self.checker(None), state_file=state), "")
+        self.assertFalse(state.exists())
+
+    def test_none_found_on_monday_gives_no_line_yet(self):
+        self.assertEqual(hd.peer_review_line(self.MON, self.repos_file("acme/widgets\n"), self.checker(False)), "")
+
+    def test_gh_failure_gives_no_line_and_is_reported(self):
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        failing = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "HTTP 401")
+        with redirect_stderr(err):
+            line = hd.peer_review_line(self.TUE, self.repos_file("acme/widgets\n"), lambda r, s: hd.gh_review_since(r, s, run=failing))
+        self.assertEqual(line, "")
+        self.assertIn("peer-review check failed: HTTP 401", err.getvalue())
+        secs = hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir="/nonexistent", inbox_text=INBOX, git_log="",
+                                 tidy_text=TIDY, budget="b", now=NOW, rules_lines=[line])
+        self.assertTrue(secs)
+
+    def test_gh_review_since_reads_the_reviews_of_each_candidate(self):
+        since = datetime(2026, 11, 9, 0, 0, tzinfo=self.ET)
+        reviews = {"7": "me\t2026-11-08T10:00:00Z\n", "8": "other\t2026-11-10T10:00:00Z\nme\t2026-11-10T10:00:00Z\n"}
+
+        def run(cmd, **kw):
+            if cmd[1:3] == ["api", "user"]:
+                out = "me\n"
+            elif cmd[1:3] == ["search", "prs"]:
+                self.assertIn("@me", cmd)
+                self.assertIn(">=2026-11-09", cmd)
+                out = "7\n8\n"
+            else:
+                out = reviews[cmd[2].split("/")[4]]
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+        self.assertTrue(hd.gh_review_since(["acme/widgets"], since, run=run))
+        reviews["8"] = "other\t2026-11-10T10:00:00Z\n"
+        self.assertFalse(hd.gh_review_since(["acme/widgets"], since, run=run))
+
+
 class Cli(unittest.TestCase):
     def test_end_to_end_with_fixtures_writes_a_private_small_file(self):
         with tempfile.TemporaryDirectory() as d:

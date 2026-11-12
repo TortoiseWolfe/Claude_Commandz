@@ -21,6 +21,8 @@
 #     Named once per death ("dead: <lane> (pane shows <cmd>); restart it fresh from its handoff.md"); the mark is cleared when the pane runs
 #     claude again. 28 Oct 2026: a lane killed its own claude with pgrep -f, sat at a bash prompt for 3 hours and nothing woke the hub.
 #   - a recycle (see below) failed
+#   - the hub asked the owner a question in the terminal and he has not answered in LANE_WATCH_UNANSWERED_MIN minutes (default 15; 0 or off
+#     disables): unanswered_check names it once, so the question can go to Hatch as one [CC>MUSE] note draft
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in hub-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
@@ -554,6 +556,113 @@ hub_handoff_check() {
   fi
 }
 
+# Unanswered-question wake. The hub asked the owner something in the terminal and 15 minutes (LANE_WATCH_UNANSWERED_MIN; 0 or "off" turns
+# it off) later he has not answered: the question goes to his phone assistant as one [CC>MUSE] note draft. Reads only the last 200 lines of
+# the hub's newest transcript (same folder as hub_handoff_check). Fires when the last assistant text comes after the last typed user
+# message (not a tool_result, not isMeta, not a "<" wrapper), its final paragraph outside fenced code holds a "?" or "your call" /
+# "which do you want" / "do you want" / "should I", and it is old enough. A question card (AskUserQuestion) with no tool_result yet
+# counts too, timed from the card. Named once per assistant uuid (.unanswered-<uuid> in $recycle_dir).
+# Sets hit and other (call it inside the poll loop, after they are reset).
+unanswered_check() {
+  local min=${LANE_WATCH_UNANSWERED_MIN:-15}
+  [ "$min" = off ] && return 0
+  [[ "$min" =~ ^[0-9]+$ ]] && (( min > 0 )) || return 0
+  local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/$(printf '%s' "${HOME}/repos" | tr / -)}"
+  [ -d "$projects_dir" ] || return 0
+  local newest="" newest_mtime=0 f m
+  for f in "$projects_dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    m=$(stat -c %Y "$f" 2>/dev/null) || continue
+    if (( m > newest_mtime )); then newest_mtime=$m; newest=$f; fi
+  done
+  [ -n "$newest" ] || return 0
+  local res uuid clock age
+  res=$(tail -n 200 "$newest" 2>/dev/null | python3 -I -c '
+import sys, json, re, datetime
+user_i = asst_i = -1
+asst = None
+card = None  # (entry, tool_use id) of a question card still waiting for its answer
+for i, line in enumerate(sys.stdin):
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(e, dict) or e.get("isSidechain"):
+        continue
+    msg = e.get("message")
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if e.get("type") == "user" and card and isinstance(c, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == card[1] for b in c):
+            card = None
+    if e.get("type") == "assistant" and isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion":
+                card = (e, b.get("id"))
+    if e.get("type") == "user" and not e.get("isMeta"):
+        texts = []
+        if isinstance(c, str):
+            texts = [c]
+        elif isinstance(c, list):
+            texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
+        texts = [t for t in texts if isinstance(t, str) and t.strip() and not t.lstrip().startswith("<")]
+        if texts:
+            user_i = i
+    elif e.get("type") == "assistant" and isinstance(c, list):
+        texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str) and b.get("text").strip()]
+        if texts:
+            asst_i, asst = i, (e, "\n".join(texts))
+def stamp(e):
+    try:
+        t = datetime.datetime.fromisoformat(str(e.get("timestamp")).replace("Z", "+00:00"))
+    except Exception:
+        sys.exit(0)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    age = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
+    uuid = re.sub(r"[^A-Za-z0-9_-]", "", str(e.get("uuid", "")))
+    if not uuid:
+        sys.exit(0)
+    lt = t.astimezone()
+    clock = "%d:%02d %s" % (lt.hour % 12 or 12, lt.minute, "AM" if lt.hour < 12 else "PM")
+    print("%s\t%d\t%s" % (uuid, age, clock))
+    sys.exit(0)
+if card is not None:
+    stamp(card[0])  # an open question card counts whatever text came before it
+if asst is None or asst_i < user_i:
+    sys.exit(0)
+e, text = asst
+blocks, cur, fenced = [], [], False
+for ln in text.splitlines():
+    if ln.lstrip().startswith("```"):
+        fenced = not fenced
+        continue
+    if fenced:
+        continue
+    if ln.strip():
+        cur.append(ln)
+    elif cur:
+        blocks.append(cur); cur = []
+if cur:
+    blocks.append(cur)
+if not blocks:
+    sys.exit(0)
+last = "\n".join(blocks[-1]).lower()
+if not ("?" in last or any(p in last for p in ("your call", "which do you want", "do you want", "should i"))):
+    sys.exit(0)
+stamp(e)
+' 2>/dev/null) || return 0
+  [ -n "$res" ] || return 0
+  IFS=$'\t' read -r uuid age clock <<<"$res"
+  [[ "$age" =~ ^[0-9]+$ ]] && [ -n "$uuid" ] || return 0
+  (( age >= min )) || return 0
+  [ -e "$recycle_dir/.unanswered-$uuid" ] && return 0
+  mkdir -p "$recycle_dir" 2>/dev/null
+  : > "$recycle_dir/.unanswered-$uuid"
+  find "$recycle_dir" -maxdepth 1 -name '.unanswered-*' -mtime +3 -delete 2>/dev/null
+  echo "unanswered: your question to the owner at $clock has had no reply for $age min; send it to Hatch as one [CC>MUSE] note draft (one question, its link, what yes and no do), then carry on with work that does not need the answer."
+  hit=1; other=1
+}
+
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
 # 10 s cmd.exe probe still fails). Prints its text once per change of the file, nothing otherwise. 19 Oct: the bridge went quiet twice
 # (5:21 PM and 8:15 PM) with nothing to tell the hub.
@@ -864,6 +973,7 @@ while :; do
   hub_handoff_check
   refresh_watched
   hit=0; other=0
+  unanswered_check
   for l in "${lanes[@]}"; do
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ] && [ "$s" != none ] && routine_report "$(report_of "$l")"; then

@@ -1162,5 +1162,53 @@ else echo "FAIL deleted starting folder: rc=$gc_rc out=$gc_out"; failures=$((fai
 gc_rel=$(cd "$(dirname "$SCRIPT")" && HOME="$gc_home" bash -c 'bash ./lane_watch.sh --recycle-once; echo rc=$?' 2>&1)
 if printf '%s' "$gc_rel" | grep -q 'rc=0'; then echo "ok   a watcher started by a relative path runs"; else echo "FAIL relative start: $gc_rel"; failures=$((failures + 1)); fi
 
+# unanswered_check: the hub asked the owner a question in the terminal and nothing came back for LANE_WATCH_UNANSWERED_MIN minutes.
+ua_home="$TMP/ua-home"; ua_proj="$TMP/ua-proj"; ua_rec="$TMP/ua-rec"
+mkdir -p "$ua_home/.claude/state/lanes" "$ua_proj" "$ua_rec"
+ua_ts() { date -u -d "-$1 min" +%Y-%m-%dT%H:%M:%S.000Z; }
+ua_user() { printf '{"type":"user","uuid":"u-%s","timestamp":"%s","message":{"role":"user","content":"%s"}}\n' "$RANDOM" "$(ua_ts "$1")" "$2"; }
+ua_asst() { printf '{"type":"assistant","uuid":"%s","timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$1" "$(ua_ts "$2")" "$3"; }
+ua_run() { HOME="$ua_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/nt-lane.sh" LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 AFA_HUB_PROJECTS_DIR="$ua_proj" LANE_RECYCLE_DIR="$ua_rec" \
+  timeout 20 bash "$SCRIPT" --max-min 0 dd-ok 2>&1 || true; }
+ua_case() { # ua_case <label> <want fire|quiet> <transcript text file content already in $ua_proj/s.jsonl>
+  local out got=quiet
+  rm -f "$ua_rec"/.unanswered-*
+  out=$(ua_run)
+  printf '%s\n' "$out" | grep -q '^unanswered: your question to the owner at [0-9]*:[0-9][0-9] [AP]M has had no reply for [0-9]* min; send it to Hatch as one \[CC>MUSE\] note draft' && got=fire
+  if [ "$got" = "$2" ]; then echo "ok   unanswered: $1"; else echo "FAIL unanswered $1: want $2, got $got: $out"; failures=$((failures + 1)); fi
+}
+{ ua_user 40 "do the thing"; ua_asst a-old 20 "Done. Which option do you want, A or B?"; } > "$ua_proj/s.jsonl"
+ua_case "an old question fires" fire
+out=$(ua_run)
+if ! printf '%s\n' "$out" | grep -q '^unanswered:'; then echo "ok   unanswered: named only once per uuid across two runs"; else echo "FAIL unanswered repeated: $out"; failures=$((failures + 1)); fi
+{ ua_user 40 "do the thing"; ua_asst a-1 20 "Which option do you want?"; ua_user 5 "option A"; } > "$ua_proj/s.jsonl"
+ua_case "silent when the owner replied after the question" quiet
+{ ua_user 40 "do the thing"; ua_asst a-2 5 "Which option do you want?"; } > "$ua_proj/s.jsonl"
+ua_case "silent when the question is younger than the limit" quiet
+{ ua_user 40 "do the thing"; ua_asst a-3 20 "All done. Nothing more to do."; } > "$ua_proj/s.jsonl"
+ua_case "silent when the last text has no question" quiet
+{ ua_user 40 "do the thing"; ua_asst a-4 20 "Here is the command.\n\n\`\`\`\nwhat is this?\n\`\`\`"; } > "$ua_proj/s.jsonl"
+ua_case "silent for a question only inside a fenced code block" quiet
+{ ua_user 40 "do the thing"; ua_asst a-5 20 "Which one?\n\nAll done, carrying on."; } > "$ua_proj/s.jsonl"
+ua_case "silent when only an earlier paragraph asks" quiet
+{ ua_user 40 "do the thing"; printf '{"type":"user","uuid":"tr","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}\n' "$(ua_ts 30)"; ua_asst a-6 20 "Should I go on?"; } > "$ua_proj/s.jsonl"
+ua_case "a tool_result entry does not count as the owner's reply" fire
+{ ua_user 40 "do the thing"; ua_asst a-7 20 "Should I go on?"; ua_user 5 "<command-name>/clear</command-name>"; } > "$ua_proj/s.jsonl"
+ua_case "a command wrapper does not count as the owner's reply" fire
+ua_card() { printf '{"type":"assistant","uuid":"%s","timestamp":"%s","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-%s","name":"AskUserQuestion","input":{}}]}}\n' "$1" "$(ua_ts "$2")" "$1"; }
+{ ua_user 40 "do the thing"; ua_asst a-9 25 "All done."; ua_card c-1 20; } > "$ua_proj/s.jsonl"
+ua_case "an open question card fires" fire
+{ ua_user 40 "do the thing"; ua_card c-2 20; printf '{"type":"user","uuid":"r2","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-c-2","content":"Hold"}]}}\n' "$(ua_ts 10)"; ua_asst a-10 9 "Holding. Carrying on."; } > "$ua_proj/s.jsonl"
+ua_case "silent once the question card is answered" quiet
+{ ua_user 40 "do the thing"; ua_card c-3 5; } > "$ua_proj/s.jsonl"
+ua_case "silent while the question card is younger than the limit" quiet
+{ ua_user 40 "do the thing"; ua_asst a-8 20 "Should I go on?"; } > "$ua_proj/s.jsonl"
+for off in 0 off; do
+  rm -f "$ua_rec"/.unanswered-*
+  out=$(LANE_WATCH_UNANSWERED_MIN=$off ua_run)
+  if ! printf '%s\n' "$out" | grep -q '^unanswered:'; then echo "ok   unanswered: LANE_WATCH_UNANSWERED_MIN=$off turns the check off"; else echo "FAIL unanswered off=$off: $out"; failures=$((failures + 1)); fi
+done
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"
