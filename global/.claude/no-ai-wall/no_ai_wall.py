@@ -706,6 +706,256 @@ def _is_launcher(seg):
     return i < len(words) and os.path.basename(words[i]) == "lane.sh"
 
 
+_TEXT_ONLY_PROGRAMS = {"grep", "egrep", "fgrep", "echo", "cat"}  # they print or search their arguments and never run them
+_STDIN_FILTERS = _TEXT_ONLY_PROGRAMS | {"head", "tail", "wc", "cut", "tr", "nl", "sort", "uniq"}  # none runs what it reads on stdin (sort can, with --compress-program: see below)
+_REDEFINERS = {"alias", "function", "hash", "enable"}  # each can make a plain name such as grep run something else
+_COMPOUND_WORDS = {"{", "}", "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "in",
+                   "time", "!", "[[", "]]", "coproc"}  # a block's output can be piped as a whole: `{ echo '..'; } | bash`
+_HARMLESS_REDIRECT = re.compile(r">(?:&[12](?![\w/.~$-])|>?[ \t]*/dev/null(?![\w/.-]))")  # `>&2`, `2>&1`, `>/dev/null`: no file is written
+_FILTER_WORD_UNSURE = re.compile(r"[^A-Za-z0-9_./=,:+@%<>&-]")  # in a word of sort or uniq: anything the shell could expand
+_SHELL_SYNTAX = set("<>|;&()`\n")
+_OPERATOR_CHARS = set(";|&<>()")
+
+
+def _quoted_text_as_text(command):
+    """The command with the text a search or print program was handed taken out of the write check's sight: a `>` inside the quoted
+    pattern of `grep -E 'a|=>|b' file`, or in the body of `cat > notes.md <<'EOF'`, is text and writes nothing (issue 71: three false
+    refusals in one night). Only two things change, and only in a pipeline where EVERY command is, by its bare first word, one of
+    _STDIN_FILTERS (so no interpreter, xargs or tee reads the text): inside the quotes of a _TEXT_ONLY_PROGRAMS command the characters the
+    checks below read as shell syntax become spaces, and the body of such a command's heredoc is dropped. Every character outside quotes
+    is returned as it was, so a real redirect, a real `rm`, and anything handed to bash -c, eval, sh, python or tmux is judged as before.
+    A pipeline that carries on after a `|` at the end of a line is read as one pipeline. A pipeline that fills a file (a redirect other
+    than `>&1`, `>&2` or `>/dev/null`, `sort -o`, `uniq IN OUT`) keeps the old reading unless every command in the whole text is one of
+    _STDIN_FILTERS, so `echo '..' > x.sh; bash x.sh` is still judged by the text it wrote.
+    The command comes back UNCHANGED (the old, stricter reading) whenever its text cannot be read with certainty or could run the quoted
+    text after all: a command substitution, backtick, parenthesis or `$'..'` anywhere outside single quotes, a comment, a `${..}` that
+    is more than a name, an unclosed quote or heredoc, a command that can rename a program (alias, function, hash, enable), or a block
+    word (`{`, if, then, for, while, do, done, case ...) at the start of a command, because a block's output can be piped as a whole.
+    A sort or uniq whose words hold anything the shell could expand (a variable, wildcard or brace), and a sort with an option starting
+    `--c` (--compress-program runs a program on the lines), is not counted as a filter. Words end at bash's blanks only (space, tab,
+    newline), so a program name with a carriage return glued on is not the plain name; `<&` is a redirect, never the end of a command."""
+    n = len(command)
+    pipelines = []
+    cmds = []  # the pipeline being read, one entry per command (see new_command)
+
+    def new_command():  # first: its bare first word or None; spans: its quoted texts; bodies: its heredoc bodies; at, end: where its
+        return {"first": None, "spans": [], "bodies": [], "at": None, "end": None, "writes": False}  # text sits; writes: it fills a file
+
+    cmd = new_command()
+    acc, done, bad = "", False, False  # the first word so far; it has ended; it cannot be trusted (quoted, escaped, after a redirect)
+    pending = []  # heredocs opened on this line: (end word, strip tabs, quoted, command)
+    i = 0
+
+    def close_word():
+        nonlocal done
+        if acc and not done:
+            done = True
+
+    def close_command():
+        nonlocal cmd, acc, done, bad
+        cmd["first"] = None if bad else acc
+        cmd["end"] = i
+        if acc or bad or cmd["spans"] or cmd["bodies"]:
+            cmds.append(cmd)
+        cmd = new_command()
+        acc, done, bad = "", False, False
+
+    def close_pipeline():
+        nonlocal cmds
+        close_command()
+        if cmds:
+            pipelines.append(cmds)
+        cmds = []
+
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            if not done:
+                bad = True
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return command
+            if not done:
+                bad = True
+            cmd["spans"].append((i + 1, j))
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                j += 2 if command[j] == "\\" else 1
+            if j >= n or "`" in command[i:j] or "$(" in command[i:j]:
+                return command
+            if not done:
+                bad = True
+            cmd["spans"].append((i + 1, j))
+            i = j + 1
+            continue
+        if c in "`()":
+            return command
+        if c == "$":
+            nxt = command[i + 1:i + 2]
+            if nxt in ("'", '"'):
+                return command
+            if nxt == "{":
+                m = re.match(r"\$\{\w+\}", command[i:])
+                if not m:
+                    return command
+                if not done:
+                    bad = True
+                i += m.end()
+                continue
+            if not done:
+                bad = True
+            i += 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in _OPERATOR_CHARS):
+            return command
+        if c == "\n":
+            pos = i + 1  # the bodies of the heredocs opened on this line follow it, in order
+            for end_word, strip, quoted, owner in pending:
+                start = pos
+                while True:
+                    if pos >= n:
+                        return command  # the heredoc never ends
+                    eol = command.find("\n", pos)
+                    line = command[pos:] if eol < 0 else command[pos:eol]
+                    pos = n if eol < 0 else eol + 1
+                    if (line.lstrip("\t") if strip else line) == end_word:
+                        break
+                if not quoted and ("`" in command[start:pos] or "$(" in command[start:pos]):
+                    return command  # an unquoted heredoc runs the substitutions in its body
+                owner["bodies"].append((start, pos))  # the body, its end line and that line's newline
+            pending = []
+            if not (cmds and not (acc or bad or cmd["spans"] or cmd["bodies"])):  # after a `|` the pipeline goes on on the next line
+                close_pipeline()
+            i = pos
+            continue
+        if c == "<":
+            if command.startswith("<<<", i):
+                close_word()
+                if not acc:
+                    bad = True
+                i += 3
+                continue
+            if command.startswith("<<", i):
+                j = i + 2
+                strip = command[j:j + 1] == "-"
+                if strip:
+                    j += 1
+                while j < n and command[j] in " \t":
+                    j += 1
+                k = j
+                while k < n and command[k] not in " \t\n" and command[k] not in _OPERATOR_CHARS:
+                    k += 1
+                raw = command[j:k]
+                end_word = re.sub(r"['\"\\]", "", raw)
+                if not end_word or "$" in raw or "`" in raw or raw.count("'") % 2 or raw.count('"') % 2:
+                    return command
+                close_word()
+                if not acc:
+                    bad = True
+                pending.append((end_word, strip, end_word != raw, cmd))
+                i = k
+                continue
+            close_word()
+            if not acc:
+                bad = True
+            i += 1
+            if command[i:i + 1] == "&":  # `<&0`, `0<&0`, `<&-`: a copy of an open file, never the `&` that ends a command
+                i += 1
+            continue
+        if c == ">":
+            close_word()
+            if not acc:
+                bad = True  # `>out grep ...`: the next word is a file, not the program
+            if not _HARMLESS_REDIRECT.match(command, i):
+                cmd["writes"] = True
+            i += 1
+            if command[i:i + 1] == ">":
+                i += 1
+            if command[i:i + 1] in ("&", "|"):
+                i += 1
+            continue
+        if c == "&":
+            if command[i + 1:i + 2] == ">":  # `&>file`: a redirect, not the end of the command
+                close_word()
+                if not acc:
+                    bad = True
+                if not _HARMLESS_REDIRECT.match(command, i + 1):
+                    cmd["writes"] = True
+                i += 2
+                if command[i:i + 1] == ">":
+                    i += 1
+                continue
+            close_pipeline()
+            i += 2 if command[i + 1:i + 2] == "&" else 1
+            continue
+        if c == ";":
+            close_pipeline()
+            i += 1
+            continue
+        if c == "|":
+            if command[i + 1:i + 2] == "|":
+                close_pipeline()
+                i += 2
+            else:
+                close_command()
+                i += 2 if command[i + 1:i + 2] == "&" else 1
+            continue
+        if c in " \t":  # bash's own blanks; a carriage return or a no-break space stays part of the word (`echo\r` is not echo)
+            close_word()
+            i += 1
+            continue
+        if not done:
+            if not acc:
+                cmd["at"] = i
+            acc += c
+        i += 1
+    if pending:
+        return command  # a heredoc with no body
+    close_pipeline()
+
+    everything = [c for p in pipelines for c in p]
+    if any(c["first"] in _REDEFINERS or c["first"] in _COMPOUND_WORDS for c in everything):
+        return command
+    for c in everything:  # two of the filters can fill a file without a redirect: `sort -o FILE` and `uniq INPUT OUTPUT`
+        if c["first"] in ("sort", "uniq"):
+            try:
+                words = shlex.split(command[c["at"]:c["end"]])[1:]
+            except ValueError:
+                words = None
+            if words is None or any(_FILTER_WORD_UNSURE.search(w) for w in words):
+                c["first"] = None  # a variable, wildcard or brace word could turn into any option: keep the old reading
+            elif c["first"] == "sort" and any(w.startswith("--c") for w in words):
+                c["first"] = None  # sort --compress-program=PROG hands the lines it reads to PROG
+            elif c["first"] == "sort":
+                c["writes"] = c["writes"] or any(re.match(r"-[A-Za-z]*o|--o", w) for w in words)
+            else:
+                c["writes"] = c["writes"] or sum(1 for w in words if w == "-" or not w.startswith("-")) > 1
+    only_filters = all(c["first"] in _STDIN_FILTERS for c in everything)  # then nothing in this command can run a file it wrote
+    out = list(command)
+    for p in pipelines:
+        if not all(c["first"] in _STDIN_FILTERS for c in p):
+            continue
+        if not only_filters and any(c["writes"] for c in p):
+            continue  # `echo '..' > x.sh; bash x.sh`: the text lands in a file that another program here could run
+        for c in p:
+            if c["first"] not in _TEXT_ONLY_PROGRAMS:
+                continue
+            for a, b in c["spans"]:
+                for k in range(a, b):
+                    if out[k] in _SHELL_SYNTAX:
+                        out[k] = " "
+            for a, b in c["bodies"]:
+                for k in range(a, b):
+                    out[k] = ""
+    return "".join(out)
+
+
 def bash_writes_guarded(command, cwd):
     """True when a shell command (best effort, from its text) writes a file _is_guarded_config names or empties a folder that holds them: a
     redirection into one, a program that changes its arguments (rm, tee, sed -i, perl -i, mv, chmod ...), the destination of cp, install,
@@ -718,6 +968,7 @@ def bash_writes_guarded(command, cwd):
     def unknown(a):  # a relative operand after a directory change the text cannot resolve: it fails closed
         return cur is None and not a.startswith(("/", "~", "$"))
 
+    command = _quoted_text_as_text(command)  # a `>` inside the quoted pattern of a grep, or in a cat heredoc's body, is text
     for seg in _segments(command.replace(">|", ">")):  # `>|` is a plain redirect; the pipe split would cut it in two
         for m in _REDIRECT.finditer(seg):
             tgt = m.group(1).strip("'\"")

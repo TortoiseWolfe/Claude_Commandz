@@ -915,6 +915,75 @@ class BypassGapTests(Fixture):
         self.denied("flock -c 'rg x %s' lane.sh n /tmp s p.md" % parent, "entry 1")
         self.denied("timeout 5 find %s -name x; lane.sh n /tmp s p.md" % parent, "entry 1")
 
+    # issue 71: a `>` inside the text handed to a search or print program is text, not a redirect
+    def test_quoted_text_of_a_search_or_print_program_is_not_a_write(self):
+        s = "~/.claude/settings.json"
+        for cmd in ("node x.js > /tmp/out.txt 2>&1; grep -E 'MISSING|Location|=>|READ-BACK' /tmp/out.txt",  # the three from the issue
+                    "cat > /tmp/issue.md <<'EOF'\nexample: echo x > %s\nEOF" % s,
+                    "grep -n '> %s' /tmp/notes.md" % s,
+                    'grep -E "a|=>|b" /tmp/out.txt', "echo 'never run: echo x > %s'" % s, 'echo "a > $HOME/.claude/settings.json"',
+                    "cd $NOWHERE && grep -E 'a|=>|b' out.txt", "cat > /tmp/issue.md << 'EOF'\nexample: echo x > %s\nEOF" % s,
+                    "echo ok; cat <<EOF > /tmp/x\ntext > %s and $HOME\nEOF" % s, "cat <<'A'\nfoo > %s\nA\ngrep 'q>%s' /tmp/f" % (s, s),
+                    "cat <<'EOF'\n EOF\nstill body > %s\nEOF" % s, "grep 'x > %s' /tmp/f | sort | uniq -c | head -3" % s,
+                    "grep 'x > %s' /tmp/f |\nhead -3" % s, "echo 'x > %s' &" % s, "grep 'x > %s' /tmp/f 2>&1 | head" % s,
+                    "echo 'x > %s' >&2" % s, "grep -c 'x > %s' /tmp/f 2>/dev/null" % s, "grep 'x > %s' /tmp/f | cat <&0 | head -3" % s,
+                    "grep 'x > %s' /tmp/f | sort -k2,2n -u | uniq -c" % s, "grep 'x > %s' /tmp/f | sort -rn | tail -2" % s,
+                    "node x.js > /tmp/out.txt 2>&1; grep -E 'a|=>|b' /tmp/out.txt | sort | uniq -c | head -3"):
+            self.allowed(cmd)
+
+    def test_a_real_write_beside_quoted_text_is_still_denied(self):
+        s = "~/.claude/settings.json"
+        for cmd in ("echo x > %s" % s, "echo x >> %s" % s, "echo x > '%s'" % s, 'echo x > "$HOME/.claude/settings.json"', "echo 'a'>%s" % s,
+                    "echo x >| %s" % s, "echo 'a > b' > %s" % s, 'echo "a > b" > %s' % s, "echo 'a' 'b' > %s" % s, "echo 'a>b' >| %s" % s,
+                    "echo 'a>b' &> %s" % s, "grep 'a>b' /tmp/f; rm %s" % s, "echo 'x' | tee %s" % s, "cat > %s <<'EOF'\nhello\nEOF" % s,
+                    "cat <<'EOF'\nhello\nEOF\necho x > %s" % s, "cat <<-'EOF'\n\thello\n\tEOF\necho x > %s" % s,
+                    "cat <<-EOF\n\ttext\n\tEOF\necho x > %s" % s, "cat <<'EOF'\nEOF2\nEOF\necho x > %s" % s,
+                    "cat <<'A' <<'B'\nx\nA\ny\nB\necho z > %s" % s, "echo 'ok > fine' && bash -c \"echo y > %s\"" % s):
+            self.denied(cmd)
+
+    def test_quoted_text_that_a_shell_could_still_run_keeps_the_strict_reading(self):
+        s = "~/.claude/settings.json"
+        text = "echo x > %s" % s  # harmless as text; each command below hands it to something that runs it
+        for cmd in ("echo '%s' | bash" % text, "echo '%s' 2>&1 | bash" % text, "echo '%s' |\nbash" % text, "echo '%s' | env bash" % text,
+                    "echo '%s' | (bash)" % text, "cat <<'EOF' | sh\n%s\nEOF" % text, "cat <<'EOF' |\n%s\nEOF\nsh" % text,
+                    "bash <<'EOF'\n%s\nEOF" % text, "sh -s <<'EOF'\n%s\nEOF" % text, "bash <<< '%s'" % text, "bash <(echo '%s')" % text,
+                    "bash -c '%s'" % text, "eval '%s'" % text, 'echo "$(%s)"' % text, 'echo "`%s`"' % text, "cat <<EOF\n$(%s)\nEOF" % text,
+                    "eval $(echo a; echo 'b > %s'; echo c)" % s, "echo x | xargs -I{} sh -c 'echo {} > %s'" % s,
+                    "tmux send-keys '%s' Enter" % text,
+                    # a block's output is piped as a whole
+                    "{ :; echo '%s'; } | bash" % text, "if true; then :; echo '%s'; fi | bash" % text,
+                    "for i in 1; do :; echo '%s'; done | bash" % text, "while true; do :; echo '%s'; break; done | sh" % text,
+                    "if true; then echo 'x > %s'; fi" % s,
+                    # the text lands in a file that the same command runs
+                    "echo '%s' > /tmp/x.sh; bash /tmp/x.sh" % text, "cat > /tmp/x.sh <<'EOF'\n%s\nEOF\nbash /tmp/x.sh" % text,
+                    "echo '%s' >> /tmp/x.sh && . /tmp/x.sh" % text, "echo '%s' | sort -o /tmp/x.sh; bash /tmp/x.sh" % text,
+                    "echo '%s' | uniq - /tmp/x.sh; bash /tmp/x.sh" % text, "exec 3>/tmp/x.sh; echo '%s' >&3; bash /tmp/x.sh" % text,
+                    # the program's name cannot be trusted
+                    "grep() { eval \"$2\"; }; grep -e '%s'" % text, "hash -p /bin/bash grep; grep -c '%s'" % text, "alias echo=eval; echo '%s'" % text,
+                    ">grep bash -c '%s'" % text, "E=1 echo 'x > %s'" % s, "\"grep\" 'x > %s' /tmp/f" % s, "\\grep 'x > %s' /tmp/f" % s,
+                    # a copy of an open file (`<&0`) is a redirect, not the end of the pipeline: the text still reaches the shell
+                    "echo '%s' | cat <&0 | bash" % text, "echo '%s' | cat 0<&0 | sh" % text, "echo '%s' | sort <&0 | sh" % text,
+                    "echo '%s' | cat <&0 <&0 | . /dev/stdin" % text, "echo '%s' | cat 2<&1 | xargs -I{} sh -c {}" % text,
+                    # sort can run a program on its lines, and a variable, brace or wildcard word can hide that option or an output file
+                    "echo '%s' | sort -S 1 --compress-program=sh" % text, "echo '%s' | sort -S 1 --compress-prog sh" % text,
+                    "X=--compress-program=sh; echo '%s' | sort -S 1 $X" % text, "echo '%s' | sort -S 1 {--compress-program=sh,-u}" % text,
+                    "echo '%s' | sort -S 1 '--compress-program=sh'" % text, "echo '%s' | sort $X; bash /tmp/x.sh" % text,
+                    "echo '%s' | uniq $X; bash /tmp/x.sh" % text, "echo '%s' | sort {-o,/tmp/x.sh}; bash /tmp/x.sh" % text,
+                    # only space, tab and newline end a word in bash: `echo` with a carriage return glued on is another program
+                    "echo\r '%s'" % text, "echo\r '%s' | cat" % text, "cat <<'EOF'\r\n%s\nEOF\n" % text,
+                    # the text cannot be read with certainty
+                    "echo hi # don't\n%s # isn't it" % text, "cat <<EOF\ntext > %s\n" % s, "echo 'unterminated > %s" % s,
+                    "echo $'a\\'; %s; echo \\'b'" % text, "echo ${X:-'} ; %s ; echo '}" % text):
+            self.denied(cmd)
+
+    def test_quoted_text_reader_returns_the_command_unchanged_when_unsure(self):
+        for cmd in ("echo 'a > b' | bash", "echo `date` 'a > b'", "echo $(date) 'a > b'", "echo 'a > b' # note", "echo 'a > b", "cat <<EOF\na > b",
+                    "alias grep=bash; grep 'a > b'", "{ echo 'a > b'; }", "python3 -c 'a > b'", "echo 'a > b' > /tmp/f; sh /tmp/f"):
+            self.assertEqual(w._quoted_text_as_text(cmd), cmd, cmd)
+        self.assertEqual(w._quoted_text_as_text("grep -E 'a|=>|b' f; rm x"), "grep -E 'a =  b' f; rm x")
+        self.assertEqual(w._quoted_text_as_text("cat > /tmp/f <<'EOF'\na > b\nEOF\necho done"), "cat > /tmp/f <<'EOF'\necho done")
+        self.assertEqual(w._quoted_text_as_text("ls > out.txt"), "ls > out.txt")  # nothing outside quotes is ever touched
+
 
 if __name__ == "__main__":
     unittest.main()
