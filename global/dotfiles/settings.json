@@ -223,6 +223,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/bare-reference.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -290,6 +299,16 @@
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/list-file-guard.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/ask-card-guard.py",
             "timeout": 5
           }
         ]
