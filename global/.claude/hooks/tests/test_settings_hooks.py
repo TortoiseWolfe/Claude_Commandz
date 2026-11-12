@@ -158,6 +158,30 @@ class SettingsHookTests(unittest.TestCase):
         self.assertEqual(source["source"], "directory")
         self.assertTrue(source["path"].endswith("/repos/Claude_Commandz"))
 
+    def test_no_ai_wall_guard_runs_before_every_tool(self):
+        # The wall's entry has no matcher on purpose: a matcher would leave some tool unguarded. On 12 Nov 2026 the
+        # live settings file was overwritten and this entry was missing from the copy here, so a restore from this
+        # repo alone would have brought the machine back with no wall.
+        self.assertIn((None, "python3 -I ~/.claude/no-ai-wall/no-ai-wall-guard.py"), commands("PreToolUse"))
+        self.assertTrue((HOOKS_DIR.parent / "no-ai-wall" / "no-ai-wall-guard.py").exists())
+
+    def test_nextcloud_guard_runs_before_every_shell_call(self):
+        # Like the private inbox watcher, this guard's own file stays out of this public repo, so only its entry
+        # is checked. With the entry in place and the file missing every Bash call is refused, so a restore copies
+        # the file from the private backup first.
+        self.assertIn(("Bash", "python3 ~/.claude/hooks/nextcloud-guard.py"), commands("PreToolUse"))
+
+    def test_vercel_plugin_and_marketplace(self):
+        data = json.loads(SETTINGS.read_text())
+        self.assertIs(data["enabledPlugins"].get("vercel-plugin@vercel"), True)
+        self.assertEqual(data["extraKnownMarketplaces"]["vercel"]["source"], {"source": "github", "repo": "vercel/vercel-plugin"})
+        self.assertEqual(data["env"].get("VERCEL_PLUGIN_TELEMETRY"), "off")
+
+    def test_push_notices_and_model_switch_are_on(self):
+        data = json.loads(SETTINGS.read_text())
+        self.assertIs(data["agentPushNotifEnabled"], True)
+        self.assertIs(data["switchModelsOnFlag"], True)
+
     def test_idle_compaction_is_off(self):
         self.assertIs(json.loads(SETTINGS.read_text())["idleCompaction"], False)
 
