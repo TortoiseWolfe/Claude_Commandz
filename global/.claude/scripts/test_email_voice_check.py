@@ -462,11 +462,17 @@ class RecordClaimsAndFlatAnswers(unittest.TestCase):
 
 
 class ThirdPersonSelf(unittest.TestCase):
+    # The real names live in a private file this repo never holds; these tests use made-up ones.
+    def setUp(self):
+        saved = v.SELF_NAMES
+        v.SELF_NAMES = v.build_self_names(['Author'], ['Sample'])
+        self.addCleanup(setattr, v, 'SELF_NAMES', saved)
+
     def test_name_in_prose_fails(self):
-        self.assertTrue(v.third_person_self('Jon has the password.\nThanks\nJon'))
+        self.assertTrue(v.third_person_self('Sample has the password.\nThanks\nSample'))
 
     def test_name_inside_a_url_passes(self):
-        t = 'See https://github.com/TortoiseWolfe/RescueDogs/issues/495 for the fix.\nThanks, Jonathan'
+        t = 'See https://github.com/TortoiseWolfe/RescueDogs/issues/495 for the fix.\nThanks, Sample'
         self.assertEqual(v.third_person_self(t), [])
 
     def test_name_beside_a_url_still_fails(self):
