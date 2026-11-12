@@ -1065,6 +1065,23 @@ window_for() {  # <recycle K> -> autoCompactWindow, capped at LANE_WINDOW_CAP (2
   [ "$w" -le "$cap" ] || w=$cap
   echo "$w"
 }
+# raise_ceiling_k <lane> <connectors on|off|->: the highest line a recycle may give the lane without being asked (--recycle-at is the
+# asking). The running process compacts by itself at about 0.84 of the window it was started with, and the lowest compaction seen at
+# the full 200000 window was 165.5K, so the ceiling is 165K at the full window and in proportion for a smaller one (a lane started at
+# 60K has a 150000 window: 123K), and never above what a line set by hand may be (150K, or LANE_RECYCLE_MAX_CONN_K with the connectors
+# on). A lane with no .window file was started before this was recorded: it keeps the old ceiling, 0.84 x the window cap - 40K = 128K.
+raise_ceiling_k() {
+  local cap=${LANE_WINDOW_CAP:-200000} hand=150 win c
+  [ "${2:--}" = on ] && hand=${LANE_RECYCLE_MAX_CONN_K:-165}
+  win="$(head -c 16 "$HOME/.claude/state/lanes/.window-$1" 2>/dev/null | tr -d '\n' || true)"
+  if [[ "$win" =~ ^[0-9]+$ ]] && [ "$win" -ge 50000 ] && [ "$win" -le "$cap" ]; then
+    c=$(( win * ${LANE_RECYCLE_MAX_CONN_K:-165} / 200000 ))
+  else
+    c=$(( cap * 84 / 100000 - 40 ))
+  fi
+  [ "$c" -le "$hand" ] || c=$hand
+  echo "$c"
+}
 
 # Flags every Claude lane gets: effort (when the model takes one), one --settings JSON (compaction backstop from window_for,
 # plugins off, connectors off unless <connectors> is on, the workspace CLAUDE.md excluded) and the slim rules.
@@ -1164,7 +1181,11 @@ claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recy
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
   [ "$dry" = 1 ] || python3 -I "$(dirname "$0")/hub_lean.py" --install >/dev/null 2>&1 || true
   [ -z "$1" ] || printf -- '--effort %q ' "$1"
-  json='{"autoCompactWindow":'"$(window_for "${4:-100}")"',"bashOutputMaxChars":'"$LANE_BASH_OUTPUT_MAX_CHARS"
+  local win; win="$(window_for "${4:-100}")"
+  json='{"autoCompactWindow":'"$win"',"bashOutputMaxChars":'"$LANE_BASH_OUTPUT_MAX_CHARS"
+  # The window is fixed for the life of this process: /clear keeps the process, so a recycle can raise the lane's line but never this
+  # backstop. It is written beside the index so a recycle knows how high the line may go (raise_ceiling_k).
+  [ "$dry" = 1 ] || [ -z "${3:-}" ] || printf '%s\n' "$win" 2>/dev/null >"$HOME/.claude/state/lanes/.window-$3" || true
   [ "$2" = on ] || json+=',"disableClaudeAiConnectors":true'
   mcp="$(project_mcp_names "${5:-.}")"
   # --project-mcp <name[,name]>: those servers stay out of the disabled list and are pre-approved, so no dialog and the lane has their tools.
@@ -1251,6 +1272,35 @@ else:
     n = sum(last.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
     print("%dK" % round(n / 1000))
 ' 2>/dev/null || echo "?"
+}
+# start_k <dir> <session-id>: the session's start load, what its first message already held (rules, tool lists, the first prompt), as "<n>K",
+# or "?" when the transcript has no such record. The same count as ctx_k, taken from the first assistant turn instead of the last. Issue 34:
+# the week's fresh sessions held a median of 64K at that point (40K to 121K), and a line set without looking at it left some lanes almost no room.
+start_k() {
+  local f
+  f="$(transcript_of "$1" "$2")"
+  [ -n "$f" ] && [ -r "$f" ] || { echo "?"; return 0; }
+  # The file is opened here and read only as far as the first such turn: no pipe, so a long transcript cannot end it with a broken pipe.
+  python3 -I -c '
+import sys, json, itertools
+for line in itertools.islice(open(sys.argv[1], "rb"), 5000):
+    try:
+        o = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(o, dict) or o.get("type") != "assistant" or o.get("isSidechain"):
+        continue
+    m = o.get("message")
+    u = m.get("usage") if isinstance(m, dict) else None
+    if not isinstance(u, dict):
+        continue
+    n = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    if n > 0:
+        print("%dK" % round(n / 1000))
+        break
+else:
+    print("?")
+' "$f" 2>/dev/null || echo "?"
 }
 
 is_headless_billing() {
@@ -1732,8 +1782,9 @@ fi
 # The request is typed at once, mid-turn if need be: Claude Code queues it and the lane sees it after the tool call in flight. Waiting for
 # the turn to end first failed (21 Oct, this lane: one 15-minute turn from 120K to the 168K backstop, "did not finish its turn in 300s",
 # then an auto compaction). Only a dialog on screen holds the request back, since typing would answer the dialog.
-# A recycle within LANE_RECYCLE_THRASH_SECS (1200) of the lane's previous start or recycle means its working set is bigger than its line:
-# the new row's line goes up 20K, to at most 0.84 x the window cap - 40K.
+# The line the new row carries (unless --recycle-at names one): at least the lane's measured start load (start_k) plus LANE_WORKING_ROOM_K
+# (50). A recycle within LANE_RECYCLE_THRASH_SECS (1200) of the lane's previous start or recycle means its working set is bigger than its
+# line: the line goes up at least 20K. Both stop at raise_ceiling_k, and a recycle never lowers a line.
 #   LANE_RECYCLE_IDLE_SECS (300)  how long a dialog may hold the request back
 #   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking
 if [ "$mode" = recycle ]; then
@@ -1758,9 +1809,19 @@ if [ "$mode" = recycle ]; then
     rk="$recycle_at_opt"
   fi
   rk_now="$(lane_recycle_k "${rk:-}" "${p:-}" "$dir" "${conn:--}")"
-  rk_next="$rk_now"
-  if [ "$recycle_at_set" != 1 ] && [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ]; then
-    rk_next=$(( rk_now + 20 )); rk_ceiling=$(( ${LANE_WINDOW_CAP:-200000} * 84 / 100000 - 40 ))
+  rk_next="$rk_now"; startk='?'
+  if [ "$recycle_at_set" != 1 ]; then
+    # The line the new row carries is never lower than what the lane holds at its first message plus the working room (issue 34): a lane
+    # that starts at 100K with a 127K line is back at it in minutes however often it is cleared. The session being cleared is the measure;
+    # the fresh one loads the same rules and tool lists. A line already above that stays.
+    startk="$([ -n "${id:-}" ] && [ "$id" != - ] && start_k "$dir" "$id" || echo '?')"; startk="${startk%K}"
+    if [[ "$startk" =~ ^[0-9]+$ ]] && [ $(( startk + LANE_WORKING_ROOM_K )) -gt "$rk_next" ]; then rk_next=$(( startk + LANE_WORKING_ROOM_K )); fi
+    if [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ] && [ "$rk_next" -lt $(( rk_now + 20 )) ]; then
+      rk_next=$(( rk_now + 20 ))
+    fi
+    # Both raises stop at raise_ceiling_k: under the point where this lane's own process compacts, and no higher than a line set by hand.
+    # The old ceiling was 128K for every lane, one K above a connector lane's default line, so the raise did nothing where it was needed.
+    rk_ceiling="$(raise_ceiling_k "$name" "${conn:--}")"
     [ "$rk_next" -le "$rk_ceiling" ] || rk_next=$(( rk_ceiling > rk_now ? rk_ceiling : rk_now ))
   fi
   target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
@@ -1970,8 +2031,9 @@ PY
   done
   [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
-  printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" >>"$rlog"
-  echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K"
+  start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"
+  printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK%s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" "$start_note" >>"$rlog"
+  echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K$start_note"
   exit 0
 fi
 
@@ -2506,6 +2568,8 @@ else
   pm_start=-
 fi
 eff="-"; flags=""; conn="-"; rk=""
+# A lane of another engine has no Claude window: an older Claude lane of the same name must not leave its .window file behind.
+[ "$dry" = 1 ] || [ "$engine" = claude ] || rm -f "$HOME/.claude/state/lanes/.window-$name"
 # Claude gets a short fixed message naming the prompt file, never the prompt text: the text would sit on claude's command line, and a lane
 # that ran pgrep -f with words from its own prompt killed itself (28 Oct 2026). The hand-off folder is already an --add-dir.
 lane_msg="Your task is in $lprompt. Read that whole file now and follow it. report.md line 1 changes only when the hub must act (done, blocked, a step for Jonathan); routine status goes to status.md in the same folder, or a line starting HOURLY or STATUS. $LANE_STANDING_RULE"
