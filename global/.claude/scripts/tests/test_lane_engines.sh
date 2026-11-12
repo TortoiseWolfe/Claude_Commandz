@@ -267,6 +267,8 @@ run_lane --dry-run claude-rule-lane "$REPO" sonnet "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'a claude start dry run works'
 plain_start="$(printf '%s' "$LAST_OUTPUT" | tr -d '\\')"   # a dry run shell-quotes the command more than once: drop the backslashes
 assert_contains "$plain_start" 'Standing rule: when a step finishes, start the next item in your queue at once.' 'the start message carries the standing rule'
+assert_contains "$plain_start" 'items N' 'the start message asks for items N on a finished line 1'
+assert_contains "$plain_start" '## Proof' 'the start message asks for a ## Proof section'
 assert_contains "$plain_start" 'End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1.' 'the start message names QUEUE EMPTY and BLOCKED'
 
 # Sending follow-up text to one-shot lanes must stop before touching their tmux window.

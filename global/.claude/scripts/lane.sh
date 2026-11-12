@@ -204,8 +204,9 @@ LANE_SKILLS_KEEP="
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
 # The standing rule every lane is told at start and at every re-prime (6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke
-# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1.
-LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs."
+# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1,
+# and its done_proof_check names a lane whose finished line 1 has no "items N" and no proof lines under "## Proof".
+LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs. A line 1 that says the work is finished (DONE or QUEUE EMPTY) also says items N, and report.md then has a section headed ## Proof with one line per item, each holding an https:// link or the full path of a file that exists, read back from the live thing."
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 
