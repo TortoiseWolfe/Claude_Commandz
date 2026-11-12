@@ -41,10 +41,20 @@ class Pace(unittest.TestCase):
         patcher = mock.patch.object(deck_write, "now", side_effect=lambda: self.clock)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.posts = []   # every fake request that would have reached the Deck
+        self.posts = []      # every fake write request that would have reached the Deck (reads are not listed)
+        self.comments = {}   # path -> the comments the fake Deck holds, so the read-back after a post finds them
+        self.refuse = None   # set to an error text and the fake Deck refuses every write request with it
 
         def fake_call(c, method, path, body=None, api=deck_write.API):
+            if method == "GET":
+                return {"ocs": {"data": list(self.comments.get(path, []))}}
+            if self.refuse:
+                raise SystemExit(self.refuse)
             self.posts.append((method, path, body))
+            if method == "POST" and path.endswith("/comments"):
+                item = {"id": len(self.posts), "message": body["message"]}
+                self.comments.setdefault(path, []).append(item)
+                return {"ocs": {"data": {"id": item["id"]}}}
             return None
         for patcher in (mock.patch.object(deck_write, "read_env", return_value={"URL": "https://example.test"}),
                         mock.patch.object(deck_write, "find_card", return_value=({"id": 6, "title": "Done"}, {"id": 9, "title": "A card"})),
@@ -131,7 +141,7 @@ class TheQueue(Pace):
         odd = "hey, it's \"ok\" now: the page loads fine for me, even with  two spaces and a tab\there."
         with mock.patch.object(deck_write, "require_chat_voice"):
             code, out, _ = self.queue(odd)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, deck_write.EXIT_QUEUED)   # stored, not posted: its own exit code, never 0
         entry = json.loads(self.queue_file().read_text().splitlines()[0])
         self.assertEqual(entry["argv"], ["comment", "--card", "9", "--text", odd])
         self.assertEqual((entry["board"], entry["status"]), (4, "queued"))
@@ -191,22 +201,24 @@ class TheQueue(Pace):
 
     def test_a_failed_write_waits_ten_minutes_then_parks_after_three_tries(self):
         self.queue()
-        with mock.patch.object(deck_write, "call", side_effect=SystemExit("deck_write: POST /cards/9/comments: HTTP 500")):
-            self.assertEqual(self.run_cli("drain")[0], 1)
-            entry = json.loads(self.queue_file().read_text())
-            self.assertEqual((entry["attempts"], entry["status"]), (1, "queued"))
-            self.clock = at(10, 5)
-            self.run_cli("drain")   # inside both its own retry wait and the gap: nothing happens
-            self.assertEqual(json.loads(self.queue_file().read_text())["attempts"], 1)
-            self.clock = at(11)
-            self.run_cli("drain")
-            self.clock = at(12)
-            self.run_cli("drain")
+        self.refuse = "deck_write: POST /cards/9/comments: HTTP 403"   # a plain refusal: the Deck wrote nothing, so a retry is safe
+        self.assertEqual(self.run_cli("drain")[0], 1)
+        entry = json.loads(self.queue_file().read_text())
+        self.assertEqual((entry["attempts"], entry["status"]), (1, "queued"))
+        self.clock = at(10, 5)
+        self.run_cli("drain")   # inside both its own retry wait and the gap: nothing happens
+        self.assertEqual(json.loads(self.queue_file().read_text())["attempts"], 1)
+        self.clock = at(11)
+        self.run_cli("drain")
+        self.clock = at(12)
+        self.run_cli("drain")
         entry = json.loads(self.queue_file().read_text())
         self.assertEqual((entry["attempts"], entry["status"]), (3, "failed"))
+        self.refuse = None
         self.clock = at(13)
-        self.run_cli("drain")   # parked: never tried again
+        self.run_cli("drain")   # parked: never tried again, even now that the Deck would take it
         self.assertEqual(json.loads(self.queue_file().read_text())["attempts"], 3)
+        self.assertEqual(self.posts, [])
 
     def test_queued_pairs_post_together(self):
         self.run_cli("queue", "4", "comment", "--card", "9", "--text", TEXT, "+", "move", "--card", "9", "--stack", "Done")
