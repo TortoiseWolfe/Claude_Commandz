@@ -69,6 +69,7 @@
 # minutes while it stays idle (idle_remind_check; 6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke breaks"). Before, the
 # "ended a turn without a new report" line came once per ended turn and a lane with a backlog could then sit idle for hours. The standing rule
 # every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
+# Also left alone (line1_rests): a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
@@ -287,9 +288,31 @@ job_idle_check() {
 # BLOCKED is named again, and again every LANE_WATCH_IDLE_REMIND_MIN minutes while it stays idle. 6 Nov 2026 (Jonathan: "we have to big of a
 # backlog to idle on smoke breaks"): the "ended a turn without a new report" line above comes once per ended turn, so a lane that stopped with
 # a backlog still queued sat idle for hours after that one line. A lane may end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1
-# (the standing rule lane.sh puts in the start and re-prime text); those two are left alone. Idle means what job_idle_check means: no dialog,
+# (the standing rule lane.sh puts in the start and re-prime text); those two are left alone, and so is a line line1_rests accepts. Idle means what job_idle_check means: no dialog,
 # no spinner, no recycle under way, and a "· done H:MM" line that old. The mark .idleremind-<lane> holds "<done epoch> <last named epoch>",
 # so a re-armed watcher keeps the spacing and a new turn (new done time) starts a new stretch. LANE_WATCH_IDLE_REMIND_MIN=0 turns it off.
+#
+# line1_rests <report line 1>: true when the line says the lane has nothing to start, so the idle reminder leaves it alone. Four kinds:
+#   QUEUE EMPTY or BLOCKED at the start (the standing rule's two endings);
+#   EMPTY <time> | ..., what the lane prompts have always asked for as the end-of-queue line (6 Nov: six lanes wrote it and were named every 20 min);
+#   a first word that names who the lane waits on: HUB or JONATHAN as one hyphen-joined part of it (HUB-ACT, NEED-HUB, READY-FOR-HUB,
+#     STEP-FOR-JONATHAN). The hub is woken once by the report itself; naming the lane again every 20 minutes woke it for nothing (8 Nov,
+#     a lane waiting on "HUB-ACT 3:23 AM | ..." was named at 24 minutes and after);
+#   DONE as the whole first word, unless the line still counts an ask ("needs hub 2", "needs Jonathan 1"; a count of 0 is no ask). 6 Nov: two
+#     finished lanes that wrote DONE were named, one after 197 minutes, and the hub had to ask each to rewrite the line as QUEUE EMPTY.
+# The first word is capitals joined by hyphens and must end at a character that is not a letter, digit, underscore or hyphen, so HUBRIS,
+# DONE-ISH and "Hub: ..." are not taken. LC_ALL=C is set for this function only: [A-Z] means the 26 plain capitals on every machine.
+line1_rests() {
+  local first=$1 w low LC_ALL=C
+  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
+  [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]] || return 1
+  w=${BASH_REMATCH[1]}
+  case "-$w-" in *-HUB-*|*-JONATHAN-*) return 0 ;; esac
+  [ "$w" = DONE ] || return 1
+  low=${first,,}
+  [[ ! $low =~ needs?\ (the\ )?(hub|jonathan):?\ *[1-9] ]]
+}
+
 idle_remind_check() {
   local l=$1 pane=$2 dl t de now mins limit=${LANE_WATCH_IDLE_REMIND_MIN:-20} mark prev rep first
   [[ "$limit" =~ ^[0-9]+$ ]] || limit=20
@@ -307,8 +330,7 @@ idle_remind_check() {
   [ "$mins" -ge "$limit" ] || return 0
   rep=$(report_of "$l")
   first=$(head -n 1 "$rep" 2>/dev/null)
-  # EMPTY <time> | ... is what the lane prompts have always asked for as the end-of-queue line (6 Nov: six lanes wrote it and were named every 20 min).
-  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
+  line1_rests "$first" && return 0
   mark="$recycle_dir/.idleremind-$l"
   prev=$(cat "$mark" 2>/dev/null)   # "<done epoch> <named epoch>"
   if [ "${prev%% *}" = "$de" ] && [ -n "${prev##* }" ] && [ $(( now - ${prev##* } )) -lt $(( limit * 60 )) ]; then return 0; fi
