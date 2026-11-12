@@ -112,7 +112,10 @@ fcntl.ioctl(s, 0x8914, struct.pack("16sH14x", b"lo", f | 1))' 2>/dev/null || ech
     case "$allowed" in *" $name "*) ;; *) die "the home path shows something besides the sentinel: $name" ;; esac
   done < <(ls -A -- "$RH")
   [ "$$" = 1 ] || die "this is not the first process of a new process list"
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "$(cat "/proc/$$/comm" 2>/dev/null)" ] || die "/proc does not show the new process list"
+  # A builtin read, so /proc/self is this shell: the new /proc calls it 1, the old one would show its number outside the room.
+  selfpid=""
+  read -r selfpid _ < /proc/self/stat 2>/dev/null || selfpid=""
+  [ "$selfpid" = 1 ] || die "/proc does not show the new process list"
   for i in "${!KEEP_PATHS[@]}"; do
     if [ "${KEEP_MODES[$i]}" = ro ] && test -w "${KEEP_PATHS[$i]}"; then die "${KEEP_PATHS[$i]} is not read-only"; fi
   done
@@ -124,8 +127,9 @@ fcntl.ioctl(s, 0x8914, struct.pack("16sH14x", b"lo", f | 1))' 2>/dev/null || ech
   # 8. The real uid, no capabilities left over, no way to gain any. The command runs as a child, not in place of this process: the first process
   #    of a pid namespace gets no default signal handling (a plain kill does nothing to it) and nothing above it in a process-ancestry walk counts
   #    pid 1, so a test that walks its parents would lose the chain. This process stays as the room's init, passes the signals on, and returns
-  #    the command's exit code; when it ends, the kernel ends everything left in the room.
-  unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs env CLOSED_ROOM=1 HOME="$RH" TMPDIR=/tmp "$@" <&0 &
+  #    the command's exit code; when it ends, the kernel ends everything left in the room. A script's background command starts with INT and
+  #    QUIT ignored, and the command would inherit that (Ctrl-C would do nothing), so env puts both back to their defaults.
+  unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs env --default-signal=INT,QUIT CLOSED_ROOM=1 HOME="$RH" TMPDIR=/tmp "$@" <&0 &
   child=$!
   trap 'kill -TERM "$child" 2>/dev/null' TERM
   trap 'kill -INT "$child" 2>/dev/null' INT

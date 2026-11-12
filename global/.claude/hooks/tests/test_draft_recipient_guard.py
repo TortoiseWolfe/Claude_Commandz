@@ -217,7 +217,7 @@ class Wiring(unittest.TestCase):
 
 class LiveHook(unittest.TestCase):
     """Runs the hook installed at $HOME/.claude/hooks/block-outbound.sh. No skip: if the hook or the installed guard is missing, the wiring is
-    broken and this fails. On the tower HOME is the real home and this tests the live hook; the CI job installs the fixture and the repo's guard
+    broken and this fails. Where HOME is the real home (a run outside the closed room) this tests the live hook; the CI job installs the fixture and the repo's guard
     into its temporary HOME first, so there it runs the same behaviour against the stand-in. (That the fixture still matches the live hook, and
     that the hand copy of the guard is the repo's file, are checked by install_scripts.py, not here: on a runner the job's copy is made from
     the repo, so either comparison would be a file against itself.)

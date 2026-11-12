@@ -65,6 +65,9 @@ room_in "$HERE" -- bash -c 'ls -A /run | wc -l'
 assert_eq "$ROUT" 0 "/run is empty at start"
 
 # 5. The cover cannot be taken off.
+room -- bash -c 'read -r selfpid _ < /proc/self/stat; echo "self=$selfpid"; grep SigIgn /proc/self/status'
+assert_not_contains "$ROUT" "self=1" "the command is a child of the room's first process, not the first process"
+case "$ROUT" in *SigIgn:*[0189]) ok ;; *) fail "the command starts with INT or QUIT ignored, so Ctrl-C could not stop it (got: $ROUT)" ;; esac
 room -- bash -c 'umount ~ 2>/dev/null; echo rc=$?; test -e ~/.closed-room && echo sentinel-there'
 assert_not_contains "$ROUT" "rc=0" "umount of the home is refused"
 assert_contains "$ROUT" sentinel-there "the sentinel is there after the umount try"
