@@ -37,6 +37,8 @@ Claude_Commandz/
 
 `coop-scrubber.py` (a `PostToolUse` hook) rewrites a tool's result in a co-op folder so every person's name, email address and phone number is a placeholder before a vendor model reads it; elsewhere it does nothing. The work is in `scripts/coop_scrubber.py`; `scripts/coop_roster_build.py` builds the private roster at run time and prints counts only; `scripts/coop_scrubber_install_presidio.sh` sets up the Presidio venv. The folder patterns, the roster and the venv are private and never come into this repo. Register it with `"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/coop-scrubber.py"}]}]`. Tests: `scripts/tests/test_coop_scrubber.py`, `test_coop_roster_build.py`, `test_coop_scrubber_hook.py`.
 
+`output-scrubber.py` (a `PostToolUse` and `PostToolUseFailure` hook) masks secret values (keys, tokens, passwords) in what any tool printed before a model reads them, then runs the co-op scrub above in the same process, so it is registered in place of `coop-scrubber.py`. A hook can only rewrite a call that succeeded, so Bash calls also run through `scripts/shell_scrub_prefix.sh` (set as `CLAUDE_CODE_SHELL_PREFIX` in `settings.json`), which hands each one to `scripts/shell_scrub_wrapper.py` to filter its output at every exit code. The rules live in `scripts/secret_scrubber.py`. Known gaps: a value split across two lines can pass, and a few lines of ordinary code read through the shell get masked (read that file with the Read tool instead). To turn the Bash filter off, create the file `~/.claude/state/shell-scrub-off`.
+
 **Totals:** 73 global commands + 3 dotfiles + 90 project commands across 8 repos = **166 backed-up files**.
 
 ## Restore on a new machine

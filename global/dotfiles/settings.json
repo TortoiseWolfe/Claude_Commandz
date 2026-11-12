@@ -4,7 +4,8 @@
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
     "ENABLE_STOP_REVIEW": "0",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
-    "CLAUDE_CODE_DISABLE_MOUSE_CLICKS": "1"
+    "CLAUDE_CODE_DISABLE_MOUSE_CLICKS": "1",
+    "CLAUDE_CODE_SHELL_PREFIX": "/home/TurtleWolfe/.claude/scripts/shell_scrub_prefix.sh"
   },
   "permissions": {
     "allow": [
@@ -285,7 +286,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/coop-scrubber.py"
+            "command": "python3 ~/.claude/hooks/output-scrubber.py",
+            "timeout": 15
           }
         ]
       }
@@ -308,6 +310,18 @@
             "type": "command",
             "command": "bash ~/.claude/hooks/precompact-keep.sh",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/output-scrubber.py",
+            "timeout": 15
           }
         ]
       }
