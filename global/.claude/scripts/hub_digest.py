@@ -542,6 +542,119 @@ def rules_pass_line(now, efficiency_dir=None):
             "(three weeks of corrections, numbered adds and removals for Jonathan).")
 
 
+NO_HEADER = "(no header)"   # what tools_catalog.py writes for a tool whose header gives no first sentence
+TOOLS_CATALOG = HOME / ".claude/scripts/TOOLS.md"
+NO_HEADER_SHOWN = 5
+
+
+def no_header_tools_line(catalog=None):
+    """One line naming the tools the catalog lists as "(no header)" (at most 5, then "and N more"); empty when the file is missing,
+    unreadable or clean. A catalog line is "- <path> | <what> | <when>", so the name is the path's last part."""
+    try:
+        text = Path(catalog if catalog is not None else TOOLS_CATALOG).read_text(errors="replace")
+    except OSError:
+        return ""
+    names = []
+    for line in text.splitlines():
+        parts = [x.strip() for x in line.split(" | ")]
+        if line.startswith("- ") and len(parts) > 1 and parts[1] == NO_HEADER:
+            names.append(parts[0][2:].strip().rsplit("/", 1)[-1])
+    if not names:
+        return ""
+    shown = ", ".join(names[:NO_HEADER_SHOWN]) + (f" and {len(names) - NO_HEADER_SHOWN} more" if len(names) > NO_HEADER_SHOWN else "")
+    return (f"Tools with no header line ({len(names)}): {shown}. A new tool starts with a header line and a 'Use when:' line; "
+            "then run tools_catalog.py build.")
+
+
+PEER_REVIEW_REPOS = HOME / ".config/afa/peer-review-repos.txt"   # private list: one owner/repo per line, # comments allowed
+
+
+def peer_review_repos(path=None):
+    try:
+        text = Path(path if path is not None else PEER_REVIEW_REPOS).read_text(errors="replace")
+    except OSError:
+        return []
+    lines = (l.split("#", 1)[0].strip() for l in text.splitlines())
+    return [l for l in lines if re.fullmatch(r"[\w.-]+/[\w.-]+", l)]
+
+
+def gh_review_since(repos, since, run=subprocess.run):
+    """True when the authenticated gh user submitted a review on a pull request in one of the repos at or after `since` (an aware datetime);
+    False when none; None when gh failed (reported on stderr, never raised). gh search prs --reviewed-by finds the candidates (it filters by
+    PR update date, whole days), then the reviews of each are read for the exact submitted_at."""
+    def gh(args):
+        try:
+            r = run(["gh"] + args, capture_output=True, text=True, timeout=10)   # the whole digest build has 60 s
+        except (OSError, subprocess.SubprocessError) as exc:
+            sys.stderr.write("hub_digest: peer-review check failed: %s\n" % type(exc).__name__)
+            return None
+        if r.returncode != 0:
+            sys.stderr.write("hub_digest: peer-review check failed: %s\n" % (r.stderr or "").strip()[:200])
+            return None
+        return r.stdout
+    me = gh(["api", "user", "--jq", ".login"])
+    if me is None:
+        return None
+    me = me.strip()
+    for repo in repos:
+        found = gh(["search", "prs", "--repo", repo, "--reviewed-by", "@me", "--updated", ">=" + since.date().isoformat(),
+                    "--json", "number", "--jq", ".[].number", "--limit", "30"])
+        if found is None:
+            return None
+        for number in found.split():
+            rows = gh(["api", f"repos/{repo}/pulls/{number}/reviews", "--paginate", "--jq", ".[] | [.user.login, .submitted_at] | @tsv"])
+            if rows is None:
+                return None
+            for row in rows.splitlines():
+                who, _, when = row.partition("\t")
+                try:
+                    posted = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if who == me and posted >= since:
+                    return True
+    return False
+
+
+PEER_REVIEW_STATE = HOME / ".claude/state/peer-review-check.json"   # this week's answer, so the 15-minute digest does not call gh each time
+PEER_REVIEW_RECHECK_SECS = 3600
+
+
+def peer_review_line(now, repos_file=None, checker=gh_review_since, state_file=None):
+    """From Tuesday (Eastern) on, one line when the owner has posted no peer review since Monday 00:00 Eastern; empty on Monday, when the list
+    of repos is missing or empty (no gh call then), when a review is found, or when the check failed. With state_file, a review found this
+    week is remembered for the rest of the week and a miss is re-checked at most once an hour."""
+    et = datetime.fromtimestamp(now.timestamp(), ZoneInfo("America/New_York"))
+    if et.weekday() == 0:
+        return ""
+    repos = peer_review_repos(repos_file)
+    if not repos:
+        return ""
+    monday = (et - timedelta(days=et.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    line = "No peer review posted this week (since Monday): start the weekly peer-review lane."
+    week = monday.date().isoformat()
+    if state_file is not None:
+        try:
+            st = json.loads(Path(state_file).read_text())
+            if st.get("week") == week:
+                if st.get("found") is True:
+                    return ""
+                if now.timestamp() - float(st.get("checked", 0)) < PEER_REVIEW_RECHECK_SECS:
+                    return line
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    found = checker(repos, monday)
+    if found is None:
+        return ""
+    if state_file is not None:
+        try:
+            Path(state_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(state_file).write_text(json.dumps({"week": week, "found": found, "checked": now.timestamp()}))
+        except OSError:
+            pass
+    return "" if found else line
+
+
 def phase_note(now):
     """The token week's phase (openclaw_dispatch.week_phase, the one place its boundaries live), as the line the Budget section adds.
     Phase 3 (Tuesday 6:00 AM to the reset) holds no reserve: Jonathan, 28 Oct about 9:20 AM, "the closer we get the the reset, the
@@ -1274,7 +1387,7 @@ def main(argv=None):
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
                           coop_cards=coop_cards,
-                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now)])
+                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)

@@ -56,4 +56,27 @@ grep -q "grep -qF -- '$HEAD' \"\$lprompt\"" "$SCRIPT" || fail "the real append c
 grep -q 'timeout 20 python3 -I "$SCRIPT_DIR/tools_catalog.py" match "$lprompt"' "$SCRIPT" || fail "the matcher runs under timeout 20"; ok
 grep -q 'tools_sec=""' "$SCRIPT" || fail "a matcher failure is ignored"; ok
 
+# 4. A repo with no graphify graph: a fresh start also puts a "## Graph" section in prompt.md, once; a dry run, a skipped repo and a repo with a graph get none.
+GH='## Graph'
+GREPO="$HOME_T/repos/widgets"; mkdir -p "$GREPO"; git -C "$GREPO" init -q
+lane --dry-run graph-a "$GREPO" sonnet "$P"
+[ ! -e "$LANES/$(date +%F)-graph-a/prompt.md" ] || fail "a dry run wrote a prompt.md"; ok
+lane graph-b "$GREPO" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "a start in a repo without a graph works ($LAST_OUT)"; ok
+D="$LANES/$(date +%F)-graph-b"
+[ "$(grep -c "^$GH\$" "$D/prompt.md")" = 1 ] || fail "prompt.md holds the Graph heading once"; ok
+has "$(cat -- "$D/prompt.md")" "run /graphify-init" "the Graph section names /graphify-init"
+hasnt "$(cat -- "$P")" "$GH" "the source prompt is not edited by the graph note"
+lane graph-b "$GREPO" sonnet "$P"
+[ "$(grep -c "^$GH\$" "$D/prompt.md")" = 1 ] || fail "a second start adds no second Graph heading"; ok
+lane --restart graph-b "$GREPO" sonnet "$P"
+[ "$LAST_RC" = 0 ] || fail "a restart works ($LAST_OUT)"; ok
+[ "$(grep -c "^$GH\$" "$D/prompt.md")" -le 1 ] || fail "a restart adds no second Graph heading"; ok
+mkdir -p "$HOME_T/.config/afa"; printf '%s\n' "$(cd "$GREPO" && pwd -P)" >"$HOME_T/.config/afa/graphify-skip"
+lane graph-c "$GREPO" sonnet "$P"
+hasnt "$(cat -- "$LANES/$(date +%F)-graph-c/prompt.md")" "$GH" "a repo on the skip list gets no Graph section"
+rm -f "$HOME_T/.config/afa/graphify-skip"; mkdir -p "$GREPO/graphify-out"
+lane graph-d "$GREPO" sonnet "$P"
+hasnt "$(cat -- "$LANES/$(date +%F)-graph-d/prompt.md")" "$GH" "a repo with a graph gets no Graph section"
+
 echo "ok - $checks checks passed"
