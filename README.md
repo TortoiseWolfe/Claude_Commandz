@@ -129,7 +129,7 @@ hooks, workflows, agents and skills. Tests: `python3 -m pytest global/.claude/sc
 the files from git, never from a working folder, so a half-edited checkout can't leak into the live scripts. It prints a
 per-file summary first (new, changed, same, drift) and asks `Install? [y/N]` before it copies anything. A live file that
 matches no earlier repo version is listed as drift and left alone. A script that reads the no-AI wall from
-`~/.claude/no-ai-wall/` (lane.sh) is held back, and not copied, while that folder lacks any of the wall's three files; the
+`~/.claude/no-ai-wall/` (lane.sh) is held back, and not copied, while that folder lacks any of the files lane.sh reads from it; the
 summary then prints the exact `global/.claude/no-ai-wall/install.sh` command a person runs first (6 Nov: a lane.sh installed
 without that folder refused to start any lane). No-AI-wall files and settings files are skipped without
 being read. It backs up every file it replaces and writes an `undo.sh` beside the backup under
@@ -144,7 +144,7 @@ Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `
 
 ### Installing the no-AI wall (a person runs this, never a session)
 
-The wall's three files live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
+The wall's four files (the guard, its module, its shell helper and the cleanup command below) live in `~/.claude/no-ai-wall/`, a folder sessions cannot change, except by running the cleanup command below, which only moves strays out. One command installs them from a named
 commit (it reads git, never the working tree or the network), backs up every live file it replaces, moves the hook entry in
 `settings.json`, removes the three old copies, and proves the result. It moves only the wall. The usual install step for the other
 global files (`install_global.py --include-stale`) runs only if you add `--with-tooling` before the commit; a copy of every stale
@@ -158,6 +158,23 @@ bash <(git -C ~/repos/Claude_Commandz show <commit>:global/.claude/no-ai-wall/in
 The last line it prints is `WALL OK <commit> refused <n>/<n> ordinary <n>/<n>`, or `WALL FAILED <reason> after undoing itself`.
 The backup folder, `~/.claude/state/no-ai-wall-backups/<date>-<commit>/`, holds `undo.sh`; `bash <that folder>/undo.sh` puts everything back.
 Tests: `python3 -m pytest global/.claude/scripts/tests/test_no_ai_wall_install.py`.
+
+#### Cleaning stray files out of the wall's folder
+
+A script can drop a file into `~/.claude/no-ai-wall/` unseen, and no session may write there to take it out. The wall's own
+cleanup command does it. It looks only at its own folder, leaves the four wall files alone (and the half-written copy an install makes, named with a dot in front and `.new` at the end, while it is an ordinary file with one name; under that name anything else is a stray), and takes no path or file name from
+whoever runs it. A dry run lists what does not belong; `--apply` moves each stray (never deletes it) into
+`~/.claude/state/no-ai-wall-strays/<date-time>/` and adds one line per move to `~/.claude/state/no-ai-wall-cleanup.log`
+(name, kind, size and, for an ordinary file up to 1 MB, a checksum; never file content). It refuses to move anything when the holding folder or the log is a
+link or the wrong kind of thing.
+
+```bash
+python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            # dry run: list only
+python3 -I ~/.claude/no-ai-wall/wall_cleanup.py --apply    # move the strays
+```
+
+On exit 0 or 1 the last line it prints starts with `WALL` (`WALL CLEAN`, or `WALL STRAYS <n> ...`); on exit 2 or 3 it prints nothing on standard output, and the reason (after any notes it held back) goes to the error stream. Exit codes: 0 fine, 1 a warning or a move
+that failed, 2 wrong arguments, 3 refused with nothing moved. Tests: `python3 -m pytest global/.claude/scripts/tests/test_wall_cleanup.py`.
 
 ### Scenario C — Single repo only
 

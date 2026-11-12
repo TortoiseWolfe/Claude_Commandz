@@ -15,8 +15,8 @@ What it does, in order. Every file comes out of git (the commit), never the work
        same     the live copy already equals origin/main (counted; --list-same names them)
        DRIFT    the live copy equals NO version in origin/main's history: a local edit nobody committed. It is listed and
                 nothing is copied for that file (commit the edit or discard it, then run again)
-       HELD     the file reads the wall from ~/.claude/no-ai-wall/ (lane.sh does) and that folder lacks one of the wall's three
-                files: not copied, and the exact global/.claude/no-ai-wall/install.sh command to run first is printed
+       HELD     the file reads the wall from ~/.claude/no-ai-wall/ (lane.sh does) and that folder lacks one of the wall's files
+                that lane.sh reads: not copied, and the exact global/.claude/no-ai-wall/install.sh command to run first is printed
      Files that belong to the no-AI wall (any file whose name has "no_ai" or "no-ai" in it, the settings files) are never
      read, compared, copied or backed up: they are listed as skipped and left alone;
   3. asks "Install? [y/N]" (skip with --yes; --dry-run stops here);
@@ -190,7 +190,7 @@ def print_wall_help(sha):
     print()
     print(f"    bash <(git -C ~/repos/Claude_Commandz show {sha}:global/.claude/no-ai-wall/install.sh) {sha}")
     print()
-    print("What it changes: it puts the wall's three files in ~/.claude/no-ai-wall/, points the wall's hook entry in")
+    print("What it changes: it puts the wall's four files in ~/.claude/no-ai-wall/, points the wall's hook entry in")
     print("~/.claude/settings.json at that folder (only the path changes), removes the three old copies from ~/.claude/hooks and")
     print("~/.claude/scripts, brings the other global files up to date with the repo's usual install step, then runs a smoke test and")
     print("undoes itself if that fails (backup and undo.sh under ~/.claude/state/no-ai-wall-backups/). Run this script again after it.")
