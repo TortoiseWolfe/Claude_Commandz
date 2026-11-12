@@ -20,6 +20,7 @@ import sys
 import tempfile
 
 SEED_VAR = "CLOSED_ROOM_SEED_HOME"
+PRIVATE = (".claude", ".config", ".ssh", ".gnupg")  # the same four closed_room_guard.sh refuses
 ROOM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "closed_room.sh")
 
 
@@ -49,29 +50,38 @@ def _pytest_args(orig):
     return orig[2:]
 
 
+def _private(rp, home):
+    """True for a path inside one of the home's private folders. The room never keeps those visible, whoever asks."""
+    return any(_under(rp, os.path.join(home, d)) for d in PRIVATE)
+
+
+def _given_home(home):
+    """The HOME the caller set, when it is a real folder other than the account home and outside the private folders; else ''."""
+    given = os.environ.get("HOME")
+    if not given or not os.path.isdir(given):
+        return ""
+    rp = os.path.realpath(given)
+    return "" if rp == home or _private(rp, home) else rp
+
+
 def _plan(orig=None):
     """The closed_room.sh command line that repeats this pytest run inside the room."""
     orig = list(orig if orig is not None else sys.orig_argv)
     home, top = _account_home(), _checkout_top()
     cmd = [ROOM]
     seen = set()
-    for p in sys.path:
+    # Python packages under the home (a user-level pytest), then tools found through PATH (a node from a version manager): their
+    # folders stay visible, read-only. Neither list may name a private folder: an entry put on sys.path or PATH is not a reason to show one.
+    for p in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
         if not p or not os.path.isdir(p):
             continue
         rp = os.path.realpath(p)
-        if _under(rp, home) and not _under(rp, top) and rp not in seen and rp != home:
+        if _under(rp, home) and rp != home and not _under(rp, top) and rp not in seen and not _private(rp, home):
             seen.add(rp)
             cmd += ["--ro", rp]
-    # Tools installed under the home (a node from a version manager) are found through PATH; their folders stay visible, read-only.
-    for p in os.environ.get("PATH", "").split(os.pathsep):
-        rp = os.path.realpath(p) if p and os.path.isdir(p) else ""
-        if (rp and _under(rp, home) and rp != home and not _under(rp, top) and rp not in seen
-                and not any(_under(rp, os.path.join(home, d)) for d in (".claude", ".config", ".ssh", ".gnupg"))):
-            seen.add(rp)
-            cmd += ["--ro", rp]
-    given = os.environ.get("HOME")
-    if given and os.path.isdir(given) and os.path.realpath(given) != home:
-        cmd += ["--ro", os.path.realpath(given)]
+    given = _given_home(home)
+    if given:
+        cmd += ["--ro", given]
     return cmd + ["--", sys.executable, "-m", "pytest"] + _pytest_args(orig)
 
 
@@ -93,9 +103,9 @@ def enter():
         sys.stderr.write("closed room: closed_room.sh is missing; nothing was run\n")
         raise SystemExit(97)
     cmd = _plan()
-    given = os.environ.get("HOME")
-    if given and os.path.isdir(given) and os.path.realpath(given) != _account_home():
-        os.environ[SEED_VAR] = os.path.realpath(given)
+    given = _given_home(_account_home())
+    if given:
+        os.environ[SEED_VAR] = given
     _release_capture()
     sys.stdout.flush()
     sys.stderr.flush()
