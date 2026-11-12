@@ -1,4 +1,5 @@
-"""The no-AI wall's cleanup command (global/.claude/no-ai-wall/wall_cleanup.py), tried on fake wall folders under pytest's tmp_path.
+"""The no-AI wall's cleanup command (global/.claude/no-ai-wall/wall_cleanup.py), tried on fake wall folders,
+each in a fresh temporary folder (the tmp_path fixture below, not pytest's own).
 
 Each test copies the script into tmp_path/.claude/no-ai-wall beside stand-in manifest files and runs the copy with `python3 -I`. The real
 ~/.claude is never touched, and the script is never run from the repo.
@@ -65,16 +66,13 @@ def holding(wall):
 
 
 @pytest.fixture
-def tmp_path(tmp_path_factory):
-    """pytest's own temporary folder, unless a folder above it holds a .git entry (the script refuses to run under one, by design); then a
-    fresh folder from the system's other temporary places that has no .git above it."""
-    p = tmp_path_factory.mktemp("wc")
-    if not has_git_above(str(p)):
-        yield p
-        return
-    for top in ("/dev/shm", "/var/tmp"):
+def tmp_path():
+    """A fresh folder of this test's own, removed when the test ends. Never pytest's own tmp_path: that leaves a pytest-of-<user> folder
+    behind and test_no_tmp_leak fails on it. The system's temporary folder is tried first; if a folder above it holds a .git entry (the
+    script refuses to run under one, by design), the system's other temporary places are tried."""
+    for top in (tempfile.gettempdir(), "/dev/shm", "/var/tmp"):
         if os.path.isdir(top) and os.access(top, os.W_OK) and not has_git_above(top):
-            d = tempfile.mkdtemp(prefix="wall-cleanup-test.", dir=top)
+            d = tempfile.mkdtemp(prefix="cc-test-wall-cleanup.", dir=top)
             try:
                 yield pathlib.Path(d)
             finally:
