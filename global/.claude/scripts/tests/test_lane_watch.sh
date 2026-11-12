@@ -1006,24 +1006,22 @@ dp_watch "QUEUE EMPTY | items 3${nl}## Proof${nl}- /no/such/file/anywhere${nl}- 
 if dp_named "$TMP/dp-out6" && grep -q 'the report has 1 proof lines' "$TMP/dp-out6"; then echo "ok   a missing path, a repeated line and a bare '- ' line do not count (1 of 3)"; else echo "FAIL proof counting: out=$(cat "$TMP/dp-out6")"; failures=$((failures + 1)); fi
 dp_watch "QUEUE EMPTY | items 2${nl}- https://example.com/above${nl}## Proof${nl}- https://example.com/one${nl}## Other${nl}- https://example.com/two${nl}- https://example.com/three" "$TMP/dp-out7"
 if dp_named "$TMP/dp-out7" && grep -q 'the report has 1 proof lines' "$TMP/dp-out7"; then echo "ok   lines above ## Proof and under a later ## Other heading are not counted"; else echo "FAIL section bounds: out=$(cat "$TMP/dp-out7")"; failures=$((failures + 1)); fi
-dp_watch "QUEUE EMPTY | items 2${nl}## Proof${nl}- https://example.com/one" "$TMP/dp-out8a"
+dp_watch "QUEUE EMPTY | items 3${nl}## Proof${nl}- https://example.com/one" "$TMP/dp-out8a"
 su_again "$TMP/dp-out8b"
-printf 'QUEUE EMPTY | items 2\n## Proof\n- https://example.com/one\n- https://example.com/two\n' > "$su_rep"; : > "$SEND_LOG"
-su_again "$TMP/dp-out8c"
 printf 'QUEUE EMPTY | items 3\n## Proof\n- https://example.com/one\n- https://example.com/two\n' > "$su_rep"; : > "$SEND_LOG"
-su_again "$TMP/dp-out8d"
+su_again "$TMP/dp-out8c"
 printf 'QUEUE EMPTY | items 3\n## Proof\n- https://example.com/one\n- https://example.com/two\n- https://example.com/three\n' > "$su_rep"; : > "$SEND_LOG"
-su_again "$TMP/dp-out8e"
-if dp_named "$TMP/dp-out8a" && ! grep -q '^done without proof' "$TMP/dp-out8b" && dp_quiet "$TMP/dp-out8c" && dp_named "$TMP/dp-out8d" && dp_quiet "$TMP/dp-out8e"; then
-  echo "ok   a short report is named once across a re-armed watcher, again when the state changes, and left alone once it reaches its count"
-else echo "FAIL re-armed naming: a=$(cat "$TMP/dp-out8a") b=$(cat "$TMP/dp-out8b") c=$(cat "$TMP/dp-out8c") d=$(cat "$TMP/dp-out8d") e=$(cat "$TMP/dp-out8e")"; failures=$((failures + 1)); fi
+su_again "$TMP/dp-out8d"
+if dp_named "$TMP/dp-out8a" && grep -q 'the report has 1 proof lines' "$TMP/dp-out8a" && ! grep -q '^done without proof' "$TMP/dp-out8b" && dp_named "$TMP/dp-out8c" && grep -q 'the report has 2 proof lines' "$TMP/dp-out8c" && dp_quiet "$TMP/dp-out8d"; then
+  echo "ok   a short report is named once across a re-armed watcher, again when one proof is added and it is still short, and left alone once it reaches its count"
+else echo "FAIL re-armed naming: a=$(cat "$TMP/dp-out8a") b=$(cat "$TMP/dp-out8b") c=$(cat "$TMP/dp-out8c") d=$(cat "$TMP/dp-out8d")"; failures=$((failures + 1)); fi
 dp_watch "QUEUE EMPTY 4:30 PM | items 4:30 | done" "$TMP/dp-out9"
 if dp_named "$TMP/dp-out9" && grep -q 'no item count' "$TMP/dp-out9"; then echo "ok   items 4:30 is a time, not a count"; else echo "FAIL items 4:30: out=$(cat "$TMP/dp-out9")"; failures=$((failures + 1)); fi
 dp_watch "DONE BY 5:00 PM | half way" "$TMP/dp-out9b"
 dp_watch2_out="$TMP/dp-out9c"; dp_quiet9b=0; dp_quiet "$TMP/dp-out9b" && dp_quiet9b=1
 dp_watch "DONE 5:00 PM | by hand" "$dp_watch2_out"
 if [ "$dp_quiet9b" = 1 ] && dp_named "$dp_watch2_out" && grep -q 'no item count' "$dp_watch2_out"; then echo "ok   DONE BY <time> is a target, not a finished line; DONE with a lower-case by later is still named"; else echo "FAIL DONE BY: quiet=$dp_quiet9b out=$(cat "$TMP/dp-out9b") later=$(cat "$dp_watch2_out")"; failures=$((failures + 1)); fi
-mkdir -p "$rc_home/dp-dir"; : > "$rc_home/dp-dir/thing"; : > "$rc_home/dp-dir/other thing"
+mkdir -p "$rc_home/dp-dir"; : > "$rc_home/dp-dir/thing"
 dp_watch "QUEUE EMPTY | items 2${nl}## Proof${nl}- ~/dp-dir/thing${nl}- see \`$dp_file\`." "$TMP/dp-out10"
 if dp_quiet "$TMP/dp-out10"; then echo "ok   a ~/ path under HOME and a backtick-wrapped path both count"; else echo "FAIL ~/ and backtick paths: out=$(cat "$TMP/dp-out10") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 rm -f "$TMP/dp-pwn" "$TMP/dp-pwn2"
