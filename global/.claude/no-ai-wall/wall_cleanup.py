@@ -2,7 +2,7 @@
 """The no-AI wall's own cleanup command: finds files that do not belong in ~/.claude/no-ai-wall and moves them out.
 
 Why it exists: a script can drop files into the wall's folder unseen, and no session may write there to take them out (the wall refuses
-every change in that folder). A person runs this command in a terminal instead.
+every change in that folder). This command is run instead, by a person in a terminal or by a session: it takes no path, so it can move only strays.
 
 What it does: looks at the direct entries of its own folder only. The wall's own files (the manifest below) are left alone. Anything
 else is a stray. A dry run lists the strays; with --apply each stray is moved (never deleted) into
@@ -18,7 +18,9 @@ Run: python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            (dry run: list o
      python3 -I ~/.claude/no-ai-wall/wall_cleanup.py --apply    (move the strays)
 
 The holding folder and the log are opened before the first move, each by its own name inside the open folder above it and never through
-a symbolic link; the log must be an ordinary file with one name. If any of that fails, the run is refused and no stray is moved.
+a symbolic link; the log must be an ordinary file with one name. The wall's own folder is opened once as well, and every look and every
+move goes through that open folder, so a folder swapped in at the same path mid-run is not followed. If any of that fails, the run is
+refused and no stray is moved.
 
 Exit codes: 0 clean, or all moved, or dry run; 1 a warning or a failed move; 2 usage; 3 refused (nothing moved).
 On exit 0 or 1 the last line on stdout is one summary line starting with WALL. On exit 2 or 3 nothing is written to stdout: the reason goes to stderr.
@@ -69,14 +71,16 @@ def kind_of(mode):
     return "other"
 
 
-def sha256_of(path, st):
-    """sha256 of a regular file up to 1 MB; '-' for anything else. The name is opened without following a link and without waiting (a
-    name swapped for a pipe after the first look would otherwise hang the run), and what was opened is looked at again: it must still be
-    a regular file within the size limit, and reading stops with '-' if it grows past the limit."""
-    if not stat.S_ISREG(st.st_mode) or st.st_size > HASH_LIMIT:
+def sha256_of(name, st, dir_fd):
+    """sha256 of a regular file up to 1 MB; '-' for anything else. The name is opened inside the open folder `dir_fd`, without following
+    a link and without waiting (a name swapped for a pipe after the first look would otherwise hang the run), and what was opened is
+    looked at again: it must still be a regular file within the size limit, and reading stops with '-' if it grows past the limit.
+    A file with more than one name (st_nlink above 1) gets '-' without being opened: it may be a second name for a file elsewhere, and
+    that file's checksum must not land in the log."""
+    if not stat.S_ISREG(st.st_mode) or st.st_size > HASH_LIMIT or st.st_nlink > 1:
         return "-"
     try:
-        fd = os.open(path, HASH_FLAGS)
+        fd = os.open(name, HASH_FLAGS, dir_fd=dir_fd)
     except OSError:
         return "-"
     try:
@@ -99,15 +103,15 @@ def sha256_of(path, st):
         os.close(fd)
 
 
-def move_out(wall, name, dest_fd):
-    """Move the stray `name` out of the wall folder into the open holding folder, under the same name. The holding folder was made new
+def move_out(wall_fd, name, dest_fd):
+    """Move the stray `name` out of the open wall folder into the open holding folder, under the same name. The holding folder was made new
     for this run, so the name should be free. If something already sits there under that name, the move is refused (FileExistsError)
     and both stay where they are, because a plain move would write over it. The look and the move are two steps, so this narrows that
     gap; it does not close it."""
     try:
         os.lstat(name, dir_fd=dest_fd)
     except FileNotFoundError:
-        os.rename(os.path.join(wall, name), name, dst_dir_fd=dest_fd)
+        os.rename(name, name, src_dir_fd=wall_fd, dst_dir_fd=dest_fd)
         return
     raise FileExistsError(name)
 
@@ -219,8 +223,29 @@ def main(argv):
     base = os.path.dirname(wall)
     if os.path.basename(wall) != "no-ai-wall" or os.path.basename(base) != ".claude":
         return refuse("this is not an installed wall folder")
+    try:
+        wall_fd = os.open(wall, DIR_FLAGS)
+    except OSError:
+        return refuse("the wall folder cannot be opened safely")
+    try:
+        try:
+            same = os.fstat(wall_fd)
+            now = os.lstat(wall)
+            if not stat.S_ISDIR(now.st_mode) or (now.st_dev, now.st_ino) != (same.st_dev, same.st_ino):
+                return refuse("the wall folder changed while this ran")
+        except OSError:
+            return refuse("the wall folder changed while this ran")
+        return run_in(wall_fd, wall, base, apply_)
+    finally:
+        os.close(wall_fd)
+
+
+def run_in(wall_fd, wall, base, apply_):
+    """The rest of main, with the wall's own folder reached only through the open descriptor `wall_fd`."""
     for name in MANIFEST:
-        if not os.path.lexists(os.path.join(wall, name)):
+        try:
+            os.lstat(name, dir_fd=wall_fd)
+        except OSError:
             return refuse("a wall file is missing, so this is not an installed wall")
     if has_git_entry(wall):
         return refuse("this folder sits in a source checkout")
@@ -231,14 +256,14 @@ def main(argv):
 
     code = 0
     strays = []
-    with os.scandir(wall) as it:
+    with os.scandir(wall_fd) as it:
         entries = sorted(it, key=lambda e: e.name)
     for e in entries:
         name = e.name
         shown = json.dumps(name)
         if name in MANIFEST:
             try:
-                st = os.lstat(e.path)
+                st = os.lstat(name, dir_fd=wall_fd)
                 ok = stat.S_ISREG(st.st_mode)
             except OSError:
                 ok = False
@@ -250,7 +275,7 @@ def main(argv):
             print("left alone %s (an install may be running)" % shown)
             continue
         try:
-            st = os.lstat(e.path)
+            st = os.lstat(name, dir_fd=wall_fd)
         except OSError as exc:
             print("WARNING %s could not be looked at (%s); it may have gone while this ran" % (shown, type(exc).__name__))
             code = 1
@@ -275,9 +300,9 @@ def main(argv):
         if not apply_:
             print("would move %s (%s, %d bytes)" % (shown, kind, size))
             continue
-        digest = sha256_of(os.path.join(wall, name), st)
+        digest = sha256_of(name, st, wall_fd)
         try:
-            move_out(wall, name, dest_fd)
+            move_out(wall_fd, name, dest_fd)
         except OSError as exc:
             sys.stderr.write("could not move %s: %s\n" % (shown, type(exc).__name__))
             failed += 1

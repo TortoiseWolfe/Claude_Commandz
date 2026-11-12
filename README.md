@@ -140,7 +140,7 @@ Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `
 
 ### Installing the no-AI wall (a person runs this, never a session)
 
-The wall's four files (the guard, its module, its shell helper and the cleanup command below) live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
+The wall's four files (the guard, its module, its shell helper and the cleanup command below) live in `~/.claude/no-ai-wall/`, a folder sessions cannot change, except by running the cleanup command below, which only moves strays out. One command installs them from a named
 commit (it reads git, never the working tree or the network), backs up every live file it replaces, moves the hook entry in
 `settings.json`, removes the three old copies, and proves the result. It moves only the wall. The usual install step for the other
 global files (`install_global.py --include-stale`) runs only if you add `--with-tooling` before the commit; a copy of every stale

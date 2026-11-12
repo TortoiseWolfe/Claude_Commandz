@@ -434,9 +434,12 @@ def test_source_opens_files_only_the_careful_way():
     assert "os.O_NONBLOCK" in flags["LOG_FLAGS"] and "os.O_NONBLOCK" in flags["HASH_FLAGS"]
     assert "O_TRUNC" not in src
     opens = [line for line in src.split("\n") if "os.open(" in line]
-    assert len(opens) == 4, opens
+    assert len(opens) == 5, opens
     for line in opens:
         assert re.search(r"os\.open\(\w+, (DIR_FLAGS|LOG_FLAGS|HASH_FLAGS)\b", line), line
+    # the wall's own folder is reached only through the open descriptor: no scan, look or move by path text
+    assert "os.scandir(wall)" not in src and "e.path" not in src and "os.path.join(wall" not in src
+    assert "src_dir_fd=" in src and "os.scandir(wall_fd)" in src
 
 
 CALL = """
@@ -446,11 +449,13 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 what = sys.argv[2]
 if what == "sha":
-    print(json.dumps(mod.sha256_of(sys.argv[3], os.lstat(sys.argv[4]))))
+    dfd = os.open(os.path.dirname(sys.argv[3]), os.O_RDONLY | os.O_DIRECTORY)
+    print(json.dumps(mod.sha256_of(os.path.basename(sys.argv[3]), os.lstat(sys.argv[4]), dfd)))
 elif what == "move":
     fd = os.open(sys.argv[5], os.O_RDONLY | os.O_DIRECTORY)
+    sfd = os.open(sys.argv[3], os.O_RDONLY | os.O_DIRECTORY)
     try:
-        mod.move_out(sys.argv[3], sys.argv[4], fd)
+        mod.move_out(sfd, sys.argv[4], fd)
         print(json.dumps("moved"))
     except OSError as exc:
         print(json.dumps(type(exc).__name__))
@@ -567,6 +572,56 @@ def test_checksum_of_a_name_swapped_for_a_bigger_file_or_a_link_gives_a_dash(tmp
     os.symlink(small, link)
     assert call("sha", big, small) == "-"
     assert call("sha", link, small) == "-"
+
+
+SWAP = """
+import importlib.util, os, sys
+sys.dont_write_bytecode = True
+wall = sys.argv[1]
+spec =importlib.util.spec_from_file_location("wall_cleanup_under_test", os.path.join(wall, "wall_cleanup.py"))
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.open_holding
+def swapping(base):
+    result = real(base)
+    os.rename(wall, wall + "-moved")
+    os.symlink(sys.argv[2], wall)
+    return result
+mod.open_holding = swapping
+sys.exit(mod.main(["--apply"]))
+"""
+
+
+def test_a_wall_folder_swapped_mid_run_moves_nothing_from_the_other_folder(tmp_path):
+    """Between the listing and the move the wall folder is renamed away and a link to another folder takes its place."""
+    wall = make_wall(tmp_path)
+    with open(os.path.join(wall, "stray.txt"), "w") as fh:
+        fh.write("from the wall")
+    decoy = os.path.join(str(tmp_path), "decoy")
+    os.mkdir(decoy)
+    with open(os.path.join(decoy, "stray.txt"), "w") as fh:
+        fh.write("from the decoy")
+    r = subprocess.run([sys.executable, "-I", "-c", SWAP, wall, decoy], capture_output=True, text=True, timeout=30,
+                       cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert open(os.path.join(decoy, "stray.txt")).read() == "from the decoy"
+    (hold,) = holding(wall + "-moved")
+    assert open(os.path.join(hold, "stray.txt")).read() == "from the wall"
+
+
+def test_a_stray_with_a_second_name_is_moved_with_a_dash_for_its_checksum(tmp_path):
+    wall = make_wall(tmp_path)
+    outside = os.path.join(str(tmp_path), "outside.txt")
+    with open(outside, "w") as fh:
+        fh.write("not the wall's")
+    os.link(outside, os.path.join(wall, "second-name"))
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    (f,) = log_fields(tmp_path)
+    assert f[2] == '"second-name"' and f[5] == "-"
+    assert open(outside).read() == "not the wall's"
+    (hold,) = holding(wall)
+    assert os.path.exists(os.path.join(hold, "second-name"))
 
 
 def test_a_move_never_writes_over_a_name_already_in_the_holding_folder(tmp_path):
