@@ -123,8 +123,11 @@ lane() {  # lane <args...>: run lane.sh against the fake home and window
   LAST_RC=$?
   set -e
 }
-usage_rec() {  # usage_rec <total-tokens>: one assistant turn whose context is that many tokens
-  printf '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":10,"cache_read_input_tokens":%d,"cache_creation_input_tokens":990}}}\n' "$(($1 - 1000))"
+usage_rec() {  # usage_rec <total-tokens> [start-tokens]: a session that held <start> (20000 unless given) at its first turn and holds <total> now
+  local n
+  for n in "${2:-20000}" "$1"; do
+    printf '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":10,"cache_read_input_tokens":%d,"cache_creation_input_tokens":990}}}\n' "$((n - 1000))"
+  done
 }
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
@@ -322,6 +325,87 @@ FAKE_WRITE_HANDOFF=1 lane --recycle rk-fast
 reset_fake; echo sess-rk >"$ST/cur"
 FAKE_WRITE_HANDOFF=1 lane --recycle rk-lane
 [ "$(rk_last)" = 90 ] || fail "a lane that ran for two hours keeps its line (90K), got: $(rk_last)"; ok
+
+# Issue 34: 32 recycles across 8 lanes in a week, because a lane's line was set without looking at what the lane holds the moment it
+# starts (a median of 64K, up to 121K). A recycle now reads the first turn of the session it clears and gives the new row at least
+# that plus the 50K of working room, up to a ceiling that depends on the window the lane's process was started with.
+WIN="$HOME_T/.claude/state/lanes"
+mrow() {  # mrow <name> <connectors on|off> <stored line or -> <now-tokens> <start-tokens> [seconds since start: 7200] [window file: none]
+  local line=""; [ "$3" = - ] || line="$(printf '\t%s' "$3")"
+  printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\tsess-%s\t%s\thigh\t%s%s\n' "$(date +%F)" "$1" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$1" "$(( $(date +%s) - ${6:-7200} ))" "$2" "$line" >>"$INDEX"
+  usage_rec "$4" "$5" >"$PROJ/sess-$1.jsonl"
+  rm -f "$WIN/.window-$1"; [ -z "${7:-}" ] || echo "$7" >"$WIN/.window-$1"
+}
+dry_line() {  # dry_line <name> [lane.sh options]: the line a recycle of that lane would give its new row
+  local n="$1"; shift
+  lane --dry-run "$@" --recycle "$n"
+  sed -n 's/.*recycle line \([0-9]*\)K.*/\1/p' <<<"$LAST_OUT" | head -1
+}
+is_line() {  # is_line <want> <what> <dry_line arguments...>
+  local want="$1" what="$2" got; shift 2
+  got="$(dry_line "$@")"
+  [ "$got" = "$want" ] || fail "$what: wanted ${want}K, got: ${got:-nothing} ($LAST_OUT)"; ok
+}
+mrow m-room on 127 150000 64000 7200 200000
+is_line 127 'a start load of 64K plus 50K is under a 127K line, so the line stays' m-room
+mrow m-conn on 127 150000 100000 7200 200000
+is_line 150 'a connector lane that starts at 100K gets 150K, not 127K' m-conn
+mrow m-big on 127 160000 121000 7200 200000
+is_line 165 'a start load of 121K stops at the 165K a connector lane may carry' m-big
+mrow m-off off 100 140000 121000 7200 200000
+is_line 150 'without connectors the measured line stops at 150K, as a line set by hand does' m-off
+mrow m-plain off 100 110000 70000 7200 200000
+is_line 120 'a plain lane that starts at 70K gets 120K' m-plain
+mrow m-nocol off - 110000 70000 7200 200000
+is_line 120 'a row with no stored line is measured from its default' m-nocol
+# The process compacts by itself at about 0.84 of the window it was STARTED with, and /clear keeps the process: the line stays under it.
+mrow m-sixty off 60 70000 64000 7200 150000
+is_line 114 'a lane started at 60K that holds 64K at its first turn gets 114K (its 150000 window allows 123K)' m-sixty
+mrow m-sixty-big off 60 100000 90000 7200 150000
+is_line 123 'the same lane with a 90K start load stops at 123K, under where its 150000 window compacts' m-sixty-big
+mrow m-forty off 40 70000 64000 7200 120000
+is_line 99 'a lane started at 40K (a 120000 window) stops at 99K' m-forty
+mrow m-high on 160 150000 64000 7200 170000
+is_line 160 'a ceiling below the line the lane already has never lowers it' m-high
+# A lane started before the window was recorded keeps the old ceiling.
+mrow m-unknown on 100 150000 121000
+is_line 128 'with no window on record the line stops at the old 128K' m-unknown
+echo junk >"$WIN/.window-m-unknown"
+is_line 128 'an unreadable window record counts as none' m-unknown
+echo 900000 >"$WIN/.window-m-unknown"
+is_line 128 'a window record above the cap counts as none' m-unknown
+# --recycle-at is the hub naming the line: nothing is measured over it.
+mrow m-hand on 127 160000 121000 7200 200000
+is_line 140 'a line named with --recycle-at is kept as named' m-hand --recycle-at 140
+# No transcript, or one with no usable first turn, changes nothing.
+mrow m-blank on 127 150000 100000 7200 200000; rm -f "$PROJ/sess-m-blank.jsonl"
+is_line 127 'a lane with no transcript keeps its line' m-blank
+mrow m-side off 100 110000 70000 7200 200000
+{ printf '{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":140000}}}\n'
+  printf '{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}\n'
+  printf 'not json\n'
+  usage_rec 110000 76000; } >"$PROJ/sess-m-side.jsonl"
+is_line 126 'a helper record, an empty record and a broken line are passed over for the first real turn (76K)' m-side
+# The 20K raise for a lane recycled within 20 minutes of its start still applies, and takes the larger of the two.
+mrow m-fast off 100 130000 20000 300 200000
+is_line 120 'a fast refill with a small start load still goes up 20K' m-fast
+mrow m-fast-big off 100 130000 80000 300 200000
+is_line 130 'a fast refill with an 80K start load takes the measured 130K, not 120K' m-fast-big
+mrow m-fast-top off 140 149000 20000 300 200000
+is_line 150 'a fast refill stops at the ceiling for its window (150K), no longer at 128K' m-fast-top
+mrow m-fast-conn on 150 160000 20000 300 200000
+is_line 165 'and at 165K with the connectors on' m-fast-conn
+# A real recycle writes the measured line into the new row and names the start load in its message and its log row.
+reset_fake
+printf '%s\trk-lane\t%s\tsonnet\tsubscription\t%s\t%s\tsess-meas\t%s\thigh\toff\t90\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$(( $(date +%s) - 7200 ))" >>"$INDEX"
+usage_rec 95000 60000 >"$PROJ/sess-meas.jsonl"; echo sess-meas >"$ST/cur"; echo 200000 >"$WIN/.window-rk-lane"
+FAKE_WRITE_HANDOFF=1 lane --recycle rk-lane
+assert_exit 0 "$LAST_RC" 'a lane with a measured start load is recycled'
+[ "$(rk_last)" = 110 ] || fail "the new row carries 60K + 50K = 110K, got: $(rk_last) ($LAST_OUT)"; ok
+assert_contains "$LAST_OUT" 'line 110K, start load 60K' 'the recycle says the line and the start load it came from'
+assert_contains "$(cat "$WIN/recycle.log")" 'line 110K, start load 60K' 'the log row carries both numbers'
+[ "$(cat "$WIN/.window-rk-lane")" = 200000 ] || fail 'a recycle leaves the window record alone (the process is the same one)'; ok
+rm -f "$WIN/.window-rk-lane"
 
 qreset() {  # a fresh q-lane row on old-sess (a recycle moves the lane's row to the new session) and an old transcript with no queue ops
   reset_fake; usage_rec 130000 >"$PROJ/old-sess.jsonl"; add_row q-lane subscription old-sess
