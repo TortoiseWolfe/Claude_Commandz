@@ -2,6 +2,7 @@
 # Card 4 poll trim: the hot-phase floor is 5 minutes, client mail looks at most every 10, and every
 # "nothing new" tick costs exactly one Haiku look. Uses a fake claude and a fake HOME; nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SCRIPT=$(cd -- "$(dirname -- "$0")/.." && pwd)/muse_poll.sh
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state; CALLS=$TMP/calls

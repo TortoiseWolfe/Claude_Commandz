@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for fleet-up.sh with a fake HOME and stub powershell.exe, tmux and lane.sh. Run: bash tests/test_fleet_up.sh
 set -u
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0

@@ -2,6 +2,7 @@
 # Tests for windows/install-tower-keeper.sh: the signed-in user is filled into the LogonTrigger (a trigger without one needs administrator
 # rights to register, 28 Oct 2026), no password is ever written, and a second run does not stack users. whoami.exe and schtasks.exe are fakes.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/keeper-install.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

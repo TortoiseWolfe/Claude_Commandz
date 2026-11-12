@@ -2,6 +2,7 @@
 # Tests for lane.sh refusing an engine whose program this machine does not have (28 Oct 2026: the tower has no agy or OpenCode, and the
 # dispatcher's agy-first order started lanes whose windows died at once on "command not found"). A fake HOME and PATH hold everything.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-enginecheck.XXXXXX")"

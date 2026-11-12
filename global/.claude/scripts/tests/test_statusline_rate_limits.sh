@@ -2,6 +2,7 @@
 # Tests for the status line's rate-limits save (#273, point 3): the 7-day and 5-hour used percentages Claude Code hands the
 # status line are saved to a small file for the budget reader. Runs the repo copy with a fake HOME; touches no real file.
 set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SL="$(cd "$(dirname "$0")/../../../dotfiles" && pwd -P)/statusline-command.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/sl-rl.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

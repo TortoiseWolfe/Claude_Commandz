@@ -3,6 +3,7 @@
 # bare bash prompt for 3 hours while lane.sh --send and --recycle typed two messages into bash). --send and --recycle now type nothing into a pane
 # that is not running claude, and lane.sh --pane says what a pane holds (lane_watch.sh uses it). A fake tmux plays the lane; nothing here is live.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"

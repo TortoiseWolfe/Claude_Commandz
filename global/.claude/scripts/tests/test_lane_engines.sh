@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 # Nothing from the session running the test may leak into it (issue 226, 4 Nov 2026): a lane or hub session exports AFA_BIG_OUT=1, which makes

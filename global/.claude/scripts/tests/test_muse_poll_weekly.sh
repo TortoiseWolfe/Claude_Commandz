@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT=$SCRIPT_DIR/../muse_poll.sh

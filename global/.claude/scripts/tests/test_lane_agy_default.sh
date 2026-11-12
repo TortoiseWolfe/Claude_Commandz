@@ -4,6 +4,7 @@
 # --claude-because "<reason>" is given; client repos, ~/repos itself, mail lanes, site-model prompts and --engine agy are never asked.
 # A fake HOME holds the client lists and a fake tmux; everything runs with --dry-run or against the fake HOME's own log.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-agydefault.XXXXXX")"

@@ -2,6 +2,7 @@
 # Tests for the "hub wakes that do nothing" fixes in lane_watch.sh (31 Oct 2026, the second PC's note): a turn end right after a report,
 # a routine HOURLY/STATUS report, a report that lands between a wake and the re-arm, a dead watcher, and the longer idle heartbeat.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 export LANE_WATCH_IDLE_REMIND_MIN=0   # these cases are about wakes the hub should not get; the idle reminder has its own cases in test_lane_watch.sh
 

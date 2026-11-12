@@ -2,6 +2,7 @@
 # Tests for the machine switch in openclaw_status_refresh.sh and the per-machine runner name in he_runner_watch.sh (fleet review finding 3,
 # 28 Oct 2026): NX-01 runs every step; any other machine runs only the keeper steps. Stub scripts record what ran; nothing real is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/status-machine.XXXXXX")"

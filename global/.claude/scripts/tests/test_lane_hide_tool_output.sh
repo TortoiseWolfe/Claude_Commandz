@@ -11,6 +11,7 @@
 #   for f in lane_hide_secrets.sh lane_secret_paths.py known_secrets_scan.py scrub_known_secrets.py; do git show <commit before this change>:global/.claude/scripts/$f >$d/$f; done
 #   chmod +x $d/lane_hide_secrets.sh; bash $d/tests/test_lane_hide_tool_output.sh
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 unset LANE_SECRET_ENV LANE_HIDE_EXTRA_ROOTS LANE_HIDE_REPOS LANE_SCAN_REPOS LANE_TOOL_OUTPUT_DIR
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_hide_secrets.sh"

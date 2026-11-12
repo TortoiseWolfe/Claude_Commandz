@@ -4,6 +4,7 @@
 # the NEW line so the handler sees it; other alerts (admin login) and other senders' mail are untouched.
 # A stub stands in for alert_issues.py and for gmail_api.py; a fake HOME holds the state. Nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 HERE=$(cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state

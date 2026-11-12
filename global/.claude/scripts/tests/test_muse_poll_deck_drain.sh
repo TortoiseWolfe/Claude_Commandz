@@ -2,6 +2,7 @@
 # The poller calls "deck_write.py drain" on every pass, before its throttle and night gates, so queued co-op Deck writes
 # go out on their own schedule. Fake HOME and a fake deck_write.py that only records its arguments; nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SCRIPT=$(cd -- "$(dirname -- "$0")/.." && pwd)/muse_poll.sh
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state; CALLS=$TMP/calls

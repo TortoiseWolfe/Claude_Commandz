@@ -4,6 +4,7 @@
 # as --add-dir, is kept in index column 15 so --resume, --restart and the recycle keep it, and --status shows it.
 # A fake HOME and a fake tmux that logs what is typed hold everything: nothing here touches a live lane.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 

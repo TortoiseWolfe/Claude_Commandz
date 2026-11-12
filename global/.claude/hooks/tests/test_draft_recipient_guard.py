@@ -217,12 +217,32 @@ class Wiring(unittest.TestCase):
 
 class LiveHook(unittest.TestCase):
     """Runs the hook installed at $HOME/.claude/hooks/block-outbound.sh. No skip: if the hook or the installed guard is missing, the wiring is
-    broken and this fails. On the tower HOME is the real home and this tests the live hook; the CI job installs the fixture and the repo's guard
+    broken and this fails. Where HOME is the real home (a run outside the closed room) this tests the live hook; the CI job installs the fixture and the repo's guard
     into its temporary HOME first, so there it runs the same behaviour against the stand-in. (That the fixture still matches the live hook, and
     that the hand copy of the guard is the repo's file, are checked by install_scripts.py, not here: on a runner the job's copy is made from
-    the repo, so either comparison would be a file against itself.)"""
+    the repo, so either comparison would be a file against itself.)
+
+    Ticket 81: a pytest run on a developer's machine now happens inside the closed room, where the real home cannot be reached, so the live
+    hook is not there to run. setUpClass then puts the same stand-in the CI job installs into the room's throwaway home. It writes only when
+    the home is a proven room (the room's own marker file is in it); anywhere else a missing hook still fails, as before."""
 
     HOOK = Path.home() / ".claude" / "hooks" / "block-outbound.sh"
+
+    @classmethod
+    def setUpClass(cls):
+        import pwd
+        import shutil
+        home = Path.home().resolve()
+        account = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        in_room = os.environ.get("CLOSED_ROOM") == "1" and home == account and (home / ".closed-room").exists()
+        if not in_room or cls.HOOK.exists():
+            return
+        cls.HOOK.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURE, cls.HOOK)
+        shutil.copy(SRC, cls.HOOK.parent / "draft-recipient-guard.py")
+        cfg = home / ".config" / "afa" / "identity-guard.json"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"draft_recipient": SELF}) + "\n")
 
     def setUp(self):
         # The live guard reads the owner's address from this HOME's private config. No skip: a missing file means the wiring is broken.

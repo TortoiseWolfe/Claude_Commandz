@@ -9,6 +9,7 @@
 # To watch it go red, run it against a lane.sh from before issue 332 (the red proof for the pull request):
 #   git archive origin/main global/.claude/scripts | tar -x -C "$dir"; cp this_file "$dir"/global/.claude/scripts/tests/; bash that copy
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 export AFA_BIG_OUT=0
 unset AFA_LANE AFA_LANE_NAME LANE_STATUS_INNER LANE_SECRET_ENV LANE_HIDE_EXTRA_ROOTS LANE_HIDE_REPOS LANE_SCAN_REPOS

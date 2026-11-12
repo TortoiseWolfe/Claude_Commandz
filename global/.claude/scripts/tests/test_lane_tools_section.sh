@@ -3,6 +3,7 @@
 # lane.sh appends the output of tools_catalog.py match to the prompt copy the lane reads, once. A dry run writes nothing and prints the section.
 # Nothing here touches a live lane: the tmux on PATH is a stub and HOME is a temp folder.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
