@@ -19,13 +19,33 @@ def rules_dir(tmp):
     return d
 
 
-def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, keywords=None):
+ROUTES = """# Routes
+
+## Cloudflare dashboard (Harmonic Egg, example.org)
+
+- 2026-01-01 | a visible window passed the check | WORKED | note
+
+## Portainer production (example co-op)
+
+- 2026-01-02 | the API with a cached token | WORKED | note
+
+## GitHub (orgs and accounts)
+
+- 2026-01-03 | gh with the CLI token | WORKED | note
+"""
+
+
+def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, routes=None, keywords=None):
     with tempfile.TemporaryDirectory() as tmp:
         d = rules_dir(tmp)
+        rf = Path(tmp) / "routes.md"
+        if routes is not None:
+            rf.write_text(routes)
         kf = Path(tmp) / "keywords.json"  # never the live private file: a missing one adds no words
         if keywords is not None:
             kf.write_text(keywords)
-        env = {**os.environ, "LANE_RULES_KEYWORDS": str(kf)}
+        # a missing routes file means no routes section, never the live one
+        env = {**os.environ, "HUB_ROUTES_FILE": str(rf), "LANE_RULES_KEYWORDS": str(kf)}
         pf = Path(tmp) / ("nope.md" if missing_prompt else "prompt.md")
         if not missing_prompt:
             pf.write_text(prompt)
@@ -82,6 +102,30 @@ class ComposeTest(unittest.TestCase):
         lists = src[start:end].lower()
         for word in ("greg", "william", "eduity", "chattanooga", "techjoy", "consemble", "peermentor", "elev8tek", "harmonic", "scout"):
             self.assertNotIn(word, lists)
+
+    def test_routes_for_a_site_the_prompt_names_ride_along(self):
+        _, text = run("Add a DNS record in the Cloudflare dashboard.", routes=ROUTES)
+        self.assertIn("## Routes that worked or failed before (hub/routes.md)", text)
+        self.assertIn("a visible window passed the check", text)
+        self.assertNotIn("the API with a cached token", text)
+        self.assertNotIn("gh with the CLI token", text)
+
+    def test_routes_match_on_a_name_in_the_section_heading_parentheses(self):
+        _, text = run("Check the Harmonic Egg site.", routes=ROUTES)
+        self.assertIn("a visible window passed the check", text)
+
+    def test_no_routes_section_when_nothing_matches_or_there_is_no_file(self):
+        for routes in (ROUTES, None):
+            _, text = run("Fix the failing parser test.", routes=routes)
+            self.assertNotIn("Routes that worked or failed before", text)
+        _, text = run("Add a DNS record in the Cloudflare dashboard.", routes=None)
+        self.assertNotIn("Routes that worked or failed before", text)
+
+    def test_site_words_match_whole_words_only(self):
+        _, text = run("Review the githubbing helper.", routes=ROUTES)
+        self.assertNotIn("gh with the CLI token", text)
+        _, text = run("Open a GitHub pull request.", routes=ROUTES)
+        self.assertIn("gh with the CLI token", text)
 
     def test_all_flag_and_missing_core(self):
         with tempfile.TemporaryDirectory() as tmp:

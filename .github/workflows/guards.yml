@@ -1,0 +1,37 @@
+name: guards
+
+# This repo is public. Two checks keep private values out of it:
+#   email-guard: no email address in a tracked file unless it is a placeholder or no-reply address
+#                (.github/scripts/email_guard.py; reviewed fake fixtures are listed in .github/email-guard-allow.txt).
+#   gitleaks:    no key, token or private key anywhere in the full history (.gitleaksignore lists the reviewed dummy fixtures).
+# Both print file and line only, never the matched text.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guards-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  email-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -I .github/scripts/email_guard.py .
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks over the full history
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE":/repo -w /repo zricethezav/gitleaks:v8.24.3 detect --source . --no-banner --redact --verbose

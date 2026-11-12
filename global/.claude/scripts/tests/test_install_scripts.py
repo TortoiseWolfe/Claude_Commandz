@@ -594,5 +594,47 @@ class Docs(unittest.TestCase):
         self.assertIn("install_scripts.py", text)
 
 
+PLACEHOLDER_GUARD = 'import sys\nSELF = "owner@example.com"\nprint(SELF)\n'
+READING_GUARD = 'import sys\nSELF = None  # read at run time from ~/.config/afa/identity-guard.json\nprint(SELF)\n'
+
+
+class Gate(GuardCheck):
+    """While the draft guard at the ref still carries the placeholder address and does not read identity-guard.json, the installer
+    refuses with exit 4 and changes nothing. The pass cases prove it lifts itself once the guard reads the private file."""
+
+    def run_ins(self, *args, input=None):
+        env = {k: v for k, v in GIT_ENV.items() if k != "INSTALL_GATE_OVERRIDE"}
+        env.update(getattr(self, "extra_env", {}))
+        return subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(self.work), "--home", str(self.home), *args],
+                              capture_output=True, text=True, input=input if input is not None else "", env=env)
+
+    def test_a_placeholder_guard_is_refused_with_exit_4_and_nothing_changes(self):
+        self.repo_guard(PLACEHOLDER_GUARD)
+        for args in (("--yes",), ("--dry-run",)):
+            p = self.run_ins(*args)
+            self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+            self.assertIn("INSTALL FAILED", p.stdout)
+            self.assertIn("identity-guard.json", p.stdout)
+        self.assertIsNone(self.live("a.py"))
+
+    def test_a_guard_that_reads_the_private_file_installs(self):
+        self.repo_guard(READING_GUARD)
+        p = self.run_ins("--yes")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("gate: ok", p.stdout)
+        self.assertEqual(self.live("a.py"), "a1")
+
+    def test_a_guard_with_the_placeholder_that_also_reads_the_file_installs(self):
+        self.repo_guard(PLACEHOLDER_GUARD + "# falls back to ~/.config/afa/identity-guard.json\n")
+        self.assertEqual(self.run_ins("--yes").returncode, 0)
+
+    def test_a_person_can_override_it_and_it_says_so(self):
+        self.repo_guard(PLACEHOLDER_GUARD)
+        self.extra_env = {"INSTALL_GATE_OVERRIDE": "1"}
+        p = self.run_ins("--yes")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("OVERRIDDEN", p.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
