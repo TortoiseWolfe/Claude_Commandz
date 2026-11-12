@@ -20,7 +20,7 @@ Command line (used by the bash helper no_ai_wall.sh):
   no_ai_wall.py check-text FILE              exit 3 when the text names a listed path
 Environment overrides (tests): NO_AI_PATHS_FILE, NO_AI_REFUSAL_LOG.
 
-Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py). The tamper
+Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py, wall_cleanup.py). The tamper
 guard below covers that folder, the list, and the settings*.json files, and nothing else under ~/.claude, so ordinary tooling in
 ~/.claude/scripts and ~/.claude/hooks installs without anyone's hands. The hook loads this file by absolute path from its own folder.
 """
@@ -46,7 +46,7 @@ def paths_file():
 
 
 WALL_FOLDER = "no-ai-wall"
-_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh")
+_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh", "wall_cleanup.py")
 
 
 def wall_dir():
@@ -429,7 +429,7 @@ def pattern_start(pattern, root, cwd):
 
 
 def protected_files():
-    """Files no session may change: the list itself, and the hook, the module and its bash helper in the wall's own folder. The three places
+    """Files no session may change: the list itself, and the hook, the module, its bash helper and the cleanup command in the wall's own folder. The three places
     the wall lived before that folder existed count too, while a file is still there (a machine not yet moved runs from them); once the
     install has moved them away, ~/.claude/scripts and ~/.claude/hooks hold no wall file and are ordinary folders. A session that could edit
     a protected file could turn the wall off. They are checked by realpath, so a symlink to one counts too."""
@@ -811,7 +811,7 @@ def _read_only_listing(command):
             continue
         if prog.startswith("python"):
             rest = [w for w in words[1:] if not w.startswith("-")]
-            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py"))]  # run, not edited
+            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py")), os.path.realpath(os.path.join(wall_dir(), "wall_cleanup.py"))]  # run, not edited
             if rest and os.path.realpath(expand(rest[0], "/")) in ok:
                 continue
         return False

@@ -17,7 +17,7 @@ GLOBAL = os.path.normpath(os.path.join(HERE, "..", ".."))          # .../global/
 WALL_SRC = os.path.join(GLOBAL, "no-ai-wall")
 INSTALL = os.path.join(WALL_SRC, "install.sh")
 INSTALL_GLOBAL = os.path.join(GLOBAL, "scripts", "install_global.py")
-WALL_FILES = ("no_ai_wall.py", "no_ai_wall.sh", "no-ai-wall-guard.py")
+WALL_FILES = ("no_ai_wall.py", "no_ai_wall.sh", "no-ai-wall-guard.py", "wall_cleanup.py")
 
 OLD_SETTINGS = {
     "model": "keep-me",
@@ -127,9 +127,9 @@ class InstallTests(unittest.TestCase):
         self.assertRegex(self.last(r), r"^WALL OK %s refused (\d+)/\1 ordinary (\d+)/\2$" % self.B[:7])
         m = re.match(r"WALL OK \S+ refused (\d+)/", self.last(r))
         self.assertIsNotNone(m)
-        self.assertEqual(int(m.group(1)) if m else 0, 2 + 1 + 5)  # two list entries, the bash helper, five tamper probes
+        self.assertEqual(int(m.group(1)) if m else 0, 2 + 1 + 8)  # two list entries, the bash helper, eight tamper probes
         wall = os.path.join(self.live, "no-ai-wall")
-        self.assertEqual(sorted(os.listdir(wall)), sorted(WALL_FILES))  # the wall's three files and nothing else
+        self.assertEqual(sorted(os.listdir(wall)), sorted(WALL_FILES))  # the wall's four files and nothing else
         for f in WALL_FILES:
             self.assertEqual(open(os.path.join(wall, f)).read(), open(os.path.join(WALL_SRC, f)).read())
         for gone in ("hooks/no-ai-wall-guard.py", "scripts/no_ai_wall.py", "scripts/no_ai_wall.sh"):

@@ -114,6 +114,9 @@ def main():
         ("an edit of the settings file", "Edit", dict(file_path=settings)),
         ("a shell write into the wall folder", "Bash", dict(command="echo x > %s" % os.path.join(wall, "probe.sh"))),
         ("an edit of the list", "Edit", dict(file_path=listfile)),
+        ("an edit of the cleanup command", "Edit", dict(file_path=os.path.join(wall, "wall_cleanup.py"))),
+        ("a write of the cleanup command", "Write", dict(file_path=os.path.join(wall, "wall_cleanup.py"))),
+        ("a shell removal of the cleanup command", "Bash", dict(command="rm %s" % os.path.join(wall, "wall_cleanup.py"))),
     ):
         refused_n += 1
         rc, err = hook(tool, **ti)
@@ -137,6 +140,8 @@ def main():
         ("a command that copies into the scripts folder", "Bash", dict(command="cp /tmp/a %s/probe.sh" % os.path.join(live, "scripts"))),
         ("a subagent prompt that names the wall's files", "Agent", dict(prompt="Read %s and %s and report their scope. Do not edit anything." % (os.path.join(wall, "no_ai_wall.py"), settings))),
         ("an ordinary shell command", "Bash", dict(command="ls /tmp")),
+        ("the cleanup command, dry run", "Bash", dict(command="python3 -I %s" % os.path.join(wall, "wall_cleanup.py"))),
+        ("the cleanup command with --apply", "Bash", dict(command="python3 -I %s --apply" % os.path.join(wall, "wall_cleanup.py"))),
     ):
         ordinary_n += 1
         rc, err = hook(tool, cwd=work, **ti)
