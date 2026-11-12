@@ -18,7 +18,16 @@ else
     # Start in the checkout that holds this test when the current folder is in another one (or none), so the test's own files are kept.
     __cr_self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
     if [ "$(git rev-parse --show-toplevel 2>/dev/null)" != "$(git -C "$__cr_dir" rev-parse --show-toplevel 2>/dev/null)" ]; then cd "$__cr_dir" || exit 97; fi
-    exec "$__cr_dir/../closed_room.sh" -- bash "$__cr_self" "$@"
+    # Tools installed under the home (a node from a version manager) are found through PATH; their folders stay visible, read-only.
+    __cr_ro=()
+    while IFS= read -r -d '' __cr_p; do
+      __cr_p="$(cd -- "$__cr_p" 2>/dev/null && pwd -P)" || continue
+      case "$__cr_p/" in
+        "$__cr_home/.claude/"* | "$__cr_home/.config/"* | "$__cr_home/.ssh/"* | "$__cr_home/.gnupg/"*) continue ;;
+        "$__cr_home/"?*) __cr_ro+=(--ro "$__cr_p") ;;
+      esac
+    done < <(printf '%s' "$PATH" | tr ':' '\0')
+    exec "$__cr_dir/../closed_room.sh" ${__cr_ro[@]+"${__cr_ro[@]}"} -- bash "$__cr_self" "$@"
   fi
   unset __cr_home
 fi

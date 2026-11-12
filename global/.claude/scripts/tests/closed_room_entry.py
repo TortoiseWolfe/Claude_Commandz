@@ -62,6 +62,13 @@ def _plan(orig=None):
         if _under(rp, home) and not _under(rp, top) and rp not in seen and rp != home:
             seen.add(rp)
             cmd += ["--ro", rp]
+    # Tools installed under the home (a node from a version manager) are found through PATH; their folders stay visible, read-only.
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        rp = os.path.realpath(p) if p and os.path.isdir(p) else ""
+        if (rp and _under(rp, home) and rp != home and not _under(rp, top) and rp not in seen
+                and not any(_under(rp, os.path.join(home, d)) for d in (".claude", ".config", ".ssh", ".gnupg"))):
+            seen.add(rp)
+            cmd += ["--ro", rp]
     given = os.environ.get("HOME")
     if given and os.path.isdir(given) and os.path.realpath(given) != home:
         cmd += ["--ro", os.path.realpath(given)]

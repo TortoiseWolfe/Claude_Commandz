@@ -75,6 +75,11 @@ assert_contains "$ROUT" sentinel-there "the sentinel is still there after a nest
 # 6. No process from outside shows in /proc.
 room -- bash -c "test ! -d /proc/$$ && echo hidden"
 assert_eq "$ROUT" hidden "the outer shell is not a folder in /proc"
+# The command is not the room's first process (that one ignores a plain kill and hides from ancestry walks that stop at pid 1).
+room -- bash -c 'kill -TERM $$; echo survived'
+assert_not_contains "$ROUT" survived "a plain kill ends the command: it is not pid 1"
+room -- bash -c '[ "$$" != 1 ] && echo not-pid-1'
+assert_eq "$ROUT" not-pid-1 "the command is not pid 1"
 
 # 7. No route off the machine without --net.
 began=$SECONDS

@@ -121,8 +121,19 @@ fcntl.ioctl(s, 0x8914, struct.pack("16sH14x", b"lo", f | 1))' 2>/dev/null || ech
   echo started >&8
   exec 8>&-
 
-  # 8. The real uid, no capabilities left over, no way to gain any.
-  exec unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs env CLOSED_ROOM=1 HOME="$RH" TMPDIR=/tmp "$@"
+  # 8. The real uid, no capabilities left over, no way to gain any. The command runs as a child, not in place of this process: the first process
+  #    of a pid namespace gets no default signal handling (a plain kill does nothing to it) and nothing above it in a process-ancestry walk counts
+  #    pid 1, so a test that walks its parents would lose the chain. This process stays as the room's init, passes the signals on, and returns
+  #    the command's exit code; when it ends, the kernel ends everything left in the room.
+  unshare -U --map-user="$RUID" --map-group="$RGID" -- setpriv --no-new-privs env CLOSED_ROOM=1 HOME="$RH" TMPDIR=/tmp "$@" <&0 &
+  child=$!
+  trap 'kill -TERM "$child" 2>/dev/null' TERM
+  trap 'kill -INT "$child" 2>/dev/null' INT
+  trap 'kill -HUP "$child" 2>/dev/null' HUP
+  wait "$child"; rc=$?
+  # A trapped signal ends the first wait early; wait again for the real exit code.
+  while kill -0 "$child" 2>/dev/null; do wait "$child"; rc=$?; done
+  exit "$rc"
 fi
 
 # ---- outer part ----
