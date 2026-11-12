@@ -822,15 +822,17 @@ def _read_only_listing(command):
     short list. A Python file on that list is there to be run as itself and nothing else: _runs_listed_python holds the rule. This is the only gate for such a command
     (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file.
     The program is the first word of each part of the command, so a part that starts by setting a variable is refused: that word is not a program, and
-    the real one after it would go unread."""
-    if re.search(r"[<>`]|\$\(", command):
+    the real one after it would go unread. For the same reason the whole command is refused when it holds a parenthesis or a brace: those group commands and
+    define functions, so they start a command where _segments sees no new part (`ls() ( python -m x file ); ls` gives the name ls a new body), and the
+    program inside would go unread too. A first word must be a plain name or path, nothing the shell would expand or define."""
+    if re.search(r"[<>`(){}]", command):
         return False
     for seg in _segments(command):
         words = _words(seg)
         if not words:
             continue
-        if "=" in words[0]:
-            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls
+        if "=" in words[0] or not re.fullmatch(r"[A-Za-z0-9_./~+-]+", words[0]):
+            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands
         prog = os.path.basename(words[0])
         if prog in _READ_ONLY_PROGRAMS:
             continue

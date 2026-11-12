@@ -123,6 +123,7 @@ def main():
         ("Python told to run code from the command line, with the wall's module as its argument", "Bash", dict(command="python3 -cpass %s" % os.path.join(wall, "no_ai_wall.py"))),
         ("the cleanup command handed a path", "Bash", dict(command="python3 -I %s /tmp/somewhere" % os.path.join(wall, "wall_cleanup.py"))),
         ("a variable set in front of Python, its value ending in a trusted program's name", "Bash", dict(command="A=/ls python3 -m somemodule %s" % os.path.join(wall, "no_ai_wall.py"))),
+        ("a trusted program's name given a new body in parentheses, then used", "Bash", dict(command="ls() ( python3 -m somemodule %s ); ls" % os.path.join(wall, "no_ai_wall.py"))),
     ):
         refused_n += 1
         rc, err = hook(tool, **ti)

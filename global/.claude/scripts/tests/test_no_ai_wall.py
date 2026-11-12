@@ -387,6 +387,23 @@ class SecurityFindingTests(Fixture):
                     self.assertEqual(r[1], "protected file", cmd)
         for cmd in ("A=/ls cat %s" % mod, "ls %s; A=/wc python3 -m somemodule %s" % (mod, mod), "A=/ls ls %s" % clean):
             self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # Parentheses and braces start a command where the rule sees no new part: a function body, a group, a subshell. The program inside must not go unread.
+        for target in (mod, clean, rv + " " + self.pfile):
+            for shape in ("ls() ( python3 -m somemodule %s ); ls", "ls () ( python3 -m somemodule %s ); ls", "ls() ( python3 -m somemodule %s )",
+                          "wc() ( python3 -cpass %s ) ; wc", "ls() { python3 -m somemodule %s; }; ls", "ls() {\npython3 -m somemodule %s\n}\nls",
+                          "function ls { python3 -m somemodule %s; }; ls", "(python3 -m somemodule %s)", "{ python3 -m somemodule %s; }",
+                          "ls; (python3 -m somemodule %s)", "stat() ( python3 -I -m somemodule %s ); stat /tmp"):
+                cmd = shape % target
+                r = self.call("Bash", command=cmd)
+                self.assertIsNotNone(r, cmd)
+                self.assertEqual(r[1], "protected file", cmd)
+        # A first word the shell would expand is not a plain program name, so it is not read as one.
+        for cmd in ("$P -m somemodule %s" % mod, '"$P" -m somemodule %s' % mod, "ls %s; $P %s" % (mod, mod), "l[s] %s; python[3] -m somemodule %s" % (mod, mod),
+                    "ls* %s" % clean, "ls {a,b} %s" % mod):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # The honest forms still pass: a lone look, two looks, a look and then the module's own check.
+        for cmd in ("ls -la %s" % mod, "sha256sum %s" % clean, "ls %s; wc -l %s" % (mod, clean), "ls %s && python3 -I %s status" % (wall, mod), "/usr/bin/stat %s" % mod):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))
