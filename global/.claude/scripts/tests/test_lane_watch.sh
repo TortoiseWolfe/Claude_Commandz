@@ -990,6 +990,15 @@ sa_tgt "Waiting since $ah" "$TMP/sf-14" "lower-case status words give no stamp" 
 sa_tgt "WORKING (a) (b $ah) x" "$TMP/sf-15" "a time inside a second parenthesised group is not a stamp" quiet
 sa_tgt "WORKING $(date '+%-H:%M') | deadline $ah" "$TMP/sf-16" "a head time with no AM/PM leaves no stamp" quiet
 sa_tgt "WORKING $nowt | their mail of 9 Nov $ah CET says x" "$TMP/sf-17" "a correct head stamp plus a far-ahead quoted time stays quiet" quiet
+sa_tgt "WAITING UNTIL $ah for the checks" "$TMP/sf-20" "a target word in capitals ('WAITING UNTIL <time>') leaves no stamp" quiet
+sa_tgt "DONE BY $ah" "$TMP/sf-21" "'DONE BY <time>' in capitals leaves no stamp" quiet
+sa_tgt "WORKING ETA: $ah" "$TMP/sf-22" "'WORKING ETA: <time>' leaves no stamp" quiet
+sa_tgt "STANDBY $ah | x" "$TMP/sf-23" "a status word that only contains a target word (STANDBY) still carries a stamp" named
+sa_tgt "BLOCKED (DUE BY noon), $ah Wed" "$TMP/sf-24" "target words inside the parenthesised group do not hide the stamp after it" named
+sa_tgt "WORKING ($ah) x" "$TMP/sf-25" "a time inside the parenthesised group at the head is not a stamp" quiet
+sa_tgt "DUE$ah" "$TMP/sf-26" "a target word with no gap before the time leaves no stamp" quiet
+LC_ALL=en_US.UTF-8 sa_tgt "ÉTAT $ah | x" "$TMP/sf-27" "an accented capital is not a status word under any locale" quiet 2>/dev/null
+LC_ALL=en_US.UTF-8 sa_tgt "WORKING $ah | x" "$TMP/sf-28" "a plain stamp is still read under a UTF-8 locale" named 2>/dev/null
 # Send first, then say what happened: a failing lane.sh --send must not be reported as sent.
 sa_watch "WORKING $ah | x" "$TMP/sf-18"
 if grep -q '^stamp ahead: rl wrote .*; sent the lane its correction$' "$TMP/sf-18" && ! grep -q 'could NOT' "$TMP/sf-18"; then echo "ok   a send that works is reported as sent"; else echo "FAIL send success line: $(cat "$TMP/sf-18")"; failures=$((failures + 1)); fi
