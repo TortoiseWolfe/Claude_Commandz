@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// gd_session.js: make sure the fleet browser is signed in to GoDaddy as Pat Client, with no human step.
+// gd_session.js: make sure the fleet browser is signed in to GoDaddy as the client (name read at run time), with no human step.
 //
 //   node gd_session.js [--profile <dir>] [--keep-open]
 //
-// Exit 0  the page reads "logged in as: Pat Client"
+// Exit 0  the page reads "logged in as: <client name>"
 // Exit 1  bad arguments or Playwright not found
 // Exit 3  needs a human; stderr carries the page's own words
 // Exit 5  the Delegate Access step-up offers only an SMS code ("SMS step-up"): the hub decides
@@ -14,7 +14,7 @@
 // page changes (origin and path, no query) and never a field value. It never signs out and never
 // signs in through GoDaddy's "Sign in with Google" when Chrome has no saved password, then reaches
 // Gail's account by GoDaddy's own route (help article 12373): account.godaddy.com/access, then
-// "Access Now" on the row that names Pat Client. A step-up is answered with the authenticator
+// "Access Now" on the row that names the client. A step-up is answered with the authenticator
 // (otp_code.py godaddy) only when the page offers it; an SMS-only step-up exits 5.
 'use strict';
 const fs = require('fs');
@@ -24,7 +24,19 @@ const { execFileSync, spawnSync } = require('child_process');
 
 const HOME = os.homedir();
 const TARGET = 'https://account.godaddy.com/products';
-const WHO = /logged in as:?\s*Pat Client/i;
+// The client's name is private: it is read at run time from ~/.config/afa/gd-client.json {"name": "First Last"}
+// (GD_CLIENT_FILE overrides the path). With no readable file the placeholder below stands in.
+function clientName() {
+  const file = process.env.GD_CLIENT_FILE || path.join(HOME, '.config/afa/gd-client.json');
+  try {
+    const n = JSON.parse(fs.readFileSync(file, 'utf8')).name;
+    if (typeof n === 'string' && n.trim()) return n.trim();
+  } catch (e) { /* fall back */ }
+  return 'Pat Client';
+}
+const CLIENT = clientName();
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const WHO = new RegExp('logged in as:?\\s*' + escapeRe(CLIENT), 'i');
 const DEADLINE_MS = 150000;
 
 // Page words are logged only after digit runs of 4+ and email addresses are masked.
@@ -48,6 +60,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--profile' && argv[i + 1]) a.profile = argv[++i];
     else if (argv[i] === '--keep-open') a.keepOpen = true;
+    else if (argv[i] === '--print-who') { console.log(WHO.source); process.exit(0); }
     else return null;
   }
   return a;
@@ -98,7 +111,7 @@ async function main() {
     const reached = async () => {
       for (const p of ctx.pages()) {
         const t = await p.locator('body').innerText({ timeout: 3000 }).catch(() => '');
-        if (WHO.test(t) || (/exit access/i.test(t) && /Pat Client/.test(t))) return true;
+        if (WHO.test(t) || (/exit access/i.test(t) && t.includes(CLIENT))) return true;
       }
       return false;
     };
@@ -210,33 +223,33 @@ async function main() {
           }
           continue;
         }
-        // Tag the smallest block that names Pat Client and holds exactly one Access Now, then click it.
-        const tagged = await page.evaluate(() => {
+        // Tag the smallest block that names the client and holds exactly one Access Now, then click it.
+        const tagged = await page.evaluate((client) => {
           const btns = [...document.querySelectorAll('button, a, [role=button]')].filter((b) => /^\s*access now\s*$/i.test(b.textContent));
           for (const b of btns) {
             let n = b.parentElement;
             while (n && n !== document.body) {
               const inN = btns.filter((x) => n.contains(x)).length;
               if (inN > 1) break;
-              if (/Pat Client/.test(n.textContent)) { b.setAttribute('data-gd-access', 'gail'); return true; }
+              if (n.textContent.includes(client)) { b.setAttribute('data-gd-access', 'gail'); return true; }
               n = n.parentElement;
             }
           }
           return false;
-        }).catch(() => false);
+        }, CLIENT).catch(() => false);
         if (tagged) {
-          log('Access Now on the Pat Client row');
+          log('Access Now on the client row');
           await page.locator('[data-gd-access="gail"]').first().click().catch(() => {});
           await page.waitForTimeout(3000);
           continue;
         }
-        if (++accessTries > 8) { code = needHuman('Delegate Access shows no Access Now row for Pat Client', text); break; }
+        if (++accessTries > 8) { code = needHuman('Delegate Access shows no Access Now row for the client', text); break; }
       }
     }
     if (code !== 0 && Date.now() - start >= DEADLINE_MS) {
-      code = needHuman(signedIn ? 'signed in but the page never read "logged in as: Pat Client"' : 'no sign-in progress', await words(page));
+      code = needHuman(signedIn ? 'signed in but the page never read "logged in as: <client name>"' : 'no sign-in progress', await words(page));
     }
-    if (code === 0) log('logged in as: Pat Client');
+    if (code === 0) log('logged in as: ' + CLIENT);
     if (args.keepOpen && code === 0) await new Promise((res) => ctx.on('close', res));
   } finally {
     await ctx.close().catch(() => {});

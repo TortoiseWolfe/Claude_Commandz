@@ -36,6 +36,8 @@ Usage:
   python3 email_voice_check.py --stdin [--strict]
 """
 
+import json
+import os
 import re
 import statistics
 import sys
@@ -863,11 +865,27 @@ def has_quoted_points(text):
 # else's full name. "Alex Sample" is a membership applicant; "Jon has the
 # password" is the author talking about himself in the third person. The negative
 # lookahead for a following capitalised word draws that line, with the author's
-# own surnames allowed through so "Jonathan Doe" still trips it.
-SELF_NAMES = re.compile(
-    r'\b(?:Jon|Jonathan|Turtle\s?Wolfe|TortoiseWolfe)\b'
-    r'(?!\s+(?!Doe\b|Wolfe\b)[A-Z][a-z])'
-)
+# own surnames (from the private file) allowed through so the author's full name still trips it.
+# The author's real surname lives in a private file, never in this public repo:
+#   ~/.config/afa/voice-check.json   {"author_surnames": ["Surname", ...]}   (mode 600; VOICE_CHECK_CONFIG overrides the path)
+# With no readable file the placeholder "Doe" stands in.
+def author_surnames(path=None):
+    where = os.path.expanduser(path or os.environ.get('VOICE_CHECK_CONFIG') or '~/.config/afa/voice-check.json')
+    try:
+        with open(where) as f:
+            names = json.load(f).get('author_surnames')
+    except (OSError, ValueError, AttributeError):
+        names = None
+    good = [n for n in (names if isinstance(names, list) else []) if isinstance(n, str) and re.fullmatch(r'[A-Za-z]+', n)]
+    return good or ['Doe']
+
+
+def build_self_names(surnames):
+    allowed = '|'.join(re.escape(s) + r'\b' for s in list(surnames) + ['Wolfe'])
+    return re.compile(r'\b(?:Jon|Jonathan|Turtle\s?Wolfe|TortoiseWolfe)\b' + r'(?!\s+(?!' + allowed + r')[A-Z][a-z])')
+
+
+SELF_NAMES = build_self_names(author_surnames())
 
 
 URL_IN_PROSE = re.compile(r'https?://\S+')
