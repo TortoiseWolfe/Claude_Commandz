@@ -24,6 +24,14 @@ if [ -f "$FAKE_ST/queue-run" ]; then
     printf '{"type":"queue-operation","operation":"dequeue"}\n' >>"$FAKE_PROJ/$(cat "$FAKE_ST/cur").jsonl"; rm -f "$FAKE_ST/queue-run" "$FAKE_ST/queued"
   else echo "$left" >"$FAKE_ST/queue-run"; fi
 fi
+# A helper that "finishes" (helper-end holds "<sleeps left> <id>"): once handoff.md is written, its finish notice is logged after a few sleeps,
+# the way a subagent reports back to a lane that is waiting for it.
+if [ -f "$FAKE_ST/helper-end" ] && [ -s "$FAKE_HANDOFF" ]; then
+  read -r left hid <"$FAKE_ST/helper-end"; left=$(( left - 1 ))
+  if [ "$left" -le 0 ]; then
+    printf '{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\\n<task-id>%s</task-id>\\n<status>completed</status>\\n<summary>made up</summary>\\n</task-notification>"}\n' "$hid" >>"$FAKE_PROJ/$(cat "$FAKE_ST/cur").jsonl"; rm -f "$FAKE_ST/helper-end"
+  else echo "$left $hid" >"$FAKE_ST/helper-end"; fi
+fi
 exec /bin/sleep 0.02
 STUB
 cat >"$BIN/tmux" <<'STUB'
@@ -121,7 +129,7 @@ usage_rec() {  # usage_rec <total-tokens>: one assistant turn whose context is t
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
-reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$ST"/helper-end "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
 cur_for() { cut -f8 < <(awk -F"\t" -v n="$1" '$2==n' "$INDEX" | tail -1) >"$ST/cur"; }  # the fake lane writes into the transcript its index row names (a send is confirmed only there)
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
@@ -678,5 +686,120 @@ FAKE_QUEUE=stubborn LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycl
 assert_exit 1 "$LAST_RC" 'the same replay count with typed text in the box still fails'
 assert_contains "$LAST_OUT" 'still queued' 'and says input is still queued'
 basepane
+
+# 11 Nov, issue 35: a lane waiting on its helpers shows no spinner, so it looked idle and was cleared (twice in nine minutes, three subagents
+# running, about 339K tokens of their work), and the results came back to a fresh session that had never asked for them. The recycle now
+# counts the helpers the lane started and has not heard back from. First the count itself, on made-up records in the shape Claude Code logs:
+# a start is a tool result with isAsync and an agentId (a subagent) or a backgroundTaskId (a shell job); an end is a queued task notification
+# with a status, or a TaskStop result.
+hr_py="$TMP/helpers_running.py"
+sed -n "/helpers_running() {/,/^  }/p" "$SCRIPT" | sed -n "/<<'PY'/,/^PY$/p" | sed '1d;$d' >"$hr_py"
+[ -s "$hr_py" ] || { echo "FAIL could not extract helpers_running's python"; exit 1; }
+hr() { python3 -I "$hr_py" "$1" "${2:-1200}"; }
+ts_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"; ts_old="$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%S.000Z)"
+agent_start() {  # agent_start <id> <time>
+  printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t-%s","content":"launched"}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"%s","canContinueAgent":true}}\n' "$2" "$1" "$1"
+}
+job_start() {  # job_start <id> <time>
+  printf '{"type":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t-%s","content":"started"}]},"toolUseResult":{"backgroundTaskId":"%s","stdout":"","stderr":"","interrupted":false}}\n' "$2" "$1" "$1"
+}
+helper_end() {  # helper_end <id> [status]
+  printf '{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\\n<task-id>%s</task-id>\\n<status>%s</status>\\n<summary>made up</summary>\\n</task-notification>"}\n' "$1" "${2:-completed}"
+}
+hr_t="$TMP/hr/sess-a.jsonl"; mkdir -p "$TMP/hr"
+assert_eq "$(hr "$TMP/hr/none.jsonl")" '0 0 0' 'a transcript that cannot be read counts no helpers'
+usage_rec 130000 >"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 0 0' 'a transcript with no helper in it counts none'
+agent_start a01 "$ts_now" >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 0 0' 'a subagent started in the background and not heard from counts as running'
+job_start b01 "$ts_now" >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 1 0' 'a background shell job counts on its own'
+printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>b01</task-id>\n<summary>Monitor event: made up</summary>\n<event>10%</event>\n</task-notification>"}' >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 1 0' 'a notification with no status (a Monitor event) is not an end'
+helper_end zz9 >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 1 0' 'an end for a helper this transcript never started changes nothing'
+printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"\"toolUseResult\":{\"isAsync\":true,\"agentId\":\"quoted1\"} and \"backgroundTaskId\":\"quoted2\""}]},"toolUseResult":{"stdout":"quoted text","stderr":""}}' >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 1 0' 'text that only quotes a start, inside some other tool result, starts nothing'
+helper_end a01 >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 1 0' 'the finish notice ends the subagent'
+helper_end b01 killed >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 0 0' 'a killed job has ended too'
+job_start b02 "$ts_now" >>"$hr_t"; agent_start a02 "$ts_now" >>"$hr_t"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t8","content":"stopped"}]},"toolUseResult":{"task_id":"b02","task_type":"local_bash","message":"stopped"}}' >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '1 0 0' 'a helper the lane stopped itself is over, with or without a notice'
+printf '%s\n' '{"type":"queue-operation","operation":"enqueue"}' '{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>a02</task-id>\n<status>completed</status>\n</task-notification>"}}' >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 0 0' 'an end whose text arrives in the later queued-command record counts'
+# A session that died and was resumed never logs an end for the helpers it had: one that is old and silent is counted apart, not waited for.
+agent_start a03 "$ts_old" >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 0 1' 'a subagent started two hours ago with no transcript of its own is quiet, not running'
+assert_eq "$(hr "$hr_t" 86400)" '1 0 0' '... and counts as running when the quiet limit is longer than its age'
+mkdir -p "$TMP/hr/sess-a/subagents"; : >"$TMP/hr/sess-a/subagents/agent-a03.jsonl"
+assert_eq "$(hr "$hr_t")" '1 0 0' 'an old subagent whose own transcript changed just now is still running'
+touch -d '-2 hours' "$TMP/hr/sess-a/subagents/agent-a03.jsonl"
+assert_eq "$(hr "$hr_t")" '0 0 1' '... and is quiet again once that file is old too'
+job_start b03 "$ts_old" >>"$hr_t"
+assert_eq "$(hr "$hr_t")" '0 1 1' 'a shell job has no quiet rule: it counts however old it is'
+
+# Then the recycle itself. A lane with no helper gets the hand-off request word for word as before.
+qreset
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a lane with no helpers recycles as before'
+assert_not_contains "$(cat "$ST/sent.log")" 'still running' 'and its hand-off request says nothing about helpers'
+[ -e "$HOME_T/.claude/state/lanes/recycle.log" ] && assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" 'JOBS-RUNNING' 'and no helper row is logged'
+# A subagent that reports back while the recycle waits: the clear comes after its notice, never before.
+qreset; agent_start a11 "$ts_now" >>"$PROJ/old-sess.jsonl"; echo '6 a11' >"$ST/helper-end"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a subagent that finishes inside the wait lets the recycle go on'
+assert_contains "$(head -1 "$ST/sent.log")" '1 subagent(s) and 0 background job(s) still running' 'the hand-off request tells the lane its helper is waited for'
+[ ! -e "$ST/helper-end" ] || fail 'the lane was cleared before the subagent reported back'; ok
+assert_eq "$(grep -c '<task-id>a11</task-id>' "$PROJ/old-sess.jsonl")" 1 "the subagent's notice reached the session that started it, not the fresh one"
+assert_contains "$(cat "$ST/sent.log")" '/clear' 'and then the lane was cleared'
+mapfile -t sent <"$ST/sent.log"; [ "${#sent[@]}" = 3 ] || fail "still 3 typed messages, got ${#sent[@]}"; ok
+# A subagent still running when the time is up: the lane is NOT cleared, and the failure says why.
+qreset; agent_start a12 "$ts_now" >>"$PROJ/old-sess.jsonl"; rows_before="$(wc -l <"$INDEX")"
+FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_WAIT_SECS=3 lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'a subagent that outlasts the wait fails the recycle'
+assert_contains "$LAST_OUT" '1 subagent(s) the lane started were still running' 'the failure counts the subagents'
+assert_contains "$LAST_OUT" 'NOT cleared' 'and says the lane kept its context'
+assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear while a subagent runs'
+grep -q $'\tq-lane\tFAILED\t1 subagent' "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has a FAILED row that names the subagent'; ok
+[ "$(wc -l <"$INDEX")" = "$rows_before" ] || fail 'a recycle held by a subagent adds no index row'; ok
+[ -s "$HAND/handoff.md" ] || fail 'the hand-off the lane wrote is kept'; ok
+# An old subagent that is still writing its own transcript is waited for just the same.
+qreset; agent_start a13 "$ts_old" >>"$PROJ/old-sess.jsonl"; mkdir -p "$PROJ/old-sess/subagents"; : >"$PROJ/old-sess/subagents/agent-a13.jsonl"
+FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_WAIT_SECS=3 lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'a long-running subagent that is still writing holds the clear'
+rm -rf "$PROJ/old-sess"
+# An old, silent subagent with no end logged does not hold the lane for ever: the recycle goes on and the log says so.
+qreset; agent_start a14 "$ts_old" >>"$PROJ/old-sess.jsonl"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a subagent that went quiet long ago does not hold the recycle'
+assert_not_contains "$(head -1 "$ST/sent.log")" 'still running' 'and the lane is not told to wait for it'
+assert_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" $'q-lane\tHELPERS-QUIET\t1 subagent' 'recycle.log has a HELPERS-QUIET row'
+# A background shell job can be a server that never ends, and its notice reaches the fresh session anyway: it is waited for a short while,
+# then the lane is cleared, the log has a row, and the fresh session is told a notice may come.
+qreset; job_start b11 "$ts_now" >>"$PROJ/old-sess.jsonl"
+FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_JOB_SECS=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a background job that keeps running does not stop the recycle'
+assert_contains "$(head -1 "$ST/sent.log")" '0 subagent(s) and 1 background job(s) still running' 'the hand-off request names the job'
+assert_contains "$LAST_OUT" '1 background job(s) the lane started were still running' 'the recycle says it cleared with a job running'
+assert_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" $'q-lane\tJOBS-RUNNING\t1 background job' 'recycle.log has a JOBS-RUNNING row'
+assert_contains "$(grep 'context was cleared' "$ST/sent.log")" '1 background job(s) your earlier session started were still running' 'the re-prime tells the fresh session a notice may come'
+# ... and a job that ends inside its short wait leaves no such row and no such sentence.
+qreset; job_start b12 "$ts_now" >>"$PROJ/old-sess.jsonl"; echo '6 b12' >"$ST/helper-end"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a background job that ends inside its wait lets the recycle go on'
+[ ! -e "$ST/helper-end" ] || fail 'the lane was cleared before the job ended'; ok
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log" 2>/dev/null)" 'JOBS-RUNNING' 'a job that ended leaves no JOBS-RUNNING row'
+assert_not_contains "$(grep 'context was cleared' "$ST/sent.log")" 'background job(s) your earlier session' 'and the re-prime says nothing about jobs'
+# With a subagent and a job both out, the job's short wait does not start until the subagent is back.
+qreset; agent_start a15 "$ts_now" >>"$PROJ/old-sess.jsonl"; job_start b13 "$ts_now" >>"$PROJ/old-sess.jsonl"
+FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_JOB_SECS=1 LANE_RECYCLE_WAIT_SECS=3 lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'a job whose short wait is over does not let a lane with a running subagent be cleared'
+assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear with a subagent and a job both running'
+# --dry-run names the new wait.
+qreset
+lane --dry-run --recycle q-lane
+assert_contains "$LAST_OUT" 'wait for the helpers the lane started' '--recycle --dry-run names the wait for helpers'
 
 printf 'ok - %s checks passed\n' "$checks"
