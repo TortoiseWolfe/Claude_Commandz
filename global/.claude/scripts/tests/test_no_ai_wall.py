@@ -961,6 +961,17 @@ class BypassGapTests(Fixture):
                     # the program's name cannot be trusted
                     "grep() { eval \"$2\"; }; grep -e '%s'" % text, "hash -p /bin/bash grep; grep -c '%s'" % text, "alias echo=eval; echo '%s'" % text,
                     ">grep bash -c '%s'" % text, "E=1 echo 'x > %s'" % s, "\"grep\" 'x > %s' /tmp/f" % s, "\\grep 'x > %s' /tmp/f" % s,
+                    # ... also when the renaming sits behind another first word, or is a variable or search-path change
+                    "builtin hash -p /bin/bash grep; grep -c '%s'" % text, "command alias echo=eval; echo '%s'" % text,
+                    "builtin enable -f /tmp/x.so grep; grep -c '%s'" % text, "eval \"alias echo=eval\"; echo '%s'" % text,
+                    "source /tmp/defs.sh; grep -c '%s'" % text, ". /tmp/defs.sh; grep -c '%s'" % text,
+                    "export PATH=.:$PATH; cat '%s'" % text, "PATH=.:$PATH; cat '%s'" % text, "BASH_ENV=/tmp/e; echo '%s'" % text,
+                    "ENV=/tmp/e; echo '%s'" % text, "$X; grep -c '%s'" % text, "shopt -s expand_aliases; echo '%s'" % text,
+                    # a redirect with a quote or backslash glued on is a longer word, and that word names a file
+                    "echo '%s' >&2'.sh'; bash 2.sh" % text, "echo '%s' >&2\".sh\"; bash 2.sh" % text, "echo '%s' >&1\\.sh; bash 1.sh" % text,
+                    "echo '%s' >/dev/null'.sh'; bash /dev/null.sh" % text,
+                    # after `--` a word starting with "-" is a file
+                    "echo '%s' | uniq -- - -x.sh; bash ./-x.sh" % text, "echo '%s' | sort -- -o; bash /tmp/x.sh" % text,
                     # a copy of an open file (`<&0`) is a redirect, not the end of the pipeline: the text still reaches the shell
                     "echo '%s' | cat <&0 | bash" % text, "echo '%s' | cat 0<&0 | sh" % text, "echo '%s' | sort <&0 | sh" % text,
                     "echo '%s' | cat <&0 <&0 | . /dev/stdin" % text, "echo '%s' | cat 2<&1 | xargs -I{} sh -c {}" % text,

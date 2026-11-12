@@ -708,10 +708,13 @@ def _is_launcher(seg):
 
 _TEXT_ONLY_PROGRAMS = {"grep", "egrep", "fgrep", "echo", "cat"}  # they print or search their arguments and never run them
 _STDIN_FILTERS = _TEXT_ONLY_PROGRAMS | {"head", "tail", "wc", "cut", "tr", "nl", "sort", "uniq"}  # none runs what it reads on stdin (sort can, with --compress-program: see below)
-_REDEFINERS = {"alias", "function", "hash", "enable"}  # each can make a plain name such as grep run something else
+_REDEFINERS = {"alias", "function", "hash", "enable", "eval", "source", ".", "builtin", "command", "declare", "typeset", "export", "readonly",
+               "local", "unset", "set", "shopt", "trap", "exec", "env"}  # each can make a plain name such as grep run something else, or
+#                run a word that can: it changes a name, the search path or a shell option, or starts another builtin by name
 _COMPOUND_WORDS = {"{", "}", "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "in",
                    "time", "!", "[[", "]]", "coproc"}  # a block's output can be piped as a whole: `{ echo '..'; } | bash`
-_HARMLESS_REDIRECT = re.compile(r">(?:&[12](?![\w/.~$-])|>?[ \t]*/dev/null(?![\w/.-]))")  # `>&2`, `2>&1`, `>/dev/null`: no file is written
+_HARMLESS_REDIRECT = re.compile(r">(?:&[12]|>?[ \t]*/dev/null)(?=[ \t\n;&|<>)]|$)")  # `>&2`, `2>&1`, `>/dev/null`: no file is written. What
+#                      follows must END the bash word: a quote or backslash glued on makes it part of a longer word, which names a file
 _FILTER_WORD_UNSURE = re.compile(r"[^A-Za-z0-9_./=,:+@%<>&-]")  # in a word of sort or uniq: anything the shell could expand
 _SHELL_SYNTAX = set("<>|;&()`\n")
 _OPERATOR_CHARS = set(";|&<>()")
@@ -729,10 +732,11 @@ def _quoted_text_as_text(command):
     _STDIN_FILTERS, so `echo '..' > x.sh; bash x.sh` is still judged by the text it wrote.
     The command comes back UNCHANGED (the old, stricter reading) whenever its text cannot be read with certainty or could run the quoted
     text after all: a command substitution, backtick, parenthesis or `$'..'` anywhere outside single quotes, a comment, a `${..}` that
-    is more than a name, an unclosed quote or heredoc, a command that can rename a program (alias, function, hash, enable), or a block
+    is more than a name, an unclosed quote or heredoc, a command anywhere in the text that can change what a name runs (_REDEFINERS, a
+    variable assignment, or a program name that is not a plain word), or a block
     word (`{`, if, then, for, while, do, done, case ...) at the start of a command, because a block's output can be piped as a whole.
-    A sort or uniq whose words hold anything the shell could expand (a variable, wildcard or brace), and a sort with an option starting
-    `--c` (--compress-program runs a program on the lines), is not counted as a filter. Words end at bash's blanks only (space, tab,
+    A sort or uniq whose words hold anything the shell could expand (a variable, wildcard or brace) or a `--` word, and a sort with an
+    option starting `--c` (--compress-program runs a program on the lines), is not counted as a filter. Words end at bash's blanks only (space, tab,
     newline), so a program name with a carriage return glued on is not the plain name; `<&` is a redirect, never the end of a command."""
     n = len(command)
     pipelines = []
@@ -920,7 +924,9 @@ def _quoted_text_as_text(command):
     close_pipeline()
 
     everything = [c for p in pipelines for c in p]
-    if any(c["first"] in _REDEFINERS or c["first"] in _COMPOUND_WORDS for c in everything):
+    # One command anywhere in the text whose program cannot be read as a plain name (quoted, escaped, a variable, after a redirect), that
+    # sets a variable (`PATH=...`, `X=1 grep`), or that can change what a name runs, turns the relaxing off for the whole text.
+    if any(not c["first"] or "=" in c["first"] or c["first"] in _REDEFINERS or c["first"] in _COMPOUND_WORDS for c in everything):
         return command
     for c in everything:  # two of the filters can fill a file without a redirect: `sort -o FILE` and `uniq INPUT OUTPUT`
         if c["first"] in ("sort", "uniq"):
@@ -930,6 +936,8 @@ def _quoted_text_as_text(command):
                 words = None
             if words is None or any(_FILTER_WORD_UNSURE.search(w) for w in words):
                 c["first"] = None  # a variable, wildcard or brace word could turn into any option: keep the old reading
+            elif "--" in words:
+                c["first"] = None  # after `--` a word starting with "-" is a file, so the count of plain words below would miss it
             elif c["first"] == "sort" and any(w.startswith("--c") for w in words):
                 c["first"] = None  # sort --compress-program=PROG hands the lines it reads to PROG
             elif c["first"] == "sort":
