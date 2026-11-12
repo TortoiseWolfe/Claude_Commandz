@@ -231,6 +231,16 @@ class Prefix(Base):
         rc, out, err, _ = self.run_cmd("echo 'jwt_secret=%s'; exit 2" % FAKE)
         self.assertEqual((rc, out), (2, "jwt_secret=%s\n" % FAKE))
         self.assertFalse(os.path.exists(self.heart), "the wrapper must not start when the switch is off")
+        # The model reading this call is told, on the call itself, that nothing was masked.
+        self.assertEqual(err.count("shell-scrub: the filter is switched off"), 1, err)
+        self.assertIn("NOT being masked", err)
+
+    def test_off_switch_says_nothing_on_a_command_that_is_not_a_bash_call(self):
+        # Hooks, the status line and connector starts also come through the prefix; a line on their stderr could break them.
+        open(self.off, "w").close()
+        rc, out, err, _ = self.run_cmd("echo hello; exit 4", raw=True)
+        self.assertEqual((rc, out, err), (4, "hello\n", ""))
+        self.assertFalse(os.path.exists(self.heart))
 
     def test_non_bash_command_passes_through_without_python(self):
         bad = os.path.join(self.tmp, "would_fail.py")

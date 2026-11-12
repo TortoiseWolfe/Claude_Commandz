@@ -11,6 +11,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import coop_fixtures as fx  # noqa: E402
+import test_coop_scrubber_hook as coop_tests  # noqa: E402
 
 HOOK = os.path.join(HERE, "..", "..", "hooks", "output-scrubber.py")
 # Made-up values are put together at run time from pieces, so a leak scanner reading this public file finds
@@ -333,6 +334,29 @@ class Hook(unittest.TestCase):
         line = open(self.base_env["OUTPUT_SCRUBBER_LOG"]).read()
         self.assertIn("Bash\tmasked=1", line)
         self.assertNotIn("eyJ", line)
+
+
+class EveryCoopCheckThroughThisHook(coop_tests.Hook):
+    """Every test written for coop-scrubber.py, run unchanged through output-scrubber.py.
+
+    settings.json names output-scrubber.py where it used to name coop-scrubber.py, so the co-op scrub now
+    happens only inside this hook. If a test in test_coop_scrubber_hook.py fails here and passes there,
+    the swap lost a co-op protection.
+    """
+    hook = HOOK
+    drop_env = ("COOP_", "SECRET_SCRUB", "KNOWN_", "SHELL_SCRUB", "CLAUDE_CODE_SHELL_PREFIX", "OUTPUT_SCRUBBER")
+
+    def more_env(self):
+        # The secret step gets empty made-up stores, so it reads nothing from the machine running the tests.
+        secrets = os.path.join(self.tmp, "secrets")
+        os.makedirs(secrets, exist_ok=True)
+        return dict(SECRET_SCRUB_ALERTS=os.path.join(self.tmp, "alerts.log"),
+                    SHELL_SCRUB_HEARTBEAT=os.path.join(self.tmp, "heartbeat"),
+                    SHELL_SCRUB_OFF_FILE=os.path.join(self.tmp, "off"),
+                    OUTPUT_SCRUBBER_LOG=os.path.join(self.tmp, "out.log"),
+                    KNOWN_SECRETS_REPOS=os.path.join(self.home, "repos"), KNOWN_SECRETS_DIR=secrets,
+                    KNOWN_SECRETS_IGNORE=os.path.join(self.tmp, "none"),
+                    KNOWN_SECRETS_CACHE=os.path.join(self.tmp, "cache.json"))
 
 
 if __name__ == "__main__":

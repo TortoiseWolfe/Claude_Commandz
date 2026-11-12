@@ -55,8 +55,10 @@ class SettingsHookTests(unittest.TestCase):
 
     def test_shell_prefix_points_at_the_scrub_wrapper(self):
         # The wrapper is what masks a Bash call that exits non-zero, so the prefix must name a file in this repo.
+        # It is reached through $HOME, never a home folder written out, so the template holds no username.
         prefix = json.loads(SETTINGS.read_text())["env"].get("CLAUDE_CODE_SHELL_PREFIX", "")
-        self.assertTrue(prefix.endswith("/.claude/scripts/shell_scrub_prefix.sh"), prefix)
+        self.assertIn('"$HOME/.claude/scripts/shell_scrub_prefix.sh"', prefix)
+        self.assertNotIn("/home/", prefix)
         scripts = HOOKS_DIR.parent / "scripts"
         for name in ("shell_scrub_prefix.sh", "shell_scrub_wrapper.py", "secret_scrubber.py"):
             self.assertTrue((scripts / name).exists(), f"no copy of {name}")
