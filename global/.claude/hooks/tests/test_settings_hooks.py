@@ -151,6 +151,23 @@ class SettingsHookTests(unittest.TestCase):
             self.assertIn(tool, matched)
         self.assertTrue((HOOKS_DIR / "list-file-guard.py").exists(), "no copy of list-file-guard.py")
 
+    def test_ask_card_guard_runs_before_every_question_card(self):
+        # One decision per card, "Hold" first, a numbered reference named in words with its address, and a live
+        # check before asking about sent mail or a merge: the card is the moment of need, so the guard must see
+        # every AskUserQuestion call. It reads the transcript through unverified-pending.py, so both files ship.
+        self.assertIn(("AskUserQuestion", "python3 ~/.claude/hooks/ask-card-guard.py"), commands("PreToolUse"))
+        self.assertTrue((HOOKS_DIR / "ask-card-guard.py").exists(), "no copy of ask-card-guard.py")
+        self.assertTrue((HOOKS_DIR / "unverified-pending.py").exists(), "ask-card-guard.py loads unverified-pending.py")
+
+    def test_bare_reference_runs_at_the_end_of_every_turn(self):
+        # A reply that names a pull request, issue or card by number alone, or hides its address in a code
+        # block, is caught when the turn ends, before the owner has to ask what the number means.
+        self.assertIn("python3 ~/.claude/hooks/bare-reference.py", [c for _, c in commands("Stop")])
+        self.assertTrue((HOOKS_DIR / "bare-reference.py").exists(), "no copy of bare-reference.py")
+
+    def test_unverified_pending_still_runs_at_the_end_of_every_turn(self):
+        self.assertIn("bash ~/.claude/hooks/unverified-pending.sh", [c for _, c in commands("Stop")])
+
     def test_afa_mods_marketplace_and_plugin(self):
         data = json.loads(SETTINGS.read_text())
         self.assertIs(data["enabledPlugins"].get("afa-mods@afa-mods"), True)

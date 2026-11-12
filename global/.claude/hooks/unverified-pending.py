@@ -1,7 +1,9 @@
 """Scanner for unverified-pending.sh. Reads a transcript path (argv[1]) and prints one line per
 item the LAST assistant reply hands to Jonathan without a live check THIS turn:
   - a Gmail draft he's told to send, when no Gmail lookup ran since his last message;
-  - a PR he's told to merge, when no `gh pr` / pulls API call ran since his last message.
+  - a PR he's told to merge, when no `gh pr` / pulls API call ran since his last message;
+  - a draft or PR listed as waiting on him ("waiting on you", "needs your OK", "your call"), when the
+    matching lookup did not run since his last message.
 Prints nothing when clear. Self-test: `python3 unverified-pending.py --self-test`."""
 import json
 import re
@@ -32,6 +34,13 @@ GMAIL_OP = re.compile(r"(?:^|__)(search_threads|list_drafts|get_draft|get_thread
 # Subjects of agent-to-agent notes. A lookup of only these cannot show whether a client draft went out.
 NOTE_TAG = re.compile(r"MUSE>CC|CC>MUSE|NCC-74656|NX-01", re.I)
 NOTE_FILLER = re.compile(r"subject:|in:(?:drafts|inbox|anywhere)|label:\S+|is:\w+|(?:newer|older)_than:\S+|\bOR\b|\bAND\b", re.I)
+# A line that says an item waits on him (12 Nov: four items listed as "waiting on you", two already sent).
+WAIT_CUE = re.compile(
+    r"\b(?:waiting on you|waits on you|waiting for your|awaiting your|your call|still yours|"
+    r"needs your (?:ok|okay|answer|word|decision|sign-?off|approval|review)|"
+    r"for you to (?:approve|review|decide|sign off))\b", re.I)
+WAIT_MAIL = re.compile(r"\b(?:drafts?|e-?mails?|repl(?:y|ies)|notes? to \w+)\b", re.I)
+WAIT_PR = re.compile(r"\bpull requests?\b|\bPRs?\s*#?\d+\b|(?:[\w.-]+/)?[\w.-]+#\d+", re.I)
 PR_CHECK = re.compile(r"\bgh\s+pr\s+(view|list|status|checks)\b|repos/[^ ]+/pulls")
 
 
@@ -101,6 +110,11 @@ def scan(last, calls):
             out.append("draft: " + ln.strip()[:120])
         elif PR_ASK.search(ln) and not pr_checked:
             out.append("PR: " + ln.strip()[:120])
+        elif WAIT_CUE.search(ln) and not reports_sent:
+            if WAIT_MAIL.search(ln) and not AGENT_NOTE.search(ln) and not gmail_checked:
+                out.append("draft: " + ln.strip()[:120])
+            elif WAIT_PR.search(ln) and not pr_checked:
+                out.append("PR: " + ln.strip()[:120])
     return out[:4]
 
 
@@ -118,6 +132,12 @@ def self_test():
         ("sent-went-out", "quiet", "Gail's reply went out at 1:25 PM.", []),
         ("hatch-note-id", "quiet", "Hatch's note r-4178758221985557888 is in your drafts, nothing for you to do.", []),
         ("narration", "quiet", "#436 merged as 1f54eec; the keep-alive run succeeded.", []),
+        ("waiting-draft-unchecked", "fire", "- Greg's reply draft is waiting on you.", []),
+        ("waiting-draft-checked", "quiet", "- Greg's reply draft is waiting on you.", ['mcp__claude_ai_Gmail__list_drafts {}']),
+        ("waiting-pr-unchecked", "fire", "- RescueDogs#436 needs your OK.", []),
+        ("waiting-pr-checked", "quiet", "- RescueDogs#436 needs your OK.", ['Bash {"command": "gh pr view 436 -R x/y"}']),
+        ("waiting-neither", "quiet", "- The colour choice is your call.", []),
+        ("waiting-draft-sent", "quiet", "- Greg's reply draft was sent at 2:10 PM, nothing waiting on you.", []),
         ("plain", "quiet", "The roadmap is updated with this afternoon's work.", []),
     ]
     fail = 0
