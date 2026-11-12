@@ -31,7 +31,8 @@ prior = [json.loads(l) for l in open(calls)] if os.path.exists(calls) else []
 open(calls, "a").write(json.dumps(args) + "\\n")
 if args[:2] == ["pr", "view"]:
     views = sum(1 for c in prior if c[:2] == ["pr", "view"])
-    print(json.dumps(sc["pr"] if views == 0 else sc.get("after", sc["pr"])))
+    # first view: the pull request; second view: the re-check just before the merge; later views: after the merge
+    print(json.dumps(sc["pr"] if views == 0 else sc.get("recheck", sc["pr"]) if views == 1 else sc.get("after", sc["pr"])))
 elif args[:2] == ["pr", "diff"]:
     if "--name-only" in args:
         if sc.get("names_fail"):
@@ -131,7 +132,7 @@ class CleanMerge(Base):
         want = ("- 8:05 PM example-org/reviewed-app PR 51 (Invented change) squash-merged eaa22110 on green "
                 "(2 checks: pytest, shell; 0 skipped, read from 2 job logs; lane_merge.py).")
         self.assertEqual(self.rollup_file().read_text(), want + "\n")
-        self.assertEqual(r.stdout.splitlines(), [want, "not readable: none", "MERGED"])
+        self.assertEqual(r.stdout.splitlines(), [want, "not readable: none; no test summary in: none", "MERGED"])
 
     def test_the_rollup_file_is_appended_not_replaced(self):
         self.state.mkdir()
@@ -269,9 +270,34 @@ class LogSkips(Base):
         r = self.go(scenario(logs={"101": "building\nall done\n", "102": "more noise\n"}))
         self.refused(r, "could not find a test summary", "zero skips is not proven")
 
-    def test_one_log_with_a_summary_is_enough_for_the_other_to_be_quiet(self):
+    def test_one_log_with_a_summary_is_enough_and_the_quiet_job_is_named(self):
         r = self.go(scenario(logs={"101": PYTEST_OK, "102": "lint ok\n"}), "--check")
         self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("not readable: none; no test summary in: shell", r.stdout)
+
+    def test_the_quiet_job_is_named_after_a_real_merge_too(self):
+        r = self.go(scenario(logs={"101": PYTEST_OK, "102": "lint ok\n"}))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout.splitlines()[1:], ["not readable: none; no test summary in: shell", "MERGED"])
+
+    def test_a_summary_with_subtests_counts_as_a_suite_that_ran(self):
+        for text in ("3501 passed, 227 subtests passed in 275.53s (0:04:35)\n", "153 passed, 89 subtests passed in 4.58s\n",
+                     "2026-11-11T10:00:01.1234567Z \x1b[32m\x1b[1m3501 passed\x1b[0m\x1b[32m, 227 subtests passed in 275.53s\x1b[0m\n"):
+            r = self.go(scenario(logs={"101": text, "102": "lint ok\n"}), "--check")
+            self.assertEqual(r.returncode, 0, text + r.stdout)
+            self.assertIn("no test summary in: shell", r.stdout)
+
+    def test_skipped_subtests_and_reruns_are_refused(self):
+        self.refused(self.with_log("10 passed, 3 subtests skipped in 1.00s\n"), "3 subtests skipped")
+        self.calls.unlink()
+        self.refused(self.with_log("=== 10 passed, 1 rerun in 1.00s ===\n"), "1 rerun")
+
+    def test_a_workflow_comment_echoed_into_the_log_is_not_a_summary(self):
+        echo = ('2026-11-11T10:00:01.1234567Z \x1b[36;1m# A deselected test never runs either; pytest only counts it in the '
+                'summary line ("5 deselected"), never as SKIPPED.\x1b[0m\n')
+        r = self.go(scenario(logs={"101": echo + PYTEST_OK, "102": PYTEST_OK}), "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.refused(self.go(scenario(logs={"101": echo, "102": echo})), "could not find a test summary")
 
     def test_a_log_that_cannot_be_fetched_is_refused(self):
         r = self.go(scenario(logs={"101": PYTEST_OK}))
@@ -299,8 +325,38 @@ class Diff(Base):
     def test_a_deploy_workflow_path_is_refused(self):
         self.refused(self.named(".github/workflows/deploy-prod.yml"), "deploy, release or publish workflow")
 
-    def test_a_plain_ci_workflow_is_allowed(self):
-        self.assertEqual(self.go(scenario(names=".github/workflows/ci.yml"), "--check").returncode, 0)
+    def test_any_change_to_the_ci_itself_is_refused(self):
+        for path in (".github/workflows/ci.yml", ".github/actions/setup/action.yml", ".github/scripts/coverage.py",
+                     ".GitHub/Workflows/CI.yml"):
+            self.setUp()
+            self.refused(self.named(path), "this change edits the CI itself; the hub merges this one", path)
+
+    def test_a_folder_that_only_looks_like_dot_github_is_allowed(self):
+        self.assertEqual(self.go(scenario(names="docs/.github/notes.md"), "--check").returncode, 0)
+
+    def test_a_migration_renamed_away_is_refused_by_its_old_name(self):
+        patch = ("diff --git a/db/migrations/0002_users.py b/attic/0002_users.py\nsimilarity index 100%\n"
+                 "rename from db/migrations/0002_users.py\nrename to attic/0002_users.py\n")
+        self.refused(self.named("attic/0002_users.py", patch), "database migration or a deploy step", "db/migrations/0002_users.py")
+
+    def test_a_deleted_migration_is_refused_even_when_the_file_list_leaves_it_out(self):
+        patch = DIFF_OK + ("diff --git a/schema/users.sql b/schema/users.sql\ndeleted file mode 100644\nindex 1111111..0000000\n"
+                           "--- a/schema/users.sql\n+++ /dev/null\n@@ -1 +0,0 @@\n-select 1;\n")
+        self.refused(self.named("src/app.py", patch), "schema/users.sql", "a .sql file")
+
+    def test_a_ci_file_renamed_away_is_refused_by_its_old_name(self):
+        patch = ("diff --git a/.github/workflows/ci.yml b/attic/ci.yml\nsimilarity index 90%\n"
+                 "rename from .github/workflows/ci.yml\nrename to attic/ci.yml\n")
+        self.refused(self.named("attic/ci.yml", patch), "edits the CI itself", ".github/workflows/ci.yml")
+
+    def test_a_quoted_old_name_is_still_read(self):
+        patch = ('diff --git "a/db/migrations/caf\\303\\251.py" "b/attic/caf\\303\\251.py"\nsimilarity index 100%\n'
+                 'rename from "db/migrations/caf\\303\\251.py"\nrename to "attic/caf\\303\\251.py"\n')
+        self.refused(self.named("attic/x.py", patch), "a folder named migrations")
+
+    def test_a_changed_line_that_looks_like_a_file_header_is_not_a_path(self):
+        patch = DIFF_OK + "--- a/db/migrations/0001_init.py\n+++ b/deploy.sh\n"
+        self.assertEqual(self.go(scenario(diff=patch), "--check").returncode, 0)
 
     def test_deploy_files_and_folders_are_refused(self):
         for path in ("deploy.sh", "Procfile", "fly.toml", "vercel.json", "netlify.toml", "eas.json", "ops/deploy/run.sh",
@@ -335,6 +391,21 @@ class Diff(Base):
         self.refused(self.go(scenario(diff_fail=True)), "could not read the patch")
         self.setUp()
         self.refused(self.go(scenario(diff="")), "could not read the patch")
+
+
+class HeadMoved(Base):
+    def test_a_head_that_moved_while_it_was_checked_is_refused(self):
+        moved = pr_json(headRefOid="f" * 40)
+        self.refused(self.go(scenario(recheck=moved)), "the branch moved while it was being checked", HEAD[:8], "ffffffff")
+        self.assertEqual(self.calls_made()[-1][:2], ["pr", "view"], "the second read comes after the diff and is the last call")
+
+    def test_check_mode_refuses_a_moved_head_too(self):
+        self.refused(self.go(scenario(recheck=pr_json(headRefOid="f" * 40)), "--check"), "the branch moved")
+
+    def test_the_second_read_comes_after_the_diff_and_before_the_merge(self):
+        self.go()
+        kinds = [" ".join(c[:2]) for c in self.calls_made() if c[0] == "pr"]
+        self.assertEqual(kinds, ["pr view", "pr diff", "pr diff", "pr view", "pr merge", "pr view"])
 
 
 class Merge(Base):
@@ -383,6 +454,24 @@ class ScanUnits(unittest.TestCase):
     def test_scan_log_counts_a_summary_with_nothing_skipped(self):
         seen, skips = lane_merge.scan_log("=== 521 passed in 3s ===\n")
         self.assertEqual((seen, skips), (1, []))
+
+    def test_scan_log_reads_this_repos_own_summary_line(self):
+        seen, skips = lane_merge.scan_log("3501 passed, 227 subtests passed in 275.53s (0:04:35)\n")
+        self.assertEqual((seen, skips), (1, []))
+
+    def test_scan_log_counts_every_unclean_pytest_word(self):
+        seen, skips = lane_merge.scan_log("== 9 passed, 1 skipped, 2 deselected, 3 xfailed, 4 xpassed, 5 subtests skipped in 1s ==\n")
+        self.assertEqual((seen, [n for n, _ in skips]), (1, [15]))
+
+    def test_scan_log_ignores_counts_that_are_not_test_results(self):
+        self.assertEqual(lane_merge.scan_log("12 files changed in 3.5s\n"), (0, []))
+
+    def test_patch_paths_gives_old_and_new_names_once_each(self):
+        patch = ("diff --git a/old/a.py b/new/a.py\nrename from old/a.py\nrename to new/a.py\n"
+                 "diff --git a/src/b.py b/src/b.py\n--- a/src/b.py\n+++ b/src/b.py\n@@ -1 +1 @@\n-x\n+y\n--- a/not/a/path\n"
+                 "diff --git a/gone.bin b/gone.bin\ndeleted file mode 100644\nBinary files a/gone.bin and /dev/null differ\n"
+                 "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n")
+        self.assertEqual(lane_merge.patch_paths(patch), ["old/a.py", "new/a.py", "src/b.py", "gone.bin", "run.sh"])
 
     def test_path_rule_is_case_insensitive(self):
         self.assertTrue(lane_merge.path_rule("DB/Migrations/X.py"))
