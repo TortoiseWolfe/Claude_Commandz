@@ -17,6 +17,9 @@ line "failed-call" to ~/.claude/state/secret-scrub-alerts.log (SECRET_SCRUB_ALER
 PostToolUse for Bash with CLAUDE_CODE_SHELL_PREFIX set and no shell-scrub-off file: a hook-side mask logs "wrapper-missed"; a
 heartbeat (SHELL_SCRUB_HEARTBEAT, ~/.claude/state/shell-scrub-heartbeat) older than 900 s on a foreground call logs
 "heartbeat-stale" and adds a warning line to the model at most once per 30 minutes (stamp file beside the alerts log).
+With the shell-scrub-off file present (SHELL_SCRUB_OFF_FILE) the heartbeat check is skipped, but the off switch is loud: a
+"filter-off" alert line and a security notice to the model at most once per 30 minutes (its own stamp file), and a call the
+hook had to mask logs "filter-off-masked" every time.
 One line per masked call goes to ~/.claude/state/output-scrubber.log (OUTPUT_SCRUBBER_LOG overrides): time, tool, count.
 """
 import contextlib
@@ -113,9 +116,10 @@ def alert(payload, tool, count, word):
         pass
 
 
-def once_per_30_min():
-    """True (and stamps) when no heartbeat warning went to the model in the last 30 minutes."""
-    stamp = state_path("SECRET_SCRUB_ALERTS", "secret-scrub-alerts.log") + ".stamp"
+def once_per_30_min(name=""):
+    """True (and stamps) when no warning of this kind (name) went to the model in the last 30 minutes.
+    Each kind has its own stamp file, so the off-switch notice cannot hide the heartbeat warning."""
+    stamp = state_path("SECRET_SCRUB_ALERTS", "secret-scrub-alerts.log") + (".%s.stamp" % name if name else ".stamp")
     try:
         if time.time() - os.path.getmtime(stamp) < 1800:
             return False
@@ -159,6 +163,13 @@ def prefix_checks(payload, tool, count):
     if tool != "Bash" or not os.environ.get("CLAUDE_CODE_SHELL_PREFIX"):
         return None
     if os.path.exists(state_path("SHELL_SCRUB_OFF_FILE", "shell-scrub-off")):
+        if count:     # printed while the filter was off and only this hook caught it
+            alert(payload, tool, count, "filter-off-masked")
+        if once_per_30_min("off"):
+            alert(payload, tool, 0, "filter-off")
+            return ("Security notice: the Bash output filter is switched off (the file shell-scrub-off exists in "
+                    "~/.claude/state), so the output of a failed command is not masked. Unless the hub told you it "
+                    "switched the filter off, write this in your report.md for the hub.")
         return None
     if count:
         alert(payload, tool, count, "wrapper-missed")

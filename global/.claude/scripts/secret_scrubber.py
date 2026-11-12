@@ -114,6 +114,7 @@ SHAPES = re.compile(_rv.TOKENS.pattern + "|" + "|".join([
 PEM = _rv.PEM
 PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+PEM_BODY = re.compile(r"[A-Za-z0-9+/=]{16,}")     # a key-body line, once stripped
 URL_PW = _rv.URL_SECRETS[0]   # only user:password@; the webhook patterns would mask ordinary API URLs
 B64_RUN = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
 AUTH_HDR = re.compile(r"""(?P<pre>(?<![\w-])(?:proxy-)?authorization(?:\\?["'])?[ \t]*[:=][ \t]*(?:\\?["'])?
@@ -160,6 +161,24 @@ def _tier1(text, needles):
             text = new
     text, k = PEM.subn(_mask("private-key"), text)
     n += k
+    # A block cut short (head -5 / tail -5 of a key file): complete blocks are gone by now, so a BEGIN still here has no
+    # END after it, and an END still here has no BEGIN before it.
+    m = PEM_BEGIN.search(text)
+    if m:
+        text = text[:m.start()] + _mask("private-key")
+        n += 1
+    while True:
+        m = PEM_END.search(text)
+        if not m:
+            break
+        start = text.rfind("\n", 0, m.start()) + 1
+        while start > 0:      # the unbroken run of key-body lines right above the END line
+            prev = text.rfind("\n", 0, start - 1) + 1
+            if not PEM_BODY.fullmatch(text[prev:start - 1].strip()):
+                break
+            start = prev
+        text = text[:start] + _mask("private-key") + text[m.end():]
+        n += 1
     runs = [(m.start(), m.end()) for m in B64_RUN.finditer(text)]
 
     def shape(m):
@@ -508,14 +527,18 @@ def withhold(obj):
 # ---------------------------------------------------------------------------------------------- --filter
 class LineFilter:
     """Stream filter on bytes: feed(bytes) -> bytes, finish() -> bytes.
-    Holds a partial line until its newline arrives (a line longer than MAX_LINE bytes counts as complete), keeps the
+    Holds a partial line until its newline arrives (a line longer than MAX_LINE bytes is cut after the last safe blank
+    in the final CUT_WINDOW bytes, or replaced by a notice with the rest of that line dropped), keeps the
     private-key-block state between lines, and after an internal error returns only withheld notices (one per line).
     flush_partial() scrubs and returns the held partial line now (for a stream that went quiet); it does nothing
     inside a private key block. Bytes that are not UTF-8 pass through unchanged (surrogateescape)."""
     MAX_LINE = 1024 * 1024
+    CUT_WINDOW = 4096       # how far back from MAX_LINE a forced cut looks for a blank to cut after
 
     def __init__(self, tier=2):
         self.tier = tier
+        self.discarding = False
+        self.cut_refused = 0        # lines replaced by a notice because no safe place to cut was found
         self.buf = bytearray()
         self.in_pem = False
         self.failed = False
@@ -550,15 +573,41 @@ class LineFilter:
             self.failed = True
             return (WITHHELD + "\n").encode()
 
+    def _safe_cut(self, buf, pos):
+        """End index for a forced cut of an over-long line, or None. Cuts just after the last space or tab in the final
+        CUT_WINDOW bytes whose previous non-blank byte is not : or =, so no token and no name: value pair is split."""
+        end = pos + self.MAX_LINE
+        for j in range(end - 1, max(pos, end - self.CUT_WINDOW) - 1, -1):
+            if buf[j] not in b" \t":
+                continue
+            k = j - 1
+            while k >= pos and buf[k] in b" \t":
+                k -= 1
+            if k < pos or buf[k] not in b":=":
+                return j + 1
+        return None
+
     def feed(self, data):
         self.buf += data
         out, pos, buf = [], 0, self.buf
         while True:
+            if self.discarding:       # the rest of a line that had no safe place to cut
+                i = buf.find(b"\n", pos)
+                if i < 0:
+                    pos = len(buf)
+                    break
+                pos, self.discarding = i + 1, False
+                continue
             i = buf.find(b"\n", pos)
             if i >= 0:
                 stop = i + 1
             elif len(buf) - pos > self.MAX_LINE:
-                stop = pos + self.MAX_LINE
+                stop = self._safe_cut(buf, pos)
+                if stop is None:
+                    out.append(b"<withheld: a line over 1 MB with no safe place to cut>\n")
+                    self.discarding = True
+                    self.cut_refused += 1
+                    continue
             else:
                 break
             out.append(self._one(bytes(buf[pos:stop])))

@@ -22,6 +22,11 @@ FAKE_SECRET = "Zq7fakeJWTsigningValue0123456789abcdefQwErTy"
 PEM_WORDS = "PRIVATE" + " " + "KEY"
 FAKE_PEM = ("-----BEGIN " + PEM_WORDS + "-----\nZmFrZWtleWJvZHlsaW5lMQ==\nZmFrZWtleWJvZHlsaW5lMg==\n-----END "
             + PEM_WORDS + "-----")
+PEM_TOP = "-----BEGIN " + PEM_WORDS + "-----"
+PEM_BOTTOM = "-----END " + PEM_WORDS + "-----"
+PEM_BODY_1 = "ZmFrZWtleWJvZHlsaW5lMQ=="
+PEM_BODY_2 = "ZmFrZWtleWJvZHlsaW5lMg=="
+FAKE_CERT = ("-----BEGIN " + "CERTI" + "FICATE-----\nZmFrZWNlcnRib2R5bGluZTE=\n-----END " + "CERTI" + "FICATE-----")
 FAKE_KNOWN = "Kx9!fake-known-value-for-tests-only-77Q"
 FAKE_AKIA = "AKIA" + "ABCDEFGHIJKLMNOP"
 PLAIN_A = "hunter2" + "hunter2"
@@ -61,6 +66,34 @@ class Library(unittest.TestCase):
         out, n = scrub("before\n%s\nafter" % FAKE_PEM, 1)
         self.assertEqual(out, "before\n<redacted:private-key>\nafter")
         self.assertEqual(n, 1)
+
+    def test_head_of_key_is_masked_to_the_end(self):          # head -5 key.pem: BEGIN with no END
+        out, n = scrub("line before\n%s\n%s\n%s\nlast line" % (PEM_TOP, PEM_BODY_1, PEM_BODY_2), 1)
+        self.assertEqual(out, "line before\n<redacted:private-key>")
+        self.assertEqual(n, 1)
+
+    def test_tail_of_key_is_masked_with_the_body_above_it(self):      # tail -5 key.pem: END with no BEGIN
+        text = "ordinary prose line here\n%s\n  %s  \n%s\nafter" % (PEM_BODY_1, PEM_BODY_2, PEM_BOTTOM)
+        out, n = scrub(text, 1)
+        self.assertEqual(out, "ordinary prose line here\n<redacted:private-key>\nafter")
+        self.assertEqual(n, 1)
+
+    def test_tail_of_key_stops_at_the_first_line_that_is_not_body(self):
+        text = "%s\nnot a body line\n%s\n%s" % (PEM_BODY_1, PEM_BODY_2, PEM_BOTTOM)
+        out, n = scrub(text, 1)
+        self.assertEqual(out, "%s\nnot a body line\n<redacted:private-key>" % PEM_BODY_1)
+        self.assertEqual(n, 1)
+
+    def test_lone_end_line_with_no_body_above(self):
+        out, n = scrub("short line\n%s\nafter" % PEM_BOTTOM, 1)
+        self.assertEqual(out, "short line\n<redacted:private-key>\nafter")
+        self.assertEqual(n, 1)
+
+    def test_complete_block_still_masked_once_and_certificate_untouched(self):
+        out, n = scrub("a\n%s\nb\n%s\nc" % (FAKE_PEM, FAKE_CERT), 1)
+        self.assertEqual(out, "a\n<redacted:private-key>\nb\n%s\nc" % FAKE_CERT)
+        self.assertEqual(n, 1)
+        self.assertEqual(scrub(FAKE_CERT, 1), (FAKE_CERT, 0))
 
     def test_url_password_only(self):
         out, _ = scrub("postgres://app:s3cretPassw0rd@db.example.test:5432/app", 1)
@@ -249,9 +282,49 @@ class Hardening(unittest.TestCase):
     def test_linefilter_long_line_is_complete(self):
         lf = ss.LineFilter()
         lf.MAX_LINE = 1000
-        out = lf.feed(b"x" * 2500)
+        # Changed: this used "x" * 2500. A line with no blank now has no safe cut and is replaced by a notice (see
+        # the tests below); with a blank every other byte the cut still falls at the old position.
+        out = lf.feed(b"x " * 1250)
         self.assertEqual(len(out), 2000)
-        self.assertEqual(lf.finish(), b"x" * 500)
+        self.assertEqual(lf.finish(), b"x " * 250)
+
+    def test_linefilter_forced_cut_never_splits_a_value(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 100, 30
+        value = "FAKEq7Zp2LmX9vTr" + "4KdW8sNb3HcY6uJe"
+        line = "word " * 16 + "jwt_secret=" + value + " after more words"     # the value straddles byte 100
+        out = lf.feed(line.encode()) + lf.feed(b"\n")
+        self.assertEqual(out, b"word " * 16 + b"jwt_secret=<redacted:field jwt_secret>\n")   # bare value runs to line end
+        self.assertNotIn(value.encode(), out)
+        self.assertEqual(lf.cut_refused, 0)
+
+    def test_linefilter_cut_is_never_between_name_and_value(self):
+        lf = ss.LineFilter()
+        buf = b"ab cd name: " + b"x" * 20
+        lf.MAX_LINE, lf.CUT_WINDOW = 17, 10
+        self.assertIsNone(lf._safe_cut(buf, 0))           # the only blank in the window follows "name:"
+        lf.CUT_WINDOW = 20
+        self.assertEqual(lf._safe_cut(buf, 0), 6)         # cut after "ab cd ", before the pair
+        eq = b"ab cd name=  " + b"x" * 20
+        self.assertEqual(lf._safe_cut(eq, 0), 6)          # blanks after "=" are refused too, however many
+
+    def test_linefilter_line_with_no_safe_cut_is_withheld_and_the_next_line_passes(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 100, 30
+        notice = b"<withheld: a line over 1 MB with no safe place to cut>\n"
+        self.assertEqual(lf.feed(b"x" * 150), notice)
+        self.assertEqual(lf.feed(b"y" * 500), b"")                    # still discarding, across feeds
+        self.assertEqual(lf.feed(b"y\nnext line\n"), b"next line\n")
+        self.assertEqual(lf.cut_refused, 1)
+        self.assertEqual(lf.finish(), b"")
+
+    def test_linefilter_discarded_remainder_is_not_flushed(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 100, 30
+        out = lf.feed(b"x" * 150) + lf.feed(b"z" * 40)
+        self.assertEqual(out, b"<withheld: a line over 1 MB with no safe place to cut>\n")
+        self.assertEqual(lf.flush_partial(), b"")
+        self.assertEqual(lf.finish(), b"")
 
     def test_linefilter_error_returns_only_notices(self):
         lf = ss.LineFilter()

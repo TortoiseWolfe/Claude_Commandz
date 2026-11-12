@@ -278,8 +278,50 @@ class Hook(unittest.TestCase):
         env = dict(CLAUDE_CODE_SHELL_PREFIX="/x/prefix.sh")
         self.silent(self.bash_call(background=True, **env))
         open(self.off, "w").close()
-        self.silent(self.bash_call(**env))
-        self.assertEqual(self.alert_lines(), [])
+        # Changed: the off switch used to be silent. It is now loud (a notice and a "filter-off" line), but still
+        # never logs "heartbeat-stale" because the heartbeat check is skipped while the filter is off.
+        r = self.bash_call(**env)
+        self.assertIn("switched off", r.stdout)
+        self.assertEqual(len(self.alert_lines()), 1)
+        self.assertNotIn("heartbeat-stale", self.alert_lines()[0])
+
+    def test_off_switch_is_loud_once_per_30_minutes(self):
+        env = dict(CLAUDE_CODE_SHELL_PREFIX="/x/prefix.sh")
+        open(self.off, "w").close()
+        r = self.bash_call(**env)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]
+        self.assertEqual(ctx["hookEventName"], "PostToolUse")
+        self.assertIn("switched off", ctx["additionalContext"])
+        self.assertIn("report.md", ctx["additionalContext"])
+        self.assertNotIn("updatedToolOutput", ctx)
+        self.assertEqual(len(self.alert_lines()), 1)
+        self.assertIn("filter-off", self.alert_lines()[0])
+        self.silent(self.bash_call(**env))                               # inside the window: no notice, no second line
+        self.assertEqual(len(self.alert_lines()), 1)
+        old = time.time() - 1900
+        os.utime(self.alerts + ".off.stamp", (old, old))
+        self.assertIn("switched off", self.bash_call(**env).stdout)      # after 30 minutes: again
+        self.assertEqual(len(self.alert_lines()), 2)
+
+    def test_off_switch_notice_does_not_use_the_heartbeat_stamp(self):
+        env = dict(CLAUDE_CODE_SHELL_PREFIX="/x/prefix.sh")
+        self.assertIn("not running", self.bash_call(**env).stdout)       # heartbeat warning stamps its own file
+        open(self.off, "w").close()
+        self.assertIn("switched off", self.bash_call(**env).stdout)
+
+    def test_masked_call_while_off_logs_filter_off_masked(self):
+        env = dict(CLAUDE_CODE_SHELL_PREFIX="/x/prefix.sh")
+        open(self.off, "w").close()
+        r = self.bash_call("got " + FAKE_JWT, **env)
+        self.assertEqual(self.updated(r)["stdout"], "got <redacted:jwt>")
+        self.assertIn("switched off", json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"])
+        r2 = self.bash_call("again " + FAKE_JWT, **env)                  # window still open: masked line again, no notice
+        self.updated(r2)
+        self.assertNotIn("additionalContext", r2.stdout)
+        words = [ln.split("\t")[-1] for ln in self.alert_lines()]
+        self.assertEqual(words, ["filter-off-masked", "filter-off", "filter-off-masked"])
+        self.assertTrue(all("count=1" in ln for ln in self.alert_lines() if ln.endswith("masked")))
+        self.assertNotIn("eyJ", open(self.alerts).read())
 
     def test_only_bash_is_checked(self):
         payload = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "cwd": self.other, "tool_input": {},
