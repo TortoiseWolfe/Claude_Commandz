@@ -8,6 +8,7 @@ Usage: tools_catalog.py build [--check] | match PROMPT_FILE [--max N]
 Standard library only. The catalog holds header text only (first sentence, "Use when:" line, usage line), never file contents beyond the header.
 
 Include rule: files directly inside ~/.claude/scripts, ~/.claude/hooks and ~/repos/hub/scripts whose extension is .py .sh .js .mjs .cjs or .ps1.
+Repo rule: each repo named in ~/repos/hub/repos.tsv that exists on disk and whose CLAUDE.md, README.md, .mcp.json or .claude/commands name an MCP server, tool or slash command gets one line (names only, never config values; playwright and the SpecKit commands are skipped as boilerplate).
 Exclude rule: subfolders (tests/, __pycache__/, examples/ ...), any name containing ".bak", dotfiles, and every other extension (.md .json .tsv .txt .log .prompt .ref ...).
 """
 import argparse
@@ -23,6 +24,8 @@ HOME = Path(os.path.expanduser("~"))
 SCRIPTS_DIR = HOME / ".claude" / "scripts"
 HOOKS_DIR = HOME / ".claude" / "hooks"
 HUB_SCRIPTS_DIR = HOME / "repos" / "hub" / "scripts"
+REPOS_DIR = HOME / "repos"
+REPOS_LIST = HOME / "repos" / "hub" / "repos.tsv"
 CATALOG = SCRIPTS_DIR / "TOOLS.md"
 CATALOG_LABEL = "~/.claude/scripts/TOOLS.md"
 
@@ -245,11 +248,176 @@ def tool_line(t):
     return "- " + " | ".join(parts)
 
 
+# ---------- repo tools and MCP servers ----------
+
+MCP_TOOL = re.compile(r"mcp__([A-Za-z0-9]+(?:_[A-Za-z0-9]+)*?)__([A-Za-z0-9_]+)")
+MCP_IMAGE = re.compile(r"\bmcp/([a-z0-9][a-z0-9._-]*)")
+BOLD_LABEL = re.compile(r"^\s*(?:[-*]\s+)?\*\*([^*:\n]{2,40}?):?\*\*")
+GENERIC_SERVERS = {"playwright"}      # in nearly every repo's .mcp.json: says nothing about the repo
+GENERIC_COMMAND_PREFIXES = ("speckit.",)  # the SpecKit commands are copied into many repos
+MAX_REPO_ITEMS = 4
+SHARED_COMMAND_REPOS = 3
+RULE_OPENING = re.compile(r"^(Never|Always|No |Do not|Don't|Auto-generated|Instructions for|This file)", re.I)
+
+
+def _read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def purpose_sentence(text):
+    """First sentence of the first plain paragraph (at least 40 letters) after the title; '' when none."""
+    in_fence = False
+    para = []
+    paras = []
+    for raw in text.splitlines():
+        ln = raw.strip()
+        if ln.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if not ln or re.match(r"^(#|>|[-*+]\s|\d+[.)]\s|\||<|!\[|\[!\[|---|===|This file provides guidance)", ln):
+            if para:
+                paras.append(" ".join(para))
+                para = []
+            continue
+        para.append(ln)
+    if para:
+        paras.append(" ".join(para))
+    for p in paras:
+        p = re.sub(r"https?://\S+", "", p)
+        p = re.sub(r"[*`]|\*\*CRITICAL\*\*:?", "", p)
+        p = re.sub(r"\s+", " ", p).strip(" :-")
+        if len(re.findall(r"[A-Za-z]", p)) < 40 or RULE_OPENING.match(p):
+            continue
+        sent = first_sentence([p])
+        if len(re.findall(r"[A-Za-z]", sent)) >= 30:
+            return sent
+    return ""
+
+
+def _unique(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def repo_mcp_items(repo, docs):
+    """Names of MCP servers and tools a repo's own docs and .mcp.json name (names only, never values)."""
+    items = []
+    servers = {}
+    for text in docs:
+        for m in MCP_TOOL.finditer(text):
+            servers.setdefault(m.group(1).replace("_", "-"), [])
+            full = m.group(0)
+            if full not in servers[m.group(1).replace("_", "-")]:
+                servers[m.group(1).replace("_", "-")].append(full)
+        for m in MCP_IMAGE.finditer(text):
+            servers.setdefault(m.group(1).rstrip(".,)"), [])
+    mcp_json = repo / ".mcp.json"
+    if mcp_json.is_file():
+        try:
+            import json
+            data = json.loads(_read_text(mcp_json))
+            block = data.get("mcpServers", data) if isinstance(data, dict) else {}
+            for name in (block.keys() if isinstance(block, dict) else []):
+                if str(name).lower() not in GENERIC_SERVERS:
+                    servers.setdefault(str(name), [])
+        except ValueError:
+            pass
+    for name, tools in servers.items():
+        if name.lower() in GENERIC_SERVERS:
+            continue
+        items.append(f"MCP server {name}" + (f" ({', '.join(tools[:2])})" if tools else ""))
+    # bold labels inside a section whose heading mentions MCP, for example "**YouTube Transcript:** ..."
+    for text in docs:
+        in_mcp = False
+        for ln in text.splitlines():
+            if ln.startswith("#"):
+                in_mcp = "mcp" in ln.lower()
+                continue
+            m = BOLD_LABEL.match(ln) if in_mcp else None
+            if m:
+                label = re.sub(r"\s*MCP$", "", m.group(1).strip(), flags=re.I)
+                items.append(f"MCP: {label}")
+    if not items:
+        for text in docs:
+            heads = [ln.lstrip("# ").strip() for ln in text.splitlines() if ln.startswith("#") and "mcp" in ln.lower()]
+            if heads:
+                items.append("MCP section: " + heads[0][:50])
+                break
+    if not items and "mcp" in repo.name.lower():
+        items.append("MCP server (the repo itself)")
+    return _unique(items)
+
+
+def repo_commands(repo):
+    cmd_dir = repo / ".claude" / "commands"
+    try:
+        names = sorted(p.stem for p in cmd_dir.iterdir() if p.suffix == ".md")
+    except OSError:
+        return []
+    return [n for n in names if not n.startswith(GENERIC_COMMAND_PREFIXES)]
+
+
+def repo_entry(repo, shared=frozenset()):
+    """One catalog entry for a repo, or None when its docs name nothing worth listing."""
+    docs = [_read_text(repo / n) for n in ("CLAUDE.md", "README.md")]
+    items = repo_mcp_items(repo, docs)
+    cmds = [c for c in repo_commands(repo) if c not in shared]
+    if not items and not cmds:
+        return None
+    what = purpose_sentence(docs[1]) or purpose_sentence(docs[0])
+    if len(re.findall(r"[A-Za-z]", what)) < 8:
+        what = f"Repository {repo.name}"
+    bits = items[:MAX_REPO_ITEMS]
+    if cmds:
+        bits.append("slash commands " + ", ".join("/" + c for c in cmds[:6]) + (" ..." if len(cmds) > 6 else ""))
+    doc = "CLAUDE.md" if docs[0] else "README.md"
+    when = "Tools: " + "; ".join(bits) + f". Read {repo}/{doc} first"
+    return {"path": str(repo), "name": repo.name, "what": what, "when": when, "repo": True}
+
+
+def collect_repos(repos_dir, repos_list):
+    """Repo tools: every repo named in hub/repos.tsv that exists on disk and whose docs name a tool."""
+    out = []
+    text = _read_text(repos_list)
+    repos = []
+    for i, ln in enumerate(text.splitlines()):
+        if i == 0 or not ln.strip():
+            continue
+        name = ln.split("\t")[0].strip()
+        if not name or name.startswith("."):
+            continue
+        repo = Path(repos_dir) / name
+        if repo.is_dir():
+            repos.append(repo)
+    # a slash command copied into three or more repos is boilerplate, not a tool of one repo
+    counts = {}
+    for repo in repos:
+        for c in repo_commands(repo):
+            counts[c] = counts.get(c, 0) + 1
+    shared = frozenset(c for c, n in counts.items() if n >= SHARED_COMMAND_REPOS)
+    for repo in repos:
+        e = repo_entry(repo, shared)
+        if e:
+            out.append(e)
+    out.sort(key=lambda t: t["path"])
+    return out
+
+
 def safety_rank(name):
     return SAFETY.index(name) if name in SAFETY else None
 
 
-def render(tools, scripts_dir_label=None):
+def render(tools, repos=None):
     safety = sorted((t for t in tools if t["name"] in SAFETY), key=lambda t: (safety_rank(t["name"]), t["path"]))
     rest = [t for t in tools if t["name"] not in SAFETY]
     out = ["<!-- GENERATED FILE. Do not edit. Regenerate with: python3 ~/.claude/scripts/tools_catalog.py build -->",
@@ -257,6 +425,10 @@ def render(tools, scripts_dir_label=None):
            "One line per tool: full path | what it does | when to use it. Taken from each tool's own header.", "",
            "## Safety tools (use these first)", ""]
     out += [tool_line(t) for t in safety]
+    if repos:
+        out += ["", "## Repo tools and MCP servers (check here before building anything)", "",
+                "One line per repo whose own docs name a tool, MCP server or slash command: repo path | what the repo is | tools and the doc to read first.", ""]
+        out += [tool_line(t) for t in repos]
     out += ["", "## All other tools (sorted by path)", ""]
     out += [tool_line(t) for t in rest]
     return "\n".join(out) + "\n"
@@ -286,8 +458,9 @@ def cmd_build(args):
             print("no usable header: " + t["path"])
         print(f"{len(tools)} tools, {len(bare)} without a usable header")
         return 1 if bare else 0
-    atomic_write(args.catalog, render(tools))
-    print(f"wrote {args.catalog}: {len(tools)} tools, {len(bare)} without a usable header")
+    repos = collect_repos(Path(args.repos_dir), Path(args.repos_list))
+    atomic_write(args.catalog, render(tools, repos))
+    print(f"wrote {args.catalog}: {len(tools)} tools, {len(repos)} repos, {len(bare)} without a usable header")
     return 0
 
 
@@ -407,6 +580,8 @@ def main(argv=None):
     ap.add_argument("--hooks-dir", default=str(HOOKS_DIR))
     ap.add_argument("--hub-dir", default=str(HUB_SCRIPTS_DIR))
     ap.add_argument("--catalog", default=str(CATALOG))
+    ap.add_argument("--repos-dir", default=str(REPOS_DIR))
+    ap.add_argument("--repos-list", default=str(REPOS_LIST))
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="write TOOLS.md")
     b.add_argument("--check", action="store_true", help="list tools with no usable header; write nothing")

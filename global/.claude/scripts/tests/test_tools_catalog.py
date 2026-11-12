@@ -22,8 +22,11 @@ def make_tree(tmp, scripts=None, hooks=None):
 
 
 def run(s, h, cat, *args):
+    # the default repo list is the real one; point it at a missing file unless the test gives its own
+    base = [] if "--repos-list" in args else ["--repos-list", str(Path(s).parent / "no-repos.tsv")]
     return subprocess.run([sys.executable, "-I", str(SCRIPT), "--scripts-dir", str(s), "--hooks-dir", str(h),
-                           "--hub-dir", str(Path(s).parent / "hub-scripts"), "--catalog", str(cat), *args], capture_output=True, text=True)
+                           "--hub-dir", str(Path(s).parent / "hub-scripts"), "--catalog", str(cat), *base, *args],
+                          capture_output=True, text=True)
 
 
 PY = '"""alpha.py: count the widgets in a folder. More detail here.\n\nUse when: the widget total looks wrong.\n"""\nprint(1)\n'
@@ -237,6 +240,81 @@ class MatchTest(unittest.TestCase):
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0)
             self.assertIn("## Tools you already have for this job", r.stdout)
+
+
+class RepoToolsTest(unittest.TestCase):
+    """Repos named in the repo list whose docs name an MCP server, tool or slash command get a catalog line."""
+
+    def build(self, repos, extra_rows=()):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        s, h, cat = make_tree(root, {"alpha.py": PY})
+        rd = root / "repos"
+        rows = ["name\tremote\tdefault_branch\tlast_commit\tkind\tcurrent_branch"]
+        for name, files in repos.items():
+            for rel, body in files.items():
+                f = rd / name / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(body)
+            rows.append(f"{name}\tgit@example.invalid:x/{name}.git\tmain\t2026-01-01\trepo\tmain")
+        rows += list(extra_rows)
+        lst = root / "repos.tsv"
+        lst.write_text("\n".join(rows) + "\n")
+        r = run(s, h, cat, "--repos-dir", str(rd), "--repos-list", str(lst), "build")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return cat.read_text(), rd
+
+    WIDGET = {"CLAUDE.md": "# Widget\n\nWidget clips from video playlists, sorted for the gizmo team.\n\n"
+              "## MCP Server Quick Reference\n\n**Clip Fetcher:** Pull clips directly.\n\n"
+              "Use mcp__clip_fetcher__get_timed_clip for timestamps.\n"}
+
+    def test_repo_with_mcp_tool_name_gets_a_line(self):
+        text, rd = self.build({"widget": self.WIDGET})
+        self.assertIn("## Repo tools and MCP servers", text)
+        line = next(ln for ln in text.splitlines() if ln.startswith(f"- {rd}/widget |"))
+        self.assertIn("Widget clips from video playlists", line)
+        self.assertIn("MCP server clip-fetcher (mcp__clip_fetcher__get_timed_clip)", line)
+        self.assertIn("MCP: Clip Fetcher", line)
+        self.assertIn("widget/CLAUDE.md first", line)
+
+    def test_repo_with_nothing_to_list_is_left_out(self):
+        text, rd = self.build({"plain": {"CLAUDE.md": "# Plain\n\nJust notes about a garden plan for the team.\n"}})
+        self.assertNotIn(f"{rd}/plain", text)
+
+    def test_repo_missing_on_disk_and_blank_rows_do_not_break_the_build(self):
+        text, _ = self.build({"widget": self.WIDGET}, extra_rows=["ghost\tx\tmain\t2026\trepo\tmain", ""])
+        self.assertNotIn("ghost", text)
+
+    def test_mcp_json_lists_server_names_only_and_skips_playwright(self):
+        body = '{"mcpServers": {"playwright": {"command": "SECRET_VALUE_ONE"}, "gizmo-link": {"command": "SECRET_VALUE_TWO"}}}'
+        text, rd = self.build({"gizmo": {"README.md": "# Gizmo\n\nThe gizmo controller for the shop floor machines.\n", ".mcp.json": body}})
+        line = next(ln for ln in text.splitlines() if ln.startswith(f"- {rd}/gizmo |"))
+        self.assertIn("MCP server gizmo-link", line)
+        self.assertNotIn("playwright", text)
+        self.assertNotIn("SECRET_VALUE", text)
+
+    def test_slash_commands_listed_but_shared_boilerplate_is_not(self):
+        repos = {n: {"CLAUDE.md": "# R\n\nA repository for the " + n + " project work.\n", ".claude/commands/analyze.md": "x",
+                     ".claude/commands/speckit.plan.md": "x"} for n in ("one", "two", "three")}
+        repos["one"][".claude/commands/clip-sorter.md"] = "x"
+        text, rd = self.build(repos)
+        line = next(ln for ln in text.splitlines() if ln.startswith(f"- {rd}/one |"))
+        self.assertIn("/clip-sorter", line)
+        self.assertNotIn("/analyze", text)
+        self.assertNotIn("speckit", text)
+        self.assertNotIn(f"{rd}/two", text)
+
+    def test_repo_lines_reach_the_lane_matcher(self):
+        text, rd = self.build({"widget": self.WIDGET})
+        with tempfile.TemporaryDirectory() as t:
+            cat, pf = Path(t) / "TOOLS.md", Path(t) / "p.md"
+            filler = "".join(f"- /x/tool{i}.py | Tool number {i} does thing{i} for area{i}.\n" for i in range(200))
+            cat.write_text(text + filler)
+            pf.write_text("Fetch the timed clip transcript for the widget playlist video clips")
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT), "--catalog", str(cat), "match", str(pf)],
+                               capture_output=True, text=True)
+        self.assertIn(f"- {rd}/widget |", r.stdout)
 
 
 if __name__ == "__main__":
