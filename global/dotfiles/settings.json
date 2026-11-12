@@ -232,6 +232,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -312,6 +321,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "^(Bash|Write|Edit|AskUserQuestion)$|mcp__.*(Gmail__(get_draft|list_drafts)|[Cc]alendar.*create_event)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -329,6 +348,15 @@
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/context-warn.py"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
+            "timeout": 5
           }
         ]
       }

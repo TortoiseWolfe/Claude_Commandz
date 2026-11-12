@@ -165,6 +165,28 @@ class SettingsHookTests(unittest.TestCase):
         self.assertIn("python3 ~/.claude/hooks/bare-reference.py", [c for _, c in commands("Stop")])
         self.assertTrue((HOOKS_DIR / "bare-reference.py").exists(), "no copy of bare-reference.py")
 
+    def test_moment_lines_runs_on_prompt_tool_and_turn_end(self):
+        # moment-lines.py reads a private table and says one habit line at the moment it applies: when the owner's
+        # message arrives, before a matching tool call, and when a reply ends. A new habit is a table row, never a
+        # new settings entry, so all three events must reach it.
+        cmd = "python3 ~/.claude/hooks/moment-lines.py"
+        self.assertIn(cmd, [c for _, c in commands("UserPromptSubmit")])
+        self.assertIn(cmd, [c for _, c in commands("Stop")])
+        self.assertTrue((HOOKS_DIR / "moment-lines.py").exists(), "no copy of moment-lines.py")
+
+    def test_moment_lines_tool_matcher_reaches_the_tools_the_table_names(self):
+        import re
+
+        matchers = [m for m, c in commands("PreToolUse") if c == "python3 ~/.claude/hooks/moment-lines.py"]
+        self.assertEqual(len(matchers), 1, "one PreToolUse entry for moment-lines.py")
+        pat = re.compile(matchers[0])
+        for name in ("Bash", "Write", "Edit", "AskUserQuestion", "mcp__claude_ai_Gmail__get_draft",
+                     "mcp__claude_ai_Gmail__list_drafts", "mcp__claude_ai_Google_Calendar__create_event"):
+            self.assertTrue(pat.search(name), name)
+        # Unanchored matching must not catch every tool whose name merely contains a listed word.
+        for name in ("Read", "Grep", "MultiEdit", "BashOutput", "mcp__claude_ai_Gmail__search_threads"):
+            self.assertFalse(pat.search(name), name)
+
     def test_unverified_pending_still_runs_at_the_end_of_every_turn(self):
         self.assertIn("bash ~/.claude/hooks/unverified-pending.sh", [c for _, c in commands("Stop")])
 
