@@ -15,7 +15,7 @@ from tmpdirs import fresh_dir  # noqa: E402
 
 class Names(unittest.TestCase):
     def test_safe_name_keeps_letters_and_drops_the_rest(self):
-        self.assertEqual(tr.safe_name("Audio Eye / job #1"), "Audio-Eye-job-1")
+        self.assertEqual(tr.safe_name("Example Co / job #1"), "Example-Co-job-1")
 
     def test_safe_name_never_empty_and_never_long(self):
         self.assertEqual(tr.safe_name(""), "tab")

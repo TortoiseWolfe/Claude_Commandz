@@ -5,7 +5,7 @@ state, the hub's list or Jonathan's chat.
 
   python3 replay_frontdesk_dupes.py
 
-1  one hub post (the CLI, as the hub ran it for "## Tigard porch ...") makes exactly one chat.inject call.
+1  one hub post (the CLI, as the hub ran it for "## Sample porch ...") makes exactly one chat.inject call.
 2  one deferred question makes one short chat line, and one hub-list line that carries his whole message.
 3  a failed lane's report is posted to the chat but leaves its ask open, on the hub's list (the oc-bb085874 case).
 4  a later report posted to an already-answered ask is recorded as a follow-up on it and delivered once.
@@ -29,7 +29,7 @@ import openclaw_dispatch as dp  # noqa: E402
 from test_openclaw_pass import PassBase  # noqa: E402
 
 ASK = "oc-bb085874"
-HIS = "Tigard porch: what is the status of the first pass and when does the fix land?"
+HIS = "Sample porch: what is the status of the first pass and when does the fix land?"
 
 
 class Recorder:
@@ -49,7 +49,7 @@ class Replay(PassBase):
         with mock.patch.dict(os.environ, env), mock.patch.object(dp.LaneHost, "_run", lambda host, *a, **k: rec(*a, **k)), \
                 mock.patch.object(dp.LaneHost, "windows", lambda self: []), mock.patch.object(dp.LaneHost, "kill_window", lambda self, n: True):
             # 1. one hub post -> one chat.inject
-            text = "## Tigard porch: first pass done, fix still running\n\nThe fix lane is running; I'll post when it lands."
+            text = "## Sample porch: first pass done, fix still running\n\nThe fix lane is running; I'll post when it lands."
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 code = dp.main(["post", text])
             sent = [c for c in rec.calls if isinstance(c, dict)]

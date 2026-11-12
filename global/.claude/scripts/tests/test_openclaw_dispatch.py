@@ -380,7 +380,7 @@ class ReceptionistQueue(Base):
 
     def test_post_splits_an_answer_on_dashes_into_short_items_and_stores_it_whole(self):
         ask_id = "oc-ccccccce"
-        parts = ["Porch: the columns are traced.", "Steps: three risers, 7 inches each.", "Roof: waiting on Kai's photo."]
+        parts = ["Porch: the columns are traced.", "Steps: three risers, 7 inches each.", "Roof: waiting on Pat's photo."]
         self.record_question(ask_id, "deferred", NOW - 900)
         ok, msg = dp.post_ask(self.ctx, self.host, ask_id, "\n---\n".join(parts), NOW)
         self.assertTrue(ok, msg)

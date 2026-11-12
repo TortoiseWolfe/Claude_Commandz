@@ -23,7 +23,7 @@ REC = str(SCRIPTS / "muse_poll_record.sh")
 LEDGER = str(SCRIPTS / "notes_ledger.py")
 NOW = "2026-11-07 09:00"
 
-BOARD = """- [ ] 2026-11-07 08:31 | Job: ear-check the Estimify take | due: 2026-11-07 1:00 PM | e-1111111
+BOARD = """- [ ] 2026-11-07 08:31 | Job: ear-check the Sample take | due: 2026-11-07 1:00 PM | e-1111111
 - [ ] 2026-11-07 08:00 | Job: write the weekly digest, lane digestwork | detail | e-2222222
 - [ ] 2026-11-07 07:00 | Job: fix the thing, the lane needed is not made yet | detail | e-3333333
 - [ ] 2026-11-06 12:00 | Job: being built right now, honest | detail | e-4444444
@@ -202,7 +202,7 @@ class Deadlines(Base):
         self.assertIsNone(self.due("go due: soon"))
         self.assertEqual(self.due("go due: 2026-11-08 12 items"), datetime(2026, 11, 8, 17, 0))
 
-    def test_estimify_shaped_item_is_at_risk_at_nine(self):
+    def test_sample_shaped_item_is_at_risk_at_nine(self):
         r = self.cli("risk")
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = r.stdout.strip().splitlines()
@@ -256,7 +256,7 @@ class Stale(Base):
         self.assertIn("open items: 10", r.stdout)
         self.assertIn("stale (older than 10 days, no change since): 1", r.stdout)
         self.assertIn("by state:", r.stdout)
-        for word in ("ear-check", "Estimify", "digest", "ticked"):
+        for word in ("ear-check", "Sample", "digest", "ticked"):
             self.assertNotIn(word, r.stdout)
 
     def test_a_line_without_a_readable_date_is_never_stale(self):

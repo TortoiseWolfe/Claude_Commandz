@@ -117,7 +117,7 @@ class Alarm(Drops):
         self.assertEqual(len(self.inbox_lines()), 1)
 
     def test_a_long_message_reaches_the_hub_list_whole(self):
-        long = "the whole point is to get what we can before sending Kai in person, " * 8
+        long = "the whole point is to get what we can before sending Pat in person, " * 8
         dp.unsettled_to_hub(self.ctx, "c" * 64, ASK_TS, long, "test", NOW)
         self.assertIn(json.dumps(" ".join(long.split())), self.inbox_lines()[0])
 
