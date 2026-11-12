@@ -256,6 +256,7 @@ def run_in(wall_fd, wall, base, apply_):
 
     code = 0
     strays = []
+    notes = []  # held back: a run that ends in exit 3 must leave stdout empty
     with os.scandir(wall_fd) as it:
         entries = sorted(it, key=lambda e: e.name)
     for e in entries:
@@ -268,21 +269,23 @@ def run_in(wall_fd, wall, base, apply_):
             except OSError:
                 ok = False
             if not ok:
-                print("WARNING manifest name %s is not a regular file" % shown)
+                notes.append("WARNING manifest name %s is not a regular file" % shown)
                 code = 1
             continue
         if name in IN_FLIGHT:
-            print("left alone %s (an install may be running)" % shown)
+            notes.append("left alone %s (an install may be running)" % shown)
             continue
         try:
             st = os.lstat(name, dir_fd=wall_fd)
         except OSError as exc:
-            print("WARNING %s could not be looked at (%s); it may have gone while this ran" % (shown, type(exc).__name__))
+            notes.append("WARNING %s could not be looked at (%s); it may have gone while this ran" % (shown, type(exc).__name__))
             code = 1
             continue
         strays.append((name, shown, kind_of(st.st_mode), st.st_size, st))
 
     if not strays:
+        for line in notes:
+            print(line)
         print("WALL CLEAN")
         return code
 
@@ -293,8 +296,12 @@ def run_in(wall_fd, wall, base, apply_):
         try:
             dest_fd, log_fd, stamp = open_holding(base)
         except OSError as exc:
+            for line in notes:
+                sys.stderr.write(line + "\n")
             return refuse("the holding folder or the log cannot be used safely (%s), so nothing was moved" % type(exc).__name__)
         rel = "state/%s/%s" % (STRAYS_NAME, stamp)
+    for line in notes:
+        print(line)
 
     for name, shown, kind, size, st in strays:
         if not apply_:

@@ -449,6 +449,28 @@ class SecurityFindingTests(Fixture):
         words = ["python3", mod, "status"]
         self.assertTrue(w._runs_listed_python(words, " ".join(words)))
 
+    def test_python_rule_refuses_dotdot_after_a_link_and_any_other_variable(self):
+        """A ".." after a link means the folder above the link's target, not above the link, and a variable other than the leading $HOME may hold anything:
+        the rule compares text, so it must refuse both. Each case would be allowed if its clause were removed."""
+        claude = os.path.join(self.home, ".claude")
+        os.makedirs(claude, exist_ok=True)
+        far = tempfile.mkdtemp(dir=self.tmp)
+        self.addCleanup(shutil.rmtree, far, ignore_errors=True)
+        os.symlink(far, os.path.join(claude, "lnk"))
+        cases = [["python3", "%s/lnk/../no-ai-wall/no_ai_wall.py" % claude, "status"],
+                 ["python3", "~/.claude/lnk/../no-ai-wall/no_ai_wall.py", "status"],
+                 ["python3", "-I", "$HOME/.claude/lnk/../no-ai-wall/wall_cleanup.py", "--apply"],
+                 ["python3", "%s/lnk/../scripts/redact_view.py" % claude, "--keys-only", self.pfile]]
+        for words in cases:
+            cmd = " ".join(words)
+            self.assertFalse(w._runs_listed_python(words, cmd), cmd)
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        with mock.patch.dict(os.environ, {"EMPTYV": "", "FOLDERV": "no-ai-wall"}):
+            for word in ("$HOME/.claude/no-ai-wall/no_ai_wall.py$EMPTYV", "$HOME/$EMPTYV.claude/no-ai-wall/no_ai_wall.py",
+                         "$HOME/.claude/$FOLDERV/no_ai_wall.py", "~/.claude/$FOLDERV/no_ai_wall.py"):
+                words = ["python3", word, "status"]
+                self.assertFalse(w._runs_listed_python(words, " ".join(words)), word)
+
     def test_a_home_folder_with_a_space_refuses_the_home_form(self):
         """$HOME/ in a command is split by the shell when the home folder's name holds white space, so the rule refuses it."""
         os.environ["HOME"] = os.path.join(self.tmp, "my home")

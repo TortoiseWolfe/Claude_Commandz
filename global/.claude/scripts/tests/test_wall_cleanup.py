@@ -332,6 +332,25 @@ def test_refused_holding_folder_is_a_file(tmp_path):
     assert snapshot(tmp_path) == before
 
 
+def test_a_refused_apply_leaves_stdout_empty_and_keeps_the_notes_on_stderr(tmp_path):
+    """Exit 3 writes nothing to stdout: the 'left alone' line held back during the scan goes to stderr, before the reason."""
+    wall = make_wall(tmp_path)
+    put_stray(wall)
+    with open(os.path.join(wall, ".no_ai_wall.py.new"), "w") as fh:
+        fh.write("half")
+    state = os.path.join(os.path.dirname(wall), "state")
+    os.makedirs(state)
+    with open(os.path.join(state, "no-ai-wall-strays"), "w") as fh:
+        fh.write("not a folder\n")
+    r = run(wall, "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert r.stdout == ""
+    assert 'left alone ".no_ai_wall.py.new" (an install may be running)' in r.stderr
+    assert r.stderr.index("left alone") < r.stderr.index("wall cleanup: refused:")
+    assert "nothing was moved" in r.stderr
+    assert os.path.exists(os.path.join(wall, "stray.txt"))
+
+
 def test_a_move_that_fails_is_counted_and_not_logged(tmp_path):
     """A wall folder nobody may write to: the stray cannot leave it, so the run says so, exits 1 and logs no move."""
     assert os.geteuid() != 0, "this test needs an ordinary user: root can write to a read-only folder"
