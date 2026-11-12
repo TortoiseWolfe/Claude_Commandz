@@ -12,7 +12,9 @@ All come from absolute token counts, not percentages of an auto-compaction windo
   - AFA_HANDOFF_START_K (default 125): "start the running hand-off file now", once per session;
   - hand-off line minus 20K (130K by default): "start wrapping up", once per session;
   - AFA_HANDOFF_K (default 150): "hand off and end, no new work" with the marker to touch,
-    repeated on every call past the line (lane-watch-guard.py lets the session stop once
+    on the call that first sees the crossing, then with every prompt and on every 10th tool call
+    between prompts (it printed after every tool call until 12 Nov 2026, which added text exactly
+    when the window was fullest; lane-watch-guard.py lets the session stop once
     ~/.claude/state/hub-handed-off.<session id> exists and a fresh hub-handoff-*.md does).
 A setting that is not a positive whole number falls back to its default. Lanes (any other cwd) see nothing.
 
@@ -34,6 +36,7 @@ DEFAULT_HANDOFF_FRESH_K = 100
 FRESH_HANDOFF_SECS = 30 * 60   # a hand-off file touched within this long counts as the running one
 NAG_EVERY_SECS = 10 * 60       # the no-file warning repeats at most this often
 EARLY_MARGIN_K = 20  # the early warning comes this many thousand tokens before the hand-off line
+HANDOFF_REPEAT_CALLS = 10      # past the line, the hand-off warning rides every prompt and every this-many-th tool call between prompts
 
 
 def get_setting(env_var, default):
@@ -43,6 +46,24 @@ def get_setting(env_var, default):
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def handoff_warning_due(count_file, is_prompt):
+    """True when this call should carry the hand-off warning. The file holds the tool calls since the last one."""
+    calls = 0
+    due = is_prompt
+    if not due:
+        try:
+            calls = int(count_file.read_text(encoding="ascii").strip()) + 1
+            due = calls < 1 or calls >= HANDOFF_REPEAT_CALLS
+        except (OSError, ValueError):
+            due = True
+    try:
+        count_file.parent.mkdir(parents=True, exist_ok=True)
+        count_file.write_text("0" if due else str(calls), encoding="ascii")
+    except OSError:
+        return True
+    return due
 
 
 def has_fresh_handoff(state_dir, now):
@@ -127,6 +148,12 @@ def main():
         message = f"Hub context: {tokens_k}K of 367K"
 
         state_dir = Path(os.path.expanduser(os.environ.get("AFA_STATE_DIR", "~/.claude/state")))
+        if size < handoff_k * 1000:
+            # Back under the line (a cleared or compacted session): the next crossing warns at once.
+            try:
+                (state_dir / ("context-handoff-calls." + session_id)).unlink(missing_ok=True)
+            except OSError:
+                pass
         stamp = state_dir / ("context-warn." + session_id)
         # Once per prompt: UserPromptSubmit always shows the line and leaves a mark; PostToolUse shows it only when there is no mark yet.
         line_mark = state_dir / ("context-line." + session_id)
@@ -194,8 +221,9 @@ def main():
             stamp.parent.mkdir(parents=True, exist_ok=True)
             stamp.write_text(str(threshold_k), encoding="ascii")
 
-        # The hand-off warning repeats every turn past 150K
-        if threshold_k >= handoff_k:
+        # Past the line the hand-off warning comes with every prompt, on the tool call that first sees the crossing, and then on every
+        # HANDOFF_REPEAT_CALLS-th tool call. A count that cannot be read or written means warn.
+        if threshold_k >= handoff_k and handoff_warning_due(state_dir / ("context-handoff-calls." + session_id), is_prompt):
             extra = (
                 f"Hub context {tokens_k}K: hand off and end, no new work. "
                 f"When the hand-off file is written: touch ~/.claude/state/hub-handed-off.{session_id}"
