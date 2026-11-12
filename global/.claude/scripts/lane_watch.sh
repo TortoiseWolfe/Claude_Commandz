@@ -12,6 +12,8 @@
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
+#   - a watched lane's report.md line 1 says the work is finished (DONE, QUEUE EMPTY) without "items N" and one proof line per item under
+#     "## Proof" (done_proof_check; the lane is sent for the proof). It counts lines and checks a named file exists; it does not open a link.
 #   - a watched lane's report.md line 1 starts with a status word and a time (WORKING 3:05 PM ...) that is more than 2 minutes ahead of the
 #     file's modification time (stamp_ahead_check; the lane is sent the correction). Only that fixed place counts; times deeper in the line do not.
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub. Named ONCE per dialog: a dialog
@@ -218,6 +220,75 @@ step_url_check() {
   printf '%s' "$sum" > "$mark"
   echo "step without URL: $l (line 1 of $rep starts STEP-FOR-JONATHAN and has no https:// link); asked the lane to rewrite it"
   "$lane_sh" --send "$l" "Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link. Rewrite line 1 so it carries the full https:// URL of the exact page, says which browser (the fleet Chromium and its tab title, or his own) and how he will know it is done; bring the fleet tab to the front first. He cannot act on a step without the URL." >/dev/null 2>&1 || true
+  hit=1; other=1
+}
+
+# done_proof_counts <report file>: prints "CLAIMED PROOFS". CLAIMED is the whole number after the word item or items on line 1 (case-insensitive,
+# the word not glued to a letter, digit or underscore before it, the number not followed by a digit or a colon, so "items 4:30" is no count), or
+# none. PROOFS counts the distinct lines of the first "## Proof" section (up to the next "## " line, at most 500 lines of it) that begin "- " and
+# hold an https:// link or a word that is an existing absolute path (a leading ~/ becomes $HOME by string replacement; at most 3 such words a line
+# are tried, after stripping quotes, brackets, commas, semicolons and a trailing full stop or colon). Nothing in the report is run or evaluated.
+done_proof_counts() {
+  local LC_ALL=C f=$1 line1 low claimed=none proofs=0 line w n t prev
+  local -A seen=()
+  line1=$(head -n 1 "$f" 2>/dev/null); line1=${line1%$'\r'}; low=${line1,,}
+  if [[ $low =~ (^|[^a-z0-9_])items?[\ :]+([0-9]{1,9})([^0-9:]|$) ]]; then claimed=$((10#${BASH_REMATCH[2]})); fi
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ $line == "- "* ]] || continue
+    [ -z "${seen[$line]:-}" ] || continue
+    if [[ $line =~ https://[^[:space:]] ]]; then seen[$line]=1; proofs=$((proofs + 1)); continue; fi
+    n=0
+    local -a words=()
+    read -ra words <<<"$line"
+    for w in "${words[@]}"; do
+      prev=
+      while [ "$w" != "$prev" ]; do
+        prev=$w
+        w=${w#[\`\'\"\(\)\[\],;]}; w=${w%[\`\'\"\(\)\[\],;.:]}
+      done
+      case "$w" in /*|"~/"*) ;; *) continue ;; esac
+      n=$((n + 1))
+      t=$w; case "$t" in "~/"*) t="$HOME/${t#"~/"}" ;; esac
+      if [ "${t//\//}" != "" ] && [ -e "$t" ]; then seen[$line]=1; proofs=$((proofs + 1)); break; fi
+      [ "$n" -lt 3 ] || break
+    done
+  done < <(awk 'BEGIN{s=0;n=0} s==0{ if (substr($0,1,8)=="## Proof") s=1; next } /^## /{exit} {print; if (++n>=500) exit}' "$f" 2>/dev/null)
+  printf '%s %s\n' "$claimed" "$proofs"
+}
+
+# line1_done_claim <report line 1>: true when line 1 says the work is finished: QUEUE EMPTY at the start, an EMPTY form line1_rests accepts, or
+# DONE as the whole first word. BLOCKED, WORKING, HUB and JONATHAN words, HOURLY, STATUS and the rest are false. DONE followed by one of
+# stamp_ahead_check's target words in capitals (BY, UNTIL, TILL, DEADLINE, DUE, BEFORE, ETA) says when the lane WILL be done, so it is no claim.
+line1_done_claim() {
+  local first=$1 LC_ALL=C
+  case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
+  [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]] || return 1
+  [ "${BASH_REMATCH[1]}" = DONE ] || return 1
+  [[ ! $first =~ ^DONE\ +(BY|UNTIL|TILL|DEADLINE|DUE|BEFORE|ETA)([^A-Za-z0-9_-]|$) ]]
+}
+
+# A finished line with nothing to show for it. done_proof_check <lane> (no subshell: it sets hit and other) looks at a changed report.md: when
+# line 1 says the work is finished (line1_done_claim) it must also count its items ("items N") and the report must hold at least N proof lines
+# under "## Proof". Otherwise it names the lane to the hub ("done without proof: <lane>") and sends the lane a note through lane.sh --send.
+# Once per distinct state (line 1 plus the two counts), so a lane that adds a proof is checked again. Only a changed report is checked.
+# 11 Nov 2026: a lane wrote that all 12 of its items were done after 12 minutes when 3 were, and nothing checked the claim before the hub
+# believed it. This check counts proof lines and checks that a named file exists; it does not open a link, so it catches a bare claim, not a lie.
+done_proof_check() {
+  local l=$1 rep first counts claimed proofs reason sum mark
+  rep=$(report_of "$l"); [ -n "$rep" ] || return 0
+  first=$(head -n 1 "$rep" 2>/dev/null)
+  line1_done_claim "$first" || return 0
+  counts=$(done_proof_counts "$rep")
+  claimed=${counts%% *}; proofs=${counts##* }
+  if [[ $claimed =~ ^[0-9]+$ ]] && [ "$proofs" -ge "$claimed" ]; then return 0; fi
+  if [ "$claimed" = none ]; then reason="no item count on line 1"; else reason="line 1 counts $claimed items and the report has $proofs proof lines"; fi
+  sum=$(printf '%s %s %s' "$first" "$claimed" "$proofs" | cksum | cut -d' ' -f1)
+  mark="$recycle_dir/.doneproof-$l"
+  [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
+  printf '%s' "$sum" > "$mark"
+  echo "done without proof: $l ($reason; $rep); asked the lane for one proof line per item -- do not count it as done yet"
+  "$lane_sh" --send "$l" "Hub: line 1 of your report.md says the work is finished but does not prove it ($reason). Put the words items N on line 1, where N is how many things you finished (items 0 when there was nothing to do), and add a section headed ## Proof to report.md with one line per item, each starting with a hyphen and a space and holding an https:// link or the full path of a file that exists. Read each proof back from the live thing itself (the posted card, the merged commit, the staged draft), not from what a tool answered when you sent it. Then save report.md so it is read again." >/dev/null 2>&1 || true
   hit=1; other=1
 }
 
@@ -984,6 +1055,7 @@ while :; do
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       step_url_check "$l"
       stamp_ahead_check "$l"
+      done_proof_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
       setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole

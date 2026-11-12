@@ -953,7 +953,7 @@ if grep -q '^step without URL: rl' "$TMP/su-out1" && [ "$(wc -l < "$SEND_LOG")" 
 else echo "FAIL step without URL: out=$(cat "$TMP/su-out1") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 su_watch 'STEP-FOR-JONATHAN open https://vercel.com/acme/site/deployments (fleet Chromium tab "Deployments"), approve; done when it says Ready' "$TMP/su-out2"
 if ! grep -q 'step without URL' "$TMP/su-out2" && [ ! -s "$SEND_LOG" ]; then echo "ok   a STEP-FOR-JONATHAN report with an https:// URL is left alone"; else echo "FAIL step with URL flagged: out=$(cat "$TMP/su-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
-su_watch "DONE $(date -d '30 min ago' '+%-I:%M %p') shipped, see the page at none" "$TMP/su-out3"   # a time behind the clock, so this case does not depend on the hour it runs
+su_watch "DONE $(date -d '30 min ago' '+%-I:%M %p') shipped, items 0, see the page at none" "$TMP/su-out3"   # a time behind the clock, so this case does not depend on the hour it runs
 if ! grep -q 'step without URL' "$TMP/su-out3" && [ ! -s "$SEND_LOG" ]; then echo "ok   an ordinary report with no URL is left alone"; else echo "FAIL ordinary report flagged: out=$(cat "$TMP/su-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 # The same bad line 1 is named once, even across a re-armed watcher (the mark is a file); a rewrite that still has no URL is a new line.
 su_again() { # su_again <out>: another watcher, the report touched after it starts
@@ -969,6 +969,65 @@ su_again "$TMP/su-out6"
 # su_again touches the report after the rewrite, so the new line 1 is the one checked
 if grep -q '^step without URL' "$TMP/su-out6" && [ "$(wc -l < "$SEND_LOG")" = 1 ]; then echo "ok   a rewrite that still has no URL is named again"; else echo "FAIL rewrite not re-checked: $(cat "$TMP/su-out6")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-*
+
+# 11 Nov 2026: a lane wrote that all 12 of its items were done after 12 minutes when 3 were. A line 1 that says the work is finished (DONE, QUEUE
+# EMPTY, EMPTY) must count its items ("items N") and the report must hold N proof lines under "## Proof" (a "- " line with an https:// link or the
+# path of a file that exists); otherwise the watcher names the lane ("done without proof: <lane>") and sends the lane a note. Reuses su_watch's setup.
+mkdir -p "$su_dir"
+dp_file="$TMP/dp-real-file"; : > "$dp_file"
+dp_watch() { # dp_watch <whole report text> <out>: the report appears 1.5 s after the watcher starts
+  rl_reset; rm -f "$rl_dir"/.doneproof-* "$rl_dir"/.reportseen-* "$su_rep"; : > "$SEND_LOG"; echo 50 > "$CTX_FILE"
+  ( HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 \
+      timeout 8 bash "$SCRIPT" --max-min 5 rl > "$2" 2>&1 ) &
+  suw=$!
+  sleep 1.5; printf '%s\n' "$1" > "$su_rep"
+  wait "$suw" || true
+}
+dp_named() { grep -q '^done without proof: rl ' "$1"; }
+dp_quiet() { ! grep -q '^done without proof' "$1" && [ ! -s "$SEND_LOG" ]; }
+nl=$'\n'
+dp_watch "QUEUE EMPTY 4:30 PM | items 3 | all shipped${nl}${nl}## Proof${nl}- https://example.com/one" "$TMP/dp-out1"
+if dp_named "$TMP/dp-out1" && [ "$(wc -l < "$SEND_LOG")" = 1 ] && grep -q '## Proof' "$SEND_LOG" && grep -q 'items N' "$SEND_LOG" && grep -q 'line 1 counts 3 items and the report has 1 proof lines' "$TMP/dp-out1"; then
+  echo "ok   a finished line 1 counting 3 items with 1 proof line is named and the lane is sent for the proof"
+else echo "FAIL done without proof (short): out=$(cat "$TMP/dp-out1") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY 4:30 PM | items 3 | all shipped${nl}${nl}## Proof${nl}- https://example.com/one${nl}- merged https://example.com/two${nl}- file $dp_file" "$TMP/dp-out2"
+if dp_quiet "$TMP/dp-out2"; then echo "ok   items 3 with three proof lines (two links, one existing file) is left alone"; else echo "FAIL full proof flagged: out=$(cat "$TMP/dp-out2") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+dp_watch "DONE 4:30 PM | all finished${nl}${nl}## Proof${nl}- https://example.com/one${nl}- https://example.com/two${nl}- https://example.com/three${nl}- https://example.com/four" "$TMP/dp-out3"
+if dp_named "$TMP/dp-out3" && grep -q 'no item count' "$TMP/dp-out3" && [ "$(wc -l < "$SEND_LOG")" = 1 ]; then echo "ok   DONE with no items word is named (no item count), and 4:30 is not read as 4 items"; else echo "FAIL no item count: out=$(cat "$TMP/dp-out3") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY | items 0 | nothing to do" "$TMP/dp-out4"
+if dp_quiet "$TMP/dp-out4"; then echo "ok   items 0 with no proof section is left alone"; else echo "FAIL items 0 flagged: out=$(cat "$TMP/dp-out4") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+dp_ok=1
+for dp_line in 'BLOCKED 4:30 PM | needs hub | items 3' 'WORKING 4:30 PM | items 3 | on it' 'STEP-FOR-JONATHAN open https://example.com/page and approve | items 3'; do
+  dp_watch "$dp_line" "$TMP/dp-out5"
+  dp_quiet "$TMP/dp-out5" || { dp_ok=0; echo "FAIL not a done claim but flagged: $dp_line out=$(cat "$TMP/dp-out5")"; }
+done
+if [ "$dp_ok" = 1 ]; then echo "ok   BLOCKED, WORKING and STEP-FOR-JONATHAN first lines with no proof are left alone"; else failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY | items 3${nl}## Proof${nl}- /no/such/file/anywhere${nl}- https://example.com/one${nl}- https://example.com/one${nl}- just words, no link or path" "$TMP/dp-out6"
+if dp_named "$TMP/dp-out6" && grep -q 'the report has 1 proof lines' "$TMP/dp-out6"; then echo "ok   a missing path, a repeated line and a bare '- ' line do not count (1 of 3)"; else echo "FAIL proof counting: out=$(cat "$TMP/dp-out6")"; failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY | items 2${nl}- https://example.com/above${nl}## Proof${nl}- https://example.com/one${nl}## Other${nl}- https://example.com/two${nl}- https://example.com/three" "$TMP/dp-out7"
+if dp_named "$TMP/dp-out7" && grep -q 'the report has 1 proof lines' "$TMP/dp-out7"; then echo "ok   lines above ## Proof and under a later ## Other heading are not counted"; else echo "FAIL section bounds: out=$(cat "$TMP/dp-out7")"; failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY | items 3${nl}## Proof${nl}- https://example.com/one" "$TMP/dp-out8a"
+su_again "$TMP/dp-out8b"
+printf 'QUEUE EMPTY | items 3\n## Proof\n- https://example.com/one\n- https://example.com/two\n' > "$su_rep"; : > "$SEND_LOG"
+su_again "$TMP/dp-out8c"
+printf 'QUEUE EMPTY | items 3\n## Proof\n- https://example.com/one\n- https://example.com/two\n- https://example.com/three\n' > "$su_rep"; : > "$SEND_LOG"
+su_again "$TMP/dp-out8d"
+if dp_named "$TMP/dp-out8a" && grep -q 'the report has 1 proof lines' "$TMP/dp-out8a" && ! grep -q '^done without proof' "$TMP/dp-out8b" && dp_named "$TMP/dp-out8c" && grep -q 'the report has 2 proof lines' "$TMP/dp-out8c" && dp_quiet "$TMP/dp-out8d"; then
+  echo "ok   a short report is named once across a re-armed watcher, again when one proof is added and it is still short, and left alone once it reaches its count"
+else echo "FAIL re-armed naming: a=$(cat "$TMP/dp-out8a") b=$(cat "$TMP/dp-out8b") c=$(cat "$TMP/dp-out8c") d=$(cat "$TMP/dp-out8d")"; failures=$((failures + 1)); fi
+dp_watch "QUEUE EMPTY 4:30 PM | items 4:30 | done" "$TMP/dp-out9"
+if dp_named "$TMP/dp-out9" && grep -q 'no item count' "$TMP/dp-out9"; then echo "ok   items 4:30 is a time, not a count"; else echo "FAIL items 4:30: out=$(cat "$TMP/dp-out9")"; failures=$((failures + 1)); fi
+dp_watch "DONE BY 5:00 PM | half way" "$TMP/dp-out9b"
+dp_watch2_out="$TMP/dp-out9c"; dp_quiet9b=0; dp_quiet "$TMP/dp-out9b" && dp_quiet9b=1
+dp_watch "DONE 5:00 PM | by hand" "$dp_watch2_out"
+if [ "$dp_quiet9b" = 1 ] && dp_named "$dp_watch2_out" && grep -q 'no item count' "$dp_watch2_out"; then echo "ok   DONE BY <time> is a target, not a finished line; DONE with a lower-case by later is still named"; else echo "FAIL DONE BY: quiet=$dp_quiet9b out=$(cat "$TMP/dp-out9b") later=$(cat "$dp_watch2_out")"; failures=$((failures + 1)); fi
+mkdir -p "$rc_home/dp-dir"; : > "$rc_home/dp-dir/thing"
+dp_watch "QUEUE EMPTY | items 2${nl}## Proof${nl}- ~/dp-dir/thing${nl}- see \`$dp_file\`." "$TMP/dp-out10"
+if dp_quiet "$TMP/dp-out10"; then echo "ok   a ~/ path under HOME and a backtick-wrapped path both count"; else echo "FAIL ~/ and backtick paths: out=$(cat "$TMP/dp-out10") send=$(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
+rm -f "$TMP/dp-pwn" "$TMP/dp-pwn2"
+dp_watch "QUEUE EMPTY | items 1${nl}## Proof${nl}"'- $(touch '"$TMP/dp-pwn"') and `touch '"$TMP/dp-pwn2"'`' "$TMP/dp-out11"
+if [ ! -e "$TMP/dp-pwn" ] && [ ! -e "$TMP/dp-pwn2" ] && dp_named "$TMP/dp-out11"; then echo "ok   a proof line holding \$(...) and a backtick command runs nothing"; else echo "FAIL report text was run: out=$(cat "$TMP/dp-out11")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir" "$rc_home/dp-dir" "$dp_file"; rm -f "$rl_dir"/.doneproof-* "$TMP/dp-pwn" "$TMP/dp-pwn2"
 
 # 6 Nov 2026: lanes wrote report times ahead of the clock ("WORKING 8:30 AM" at 8:13 AM) and the hub corrected each by hand. The watcher compares the
 # first time on line 1 with the report file's modification time: more than 2 minutes ahead is named ("stamp ahead: <lane> wrote <stamp> at <mtime>")
@@ -1023,7 +1082,7 @@ sa_tgt "DONE at $ah" "$TMP/sf-7" "fixed place: 'at' before the time is allowed" 
 sa_tgt "STEP-FOR-JONATHAN as of $ah open https://x.example" "$TMP/sf-8" "fixed place: hyphenated status word and 'as of' are allowed" named
 sa_tgt "READY 476 0 skipped | nightly $ah Eastern" "$TMP/sf-9" "a schedule time deep in the line is not a stamp" quiet
 sa_tgt "WORKING on the reply; their mail of 9 Nov $ah their CET says x" "$TMP/sf-10" "a quoted mail time deep in the line is not a stamp" quiet
-sa_tgt "QUEUE EMPTY until $ah | last check $ah2" "$TMP/sf-11" "'until <time>' after the status words leaves no stamp" quiet
+sa_tgt "QUEUE EMPTY until $ah | last check $ah2 | items 0" "$TMP/sf-11" "'until <time>' after the status words leaves no stamp" quiet
 sa_tgt "WORKING by $ah" "$TMP/sf-12" "'WORKING by <time>' has no stamp" quiet
 sa_tgt "BLOCKED | Deadline: $ah, waiting" "$TMP/sf-13" "'BLOCKED | Deadline: <time>' has no stamp" quiet
 sa_tgt "Waiting since $ah" "$TMP/sf-14" "lower-case status words give no stamp" quiet
