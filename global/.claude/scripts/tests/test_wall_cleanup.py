@@ -3,6 +3,7 @@
 Each test copies the script into tmp_path/.claude/no-ai-wall beside stand-in manifest files and runs the copy with `python3 -I`. The real
 ~/.claude is never touched, and the script is never run from the repo.
 """
+import datetime
 import hashlib
 import os
 import pathlib
@@ -264,6 +265,90 @@ def test_refused_state_folder_is_a_link(tmp_path):
     assert snapshot(tmp_path) == before
 
 
+def log_setup(tmp_path):
+    """A wall with one stray, an existing state folder, and a file elsewhere that the log must never reach."""
+    wall = make_wall(tmp_path)
+    put_stray(wall)
+    state = os.path.join(str(tmp_path), ".claude", "state")
+    os.makedirs(state)
+    target = os.path.join(str(tmp_path), "elsewhere.txt")
+    with open(target, "w") as fh:
+        fh.write("kept as it was\n")
+    return wall, os.path.join(state, "no-ai-wall-cleanup.log"), target
+
+
+def test_refused_log_is_a_symbolic_link(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    os.symlink(target, log)
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert snapshot(tmp_path) == before
+    assert open(target).read() == "kept as it was\n"
+    assert os.path.exists(os.path.join(wall, "stray.txt"))
+
+
+def test_refused_log_is_a_link_to_nothing(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    missing = os.path.join(str(tmp_path), "not-there.txt")
+    os.symlink(missing, log)
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert snapshot(tmp_path) == before
+    assert not os.path.lexists(missing)
+
+
+def test_refused_log_is_a_hard_link(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    os.link(target, log)
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert snapshot(tmp_path) == before
+    assert open(target).read() == "kept as it was\n"
+    assert os.path.exists(os.path.join(wall, "stray.txt"))
+
+
+def test_refused_log_is_a_folder(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    os.mkdir(log)
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert snapshot(tmp_path) == before
+
+
+def test_refused_holding_folder_is_a_file(tmp_path):
+    wall, log, target = log_setup(tmp_path)
+    with open(os.path.join(os.path.dirname(log), "no-ai-wall-strays"), "w") as fh:
+        fh.write("not a folder\n")
+    before = snapshot(tmp_path)
+    r = run(wall, "--apply")
+    assert refused(r), r.stdout + r.stderr
+    assert "Traceback" not in r.stderr
+    assert snapshot(tmp_path) == before
+
+
+def test_a_move_that_fails_is_counted_and_not_logged(tmp_path):
+    """A wall folder nobody may write to: the stray cannot leave it, so the run says so, exits 1 and logs no move."""
+    assert os.geteuid() != 0, "this test needs an ordinary user: root can write to a read-only folder"
+    wall = make_wall(tmp_path)
+    put_stray(wall)
+    os.chmod(wall, 0o555)
+    try:
+        r = run(wall, "--apply")
+    finally:
+        os.chmod(wall, 0o755)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Traceback" not in r.stderr and "could not move" in r.stderr
+    assert re.fullmatch(r"WALL STRAYS 0 moved to state/no-ai-wall-strays/\d{8}-\d{6}, 1 could not be moved", last(r)), last(r)
+    assert os.path.exists(os.path.join(wall, "stray.txt"))
+    (hold,) = holding(wall)
+    assert os.listdir(hold) == []
+    assert open(os.path.join(str(tmp_path), ".claude", "state", "no-ai-wall-cleanup.log")).read() == ""
+
+
 @pytest.mark.parametrize("args", [("--apply", "x"), ("x",), ("/etc",), ("--dry",), ("--apply", "--apply"), ("--apply=1",)])
 def test_usage_errors(tmp_path, args):
     wall = make_wall(tmp_path)
@@ -274,15 +359,38 @@ def test_usage_errors(tmp_path, args):
     assert snapshot(tmp_path) == before
 
 
-def test_two_runs_in_one_second_make_two_folders(tmp_path):
+def test_a_taken_folder_name_gets_a_number_suffix(tmp_path):
+    """The holding folder is named for the second it was made. The first run gives the clock the command sees; the test then takes the
+    plain name of every second in the next minute, so the second run must land on a taken name and add -2, and the third (with every -2
+    taken as well) must add -3. Nothing here depends on two runs falling in the same second."""
     wall = make_wall(tmp_path)
     put_stray(wall)
     assert run(wall, "--apply").returncode == 0
+    (first,) = holding(wall)
+    root = os.path.dirname(first)
+    start = datetime.datetime.strptime(os.path.basename(first), "%Y%m%d-%H%M%S")
+    names = [(start + datetime.timedelta(seconds=i)).strftime("%Y%m%d-%H%M%S") for i in range(61)]
+    for n in names[1:]:
+        os.mkdir(os.path.join(root, n))
+
     put_stray(wall)
-    assert run(wall, "--apply").returncode == 0
-    holds = holding(wall)
-    assert len(holds) == 2 and len(set(holds)) == 2
-    assert all(os.path.exists(os.path.join(h, "stray.txt")) for h in holds)
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    second = [d for d in os.listdir(root) if d not in names]
+    assert len(second) == 1 and second[0] in [n + "-2" for n in names], second
+    assert last(r) == "WALL STRAYS 1 moved to state/no-ai-wall-strays/" + second[0]
+    assert os.listdir(os.path.join(root, second[0])) == ["stray.txt"]
+
+    for n in names:
+        if n + "-2" != second[0]:
+            os.mkdir(os.path.join(root, n + "-2"))
+    put_stray(wall)
+    r = run(wall, "--apply")
+    assert r.returncode == 0, r.stderr
+    third = [d for d in os.listdir(root) if d not in names and not d.endswith("-2")]
+    assert len(third) == 1 and third[0] in [n + "-3" for n in names], third
+    assert os.listdir(os.path.join(root, third[0])) == ["stray.txt"]
+    assert all(os.listdir(os.path.join(root, n)) == [] for n in names[1:])
 
 
 def test_never_reads_home(tmp_path):
@@ -310,3 +418,13 @@ def test_source_deletes_and_starts_nothing():
     src = open(SCRIPT_SRC).read()
     for word in ("subprocess", "os.system", "shutil.rmtree", "os.remove", "os.unlink"):
         assert word not in src, word
+
+
+def test_source_opens_files_only_the_careful_way():
+    """No plain open() anywhere in the script: every file and folder it opens goes through os.open with a no-follow flag, so a name
+    that was swapped for a link is refused instead of followed."""
+    src = open(SCRIPT_SRC).read()
+    assert re.search(r"(?<![.\w])open\(", src) is None
+    for line in src.split("\n"):
+        if "os.open(" in line:
+            assert "O_NOFOLLOW" in line or "FLAGS" in line, line

@@ -798,8 +798,9 @@ def _segments(command):
 
 
 def _read_only_listing(command):
-    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands (no redirection,
-    no command substitution, no program outside the short list)."""
+    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands, or runs the wall's cleanup
+    command wall_cleanup.py (which takes no path and moves only strays out of the wall's folder), with no redirection, no command substitution and no program outside the
+    short list. The three Python files below are on the list to be run; an edit of any of them is still refused elsewhere."""
     if re.search(r"[<>`]|\$\(", command):
         return False
     for seg in _segments(command):

@@ -140,7 +140,7 @@ Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `
 
 ### Installing the no-AI wall (a person runs this, never a session)
 
-The wall's three files live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
+The wall's four files (the guard, its module, its shell helper and the cleanup command below) live in `~/.claude/no-ai-wall/`, a folder sessions cannot change. One command installs them from a named
 commit (it reads git, never the working tree or the network), backs up every live file it replaces, moves the hook entry in
 `settings.json`, removes the three old copies, and proves the result. It moves only the wall. The usual install step for the other
 global files (`install_global.py --include-stale`) runs only if you add `--with-tooling` before the commit; a copy of every stale
@@ -154,6 +154,23 @@ bash <(git -C ~/repos/Claude_Commandz show <commit>:global/.claude/no-ai-wall/in
 The last line it prints is `WALL OK <commit> refused <n>/<n> ordinary <n>/<n>`, or `WALL FAILED <reason> after undoing itself`.
 The backup folder, `~/.claude/state/no-ai-wall-backups/<date>-<commit>/`, holds `undo.sh`; `bash <that folder>/undo.sh` puts everything back.
 Tests: `python3 -m pytest global/.claude/scripts/tests/test_no_ai_wall_install.py`.
+
+#### Cleaning stray files out of the wall's folder
+
+A script can drop a file into `~/.claude/no-ai-wall/` unseen, and no session may write there to take it out. The wall's own
+cleanup command does it. It looks only at its own folder, leaves the four wall files alone, and takes no path or file name from
+whoever runs it. A dry run lists what does not belong; `--apply` moves each stray (never deletes it) into
+`~/.claude/state/no-ai-wall-strays/<date-time>/` and adds one line per move to `~/.claude/state/no-ai-wall-cleanup.log`
+(name, kind, size and a checksum; never file content). It refuses to move anything when the holding folder or the log is a
+link or the wrong kind of thing.
+
+```bash
+python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            # dry run: list only
+python3 -I ~/.claude/no-ai-wall/wall_cleanup.py --apply    # move the strays
+```
+
+The last line it prints starts with `WALL` (`WALL CLEAN`, or `WALL STRAYS <n> ...`). Exit codes: 0 fine, 1 a warning or a move
+that failed, 2 wrong arguments, 3 refused with nothing moved. Tests: `python3 -m pytest global/.claude/scripts/tests/test_wall_cleanup.py`.
 
 ### Scenario C — Single repo only
 
