@@ -34,6 +34,17 @@ class SettingsHookTests(unittest.TestCase):
             [c for _, c in commands("Stop")],
         )
 
+    def test_every_stop_hook_has_a_time_limit(self):
+        # A Stop hook runs at the end of every turn and three of them re-read the whole transcript. With no limit of its
+        # own, one that hangs holds every turn's end for as long as Claude Code's default allows.
+        missing = []
+        for group in json.loads(SETTINGS.read_text())["hooks"]["Stop"]:
+            for hook in group.get("hooks", []):
+                limit = hook.get("timeout")
+                if not (isinstance(limit, int) and 1 <= limit <= 30):
+                    missing.append(hook.get("command", ""))
+        self.assertEqual(missing, [], "Stop hooks with no time limit of 30 seconds or less")
+
     def test_context_warn_runs_on_prompt_and_after_tools(self):
         want = "python3 ~/.claude/hooks/context-warn.py"
         self.assertIn(want, [c for _, c in commands("UserPromptSubmit")])
