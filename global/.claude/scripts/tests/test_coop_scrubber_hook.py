@@ -14,6 +14,14 @@ HOOK = os.path.join(HERE, "..", "..", "hooks", "coop-scrubber.py")
 
 
 class Hook(unittest.TestCase):
+    # test_output_scrubber_hook.py runs every test in this class a second time through output-scrubber.py,
+    # the hook that takes this one's place in settings.json, by overriding the three names below.
+    hook = HOOK
+    drop_env = ("COOP_",)
+
+    def more_env(self):
+        return {}
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -29,12 +37,13 @@ class Hook(unittest.TestCase):
         fx.write_json(self.roster, fx.ROSTER)
 
     def run_hook(self, cwd, response, tool="Bash", raw=None, **env_extra):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("COOP_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(self.drop_env)}
         env.update(HOME=self.home, COOP_SCRUBBER_CONFIG=self.cfg, COOP_ROSTER_FILE=self.roster,
                    COOP_SCRUBBER_LOG=self.log)
+        env.update(self.more_env())
         env.update(env_extra)
         stdin = raw if raw is not None else json.dumps({"tool_name": tool, "cwd": cwd, "tool_response": response})
-        r = subprocess.run([sys.executable, HOOK], input=stdin, env=env, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, self.hook], input=stdin, env=env, capture_output=True, text=True, timeout=60)
         return r
 
     def bash_response(self, text):

@@ -36,16 +36,51 @@ class SettingsHookTests(unittest.TestCase):
         self.assertIn(want, [c for _, c in commands("UserPromptSubmit")])
         self.assertIn(want, [c for _, c in commands("PostToolUse")])
 
-    def test_coop_wall_guard_runs_after_every_tool(self):
+    def test_output_scrubber_runs_after_every_tool(self):
+        # output-scrubber.py masks secrets and then runs the co-op scrub itself (it loads coop-scrubber.py),
+        # so it is registered in place of coop-scrubber.py, never beside it: two hooks that both rewrite
+        # a tool's output would race.
         self.assertIn(
-            ("*", "python3 ~/.claude/hooks/coop-scrubber.py"),
+            ("*", "python3 ~/.claude/hooks/output-scrubber.py"),
             commands("PostToolUse"),
         )
+        self.assertNotIn("python3 ~/.claude/hooks/coop-scrubber.py", [c for _, c in commands("PostToolUse")])
 
-    def test_the_three_scripts_are_in_this_repo(self):
+    def test_output_scrubber_runs_after_a_failed_tool_call(self):
+        # A failed call's output cannot be rewritten by a hook; there the hook only detects and warns.
+        self.assertIn(
+            ("*", "python3 ~/.claude/hooks/output-scrubber.py"),
+            commands("PostToolUseFailure"),
+        )
+
+    def test_shell_prefix_points_at_the_scrub_wrapper(self):
+        # The wrapper is what masks a Bash call that exits non-zero, so the prefix must name a file in this repo.
+        # The live value must be one bare absolute path: no spaces, no quotes, no $HOME and no ~. Claude Code runs
+        # the prefix through a shell for Bash calls and hooks, but to start a stdio connector (MCP server) it uses
+        # the whole prefix text as the path of one program, so a value like bash -c '... "$HOME/..."' starts no
+        # connector (ENOENT, seen live on Claude Code 2.1.322). This template holds __HOME__ in place of the home
+        # folder, so it carries no username; the restore steps in README.md fill it in.
+        prefix = json.loads(SETTINGS.read_text())["env"].get("CLAUDE_CODE_SHELL_PREFIX", "")
+        self.assertEqual(prefix, "__HOME__/.claude/scripts/shell_scrub_prefix.sh")
+        for bad in (" ", "$", "~", "'", '"', "/home/", "/Users/"):
+            self.assertNotIn(bad, prefix)
+
+    def test_restore_steps_fill_in_the_home_folder(self):
+        # Copied as it is, the template's prefix names no real file and every Bash call would exit 127,
+        # so each restore block in README.md must fill __HOME__ in right after it copies the file.
+        readme = (HOOKS_DIR.parent.parent.parent / "README.md").read_text()
+        copies = readme.count("cp global/dotfiles/settings.json ~/.claude/settings.json")
+        fills = readme.count('sed -i "s|__HOME__|$HOME|g" ~/.claude/settings.json')
+        self.assertGreaterEqual(copies, 2)
+        self.assertEqual(copies, fills)
+        scripts = HOOKS_DIR.parent / "scripts"
+        for name in ("shell_scrub_prefix.sh", "shell_scrub_wrapper.py", "secret_scrubber.py"):
+            self.assertTrue((scripts / name).exists(), f"no copy of {name}")
+
+    def test_the_four_scripts_are_in_this_repo(self):
         # Other hooks in the file (the private inbox watcher, for one) stay out of this
-        # public repo on purpose, so only the three named here are checked.
-        for name in ("lane-watch-guard.py", "context-warn.py", "coop-scrubber.py"):
+        # public repo on purpose, so only the four named here are checked.
+        for name in ("lane-watch-guard.py", "context-warn.py", "coop-scrubber.py", "output-scrubber.py"):
             self.assertTrue((HOOKS_DIR / name).exists(), f"no copy of {name}")
 
     def test_afa_mods_marketplace_and_plugin(self):
