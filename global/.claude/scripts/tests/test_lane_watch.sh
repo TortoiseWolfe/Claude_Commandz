@@ -622,6 +622,20 @@ rl_reset; log_row rl 70; log_row rl 55; log_row rl 40; log_row rl 31 FAILED
 rl_watch 130 6 "$TMP/th-out5"
 if [ "$(cat "$RC_CALLS")" = rl ] && ! grep -q '^thrash:' "$TMP/th-out5"; then echo "ok   recycles older than 30 minutes, and failed ones, do not count"; else echo "FAIL old recycles counted: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/th-out5")"; failures=$((failures + 1)); fi
 
+# A lane whose third recycle in the window set the stop marker is not recycled by the watcher, however old its rows are, and the hub is not
+# told a second time (the FAILED row lane.sh wrote told it). Removing the marker lets the watcher recycle it again.
+rl_stop="$rl_dir/.recycle-stop-rl"
+rl_reset; rm -f "$rl_stop"; echo '1:09 PM stopped after 3 recycles' > "$rl_stop"
+rl_watch 130 6 "$TMP/st-out1"
+if [ ! -s "$RC_CALLS" ] && ! grep -q '^thrash:' "$TMP/st-out1"; then echo "ok   a stopped lane over its line is not recycled and no thrash line is printed"; else echo "FAIL stopped lane (no rows): calls=$(cat "$RC_CALLS") out=$(cat "$TMP/st-out1")"; failures=$((failures + 1)); fi
+rl_reset; echo '1:09 PM stopped after 3 recycles' > "$rl_stop"; log_row rl 25; log_row rl 15; log_row rl 5
+rl_watch 130 6 "$TMP/st-out2"
+if [ ! -s "$RC_CALLS" ] && ! grep -q '^thrash:' "$TMP/st-out2"; then echo "ok   a stopped lane with three recent rows is not recycled and not named again"; else echo "FAIL stopped lane (rows): calls=$(cat "$RC_CALLS") out=$(cat "$TMP/st-out2")"; failures=$((failures + 1)); fi
+rl_reset; rm -f "$rl_stop"
+rl_watch 130 6 "$TMP/st-out3"
+if [ "$(cat "$RC_CALLS")" = rl ]; then echo "ok   with the stop marker removed the lane is recycled again"; else echo "FAIL marker removed, not recycled: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/st-out3")"; failures=$((failures + 1)); fi
+rl_reset; rm -f "$rl_stop"
+
 # 26 Oct 1:30-8:28 AM: a lane at 95K (under its line) wrote handoff.md, said it was ready to recycle, and sat idle seven hours. The hub is told,
 # once per handoff.md, when it has been idle 10 minutes.
 orphan_case() { # orphan_case <label> <want yes|no> <ctx> <handoff age min|none> <pane> [last recycle min ago]

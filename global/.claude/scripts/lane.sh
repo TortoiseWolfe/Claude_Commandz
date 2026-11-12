@@ -91,7 +91,11 @@
 #                                       prompt.md, then handoff.md, then carry on; a new index row follows its new session. A lane that
 #                                       never writes handoff.md is not cleared. The request goes to the lane at once, even mid-turn (a long turn would never end first): it
 #                                       finishes the step in hand and writes handoff.md as its next action. lane_watch.sh runs this when a
-#                                       lane passes its own recycle line.
+#                                       lane passes its own recycle line. The third recycle inside LANE_THRASH_SECS (30 minutes) is the last: it
+#                                       succeeds, writes one FAILED row (the hub is told once, with the start load and the line) and sets the stop
+#                                       marker ~/.claude/state/lanes/.recycle-stop-<name>; a plain --recycle, a --send hold and the watcher then start
+#                                       nothing. A recycle held three times (LANE_RECYCLE_HELPER_TRIES) by running subagents stops the same way.
+#                                       lane.sh --recycle-at <K> --recycle <name> clears the marker and recycles; a restart clears it too.
 #   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
 #                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
 #                                       A lane already on the installed version is skipped unless --restart is given too (lane.sh --restart --update <name>):
@@ -288,6 +292,7 @@ Usage:
   lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
+  (--recycle-at <K> --recycle <name> sets the line and lifts a stop: the third recycle in 30 minutes is the last until then)
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
 
 Claude is the default engine. Codex, Copilot, agy, opencode and local run headless and write to out.log.
@@ -1612,6 +1617,18 @@ PY
   echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
   return 1
 }
+# Recycle count and stop marker (issue 34). recent_recycles <name> is the one count of `recycled` rows for the lane (field 2, exact match) inside
+# LANE_THRASH_SECS (1800); 0 when the log is missing. The third one in the window is the last: --recycle then writes the marker
+# ~/.claude/state/lanes/.recycle-stop-<name> (a line for a person: the time, then why) and no plain --recycle, --send hold or watcher pass starts
+# another until `lane.sh --recycle-at <K> --recycle <name>` (or a restart, or a fresh start) clears it. A recycle held LANE_RECYCLE_HELPER_TRIES
+# times by running subagents sets it too; .recycle-helper-fails-<name> counts those tries.
+recent_recycles() {
+  local rlog="$HOME/.claude/state/lanes/recycle.log"
+  [ -f "$rlog" ] || { echo 0; return 0; }
+  command grep -a $'\trecycled\t' "$rlog" | awk -F'\t' -v n="$1" -v now="$(date +%s)" -v w="${LANE_THRASH_SECS:-1800}" '$2 == n { cmd = "date -d \"" $1 "\" +%s"; cmd | getline t; close(cmd); if (now - t <= w) c++ } END { print c + 0 }'
+}
+recycle_stop_file() { printf '%s\n' "$HOME/.claude/state/lanes/.recycle-stop-$1"; }
+clear_recycle_stop() { rm -f "$HOME/.claude/state/lanes/.recycle-stop-$1" "$HOME/.claude/state/lanes/.recycle-helper-fails-$1"; }
 # send_held <name> <text...>: a lane past its recycle line, or with a recycle already under way, is not typed into. Text typed mid-turn queues
 # in Claude Code, and queued input is what --recycle must not carry into the fresh session (26 Oct: a hub message typed into scout-run-2 at
 # 163K, past its 128K line, queued and blocked the watcher's recycle, which failed safe). So the words go to hub-pending.md in the lane's
@@ -1641,12 +1658,11 @@ send_held() {
   mkdir -p "$hand"
   printf '## %s (typed with lane.sh --send while you were past your recycle line)\n%s\n\n' "$(date '+%-I:%M %p')" "$text" >>"$pend"
   rlog="$HOME/.claude/state/lanes/recycle.log"
-  cnt=0
-  if [ -f "$rlog" ]; then
-    cnt="$(command grep -a $'\trecycled\t' "$rlog" | awk -F'\t' -v n="$name" -v now="$(date +%s)" -v w="${LANE_THRASH_SECS:-1800}" '$2 == n { cmd = "date -d \"" $1 "\" +%s"; cmd | getline t; close(cmd); if (now - t <= w) c++ } END { print c + 0 }')"
-  fi
+  cnt="$(recent_recycles "$name")"
   if [ "$locked" = 1 ]; then
     echo "held for $name: a recycle is already under way, so I did not type into its box. Your text is in $pend and the re-prime message sends it there to read it."
+  elif [ -f "$(recycle_stop_file "$name")" ]; then
+    echo "held for $name: it is at ${ctxk}K, past its ${line}K line, but recycling this lane is stopped ($(cat "$(recycle_stop_file "$name")")) so I did not start one. Your text is in $pend. To start it again: lane.sh --recycle-at <K> --recycle $name"
   elif [ "$cnt" -ge "${LANE_THRASH_COUNT:-3}" ]; then
     echo "held for $name: it is at ${ctxk}K, past its ${line}K line, but it was recycled $cnt times in the last $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes so I did not start another. Your text is in $pend; it is read at the next recycle (lane.sh --recycle $name), or tell the lane to read it."
   else
@@ -1792,6 +1808,9 @@ fi
 if [ "$mode" = recycle ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --recycle <name>" >&2; exit 1; }
   name="$1"
+  if [ "$recycle_at_set" != 1 ] && [ -f "$(recycle_stop_file "$name")" ]; then
+    echo "recycle $name is stopped ($(cat "$(recycle_stop_file "$name")")). To start it again: lane.sh --recycle-at <K> --recycle $name" >&2; exit 1
+  fi
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
@@ -1865,6 +1884,7 @@ if [ "$mode" = recycle ]; then
   mkdir "$lockd" 2>/dev/null || { echo "$name is already being recycled ($lockd)" >&2; exit 1; }
   rlog="$HOME/.claude/state/lanes/recycle.log"
   trap 'rmdir "$lockd" 2>/dev/null || true' EXIT
+  [ "$recycle_at_set" != 1 ] || clear_recycle_stop "$name"   # --recycle-at <K> --recycle is how the stop is lifted
   rfail() { echo "recycle $name FAILED: $*" >&2; printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$*" >>"$rlog"; exit 1; }
   lane_idle() {  # no spinner and no dialog in the lane's pane
     local pane; pane="$(tmux capture-pane -p -t "$SESSION:$name" 2>/dev/null)" || return 1
@@ -2095,7 +2115,17 @@ PY
   if [ "$written" != 1 ] && handoff_new && lane_idle; then
     # The time ran out with the hand-off written and the lane idle, so it was held only by its helpers.
     helper_counts
-    [ "$h_agents" = 0 ] || rfail "$h_agents subagent(s) the lane started were still running after ${LANE_RECYCLE_WAIT_SECS:-600}s. They outlive a clear and would hand their results to a fresh session that never asked for them, so the lane was NOT cleared; its handoff.md is written and the next try waits again"
+    if [ "$h_agents" != 0 ]; then
+      # Held again and again by the same running subagents: after LANE_RECYCLE_HELPER_TRIES (3) tries the stop marker is set (one FAILED row).
+      hf="$HOME/.claude/state/lanes/.recycle-helper-fails-$name"; hfn="$(cat "$hf" 2>/dev/null || true)"; [[ "$hfn" =~ ^[0-9]+$ ]] || hfn=0
+      hfn=$(( hfn + 1 )); printf '%s\n' "$hfn" >"$hf"
+      hmsg="$h_agents subagent(s) the lane started were still running after ${LANE_RECYCLE_WAIT_SECS:-600}s. They outlive a clear and would hand their results to a fresh session that never asked for them, so the lane was NOT cleared; its handoff.md is written and the next try waits again"
+      if [ "$hfn" -ge "${LANE_RECYCLE_HELPER_TRIES:-3}" ]; then
+        printf '%s %s\n' "$(date '+%-I:%M %p')" "held by running subagents $hfn times in a row" >"$(recycle_stop_file "$name")"
+        hmsg+=" Stopped after $hfn tries: no further recycle will start. When its subagents have ended: lane.sh --recycle-at <K> --recycle $name"
+      fi
+      rfail "$hmsg"
+    fi
     sleep 2; lane_idle && written=1   # only background jobs are left, and the time for them is up
   fi
   [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
@@ -2156,7 +2186,20 @@ PY
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK%s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" "$start_note" >>"$rlog"
+  rm -f "$HOME/.claude/state/lanes/.recycle-helper-fails-$name"
+  stopped_now=0
+  if [ "$recycle_at_set" != 1 ]; then
+    rcount="$(recent_recycles "$name")"
+    if [ "$rcount" -ge "${LANE_THRASH_COUNT:-3}" ]; then
+      stopped_now=1
+      sload="an unknown amount"; [[ "$startk" =~ ^[0-9]+$ ]] && sload="${startk}K"
+      stopmsg="stopped after $rcount recycles in $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes: the session just cleared held $sload at its first message and the line is now ${rk_next}K. This one was cleared and re-primed, and no further recycle will start. Shrink what the lane loads at its start (prompt.md, handoff.md, files it re-reads), then: lane.sh --recycle-at <K> --recycle $name"
+      printf '%s %s\n' "$(date '+%-I:%M %p')" "$stopmsg" >"$(recycle_stop_file "$name")"
+      printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$stopmsg" >>"$rlog"
+    fi
+  fi
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K$start_note"
+  [ "$stopped_now" != 1 ] || echo "recycle $name is now stopped after $rcount recycles in $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes: no further recycle will start. To start it again: lane.sh --recycle-at <K> --recycle $name" >&2
   exit 0
 fi
 
@@ -2833,6 +2876,7 @@ if [ "$dry" = 0 ]; then
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
   lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
+  clear_recycle_stop "$name"   # a new session starts clean: a restart (or a fresh start of the same name) lifts the stop
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
     "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" "$pm_start" "$ad_start")"
 else
