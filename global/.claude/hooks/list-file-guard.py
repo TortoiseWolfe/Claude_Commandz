@@ -14,32 +14,69 @@ through "..", "~" or a symlink) is one of the two list files or the installed co
 this hook. Reading any of them with the Read tool stays allowed.
 
 Bash is refused when the command:
-  - contains either list file's name, anywhere;
+  - contains either list file's name, anywhere, also when quotes or backslashes are
+    written inside the name;
   - has a word that resolves to a list file or to the installed copy of this hook. A word
-    is resolved against the session's folder and against every folder the command changes
-    into (cd, pushd), with ~, $HOME, ".." and symlinks followed;
+    is read the way a shell reads it (quotes and backslashes taken out, so a path glued
+    from quoted pieces is one word) and is resolved against the session's folder and
+    against every folder the command changes into (cd, pushd, -C), with ~, $HOME, ".."
+    and symlinks followed. Every ${HOME...} form, such as ${HOME:-x} or ${HOME%/}, is read
+    as the home folder. A "$" written before a quote and a backslash at a line end are
+    dropped first, as a shell drops them. A cd with no folder, or with one held in a
+    variable, counts as a change into the home folder;
   - has a wildcard or brace word that could match a list file, this hook, or (with a verb
-    below) one of the guarded folders, resolved the same way;
+    below) one of the guarded folders, resolved the same way. A brace word is expanded
+    the way a shell expands it, a{b,c} into ab and ac, and each result is checked; a word
+    with more than 64 results is checked as wildcards instead, where a group that holds a
+    "/" counts as any number of folders and any other group counts as any characters
+    inside one name. A {1..9} run and an extended wildcard group, @(a|b), count the same
+    way. A bracket set, [a-c], is read as written with letter case ignored; a named class,
+    [[:alpha:]], or a set that cannot be read counts as any one character;
+  - has command output, $(...) or backticks, in the middle or at the end of a name. The
+    output counts as any characters inside one name, so ~/.config/afa/$(echo x).txt is
+    checked as ~/.config/afa/*.txt. A word that starts with command output is not checked,
+    so "rm $(find . -name '*.pyc')" passes;
   - names the .config/afa folder as a whole together with a verb that moves, removes,
     links, copies, walks or re-permissions (mv, rm, cp, find, chmod and the like);
+  - runs tar, bsdtar, unzip, cpio or find while one of the folders it changes into, or the
+    session's own folder, is the .config/afa folder. Those verbs write into or walk the
+    folder they run in without a word that names it;
   - names ~/.config or ~/.claude/hooks as a whole together with a verb that moves, removes,
     links or re-permissions it.
+A verb counts however it is written: rm, /bin/rm, ./rm, \\rm or "rm".
+
+Message text is not a command. For git and gh, the quoted text right after -m, -am,
+--message, --body, --title or --notes is left out of the word checks, so a commit message
+may mention ~/.config or "rm". Only text a shell leaves exactly as written is left out:
+single-quoted, or double-quoted with no "$", backtick or backslash in it. The plain name
+check still reads it, so a message that spells a list file's name is refused; put such a
+message in a file and pass the file.
 
 Honest limit: this is a tripwire for direct and careless edits, not a wall. A command that
-builds the path from pieces, reaches it through a variable other than HOME, or runs a script
-file that does the edit is not seen, and a session that can edit the settings file can
-remove this hook. The sturdy fix is ownership: lists a session's user cannot write. The
-session's own safety check and lane_merge.py's refusals remain the other layers.
+builds the path from pieces, reaches it through a variable other than HOME, reaches it
+through a wildcard in the name of a symlink, or runs a script file that does the edit is
+not seen, and a session that can edit the settings file can remove this hook. The sturdy
+fix is ownership: lists a session's user cannot write. The session's own safety check and
+lane_merge.py's refusals remain the other layers.
 
-Unreadable or non-JSON stdin: allow, as lane-watch-guard.py does. An unexpected error in the
-path checks allows after one line on stderr, so a fault here cannot stop every shell call;
-the plain name check runs first and has nothing in it that can fail.
+Time limit: the settings file stops this hook after 5 seconds, and a hook that is stopped
+lets the command through. So a Bash check runs in a child process that this hook stops
+itself after 3 seconds, and a command whose check did not finish is refused. Long runs of
+braces and brackets are read in one pass, so ordinary long commands finish far inside the
+limit; the limit is there for a command padded to be slow.
+
+Unreadable or non-JSON stdin: allow, as lane-watch-guard.py does. An unexpected error while
+checking one word skips that word after one line on stderr and the other words are still
+checked, so a fault here cannot stop every shell call and one odd word cannot switch the
+checks off; the plain name check runs first and has nothing in it that can fail.
 """
-import fnmatch
 import json
 import os
 import re
+import select
+import signal
 import sys
+import warnings
 
 HOME = os.path.expanduser("~")
 AFA = os.path.join(HOME, ".config", "afa")
@@ -52,26 +89,60 @@ PROTECTED = (
 SELF = os.path.join(HOOKS, "list-file-guard.py")
 BASE_NAMES = tuple(os.path.basename(p) for p in PROTECTED)
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-MAX_FOLDERS = 24
+# Each relative folder change doubles the list of folders a later word may start from; 64 leaves room for six.
+MAX_FOLDERS = 64
 
 # Verbs that act on a folder as a whole. The list folder gets the long list; its parent and
 # the hooks folder get the short one, because copying into or searching them is everyday work.
-AFA_VERBS = re.compile(
-    r"(?<![\w./-])(?:mv|rm|rmdir|ln|cp|rsync|chmod|chown|chattr|setfacl|install|tar|find|rename|unlink)(?![\w.-])"
-)
-PARENT_VERBS = re.compile(r"(?<![\w./-])(?:mv|rm|rmdir|ln|chmod|chown|chattr|setfacl|rename|unlink)(?![\w.-])")
+PARENT_VERB_NAMES = frozenset("mv rm rmdir ln chmod chown chattr setfacl rename unlink".split())
+AFA_VERB_NAMES = PARENT_VERB_NAMES | frozenset("cp rsync install tar find".split())
+# Verbs that write into or walk the folder they run in without naming it as a word.
+CWD_VERB_NAMES = frozenset("tar bsdtar unzip cpio find".split())
+FOLDER_CHANGERS = ("cd", "pushd", "-C")
+# A cd or pushd with nothing after it goes to the home folder.
+BARE_CD = re.compile(r"(?<![\w./-])(?:cd|pushd)(?:[ \t]+--)?[ \t]*(?:$|[;&|)}#\n])")
 WORD_SPLIT = re.compile(r"[\s\"';&|()<>=,`]+")
-BRACES = re.compile(r"\{[^{}]*\}")
+QUOTES = re.compile(r"[\"'\\]")
+# Control characters that are not white space. A shell may drop one or stop reading at it, so both readings are checked.
+CONTROL = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+# A quote or a backtick between a "{" and its "}" means the pair is not one brace group; so does white space.
+BRACE_BREAKS = "\"'`"
+SEQUENCE = re.compile(r"[^./]+\.\.[^./]+(?:\.\.[^./]+)?")
 WILD = "*?["
+MAX_BRACE_WORDS = 64
+MAX_BRACE_GROUPS = 200
+# The settings file stops this hook after 5 seconds, and a stopped hook lets the command through. So the hook
+# stops its own check sooner and refuses the command itself.
+TIME_LIMIT = 3.0
+# Stand-ins used only inside this file: "any number of folders", and the braces and commas of a brace group.
+ANY, LEFT, RIGHT, COMMA = "﷐", "﷑", "﷒", "﷓"
+# Two more stand-ins, both "any characters inside one name": ONE for a group whose results cannot be listed
+# (a {1..9} run, a brace word with too many results, an extended wildcard group), SUB for a command's output.
+ONE, SUB = "﷔", "﷕"
+# A "$" right before a quote ($'' and $"") is part of the quote, and a backslash before a line end joins the lines.
+DOLLAR_QUOTE = re.compile(r"\$(?=[\"'])")
+HOME_FORM = re.compile(r"\$\{HOME(?![A-Za-z0-9_])[^}]*\}")
+SUBSTITUTION = re.compile(r"\$\([^()]*\)|`[^`]*`")
+EXTENDED_GROUP = re.compile(r"[@+!?*]\([^()]*\)")
+MAX_FOLDS = 20
+# git and gh take the text after these flags as a message, never as a command. Only text that a shell leaves
+# exactly as written is dropped: single-quoted, or double-quoted with no "$", backtick or backslash in it.
+MESSAGE_ARG = re.compile(
+    r"""((?:^|[\s;&|(])(?:git|gh)\s[^;&|\n'"]{0,400}?\s(?:-m|-am|--message|--body|--title|--notes)(?:=|[ \t]+))"""
+    r"""(?:'[^']*'|"[^"$`\\]*")"""
+)
 
 
-def both(path):
-    """The path as written and with symlinks followed, each split into its parts."""
-    out = []
-    for form in (os.path.abspath(path), os.path.realpath(path)):
-        parts = [c for c in form.split("/") if c]
-        if parts not in out:
-            out.append(parts)
+class TooManyWords(Exception):
+    pass
+
+
+def forms(path):
+    """The path as written and with symlinks followed."""
+    out = [os.path.abspath(path)]
+    real = os.path.realpath(path)
+    if real not in out:
+        out.append(real)
     return out
 
 
@@ -80,6 +151,11 @@ def reason_for(what):
         return (
             "BLOCKED: this is the installed copy of list-file-guard.py; a session may not change it. "
             "A person copies hooks in a plain terminal."
+        )
+    if what == "slow":
+        return (
+            "BLOCKED: this command took the merge-list guard too long to read, so it was not run. "
+            "Split it into separate commands, or move long text into a file."
         )
     if what == "folders":
         return (
@@ -114,38 +190,269 @@ def check_path(tool_input):
 def expand(word):
     if word == "~" or word.startswith("~/"):
         word = HOME + word[1:]
-    return word.replace("${HOME}", HOME).replace("$HOME", HOME)
+    # Every ${HOME...} form (${HOME:-x}, ${HOME%/}) is read as the home folder itself.
+    return HOME_FORM.sub(lambda match: HOME, word).replace("$HOME", HOME)
 
 
-def parts_match(pattern, target):
-    """True when a wildcard path, part by part, could name the target. "**" matches any depth."""
-    for i, piece in enumerate(pattern):
-        if "**" in piece:
-            return True
-        if i >= len(target) or not fnmatch.fnmatchcase(target[i], piece):
-            return False
-    return len(pattern) == len(target)
+def mark_braces(text):
+    """Swap the braces and commas of every brace group for stand-ins, so cutting the text into words keeps a group whole.
+
+    A group is a "{" and its "}" with no white space, quote or backtick anywhere between them. One pass over the
+    text, so a long run of braces costs no more than its length.
+    """
+    if "{" not in text:
+        return text
+    opened, role = [], {}
+    for i, ch in enumerate(text):
+        if ch == "{":
+            opened.append(i)
+        elif ch == "}":
+            if opened:
+                role[opened.pop()] = LEFT
+                role[i] = RIGHT
+        elif ch in BRACE_BREAKS or ch.isspace():
+            opened.clear()
+    if not role:
+        return text
+    out, depth = [], 0
+    for i, ch in enumerate(text):
+        mark = role.get(i)
+        if mark == LEFT:
+            depth += 1
+        elif mark == RIGHT:
+            depth -= 1
+        out.append(mark or (COMMA if ch == "," and depth else ch))
+    return "".join(out)
 
 
-def folders_of(words, cwd):
+def unmark(word):
+    return word.replace(LEFT, "{").replace(RIGHT, "}").replace(COMMA, ",")
+
+
+def expand_braces(word):
+    """Every word a shell makes from this one by brace expansion: a{b,c}d gives abd and acd. A {1..9} run becomes ONE."""
+    start = word.find(LEFT)
+    if start == -1:
+        return [word]
+    if word.count(LEFT) > MAX_BRACE_GROUPS:
+        # This function calls itself once per group; a word with more groups than this is checked as wildcards.
+        raise TooManyWords()
+    depth, end, cuts = 0, -1, []
+    for i in range(start, len(word)):
+        ch = word[i]
+        if ch == LEFT:
+            depth += 1
+        elif ch == RIGHT:
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+        elif ch == COMMA and depth == 1:
+            cuts.append(i)
+    if end == -1:
+        return [word]
+    tails = expand_braces(word[end + 1:])
+    if cuts:
+        bounds = [start] + cuts + [end]
+        middles = [alt for a, b in zip(bounds, bounds[1:]) for alt in expand_braces(word[a + 1:b])]
+    elif SEQUENCE.fullmatch(word[start + 1:end]):
+        middles = [ONE]
+    else:
+        # No comma and no run: a shell leaves the braces as written.
+        middles = ["{" + inner + "}" for inner in expand_braces(word[start + 1:end])]
+    if len(middles) * len(tails) > MAX_BRACE_WORDS:
+        raise TooManyWords()
+    return [word[:start] + middle + tail for middle in middles for tail in tails]
+
+
+def collapse_braces(word):
+    """For a word with too many expansions: each group becomes ONE, or any number of folders when it holds a "/"."""
+    # One pass, innermost group first: pieces[-1] collects the text of the group being read, pieces[0] the result.
+    pieces = [[]]
+    for ch in word:
+        if ch == LEFT:
+            pieces.append([])
+        elif ch == RIGHT and len(pieces) > 1:
+            body = "".join(pieces.pop())
+            pieces[-1].append(ANY if ("/" in body or ANY in body) else ONE)
+        else:
+            pieces[-1].append(ch)
+    while len(pieces) > 1:
+        # A stand-in that was typed into the command and never closes stays as written.
+        body = "".join(pieces.pop())
+        pieces[-1].append(LEFT + body)
+    return "".join(pieces[0])
+
+
+def words_of(text):
+    """The text cut into words, with each brace word replaced by the words a shell would make from it."""
+    out = []
+    for word in WORD_SPLIT.split(mark_braces(text)):
+        if not word:
+            continue
+        try:
+            made = expand_braces(word)
+        except TooManyWords:
+            made = [collapse_braces(word)]
+        out.extend(unmark(w) for w in made if w)
+    return out
+
+
+def fold_groups(text):
+    """The text with each extended wildcard group, @(a|b), swapped for ONE and each $(...) or backtick group for SUB."""
+    for _ in range(MAX_FOLDS):
+        folded = EXTENDED_GROUP.sub(ONE, SUBSTITUTION.sub(SUB, text))
+        if folded == text:
+            break
+        text = folded
+    return text
+
+
+def drop_messages(command):
+    """The command without the message text git and gh are given: a message is data, not words of the command."""
+    for _ in range(MAX_FOLDS):
+        cut = MESSAGE_ARG.sub(lambda match: match.group(1) + "_", command)
+        if cut == command:
+            break
+        command = cut
+    return command
+
+
+def set_regex(part, i):
+    """The bracket set that opens at part[i] as a regular expression, and the index after it; (None, i) if it never closes."""
+    start = i + 1
+    negated = start < len(part) and part[start] in "!^"
+    if negated:
+        start += 1
+    j = start + 1 if part[start:start + 1] == "]" else start
+    named = False
+    unclosed = set()
+    while j < len(part) and part[j] != "]":
+        kind = part[j + 1:j + 2]
+        if part[j] == "[" and kind in (":", ".", "=") and kind not in unclosed:
+            named = True
+            end = part.find(kind + "]", j + 2)
+            if end != -1:
+                j = end + 2
+                continue
+            # A class that never closes is plain characters to a shell. It is looked for once per kind, so a
+            # long run of openers costs no more than its length; the set still falls back to any one character.
+            unclosed.add(kind)
+        j += 1
+    if j >= len(part):
+        return None, i
+    body = part[start:j]
+    wide = "[^/]"
+    if named or not body:
+        # A named class, [[:alpha:]], is not worked out: any one character, wider than written and never narrower.
+        return wide, j + 1
+    members = "".join(ch if ch == "-" else re.escape(ch) for ch in body)
+    # Letter case is ignored, because some locales sort upper and lower case together inside a range.
+    candidate = "(?i:[%s%s])" % ("^/" if negated else "", members)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            re.compile(candidate)
+    except (re.error, Warning):
+        return wide, j + 1
+    return candidate, j + 1
+
+
+def glob_regex(pattern, dots):
+    """A wildcard path as a regular expression over a whole path. "**" and the any-folders stand-in cross "/"."""
+    out = []
+    for part in pattern.split("/"):
+        if not part:
+            continue
+        out.append("/")
+        # As in a shell, a part that starts with a wildcard does not match a name that starts with a dot,
+        # unless the command switches that on (dots is True).
+        if not dots and (part[0] in "?[" or (part[0] == "*" and not part.startswith("**"))):
+            out.append(r"(?!\.)")
+        # A "[" after the last "]" cannot open a set, so it is never read as one: a long run of "[" stays cheap.
+        last_close = part.rfind("]")
+        i = 0
+        while i < len(part):
+            ch = part[i]
+            piece, after = None, i
+            if ch == "[" and i < last_close:
+                piece, after = set_regex(part, i)
+            if piece:
+                out.append(piece)
+                i = after
+                continue
+            if ch == ANY:
+                out.append(".*")
+            elif ch in (ONE, SUB):
+                # Inside one name only, and it may start with a dot: its real results are not known here.
+                out.append("[^/]*")
+            elif ch == "*":
+                j = i
+                while j < len(part) and part[j] == "*":
+                    j += 1
+                out.append(".*" if j - i > 1 else "[^/]*")
+                i = j
+                continue
+            elif ch == "?":
+                out.append("[^/]")
+            else:
+                out.append(re.escape(ch))
+            i += 1
+    return re.compile("".join(out), re.S)
+
+
+def wild_patterns(candidate, dots):
+    """The wildcard path as written, and with the symlinks in its plain leading folders followed."""
+    parts = candidate.split("/")
+    for i, part in enumerate(parts):
+        if ANY in part or "**" in part:
+            # ".." after a part of unknown depth cannot be worked out from the text: the rest is any depth.
+            if ".." in parts[i + 1:]:
+                parts = parts[:i] + [ANY]
+            break
+    pattern = os.path.normpath("/".join(parts))
+    out = [pattern]
+    pieces = [p for p in pattern.split("/") if p]
+    first = next((i for i, p in enumerate(pieces) if any(c in p for c in WILD + ANY + ONE + SUB)), len(pieces))
+    real = "/".join([os.path.realpath("/" + "/".join(pieces[:first]))] + pieces[first:])
+    if real not in out:
+        out.append(real)
+    return [glob_regex(p, dots) for p in out]
+
+
+def could_name(regexes, target):
+    return any(rx.fullmatch(form) for rx in regexes for form in forms(target))
+
+
+def folders_of(words, cwd, home_too):
     """The session's folder plus every folder the command changes into, or None when there are too many."""
     bases = []
     if isinstance(cwd, str) and os.path.isabs(cwd):
         bases.append(os.path.normpath(cwd))
+    else:
+        # No folder given: the hook runs in the session's folder, and the home folder is the other safe guess.
+        bases.append(os.getcwd())
+        home_too = True
+    if home_too and HOME not in bases:
+        bases.append(HOME)
     targets = set()
     for i, word in enumerate(words):
-        if word not in ("cd", "pushd"):
+        if word not in FOLDER_CHANGERS:
             continue
         j = i + 1
-        while j < len(words) and words[j].startswith("-") and words[j] != "-":
+        while word != "-C" and j < len(words) and words[j].startswith("-") and words[j] != "-":
             j += 1
         if j >= len(words):
             continue
         targets.add(j)
         target = expand(words[j])
-        new = [os.path.normpath(target)] if os.path.isabs(target) else [
-            os.path.normpath(os.path.join(b, target)) for b in bases
-        ]
+        if "$" in target:
+            # A folder held in a variable cannot be read here; the home folder stands in for it.
+            new = [HOME]
+        elif os.path.isabs(target):
+            new = [os.path.normpath(target)]
+        else:
+            new = [os.path.normpath(os.path.join(b, target)) for b in bases]
         for folder in new:
             if folder not in bases:
                 bases.append(folder)
@@ -154,36 +461,27 @@ def folders_of(words, cwd):
     return bases, targets
 
 
-def check_word(word, bases, afa_verb, parent_verb, is_cd_target):
+def check_word(word, bases, afa_verb, parent_verb, is_cd_target, dots=False):
     word = expand(word)
-    if not word:
+    if not word or word.startswith(SUB):
+        # A word that begins with a command's output is a path this hook cannot read (the honest limit above).
         return None
-    wild = any(c in word for c in WILD) or bool(BRACES.search(word))
+    wild = any(c in word for c in WILD + ANY + ONE + SUB)
     candidates = [word] if os.path.isabs(word) else [os.path.join(b, word) for b in bases]
     for candidate in candidates:
         if wild:
-            pattern = candidate
-            while BRACES.search(pattern):
-                pattern = BRACES.sub("*", pattern)
-            pattern = os.path.normpath(pattern)
-            forms = [[c for c in pattern.split("/") if c]]
-            head, tail = os.path.split(pattern)
-            if not any(c in head for c in WILD):
-                real = [c for c in os.path.join(os.path.realpath(head), tail).split("/") if c]
-                if real not in forms:
-                    forms.append(real)
-            for form in forms:
-                for protected in PROTECTED:
-                    if any(parts_match(form, t) for t in both(protected)):
-                        return os.path.basename(protected)
-                if any(parts_match(form, t) for t in both(SELF)):
-                    return "self"
-                if afa_verb and any(parts_match(form, t) for t in both(AFA)):
-                    return ".config/afa"
-                if parent_verb and any(parts_match(form, t) for t in both(CONFIG)):
-                    return ".config"
-                if parent_verb and any(parts_match(form, t) for t in both(HOOKS)):
-                    return ".claude/hooks"
+            regexes = wild_patterns(candidate, dots)
+            for protected in PROTECTED:
+                if could_name(regexes, protected):
+                    return os.path.basename(protected)
+            if could_name(regexes, SELF):
+                return "self"
+            if afa_verb and could_name(regexes, AFA):
+                return ".config/afa"
+            if parent_verb and could_name(regexes, CONFIG):
+                return ".config"
+            if parent_verb and could_name(regexes, HOOKS):
+                return ".claude/hooks"
             continue
         path = os.path.normpath(candidate)
         if not os.path.lexists(path):
@@ -208,33 +506,78 @@ def check_word(word, bases, afa_verb, parent_verb, is_cd_target):
     return None
 
 
+def readings(command):
+    """The command read each way a shell might: control characters as gaps or dropped, quotes as gaps or taken out."""
+    texts = [CONTROL.sub(" ", command)]
+    dropped = CONTROL.sub("", command)
+    if dropped not in texts:
+        texts.append(dropped)
+    for text in list(texts):
+        bare = QUOTES.sub("", DOLLAR_QUOTE.sub("", text.replace("\\\n", "")))
+        if bare not in texts:
+            texts.append(bare)
+    return texts
+
+
+def is_list_folder(folder):
+    return folder == AFA or os.path.realpath(folder) == os.path.realpath(AFA)
+
+
 def check_bash(command, cwd):
-    for name in BASE_NAMES:
-        if name in command:
-            return name
-    try:
-        words = [w for w in WORD_SPLIT.split(command) if w]
-        bases, cd_targets = folders_of(words, cwd)
+    texts = readings(command)
+    for text in texts:
+        for name in BASE_NAMES:
+            if name in text:
+                return name
+    # From here on the words are checked, and message text is not words. The name check above has read it.
+    texts = readings(drop_messages(command))
+    home_too = any(BARE_CD.search(text) for text in texts)
+    word_lists = []
+    for text in texts:
+        for reading in (text, fold_groups(text)):
+            words = words_of(reading)
+            if words not in word_lists:
+                word_lists.append(words)
+    for words in word_lists:
+        for word in words:
+            for name in BASE_NAMES:
+                if name in word:
+                    return name
+    names = {os.path.basename(w) for words in word_lists for w in words}
+    afa_verb = bool(names & AFA_VERB_NAMES)
+    parent_verb = bool(names & PARENT_VERB_NAMES)
+    cwd_verb = bool(names & CWD_VERB_NAMES)
+    # A command that sets one of these lets "*" match names that start with a dot.
+    dots = bool(names & {"dotglob", "GLOBIGNORE"})
+    warned = False
+    for words in word_lists:
+        try:
+            bases, cd_targets = folders_of(words, cwd, home_too)
+            # tar, unzip or find in the list folder itself acts on it without a word that names it.
+            in_list_folder = cwd_verb and bases is not None and any(is_list_folder(b) for b in bases)
+        except Exception as exc:
+            print(f"list-file-guard internal error: {type(exc).__name__}", file=sys.stderr)
+            continue
         if bases is None:
             return "folders"
-        afa_verb = bool(AFA_VERBS.search(command))
-        parent_verb = bool(PARENT_VERBS.search(command))
+        if in_list_folder:
+            return ".config/afa"
         for i, word in enumerate(words):
-            hit = check_word(word, bases, afa_verb, parent_verb, i in cd_targets)
+            try:
+                hit = check_word(word, bases, afa_verb, parent_verb, i in cd_targets, dots)
+            except Exception as exc:
+                # One word the checks cannot read is skipped; every other word is still checked.
+                if not warned:
+                    print(f"list-file-guard internal error: {type(exc).__name__}", file=sys.stderr)
+                    warned = True
+                continue
             if hit:
                 return hit
-    except Exception as exc:
-        print(f"list-file-guard internal error: {type(exc).__name__}", file=sys.stderr)
     return None
 
 
-def main():
-    try:
-        payload = json.loads(sys.stdin.read())
-    except Exception:
-        return 0
-    if not isinstance(payload, dict):
-        return 0
+def decide(payload):
+    """Exit code for one tool call: 2 with the reason on stderr, or 0."""
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -250,6 +593,56 @@ def main():
         print(reason_for(hit), file=sys.stderr)
         return 2
     return 0
+
+
+def decide_in_time(payload):
+    """decide(), run in a child process that is stopped after TIME_LIMIT seconds; a check that is stopped refuses.
+
+    The child holds one end of a pipe and the parent waits on the other, so the parent wakes the moment the child
+    ends, however it ends, and a check stuck inside one long step can still be stopped from outside.
+    """
+    if not hasattr(os, "fork"):
+        return decide(payload)
+    read_end, write_end = os.pipe()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            os.close(read_end)
+            code = decide(payload)
+        except BaseException as exc:
+            # A fault in the whole check: one line, and exit 1, which does not refuse the command.
+            print(f"list-file-guard internal error: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            try:
+                sys.stderr.flush()
+            finally:
+                os._exit(code)
+    os.close(write_end)
+    try:
+        ended, _, _ = select.select([read_end], [], [], TIME_LIMIT)
+    finally:
+        os.close(read_end)
+    if not ended:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        print(reason_for("slow"), file=sys.stderr)
+        return 2
+    _, status = os.waitpid(pid, 0)
+    return os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+
+
+def main():
+    try:
+        payload = json.loads(sys.stdin.read())
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    if payload.get("tool_name") == "Bash":
+        return decide_in_time(payload)
+    return decide(payload)
 
 
 if __name__ == "__main__":
