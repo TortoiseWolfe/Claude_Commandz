@@ -142,11 +142,14 @@ recycle_due() {
 }
 # Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
 # recycled thrash_count times within thrash_secs by the rows of the recycle log. The marker (.thrash-<lane>) holds the newest recycled stamp
-# of the episode it named, so the same episode is not named twice but a later one is.
+# of the episode it named, so the same episode is not named twice but a later one is. A lane whose stop marker (.recycle-stop-<lane>, written by
+# lane.sh when the third recycle in the window succeeded, or a recycle was held three times by running subagents) stands is never recycled by
+# the watcher, however old its rows are: it returns 0 at once and says nothing, because the FAILED row lane.sh wrote has told the hub already.
 thrash_count=${LANE_THRASH_COUNT:-3}
 thrash_secs=${LANE_THRASH_SECS:-1800}
 recycle_thrash() {
   local l=$1 quiet=${2:-} now ts e newest='' times='' n=0 mark
+  [ ! -e "$recycle_dir/.recycle-stop-$l" ] || return 0
   [ -f "$recycle_log" ] || return 1
   now=$(date +%s)
   while IFS= read -r ts; do

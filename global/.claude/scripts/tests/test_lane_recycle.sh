@@ -133,7 +133,7 @@ usage_rec() {  # usage_rec <total-tokens> [start-tokens]: a session that held <s
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
-reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$ST"/helper-end "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log"; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$ST"/helper-end "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log" "$HOME_T"/.claude/state/lanes/.recycle-stop-*; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
 cur_for() { cut -f8 < <(awk -F"\t" -v n="$1" '$2==n' "$INDEX" | tail -1) >"$ST/cur"; }  # the fake lane writes into the transcript its index row names (a send is confirmed only there)
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
@@ -886,5 +886,119 @@ assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear with a subagent 
 qreset
 lane --dry-run --recycle q-lane
 assert_contains "$LAST_OUT" 'wait for the helpers the lane started' '--recycle --dry-run names the wait for helpers'
+
+# Issue 34, second half: the third recycle inside the window is the last. It sets a stop marker (.recycle-stop-<lane>), tells the hub once with
+# one FAILED row, and no plain --recycle (or --send, or the watcher) starts another until --recycle-at <K> --recycle <lane> clears it.
+LD="$HOME_T/.claude/state/lanes"; RLOG="$LD/recycle.log"; STOPF="$LD/.recycle-stop-q-lane"; HFAILF="$LD/.recycle-helper-fails-q-lane"
+stp_reset() { qreset; rm -f "$STOPF" "$HFAILF" "$ST/keys.log"; basepane; }
+rec_row() {  # rec_row <lane> <minutes ago>: a recycled row in recycle.log
+  mkdir -p "$LD"; printf '%s\t%s\trecycled\tfrom 120K (session a) to session b, line 128K\n' "$(date -Is -d "-$2 min")" "$1" >>"$RLOG"
+}
+failed_rows() { { grep -a $'\tq-lane\tFAILED\t' "$RLOG" 2>/dev/null || true; } | wc -l | tr -d ' '; }
+
+# a. two recycled rows in the window, then a recycle that succeeds: the third is the last
+stp_reset; rec_row q-lane 20; rec_row q-lane 10
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'the third recycle in the window still succeeds'
+[ -f "$STOPF" ] || fail 'the third recycle in the window sets the stop marker'; ok
+assert_eq "$(failed_rows)" 1 'exactly one FAILED row is added for the lane'
+frow="$(grep -a $'\tq-lane\tFAILED\t' "$RLOG")"
+assert_contains "$frow" 'stopped after 3 recycles in 30 minutes' 'the FAILED row says how many recycles and how long'
+assert_contains "$frow" 'held 20K at its first message' 'the FAILED row names the start load'
+newline="$(grep -a $'\tq-lane\trecycled\t' "$RLOG" | tail -1 | sed 's/.*line \([0-9]*\)K.*/\1/')"
+assert_contains "$frow" "the line is now ${newline}K." 'the FAILED row names the new line'
+assert_contains "$frow" 'lane.sh --recycle-at <K> --recycle q-lane' 'the FAILED row names the command that starts it again'
+assert_contains "$LAST_OUT" 'recycled q-lane:' 'the usual last line is still printed'
+assert_contains "$LAST_OUT" 'no further recycle will start' 'stderr says the stop is set'
+assert_contains "$(cat "$STOPF")" 'stopped after 3 recycles' 'the marker holds a line for a person'
+case "$(cut -c1-8 "$STOPF")" in [0-9]:[0-9][0-9]\ [AP]M* | 1[0-2]:[0-9][0-9]\ [AP]M*) ok ;; *) fail "the marker starts with a 12-hour time: $(cat "$STOPF")" ;; esac
+
+# b. with the marker standing, a plain --recycle is refused before anything is typed or logged
+cp "$RLOG" "$TMP/rlog-before"; rm -f "$ST/keys.log" "$ST/sent.log"
+lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'a plain --recycle is refused while the marker stands'
+assert_contains "$LAST_OUT" 'recycle q-lane is stopped' 'the refusal says the lane is stopped'
+assert_contains "$LAST_OUT" 'lane.sh --recycle-at <K> --recycle q-lane' 'the refusal names the command that starts it again'
+cmp -s "$RLOG" "$TMP/rlog-before" || fail 'the refusal writes nothing to recycle.log'; ok
+[ ! -e "$ST/sent.log" ] && [ ! -e "$ST/keys.log" ] || fail 'the refusal typed into the lane'; ok
+
+# c. --recycle-at <K> --recycle clears the marker and goes on; it never sets one itself
+rec_row q-lane 5; rec_row q-lane 4; rec_row q-lane 3; rm -f "$ST/keys.log" "$ST/sent.log"; before_failed="$(failed_rows)"
+FAKE_WRITE_HANDOFF=1 lane --recycle-at 120 --recycle q-lane
+assert_exit 0 "$LAST_RC" '--recycle-at <K> --recycle goes on although the marker stood'
+[ ! -e "$STOPF" ] || fail 'the marker is gone afterwards'; ok
+assert_eq "$(failed_rows)" "$before_failed" 'a run given --recycle-at writes no new FAILED row'
+assert_contains "$(cat "$ST/sent.log")" '/clear' 'the lane was cleared'
+
+# d. fewer than three in the window sets nothing
+stp_reset; rec_row q-lane 10
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'second recycle in the window succeeds'
+[ ! -e "$STOPF" ] || fail 'one earlier recycle in the window sets no marker'; ok
+assert_eq "$(failed_rows)" 0 'and writes no FAILED row'
+stp_reset; rec_row q-lane 90; rec_row q-lane 60; rec_row q-lane 5
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+[ ! -e "$STOPF" ] || fail 'two rows older than the window plus one recent set no marker'; ok
+stp_reset; rec_row q-lane-2 20; rec_row xq-lane 10
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+[ ! -e "$STOPF" ] || fail 'rows of other lanes whose names contain this one do not count'; ok
+
+# e. --send to a lane past its line, with the marker standing: no recycle, and the words wait in hub-pending.md
+shreset 130000
+printf '1:09 PM stopped after 3 recycles\n' >"$LD/.recycle-stop-sh-lane"
+FAKE_WRITE_HANDOFF=1 lane --send sh-lane 'text while stopped'
+assert_exit 0 "$LAST_RC" '--send to a stopped lane exits 0'
+assert_contains "$LAST_OUT" 'held for sh-lane' '--send says it held the text'
+assert_contains "$LAST_OUT" 'recycling this lane is stopped' '--send says the lane is stopped'
+assert_contains "$LAST_OUT" 'lane.sh --recycle-at <K> --recycle sh-lane' '--send names the command that starts it again'
+assert_not_contains "$LAST_OUT" 'started its recycle' '--send starts no recycle'
+assert_contains "$(cat "$PEND")" 'text while stopped' 'the text is in hub-pending.md'
+sleep 1; [ ! -s "$ST/sent.log" ] || fail 'a stopped lane was typed into'; ok
+rm -f "$LD/.recycle-stop-sh-lane"
+
+# f. a recycle held three times by running subagents sets the stop too
+helper_try() {  # helper_try <id>: one recycle that the lane's running subagent holds up
+  reset_fake; usage_rec 130000 >"$PROJ/old-sess.jsonl"; add_row q-lane subscription old-sess; basepane
+  agent_start "$1" "$ts_now" >>"$PROJ/old-sess.jsonl"
+  FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_HELPER_TRIES=3 LANE_RECYCLE_WAIT_SECS=3 lane --recycle q-lane
+}
+stp_reset
+helper_try f01; assert_exit 1 "$LAST_RC" 'subagent hold, try 1 fails'
+[ ! -e "$STOPF" ] || fail 'try 1 sets no marker'; ok
+assert_eq "$(cat "$HFAILF")" 1 'the helper-failure counter is 1'
+helper_try f02; assert_exit 1 "$LAST_RC" 'subagent hold, try 2 fails'
+[ ! -e "$STOPF" ] || fail 'try 2 sets no marker'; ok
+helper_try f03; assert_exit 1 "$LAST_RC" 'subagent hold, try 3 fails'
+[ -f "$STOPF" ] || fail 'try 3 sets the marker'; ok
+assert_eq "$(failed_rows)" 1 'try 3 writes one FAILED row'
+frow="$(grep -a $'\tq-lane\tFAILED\t' "$RLOG")"
+assert_contains "$frow" '1 subagent(s) the lane started were still running' 'the row keeps the usual text'
+assert_contains "$frow" 'Stopped after 3 tries' 'and adds the stop'
+assert_contains "$frow" 'lane.sh --recycle-at <K> --recycle q-lane' 'and the command that starts it again'
+rm -f "$ST/keys.log" "$ST/sent.log"; lane --recycle q-lane
+assert_exit 1 "$LAST_RC" 'a fourth plain --recycle is refused'
+assert_contains "$LAST_OUT" 'recycle q-lane is stopped' 'with the stopped message'
+[ ! -e "$ST/sent.log" ] || fail 'the fourth try typed nothing'; ok
+# a success between failures resets the counter
+stp_reset
+helper_try f04; helper_try f05
+assert_eq "$(cat "$HFAILF")" 2 'two failures count 2'
+stp_reset; echo 2 >"$HFAILF"; FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a recycle with no running subagent succeeds'
+[ ! -e "$HFAILF" ] || fail 'a success removes the helper-failure counter'; ok
+helper_try f06; helper_try f07
+[ ! -e "$STOPF" ] || fail 'two failures after a success set no marker'; ok
+rm -f "$STOPF" "$HFAILF"
+
+# g. the restart (and a fresh start) clear the marker and the counter. lane.sh --restart needs a real window, so the two helpers are run from
+# their own lines and the call is checked where the start writes its index row.
+eval "$(grep -a '^recycle_stop_file()\|^clear_recycle_stop()' "$SCRIPT")"
+OLD_HOME="$HOME"; HOME="$HOME_T"; echo stopped >"$STOPF"; echo 2 >"$HFAILF"
+clear_recycle_stop q-lane
+[ ! -e "$STOPF" ] && [ ! -e "$HFAILF" ] || fail 'clear_recycle_stop removes the marker and the counter'; ok
+clear_recycle_stop q-lane
+assert_eq "$(recycle_stop_file q-lane)" "$STOPF" 'recycle_stop_file prints the path'
+HOME="$OLD_HOME"
+sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q clear_recycle_stop || fail 'the start/restart index row is preceded by clear_recycle_stop'; ok
 
 printf 'ok - %s checks passed\n' "$checks"
