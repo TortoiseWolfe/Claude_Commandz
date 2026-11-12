@@ -3,6 +3,7 @@
 # was told for 70 minutes). A headless lane that exits non-zero with no report.md now gets "FAILED exit <code> | <last error line>" as report line 1,
 # and an engine that says when its quota resets is refused at the next start until then. A fake HOME and a fake tmux; nothing here is live.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPTS="$(cd "$(dirname "$0")/.." && pwd -P)"
 SCRIPT="$SCRIPTS/lane.sh"; HELPER="$SCRIPTS/lane_fail_report.py"

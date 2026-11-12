@@ -3,6 +3,7 @@
 # without Deck writes, ssh and docker). The option repeats, adds its rules to LANE_TOOLS_OFF in --disallowedTools, and is kept one rule per line in
 # $LANES/.deny/<lane folder>.txt (outside the lane's own writable folder) so --resume and --restart reuse it; a bad line there fails closed. A fake HOME and a fake tmux that logs what is typed hold everything.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"

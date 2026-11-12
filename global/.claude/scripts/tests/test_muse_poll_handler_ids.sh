@@ -3,6 +3,7 @@
 # with "No new notes", and the poller gave up on the note after two runs. Now the handler is handed the check's exact ids, and the give-up line
 # says whether the handler crashed or ran and recorded nothing. Fake claude, fake HOME; nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SCRIPT=$(cd -- "$(dirname -- "$0")/.." && pwd)/muse_poll.sh
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 H=$TMP/home; ST=$H/.claude/state; PROMPTS=$TMP/prompts; INBOX=$TMP/inbox

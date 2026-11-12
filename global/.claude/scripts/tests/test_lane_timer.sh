@@ -2,6 +2,7 @@
 # test_lane_timer.sh: target 70 seconds ahead, the command must fire within 30 seconds after it.
 
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_timer.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-timer-test.XXXXXX")"

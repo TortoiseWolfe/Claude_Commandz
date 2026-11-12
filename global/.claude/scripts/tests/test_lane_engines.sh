@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 # Nothing from the session running the test may leak into it (issue 226, 4 Nov 2026): a lane or hub session exports AFA_BIG_OUT=1, which makes
@@ -161,8 +162,10 @@ HUB_LEAN_FILE="$HOME_TEST/repos/.claude/settings.json"
 assert_contains "$(cat "$HUB_LEAN_FILE")" '"Artifact"' 'hub lean settings withhold the Artifact tools'
 
 # Codex gets the required workspace flags and omits Claude model names.
+echo 200000 >"$HOME_TEST/.claude/state/lanes/.window-codex-lane"  # left by an earlier Claude lane of the same name (issue 34)
 run_lane --engine codex codex-lane "$REPO" opus "$PROMPT"
 assert_exit 0 "$LAST_STATUS" 'Codex lane starts'
+[ ! -e "$HOME_TEST/.claude/state/lanes/.window-codex-lane" ] || fail 'a lane started on another engine drops the Claude window record'
 assert_contains "$LAST_COMMAND" 'codex exec -C ' 'Codex uses exec and the working directory'
 assert_contains "$LAST_COMMAND" '-s workspace-write --add-dir ' 'Codex gets workspace-write and lane access'
 assert_not_contains "$LAST_COMMAND" '--add-dir /var/run' 'Codex does not mount /var/run (bwrap cannot mkdir /run/.git)'
@@ -723,6 +726,12 @@ run_lane --recycle-at 60 rk-sixty "$REPO" sonnet "$PROMPT"
 [ "$(win_of)" = 150000 ] || fail "a 60K line gets a 150000 backstop (60+60=120K / 0.84 = 143K, rounded up), got $(win_of)"; checks=$((checks + 1))
 run_lane --recycle-at=80 rk-eighty "$REPO" sonnet "$PROMPT"
 [ "$(rk_of rk-eighty)" = 80 ] && [ "$(win_of)" = 170000 ] || fail "--recycle-at=80: row 80, window 170000, got $(rk_of rk-eighty) / $(win_of)"; checks=$((checks + 1))
+# Issue 34: the window a lane's process was started with is written beside the index, so a later recycle knows how high its line may go.
+WINF="$HOME_TEST/.claude/state/lanes"
+[ "$(cat "$WINF/.window-rk-sixty" 2>/dev/null)" = 150000 ] || fail "a start records the lane's window (150000), got: $(cat "$WINF/.window-rk-sixty" 2>&1)"; checks=$((checks + 1))
+[ "$(cat "$WINF/.window-rk-default" 2>/dev/null)" = 200000 ] || fail "a default start records the 200000 window, got: $(cat "$WINF/.window-rk-default" 2>&1)"; checks=$((checks + 1))
+run_lane --dry-run rk-dry-window "$REPO" sonnet "$PROMPT"
+[ ! -e "$WINF/.window-rk-dry-window" ] || fail 'a dry run records no window'; checks=$((checks + 1))
 LANE_WINDOW_CAP=160000 run_lane rk-capped "$REPO" sonnet "$PROMPT"
 [ "$(win_of)" = 160000 ] || fail 'LANE_WINDOW_CAP caps the backstop below the line plus room'; checks=$((checks + 1))
 OPS_PROMPT="$TMP/ops-prompt.md"; echo 'Check the Traefik routes and the Portainer stack for the deploy' >"$OPS_PROMPT"

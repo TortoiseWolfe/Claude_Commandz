@@ -4,6 +4,7 @@
 # unhandled 30+ minutes are queued for the hub (never answered), and the claude calls run lean.
 # Everything runs in a temp HOME with a fake claude; the real poller, real claude and real mail are never touched.
 set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 D=$(cd -- "$(dirname -- "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fails=0

@@ -3,6 +3,7 @@
 # prompt held "pgrep -f docker-heavy.sh...", and the lane's own pgrep -f matched and killed its own claude). The first message is now a short fixed
 # line naming the prompt file. A dry run prints the command; nothing here touches a live lane.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"

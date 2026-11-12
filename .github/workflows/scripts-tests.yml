@@ -26,6 +26,13 @@ jobs:
         with:
           python-version: "3.13"
       - run: python3 -m pip install pytest
+      - name: allow user namespaces (ticket 81)
+        run: |
+          # Both pytest steps below start again inside closed_room.sh (tests/conftest.py and hooks/tests/conftest.py), which needs a user and mount
+          # namespace. Ubuntu 24.04 runners block that by default through AppArmor. This step lifts the block; closed_room.sh exits 97 and
+          # runs nothing if it is still off, so a blocked runner fails the job, never an unprotected run.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "sysctl not present; checking directly below"
+          unshare -Urm true && echo "user namespaces work"
       - name: pytest (skipped or deselected tests fail the job)
         working-directory: global/.claude/scripts
         run: |

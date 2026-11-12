@@ -3,6 +3,7 @@
 # rights to register), no password is ever written, the task runs wsl.exe as root, and a second run does not stack users.
 # whoami.exe and schtasks.exe are fakes.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 SRC="$(cd "$(dirname "$0")/.." && pwd -P)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/rootcheck-install.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

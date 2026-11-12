@@ -85,6 +85,38 @@ def test_the_real_repo_has_no_unrun_test_file():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+def test_a_shell_test_that_does_not_source_the_closed_room_guard_fails_the_check():
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, S, "tests"))
+        guarded = S + "/tests/test_guarded.sh"
+        bare = S + "/tests/test_bare.sh"
+        room = S + "/tests/test_closed_room.sh"
+        commented = S + "/tests/test_commented.sh"
+        for rel, body in (
+            (guarded, 'set -euo pipefail\n. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"\n'),
+            (bare, "set -euo pipefail\necho hi\n"),
+            (commented, '# . "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"\n'),
+            (room, "set -euo pipefail\n"),
+        ):
+            with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+                fh.write(body)
+        files = [guarded, bare, commented, room]
+        problems = cov.unguarded(files, {}, root)
+        assert len(problems) == 2, problems
+        assert bare in problems[0] and commented in problems[1]
+        # the one exception passes without the guard, and fails if it has it; a file listed as not run is not asked for the guard
+        with open(os.path.join(root, room), "w", encoding="utf-8") as fh:
+            fh.write('. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"\n')
+        assert any(room in p for p in cov.unguarded([room], {}, root))
+        assert cov.unguarded([bare], {bare: ("r", ISSUE)}, root) == []
+
+
+def test_every_real_shell_test_sources_the_guard_except_the_room_test():
+    files = cov.tracked()
+    assert cov.unguarded(files, cov.read_not_run()[0]) == []
+    assert S + "/tests/test_closed_room.sh" in files
+
+
 def test_the_workflow_takes_its_lists_from_the_tool():
     wf = open(os.path.join(REPO, ".github", "workflows", "scripts-tests.yml"), encoding="utf-8").read()
     for needle in ("ci_test_coverage.py\" list shell", "ci_test_coverage.py\" list node", "ci_test_coverage.py check",

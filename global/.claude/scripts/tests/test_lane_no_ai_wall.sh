@@ -3,6 +3,7 @@
 # prompt file sits under a listed path, --allow-client does not override it, and --clean-room <scratch> is allowed only when the scratch folder and
 # prompt file match nothing and the prompt text names no listed path. Fake folders, a fake HOME and a fake tmux; nothing live is touched.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-noai.XXXXXX")"

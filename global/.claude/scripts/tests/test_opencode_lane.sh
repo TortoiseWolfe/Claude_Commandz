@@ -2,6 +2,7 @@
 # Tests for opencode_lane.sh's retry and stamp logic (issue 267): a per-minute refusal waits and retries the same provider; a per-day refusal
 # writes a stamp, moves on, and later runs skip that provider. A stub opencode (OPENCODE_BIN) plays the providers.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/opencode_lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/opencode-lane.XXXXXX")"

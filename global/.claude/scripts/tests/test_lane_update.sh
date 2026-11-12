@@ -4,6 +4,7 @@
 # shell, so /proc/<pid>/exe and comm look like Claude Code's. A fake tmux keeps the window list and plays the lane (it writes handoff.md when
 # it is asked). Nothing here touches a real lane; only the fake processes this script started are ended, by exact PID.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-update.XXXXXX")"

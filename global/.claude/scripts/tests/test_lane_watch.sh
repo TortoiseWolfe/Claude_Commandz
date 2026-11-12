@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for lane_watch.sh: the stuck-dialog match, and running with no lane names.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 # The CI machine has no claude, agy or codex program; the engine check (test_lane_engine_check.sh) is tested on its own.
 export AFA_ENGINES_AVAILABLE="*"
 # The idle heartbeat stretch (tests/test_lane_watch_quiet.sh covers it) would turn every "--max-min 0" run here into a two-hour wait.

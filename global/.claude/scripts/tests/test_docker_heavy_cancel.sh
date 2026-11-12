@@ -2,6 +2,7 @@
 # Tests for docker-heavy.sh --list, --cancel and --light (28 Oct 2026: a lane killed its own claude with pgrep -f while stopping a job; this
 # script now finds a job by tag and pid file). A stub docker stands in for the engine; nothing here touches the real one.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/docker-heavy.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dh-cancel.XXXXXX")"

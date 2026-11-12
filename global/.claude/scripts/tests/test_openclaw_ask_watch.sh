@@ -2,6 +2,7 @@
 # openclaw_ask_watch.sh against a throwaway drop folder and a stub poll. Nothing real is read, consumed or acted on.
 # Prints the milliseconds from a dropped item to the poll starting, then PASS/FAIL per check. Exit 0 only if all pass.
 set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WATCH="$HERE/../openclaw_ask_watch.sh"
 T=$(mktemp -d)

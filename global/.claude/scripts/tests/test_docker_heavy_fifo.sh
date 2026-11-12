@@ -4,6 +4,7 @@
 # let a newcomer take the slot in the gap between two jobs, woke waiters in any order, and its hour counted time spent behind live jobs.
 # A stub docker stands in for the engine; nothing here touches the real one. Usage: test_docker_heavy_fifo.sh [path/to/docker-heavy.sh]
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="${1:-$(cd "$(dirname "$0")/.." && pwd -P)/docker-heavy.sh}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/dh-fifo.XXXXXX")"

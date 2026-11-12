@@ -4,6 +4,7 @@
 # the session and the tmux server, and when a window still shows a passphrase prompt it cancels it, closes the window and exits 1. A fake tmux, ssh-add
 # and sleep stand in for the real ones; nothing here starts a real tmux.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-sshagent.XXXXXX")"
