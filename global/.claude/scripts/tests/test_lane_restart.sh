@@ -23,6 +23,7 @@ checks=0
 fail() { printf 'not ok: %s\n' "$1" >&2; exit 1; }
 ok() { checks=$((checks + 1)); }
 lane() { set +e; LAST_OUT="$(HOME="$HOME_T" PATH="$BIN:$PATH" bash "$SCRIPT" "$@" 2>&1)"; LAST_RC=$?; set -e; }
+same_head() { cmp -s -n "$(wc -c <"$2")" "$1" "$2"; }  # a start appends the tools section to prompt.md, so "the prompt as it is" means its first bytes
 rk_of() { awk -F'\t' -v n="$1" '$2==n{r=$12} END{print r}' "$LANES/index.tsv"; }
 
 printf 'Original mission: build the thing.\n' >"$TMP/orig.md"
@@ -32,14 +33,14 @@ printf 'Restart: the process died, carry on.\n' >"$TMP/restart.md"
 lane --recycle-at 120 comic "$WORK" sonnet "$TMP/orig.md"
 [ "$LAST_RC" = 0 ] || fail "first start works ($LAST_OUT)"; ok
 DIR1="$LANES/$(date +%F)-comic"
-cmp -s "$DIR1/prompt.md" "$TMP/orig.md" || fail "prompt.md is the original prompt"; ok
+same_head "$DIR1/prompt.md" "$TMP/orig.md" || fail "prompt.md is the original prompt"; ok
 [ "$(rk_of comic)" = 120 ] || fail "the first row keeps --recycle-at 120, got $(rk_of comic)"; ok
 
 # 2. Restart on the same day with a different prompt: prompt.md untouched, note stored, line carried over.
 echo 'handoff text' >"$DIR1/handoff.md"
 lane comic "$WORK" sonnet "$TMP/restart.md"
 [ "$LAST_RC" = 0 ] || fail "restart works ($LAST_OUT)"; ok
-cmp -s "$DIR1/prompt.md" "$TMP/orig.md" || fail "a restart does not overwrite prompt.md"; ok
+same_head "$DIR1/prompt.md" "$TMP/orig.md" || fail "a restart does not overwrite prompt.md"; ok
 note="$(ls "$DIR1"/prompt-[0-9]*.md 2>/dev/null | head -1)"
 [ -n "$note" ] || fail "the restart prompt is stored as prompt-<HHMM>.md"; ok
 grep -q 'Restart: the process died' "$note" || fail "the stored note holds the new prompt"; ok
@@ -59,10 +60,10 @@ printf '2026-01-02\tlive\t%s\tsonnet\tsubscription\t%s\t%s\tid\t1700000000\thigh
 NEW="$LANES/$(date +%F)-live"
 lane live "$WORK" sonnet "$TMP/restart.md"
 [ "$LAST_RC" = 0 ] || fail "a reused name on a later day starts ($LAST_OUT)"; ok
-cmp -s "$NEW/prompt.md" "$TMP/restart.md" || fail "the new day's folder has its own prompt.md, the new prompt as it is"; ok
+same_head "$NEW/prompt.md" "$TMP/restart.md" || fail "the new day's folder has its own prompt.md, the new prompt as it is"; ok
 ! ls "$OLD"/prompt-[0-9]*.md >/dev/null 2>&1 || fail "the old folder gets no restart note"; ok
 ! grep -q 'was restarted' "$NEW/prompt.md" || fail "no restart header on a fresh folder's prompt"; ok
-cmp -s "$OLD/prompt.md" "$TMP/orig.md" || fail "the old prompt.md is intact"; ok
+same_head "$OLD/prompt.md" "$TMP/orig.md" || fail "the old prompt.md is intact"; ok
 [ "$(rk_of live)" != 125 ] || fail "a fresh folder does not inherit the old recycle line"; ok
 [ "$(awk -F'\t' '$2=="live"{print $7}' "$LANES/index.tsv" | tail -1)" = "$NEW/report.md" ] || fail "the index row names the new folder's report"; ok
 
@@ -74,7 +75,7 @@ lane --restart live "$WORK" sonnet "$TMP/restart.md"
 [ ! -e "$NEW" ] || fail "--restart makes no second folder"; ok
 ls "$OLD"/prompt-[0-9]*.md >/dev/null 2>&1 || fail "the restart note lands in the old folder"; ok
 [ "$(rk_of live)" = 125 ] || fail "--restart keeps the old line (125), got $(rk_of live)"; ok
-cmp -s "$OLD/prompt.md" "$TMP/orig.md" || fail "--restart keeps the old prompt.md"; ok
+same_head "$OLD/prompt.md" "$TMP/orig.md" || fail "--restart keeps the old prompt.md"; ok
 [ "$(ls -t "$LANES"/*-live/report.md | head -1)" = "$OLD/report.md" ] || fail "lane_watch's report lookup finds the one report"; ok
 
 # 5. Passing the folder's own prompt.md, or the same text again, makes no note.
