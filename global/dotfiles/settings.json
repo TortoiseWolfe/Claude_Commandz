@@ -200,7 +200,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/naked-instruction.sh stop"
+            "command": "bash ~/.claude/hooks/naked-instruction.sh stop",
+            "timeout": 10
           }
         ]
       },
@@ -208,7 +209,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/unverified-pending.sh"
+            "command": "bash ~/.claude/hooks/unverified-pending.sh",
+            "timeout": 10
           }
         ]
       },
@@ -216,7 +218,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/lane-watch-guard.py"
+            "command": "python3 ~/.claude/hooks/lane-watch-guard.py",
+            "timeout": 10
           }
         ]
       }

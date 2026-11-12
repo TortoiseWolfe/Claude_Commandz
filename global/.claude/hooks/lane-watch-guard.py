@@ -16,6 +16,14 @@ A running watcher writes ~/.claude/state/lanes/.lane_watch.pid, which this hook 
 process listing, so a watcher started before a /clear (a different session id) still counts.
 The marker must carry the id of the session that is stopping (a marker for another session does not count). When a fresh hand-off
 file exists but this session's marker does not, the block message names the exact marker path to touch.
+
+A watcher only wakes the hub when it is a child of the hub's own Claude Code process: that process is told when the background job
+ends. A watcher started detached (nohup, setsid, a trailing &, another terminal or tmux window) keeps running and keeps its pid file
+fresh, but its exit reaches nobody. That happened on 16 Oct (a report unseen for 7 hours), 18 Oct and 11 Nov 2026. So a live watcher
+counts only when this hook's own Claude Code process is among the watcher's parents; otherwise the stop is blocked and the message
+names the detached watcher's pid. The parent chain is read from /proc/<pid>/stat and the process name from /proc/<pid>/comm, never a
+command line. When this hook cannot find its own Claude Code process (no parent named claude or node), the check is skipped and a
+live watcher counts as before. LANE_WATCH_GUARD_HUB_PID stands in for that process in tests; set but empty means "not found".
 """
 import glob
 import json
@@ -28,6 +36,9 @@ import time
 
 WATCHER_PATTERN = r"^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh( |$)"
 RECYCLE_PATTERN = r"^(/usr/bin/|/bin/)?bash [^ ]*/\.claude/scripts/lane_watch\.sh --recycle-once( |$)"
+# Claude Code shows as "claude" (the installed program) or "node" (run from its package) in /proc/<pid>/comm.
+HUB_NAMES = ("claude", "node")
+MAX_PARENTS = 64
 
 
 def open_lanes():
@@ -62,24 +73,74 @@ def process_start_time(pid):
     return rest[19] if len(rest) >= 20 else None
 
 
+def parent_pid(pid):
+    """Field 4 of /proc/<pid>/stat, or None. Never reads the process command line."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    rest = stat.rsplit(") ", 1)[-1].split()
+    return int(rest[1]) if len(rest) >= 2 and rest[1].isdigit() else None
+
+
+def parents(pid):
+    """The pids above pid, nearest first, up to but not including pid 1."""
+    chain = []
+    seen = {pid}
+    while len(chain) < MAX_PARENTS:
+        pid = parent_pid(pid)
+        if pid is None or pid <= 1 or pid in seen:
+            break
+        chain.append(pid)
+        seen.add(pid)
+    return chain
+
+
+def process_name(pid):
+    """/proc/<pid>/comm: the short process name, never the command line."""
+    try:
+        with open(f"/proc/{pid}/comm", "rb") as fh:
+            return fh.read().decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def hub_pids():
+    """The Claude Code process(es) this hook runs under, or an empty set when none can be found."""
+    override = os.environ.get("LANE_WATCH_GUARD_HUB_PID")
+    if override is not None:
+        return {int(word) for word in override.split() if word.isdigit()}
+    # The nearest one is this session. A farther one is whatever started the session (an editor, a terminal, another session).
+    for pid in parents(os.getpid()):
+        if process_name(pid) in HUB_NAMES:
+            return {pid}
+    return set()
+
+
+def wakes_this_session(pid, hubs):
+    """True when the watcher's exit reaches this session. With no hub process found, nothing can be said, so it counts."""
+    return not hubs or bool(hubs.intersection(parents(pid)))
+
+
 def watcher_from_pid_file():
-    """A watcher writes its pid and start time to the state folder, so /clear cannot hide it."""
+    """The live watcher's pid from the state folder, so /clear cannot hide it; None when there is none."""
     pid_file = state_root() / "lanes" / ".lane_watch.pid"
     try:
         fields = pid_file.read_text(encoding="utf-8").split()
     except OSError:
-        return False
+        return None
     if not fields or not fields[0].isdigit():
-        return False
+        return None
     pid = int(fields[0])
     start = fields[1] if len(fields) > 1 else ""
     try:
         os.kill(pid, 0)
     except OSError:
-        return False
+        return None
     now = process_start_time(pid)
     # An older pid file has no start time; accept the live pid. A recycled pid does not match the stored start time.
-    return not start or not now or start == now
+    return pid if (not start or not now or start == now) else None
 
 
 def pids_matching(pattern):
@@ -92,20 +153,33 @@ def pids_matching(pattern):
     return set(result.stdout.split()) if result.returncode == 0 else set()
 
 
-def watcher_running():
-    if watcher_from_pid_file():
-        return True
+def watcher_state():
+    """(running, detached): running is True when a watcher that can wake this session runs; detached lists the
+    pids of live watchers that cannot (sorted), for the block message."""
+    hubs = hub_pids()
+    detached = set()
+    pid = watcher_from_pid_file()
+    if pid is not None:
+        if wakes_this_session(pid, hubs):
+            return True, []
+        detached.add(pid)
     override = os.environ.get("LANE_WATCH_GUARD_RUNNING")
     if override is not None:
-        return override == "1"
+        return override == "1", sorted(detached)
     try:
         watching = pids_matching(WATCHER_PATTERN)
         if not watching:
-            return False
+            return False, sorted(detached)
         recycled = pids_matching(RECYCLE_PATTERN)
     except (OSError, subprocess.SubprocessError, RuntimeError):
-        return True  # unknown: do not block on a failed listing
-    return bool(watching - recycled)
+        return True, []  # unknown: do not block on a failed listing
+    for word in sorted(watching - recycled):
+        if not word.isdigit():
+            continue
+        if wakes_this_session(int(word), hubs):
+            return True, []
+        detached.add(int(word))
+    return False, sorted(detached)
 
 
 def main():
@@ -122,7 +196,10 @@ def main():
         if os.path.realpath(cwd) != os.path.realpath(os.path.expanduser(hub)):
             return 0
         lanes = open_lanes()
-        if not lanes or watcher_running():
+        if not lanes:
+            return 0
+        running, detached = watcher_state()
+        if running:
             return 0
 
         # Hand-off exemption: let it stop if a hand-off file was recently modified
@@ -139,11 +216,21 @@ def main():
             if any(now - os.path.getmtime(f) < 30 * 60 for f in handoff_files):
                 return 0
 
-        reason = (
-            f"{len(lanes)} lane(s) open ({', '.join(lanes[:6])}) and no lane_watch.sh "
-            "is running, so lane reports will not wake this session. Re-arm it now: "
-            "run ~/.claude/scripts/lane_watch.sh with run_in_background, then finish the turn."
-        )
+        if detached:
+            pids = " ".join(str(pid) for pid in detached)
+            reason = (
+                f"{len(lanes)} lane(s) open ({', '.join(lanes[:6])}) and the lane_watch.sh that is running "
+                f"(pid {pids}) was started detached from this session (nohup, setsid, a trailing & or another "
+                "window), so its exit will not wake this session and lane reports will go unseen. "
+                f"Stop it with kill {pids}, then run ~/.claude/scripts/lane_watch.sh with the Bash tool's "
+                "run_in_background and nothing else on the line, then finish the turn."
+            )
+        else:
+            reason = (
+                f"{len(lanes)} lane(s) open ({', '.join(lanes[:6])}) and no lane_watch.sh "
+                "is running, so lane reports will not wake this session. Re-arm it now: "
+                "run ~/.claude/scripts/lane_watch.sh with run_in_background, then finish the turn."
+            )
         if marker is not None:
             # 6 Nov 2026: the hub wrote its hand-off and touched hub-handed-off.<an id of another session>, so this guard kept blocking.
             # The marker has to carry the id of the session that is stopping; say exactly which one, so it is never a guess.
