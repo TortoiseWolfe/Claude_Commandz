@@ -115,6 +115,9 @@ PEM = _rv.PEM
 PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 PEM_BODY = re.compile(r"[A-Za-z0-9+/=]{16,}")     # a key-body line, once stripped
+PEM_LAST = re.compile(r"[A-Za-z0-9+/=]+")         # the last body line of a key may be a few characters long
+PEM_MARK_B = re.compile(rb"-----(BEGIN|END) [A-Z ]*PRIVATE KEY-----")    # either marker, in raw bytes
+PEM_PART_B = re.compile(rb"-----(?:BEGIN|END)[A-Z ]*\Z")                 # bytes that end part-way through a marker
 URL_PW = _rv.URL_SECRETS[0]   # only user:password@; the webhook patterns would mask ordinary API URLs
 B64_RUN = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
 AUTH_HDR = re.compile(r"""(?P<pre>(?<![\w-])(?:proxy-)?authorization(?:\\?["'])?[ \t]*[:=][ \t]*(?:\\?["'])?
@@ -172,11 +175,12 @@ def _tier1(text, needles):
         if not m:
             break
         start = text.rfind("\n", 0, m.start()) + 1
+        rule = PEM_LAST       # the line right above END is a key's last body line, which is often short
         while start > 0:      # the unbroken run of key-body lines right above the END line
             prev = text.rfind("\n", 0, start - 1) + 1
-            if not PEM_BODY.fullmatch(text[prev:start - 1].strip()):
+            if not rule.fullmatch(text[prev:start - 1].strip()):
                 break
-            start = prev
+            start, rule = prev, PEM_BODY
         text = text[:start] + _mask("private-key") + text[m.end():]
         n += 1
     runs = [(m.start(), m.end()) for m in B64_RUN.finditer(text)]
@@ -534,10 +538,12 @@ class LineFilter:
     inside a private key block. Bytes that are not UTF-8 pass through unchanged (surrogateescape)."""
     MAX_LINE = 1024 * 1024
     CUT_WINDOW = 4096       # how far back from MAX_LINE a forced cut looks for a blank to cut after
+    DROP_TAIL = 128         # bytes kept between reads while a line is dropped, so a split key marker is still seen
 
     def __init__(self, tier=2):
         self.tier = tier
         self.discarding = False
+        self.drop_tail = b""
         self.cut_refused = 0        # lines replaced by a notice because no safe place to cut was found
         self.buf = bytearray()
         self.in_pem = False
@@ -575,7 +581,8 @@ class LineFilter:
 
     def _safe_cut(self, buf, pos):
         """End index for a forced cut of an over-long line, or None. Cuts just after the last space or tab in the final
-        CUT_WINDOW bytes whose previous non-blank byte is not : or =, so no token and no name: value pair is split."""
+        CUT_WINDOW bytes whose previous non-blank byte is not : or =, so no token and no name: value pair is split.
+        A blank inside a private key marker ("-----BEGIN RSA " ...) is refused too: a split marker would not be seen."""
         end = pos + self.MAX_LINE
         for j in range(end - 1, max(pos, end - self.CUT_WINDOW) - 1, -1):
             if buf[j] not in b" \t":
@@ -583,9 +590,24 @@ class LineFilter:
             k = j - 1
             while k >= pos and buf[k] in b" \t":
                 k -= 1
-            if k < pos or buf[k] not in b":=":
-                return j + 1
+            if k >= pos and buf[k] in b":=":
+                continue
+            if PEM_PART_B.search(bytes(buf[max(pos, j - 64):j + 1])):
+                continue
+            return j + 1
         return None
+
+    def _dropped(self, chunk):
+        """Keep the private-key-block state right across bytes that are dropped unread (an over-long line with no safe
+        cut): the last BEGIN or END marker in them decides it, so the lines after a dropped BEGIN stay hidden and the
+        lines after a dropped END are shown again."""
+        data = self.drop_tail + chunk
+        last = None
+        for last in PEM_MARK_B.finditer(data):
+            pass
+        if last:
+            self.in_pem = last.group(1) == b"BEGIN"
+        self.drop_tail = data[-self.DROP_TAIL:]
 
     def feed(self, data):
         self.buf += data
@@ -593,10 +615,12 @@ class LineFilter:
         while True:
             if self.discarding:       # the rest of a line that had no safe place to cut
                 i = buf.find(b"\n", pos)
+                stop = len(buf) if i < 0 else i + 1
+                self._dropped(bytes(buf[pos:stop]))
+                pos = stop
                 if i < 0:
-                    pos = len(buf)
                     break
-                pos, self.discarding = i + 1, False
+                self.discarding, self.drop_tail = False, b""
                 continue
             i = buf.find(b"\n", pos)
             if i >= 0:

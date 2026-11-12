@@ -84,6 +84,17 @@ class Library(unittest.TestCase):
         self.assertEqual(out, "%s\nnot a body line\n<redacted:private-key>" % PEM_BODY_1)
         self.assertEqual(n, 1)
 
+    def test_tail_of_key_with_a_short_last_body_line(self):       # a real key's last body line is often a few characters
+        text = "ordinary prose line here\n%s\n%s\nAb3=\n%s\nafter" % (PEM_BODY_1, PEM_BODY_2, PEM_BOTTOM)
+        out, n = scrub(text, 1)
+        self.assertEqual(out, "ordinary prose line here\n<redacted:private-key>\nafter")
+        self.assertEqual(n, 1)
+
+    def test_only_the_line_right_above_end_may_be_short(self):
+        out, n = scrub("word\n%s\nAb3=\n%s" % (PEM_BODY_1, PEM_BOTTOM), 1)
+        self.assertEqual(out, "word\n<redacted:private-key>")
+        self.assertEqual(n, 1)
+
     def test_lone_end_line_with_no_body_above(self):
         out, n = scrub("short line\n%s\nafter" % PEM_BOTTOM, 1)
         self.assertEqual(out, "short line\n<redacted:private-key>\nafter")
@@ -325,6 +336,42 @@ class Hardening(unittest.TestCase):
         self.assertEqual(out, b"<withheld: a line over 1 MB with no safe place to cut>\n")
         self.assertEqual(lf.flush_partial(), b"")
         self.assertEqual(lf.finish(), b"")
+
+    # A dropped line still counts for the private-key-block state: the lines after it are hidden or shown by the last
+    # marker it held.
+    DROP_NOTICE = b"<withheld: a line over 1 MB with no safe place to cut>\n"
+    KEY_LINE = b"ZmFrZWtleWJvZHlsaW5lMQ==\n"
+
+    def test_linefilter_dropped_line_that_opens_a_key_block_hides_the_body_after_it(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 200, 30
+        out = lf.feed(b"x" * 20 + PEM_TOP.encode() + b"y" * 300)
+        out += lf.feed(b"\n" + self.KEY_LINE + self.KEY_LINE + PEM_BOTTOM.encode() + b"\nafter\n")
+        self.assertEqual(out, self.DROP_NOTICE + b"after\n")
+        self.assertNotIn(self.KEY_LINE.strip(), out)
+
+    def test_linefilter_dropped_line_sees_a_marker_split_between_two_reads(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 200, 30
+        top = PEM_TOP.encode()
+        out = lf.feed(b"x" * 300 + top[:10])
+        out += lf.feed(top[10:] + b"zz\n" + self.KEY_LINE + PEM_BOTTOM.encode() + b"\nafter\n")
+        self.assertEqual(out, self.DROP_NOTICE + b"after\n")
+
+    def test_linefilter_dropped_line_that_closes_a_key_block_shows_the_lines_after_it(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 200, 30
+        out = lf.feed(PEM_TOP.encode() + b"\n") + lf.feed(b"A" * 300)
+        out += lf.feed(b"A" * 10 + PEM_BOTTOM.encode() + b"\nafter\n")
+        self.assertEqual(out, b"<redacted:private-key>\n" + self.DROP_NOTICE + b"after\n")
+
+    def test_linefilter_forced_cut_is_never_inside_a_key_marker(self):
+        lf = ss.LineFilter()
+        lf.MAX_LINE, lf.CUT_WINDOW = 100, 30
+        line = b"word " * 16 + PEM_TOP.encode()                # the marker's two blanks sit at bytes 90 and 98
+        self.assertEqual(lf._safe_cut(bytearray(line + b"x"), 0), 80)
+        out = lf.feed(line) + lf.feed(b"\n" + self.KEY_LINE + PEM_BOTTOM.encode() + b"\nafter\n")
+        self.assertEqual(out, b"word " * 16 + b"<redacted:private-key>\nafter\n")
 
     def test_linefilter_error_returns_only_notices(self):
         lf = ss.LineFilter()
