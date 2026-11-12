@@ -36,6 +36,8 @@ Usage:
   python3 email_voice_check.py --stdin [--strict]
 """
 
+import json
+import os
 import re
 import statistics
 import sys
@@ -863,11 +865,36 @@ def has_quoted_points(text):
 # else's full name. "Alex Sample" is a membership applicant; "Jon has the
 # password" is the author talking about himself in the third person. The negative
 # lookahead for a following capitalised word draws that line, with the author's
-# own surnames allowed through so "Jonathan Doe" still trips it.
-SELF_NAMES = re.compile(
-    r'\b(?:Jon|Jonathan|Turtle\s?Wolfe|TortoiseWolfe)\b'
-    r'(?!\s+(?!Doe\b|Wolfe\b)[A-Z][a-z])'
-)
+# own surnames (from the private file) allowed through so the author's full name still trips it.
+# The author's first names and surnames live in a private file, never in this public repo:
+#   ~/.config/afa/voice-check.json   {"author_first_names": ["First", ...], "author_surnames": ["Surname", ...]}
+#   (mode 600; VOICE_CHECK_CONFIG overrides the path). The public handles (TurtleWolfe, TortoiseWolfe) always count.
+# With no readable file the first names are empty and the surname placeholder is "Doe".
+def _author_list(key, path=None):
+    where = os.path.expanduser(path or os.environ.get('VOICE_CHECK_CONFIG') or '~/.config/afa/voice-check.json')
+    try:
+        with open(where) as f:
+            names = json.load(f).get(key)
+    except (OSError, ValueError, AttributeError):
+        names = None
+    return [n for n in (names if isinstance(names, list) else []) if isinstance(n, str) and re.fullmatch(r'[A-Za-z]+', n)]
+
+
+def author_surnames(path=None):
+    return _author_list('author_surnames', path) or ['Doe']
+
+
+def author_first_names(path=None):
+    return _author_list('author_first_names', path)
+
+
+def build_self_names(surnames, first_names=()):
+    allowed = '|'.join(re.escape(s) + r'\b' for s in list(surnames) + ['Wolfe'])
+    who = '|'.join([re.escape(n) for n in first_names] + [r'Turtle\s?Wolfe', 'TortoiseWolfe'])
+    return re.compile(r'\b(?:' + who + r')\b' + r'(?!\s+(?!' + allowed + r')[A-Z][a-z])')
+
+
+SELF_NAMES = build_self_names(author_surnames(), author_first_names())
 
 
 URL_IN_PROSE = re.compile(r'https?://\S+')
