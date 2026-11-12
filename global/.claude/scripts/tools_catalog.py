@@ -260,6 +260,23 @@ SHARED_COMMAND_REPOS = 3
 RULE_OPENING = re.compile(r"^(Never|Always|No |Do not|Don't|Auto-generated|Instructions for|This file)", re.I)
 
 
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MAX_TEXT = 200
+
+
+def _safe_name(name):
+    """A server, command or repo name from a repo's files: only plain name characters, else ''.
+    Repo text ends up in lane prompts, so anything that is not a plain name is dropped."""
+    name = str(name)
+    return name if SAFE_NAME.match(name) else ""
+
+
+def _safe_text(s, limit=MAX_TEXT):
+    """Repo-derived prose: one line, no pipe, no control characters, capped."""
+    s = re.sub(r"[\x00-\x1f\x7f]", " ", str(s))
+    return _squash(s)[:limit].strip()
+
+
 def _read_text(path):
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
@@ -333,8 +350,9 @@ def repo_mcp_items(repo, docs):
         except ValueError:
             pass
     for name, tools in servers.items():
-        if name.lower() in GENERIC_SERVERS:
+        if name.lower() in GENERIC_SERVERS or not _safe_name(name):
             continue
+        tools = [t for t in tools if _safe_name(t)]
         items.append(f"MCP server {name}" + (f" ({', '.join(tools[:2])})" if tools else ""))
     # bold labels inside a section whose heading mentions MCP, for example "**YouTube Transcript:** ..."
     for text in docs:
@@ -346,12 +364,15 @@ def repo_mcp_items(repo, docs):
             m = BOLD_LABEL.match(ln) if in_mcp else None
             if m:
                 label = re.sub(r"\s*MCP$", "", m.group(1).strip(), flags=re.I)
-                items.append(f"MCP: {label}")
+                if re.match(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,39}$", label):
+                    items.append(f"MCP: {label}")
     if not items:
         for text in docs:
             heads = [ln.lstrip("# ").strip() for ln in text.splitlines() if ln.startswith("#") and "mcp" in ln.lower()]
             if heads:
-                items.append("MCP section: " + heads[0][:50])
+                head = re.sub(r"[^A-Za-z0-9 ._/-]", "", heads[0])[:50].strip()
+                if head:
+                    items.append("MCP section: " + head)
                 break
     if not items and "mcp" in repo.name.lower():
         items.append("MCP server (the repo itself)")
@@ -364,7 +385,7 @@ def repo_commands(repo):
         names = sorted(p.stem for p in cmd_dir.iterdir() if p.suffix == ".md")
     except OSError:
         return []
-    return [n for n in names if not n.startswith(GENERIC_COMMAND_PREFIXES)]
+    return [n for n in names if _safe_name(n) and not n.startswith(GENERIC_COMMAND_PREFIXES)]
 
 
 def repo_entry(repo, shared=frozenset()):
@@ -374,7 +395,7 @@ def repo_entry(repo, shared=frozenset()):
     cmds = [c for c in repo_commands(repo) if c not in shared]
     if not items and not cmds:
         return None
-    what = purpose_sentence(docs[1]) or purpose_sentence(docs[0])
+    what = _safe_text(purpose_sentence(docs[1]) or purpose_sentence(docs[0]))
     if len(re.findall(r"[A-Za-z]", what)) < 8:
         what = f"Repository {repo.name}"
     bits = items[:MAX_REPO_ITEMS]
@@ -394,7 +415,7 @@ def collect_repos(repos_dir, repos_list):
         if i == 0 or not ln.strip():
             continue
         name = ln.split("\t")[0].strip()
-        if not name or name.startswith("."):
+        if not name or name.startswith(".") or not _safe_name(name):
             continue
         repo = Path(repos_dir) / name
         if repo.is_dir():
