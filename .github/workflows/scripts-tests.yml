@@ -69,9 +69,61 @@ jobs:
           if [ -z "$summary" ]; then echo "::error::hook pytest summary missing"; exit 1; fi
           echo "Hook pytest summary: $summary; $skips skipped; 0 deselected"
 
-  shell:
+  # Issue 72: one job running every shell test in a row took 19 minutes 59 seconds of its 20-minute limit on main, so the next added test
+  # cancelled the job. The shell tests now run as three slices side by side, each on its own runner (so no two tests share a machine, the
+  # same as before), and the "shell" job below, the name the branch protection requires, passes only when every slice passed.
+  # The slice count is written twice here (the matrix list and the "/3" in the step); tests/test_ci_test_coverage.py fails if they disagree.
+  shell-part:
+    name: shell part ${{ matrix.part }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: allow user namespaces (issue 332)
+        run: |
+          # lane_hide_secrets.sh hides settings files from a lane with a user and mount namespace (unshare -Urm). Ubuntu 24.04 runners block that by
+          # default through AppArmor. This step lifts the block; the guard's own test (test_lane_secret_guard.sh) fails, never skips, if it is still off.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "sysctl not present; checking directly below"
+          unshare -Urm true && echo "user namespaces work"
+      - name: shell tests
+        working-directory: global/.claude/scripts
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          export HOME="$(mktemp -d)"
+          failed=0; ran=0
+          # The list comes from ci_test_coverage.py, the same rule the "shell" job checks, so a file cannot fall out of the glob.
+          # Files in .github/ci_not_run.tsv (test_openclaw_uid_stage.sh needs the WSL distro) are left out of it, with the reason and issue printed by that job.
+          # A bad slice makes the tool exit non-zero; without this check the loop below would read an empty list and the job would only fail on "no shell test ran".
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" list shell --part "$PART/3" >"$RUNNER_TEMP/shell-part.txt"
+          while IFS= read -r t; do
+            echo "::group::$t"
+            began=$SECONDS
+            if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
+            took=$((SECONDS - began))
+            echo "::endgroup::"
+            echo "took ${took}s: $t"
+            # One file may run 600 seconds; say so while there is still room, before a later change makes it time out.
+            if [ "$took" -gt 480 ]; then echo "::warning::$t took ${took}s of the 600 it may use"; fi
+            ran=$((ran + 1))
+          done < "$RUNNER_TEMP/shell-part.txt"
+          echo "shell tests run: $ran"
+          if [ "$ran" -lt 1 ]; then echo "::error::no shell test ran"; failed=1; fi
+          exit "$failed"
+
+  shell:
+    needs: shell-part
+    # always(): without it a failed or cancelled slice would leave this job "skipped", and GitHub counts a skipped required check as passed.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -81,28 +133,13 @@ jobs:
         run: |
           # Fails on a test file (anywhere in the repo) that no step here runs and that .github/ci_not_run.tsv does not openly list with a reason and an issue.
           python3 .github/scripts/ci_test_coverage.py check
-      - name: allow user namespaces (issue 332)
+      - name: every shell part passed
+        env:
+          PARTS_RESULT: ${{ needs.shell-part.result }}
         run: |
-          # lane_hide_secrets.sh hides settings files from a lane with a user and mount namespace (unshare -Urm). Ubuntu 24.04 runners block that by
-          # default through AppArmor. This step lifts the block; the guard's own test (test_lane_secret_guard.sh) fails, never skips, if it is still off.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "sysctl not present; checking directly below"
-          unshare -Urm true && echo "user namespaces work"
-      - name: shell tests
-        working-directory: global/.claude/scripts
-        run: |
-          export HOME="$(mktemp -d)"
-          failed=0; ran=0
-          # The list comes from ci_test_coverage.py, the same rule the step above checks, so a file cannot fall out of the glob.
-          # Files in .github/ci_not_run.tsv (test_openclaw_uid_stage.sh needs the WSL distro) are left out of it, with the reason and issue printed by that step.
-          while IFS= read -r t; do
-            echo "::group::$t"
-            if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
-            echo "::endgroup::"
-            ran=$((ran + 1))
-          done < <(python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" list shell)
-          echo "shell tests run: $ran"
-          if [ "$ran" -lt 1 ]; then echo "::error::no shell test ran"; failed=1; fi
-          exit "$failed"
+          # The result of a matrix job is "success" only when every one of its slices succeeded.
+          echo "shell parts: $PARTS_RESULT"
+          if [ "$PARTS_RESULT" != "success" ]; then echo "::error::the shell test parts ended as $PARTS_RESULT, not success"; exit 1; fi
       - name: node tests (skipped tests fail the job)
         working-directory: global/.claude/scripts
         run: |
