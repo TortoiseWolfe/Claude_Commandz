@@ -126,6 +126,12 @@ class SettingsHookTests(unittest.TestCase):
             commands("PreToolUse"),
         )
 
+    def test_own_review_merge_guard_runs_before_every_shell_call(self):
+        # lane_merge.py refuses a repo that keeps its own review; this hook refuses the plain gh, curl and
+        # git commands a session could type instead, so it must see every Bash call in every session.
+        self.assertIn(("Bash", "python3 ~/.claude/hooks/own-review-merge-guard.py"), commands("PreToolUse"))
+        self.assertTrue((HOOKS_DIR / "own-review-merge-guard.py").exists())
+
     def test_afa_mods_marketplace_and_plugin(self):
         data = json.loads(SETTINGS.read_text())
         self.assertIs(data["enabledPlugins"].get("afa-mods@afa-mods"), True)

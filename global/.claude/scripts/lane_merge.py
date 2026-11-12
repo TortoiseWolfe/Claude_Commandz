@@ -17,7 +17,8 @@ It refuses (one line starting "REFUSED: ", exit 1), in this order, when:
 The merge is pinned to the commit that was checked (--match-head-commit), so what was checked is what merges.
 The two lists are private files, one pattern per line (OWNER/REPO or OWNER/*, any letter case, # starts a comment):
 merge-repos.txt names the repos we merge in, and everything else is refused; own-review-repos.txt names repos that keep
-their own review, and it wins when a repo is on both.
+their own review, and it wins when a repo is on both. Nobody here merges in an own-review repo, not a lane and not the hub
+(the refusal says so; own-review-merge-guard.py in the hooks folder refuses the plain gh commands for every session).
 What it cannot see: a known non-test job passes on its green badge alone, and so does a check that is not an Actions job
 (no log to read), as long as one other job shows a summary. Each is named after "no test summary in:" or "not readable:".
 After the merge it re-reads the pull request, and only then appends one line to <state dir>/merge-rollup-YYYY-MM-DD.md.
@@ -102,7 +103,8 @@ def check_repo(repo):
     low = repo.lower()
     for pat in read_patterns(own_review_path(), "own-review list"):
         if fnmatch.fnmatchcase(low, pat.lower()):
-            refuse("this repo keeps its own review process (it matches %r on the own-review list); the hub merges this one" % pat)
+            refuse("this repo keeps its own review process (it matches %r on the own-review list): nobody here merges in it, "
+                   "not a lane and not the hub; ask for a review the way that repo's own team does" % pat)
     path = merge_repos_path()
     allowed = False
     for pat in read_patterns(path, "list of repos we merge in"):
