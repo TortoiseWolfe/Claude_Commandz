@@ -475,7 +475,7 @@ case "$1" in
   --ctx) cat "$CTX_FILE" ;;
   --turn) cat "${TURN_FILE:-/dev/null}" ;;
   --recycle-point) cat "${POINT_FILE:-/dev/null}" ;;
-  --send) printf '%s\t%s\n' "$2" "$3" >> "${SEND_LOG:-/dev/null}" ;;
+  --send) printf '%s\t%s\n' "$2" "$3" >> "${SEND_LOG:-/dev/null}"; exit "${FAKE_SEND_EXIT:-0}" ;;
   --recycle)
     echo "$2" >> "$RC_CALLS"; mkdir "$lanes/.recycle-$2.lock"; sleep 3
     [ -e "$RC_FAIL" ] && printf '2026-10-21T10:00:00-04:00\t%s\tFAILED\tno new handoff.md in 600s; the lane was NOT cleared\n' "$2" >> "$lanes/recycle.log"
@@ -967,6 +967,37 @@ sa_tgt "WORKING $(date -d '+11 min' '+%-I:%M %p') | deadline $tgt | done: 1" "$T
 sa_watch "WORKING $(date -d '+11 min' '+%-I:%M %p') | done: 1 | now on: x" "$TMP/sa-out5"
 su_again "$TMP/sa-out6"
 if grep -q '^stamp ahead' "$TMP/sa-out5" && ! grep -q '^stamp ahead' "$TMP/sa-out6" && [ ! -s "$SEND_LOG" ]; then echo "ok   the same ahead-of-clock line is named once, across a re-armed watcher"; else echo "FAIL repeated stamp naming: first=$(cat "$TMP/sa-out5") second=$(cat "$TMP/sa-out6")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
+
+# 11 Nov 2026: the stamp counts only in one fixed place, the head of line 1 (capital status words, separators, at most one parenthesised group,
+# then the time). A schedule time ("nightly 3:17 AM") and a quoted mail time deep in the line were read as stamps and woke the hub for nothing.
+mkdir -p "$su_dir"
+ah="$(date -d '+11 min' '+%-I:%M %p')"; ah2="$(date -d '+12 min' '+%-I:%M %p')"
+sa_tgt "WORKING $ah | done: 1" "$TMP/sf-1" "fixed place: 'WORKING <time>' ahead is a stamp" named
+sa_tgt "QUEUE EMPTY $ah" "$TMP/sf-2" "fixed place: 'QUEUE EMPTY <time>' ahead is a stamp" named
+sa_tgt "QUEUE EMPTY ($nowt Wed) $ah | x" "$TMP/sf-3" "fixed place: a parenthesised group before the time is allowed (time inside it is not the stamp)" named
+sa_tgt "QUEUE EMPTY (the hub: merge it, then one step), $ah Wed 11 Nov. Hub: go" "$TMP/sf-4" "fixed place: a group with words and a comma, then the time, is a stamp" named
+sa_tgt "DONE — $ah" "$TMP/sf-5" "fixed place: an em dash before the time is allowed" named
+sa_tgt "DONE | $ah" "$TMP/sf-6" "fixed place: a pipe before the time is allowed" named
+sa_tgt "DONE at $ah" "$TMP/sf-7" "fixed place: 'at' before the time is allowed" named
+sa_tgt "STEP-FOR-JONATHAN as of $ah open https://x.example" "$TMP/sf-8" "fixed place: hyphenated status word and 'as of' are allowed" named
+sa_tgt "READY 476 0 skipped | nightly $ah Eastern" "$TMP/sf-9" "a schedule time deep in the line is not a stamp" quiet
+sa_tgt "WORKING on the reply; their mail of 9 Nov $ah their CET says x" "$TMP/sf-10" "a quoted mail time deep in the line is not a stamp" quiet
+sa_tgt "QUEUE EMPTY until $ah | last check $ah2" "$TMP/sf-11" "'until <time>' after the status words leaves no stamp" quiet
+sa_tgt "WORKING by $ah" "$TMP/sf-12" "'WORKING by <time>' has no stamp" quiet
+sa_tgt "BLOCKED | Deadline: $ah, waiting" "$TMP/sf-13" "'BLOCKED | Deadline: <time>' has no stamp" quiet
+sa_tgt "Waiting since $ah" "$TMP/sf-14" "lower-case status words give no stamp" quiet
+sa_tgt "WORKING (a) (b $ah) x" "$TMP/sf-15" "a time inside a second parenthesised group is not a stamp" quiet
+sa_tgt "WORKING $(date '+%-H:%M') | deadline $ah" "$TMP/sf-16" "a head time with no AM/PM leaves no stamp" quiet
+sa_tgt "WORKING $nowt | their mail of 9 Nov $ah CET says x" "$TMP/sf-17" "a correct head stamp plus a far-ahead quoted time stays quiet" quiet
+# Send first, then say what happened: a failing lane.sh --send must not be reported as sent.
+sa_watch "WORKING $ah | x" "$TMP/sf-18"
+if grep -q '^stamp ahead: rl wrote .*; sent the lane its correction$' "$TMP/sf-18" && ! grep -q 'could NOT' "$TMP/sf-18"; then echo "ok   a send that works is reported as sent"; else echo "FAIL send success line: $(cat "$TMP/sf-18")"; failures=$((failures + 1)); fi
+export FAKE_SEND_EXIT=3
+sa_watch "WORKING $ah | x" "$TMP/sf-19"
+unset FAKE_SEND_EXIT
+if grep -q '^stamp ahead: rl wrote .*; could NOT send the lane its correction (lane.sh exit 3)$' "$TMP/sf-19" && ! grep -q 'sent the lane its correction' "$TMP/sf-19"; then echo "ok   a failed send says could NOT send and holds the exit code"; else echo "FAIL send failure line: $(cat "$TMP/sf-19")"; failures=$((failures + 1)); fi
+if grep -q "the watcher reads only that place" "$SEND_LOG"; then echo "ok   the correction tells the lane where to put its time"; else echo "FAIL correction text: $(cat "$SEND_LOG")"; failures=$((failures + 1)); fi
 rm -rf "$su_dir"; rm -f "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
 
 # 6 Nov 2026: the budget reader's Windows task hid its exit code, so a Cloudflare check left the gauge stale with nothing to say so. usage_calibrate.js now

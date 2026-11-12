@@ -12,7 +12,8 @@
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
-#   - a watched lane's report.md line 1 holds a time more than 2 minutes ahead of the file's modification time (stamp_ahead_check; the lane is sent the correction)
+#   - a watched lane's report.md line 1 starts with a status word and a time (WORKING 3:05 PM ...) that is more than 2 minutes ahead of the
+#     file's modification time (stamp_ahead_check; the lane is sent the correction). Only that fixed place counts; times deeper in the line do not.
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub. Named ONCE per dialog: a dialog
 #     the hub was already told about is skipped by every later poll and re-armed watcher until the pane shows no dialog (then the next is named).
 #   - a watched lane's tmux window disappears
@@ -214,24 +215,24 @@ step_url_check() {
   hit=1; other=1
 }
 
-# A report time that is ahead of the clock. stamp_ahead_check <lane> (no subshell: it sets hit and other) takes the first H:MM AM|PM on line 1 of
-# the lane's report.md and compares it with the file's own modification time (the clock when the lane wrote it). More than
-# LANE_WATCH_STAMP_SLACK minutes (default 2) ahead, within the next 12 hours: it names the lane to the hub ("stamp ahead: <lane> wrote <stamp>
-# at <mtime>") and types the correction into the lane through lane.sh --send, so the hub does not have to. A stamp that is behind the clock is
-# left alone (a lane may report work that finished earlier). Once per distinct line 1. 6 Nov 2026: a lane wrote "WORKING 8:30 AM" at 8:13 AM and
-# another "WORKING 8:40 AM" at 8:29 AM; the rule (every time comes from date at the moment of writing) was already in every lane's rules.
+# A report time that is ahead of the clock. stamp_ahead_check <lane> (no subshell: it sets hit and other) reads the report's own time from ONE fixed
+# place, the head of line 1 of the lane's report.md: 1 to 4 status words in capitals (WORKING, QUEUE EMPTY, STEP-FOR-JONATHAN), then separators
+# (space , : ; | ( - dashes), at most one "( ... )" group and "at" or "as of", then the H:MM AM|PM. Anything else before the first time (lower-case
+# words, "until", "by", a second group) means the line has no stamp and is left alone. The stamp is compared with the file's own modification time
+# (the clock when the lane wrote it). More than LANE_WATCH_STAMP_SLACK minutes (default 2) ahead, within the next 12 hours: it names the lane to the
+# hub ("stamp ahead: <lane> wrote <stamp> at <mtime>") and types the correction into the lane through lane.sh --send, then says whether that send
+# worked. A stamp that is behind the clock is left alone (a lane may report work that finished earlier). Once per distinct line 1.
+# 6 Nov 2026: a lane wrote "WORKING 8:30 AM" at 8:13 AM; the rule (every time comes from date at the moment of writing) was already in every lane's rules.
+# 6 and 11 Nov 2026: false alarms from the first time found anywhere on the line, a schedule time ("nightly 3:17 AM Eastern") and the time of a
+# quoted mail deep in the line; each woke the hub and told a correct report to change. Hence the fixed place.
 stamp_ahead_check() {
-  local l=$1 rep first tok h m ap sm mt now_h now_m now_min diff sum mark slack=${LANE_WATCH_STAMP_SLACK:-2} wrote
+  local l=$1 rep first tok h m ap sm mt now_h now_m now_min diff sum mark slack=${LANE_WATCH_STAMP_SLACK:-2} wrote rc msg
+  local w='[A-Z][A-Z-]*' sep='( |,|:|;|\||—|–|-)*' grp='\([^()]*\)'
+  local re="^ *$w( $w){0,3}$sep($grp$sep)?(at |as of )?((1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm])"
   rep=$(report_of "$l"); [ -n "$rep" ] || return 0
   first=$(head -n 1 "$rep" 2>/dev/null)
-  # The first time on the line that is not a target ("deadline 7:00 PM", "by 7:00 PM", until/due/before/till): that is the status time. (6 Nov
-  # 2026: grep -o prints every time on the line and the last one's AM/PM was read, so "WORKING 11:17 AM deadline 7:00 PM" was 463 minutes ahead.)
-  tok=""
-  while IFS= read -r cand; do
-    [ -n "$cand" ] || continue
-    if grep -qiE '^(by|until|till|deadline|due|before)[: ]' <<<"$cand"; then continue; fi
-    tok=$(grep -oE '(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$cand" | head -n 1); break
-  done < <(grep -oiE '([A-Za-z]+[: ]+)?(^|[^0-9:])?(1[0-2]|0?[1-9]):[0-5][0-9] ?[AaPp][Mm]' <<<"$first")
+  [[ $first =~ $re ]] || return 0
+  tok=${BASH_REMATCH[6]}   # group 6: the time (1 more words, 2 and 4 separators, 3 the group, 5 at/as of)
   [ -n "$tok" ] || return 0
   h=${tok%%:*}; h=$((10#$h)); m=${tok#*:}; m=$((10#${m:0:2})); ap=${tok: -2}
   case "$ap" in [Pp][Mm]) [ "$h" -eq 12 ] || h=$((h + 12)) ;; *) [ "$h" -ne 12 ] || h=0 ;; esac
@@ -246,8 +247,13 @@ stamp_ahead_check() {
   [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
   printf '%s' "$sum" > "$mark"
   wrote=$(date -d "@$mt" '+%-I:%M %p')
-  echo "stamp ahead: $l wrote $tok at $wrote (line 1 of $rep is $diff minutes ahead of the clock); sent the lane its correction"
-  "$lane_sh" --send "$l" "Hub: line 1 of your report.md says $tok, but the clock read $wrote when you wrote it. Run date '+%-I:%M %p' at the moment you write a time and rewrite line 1 with that. Every time in a report, hand-off or note comes from date, never from memory or an estimate." >/dev/null 2>&1 || true
+  msg="Hub: line 1 of your report.md says $tok, but the clock read $wrote when you wrote it. Run date '+%-I:%M %p' at the moment you write a time and rewrite line 1 with that. Every time in a report, hand-off or note comes from date, never from memory or an estimate. Put the report's own time right after the status word (WORKING 3:05 PM ...); the watcher reads only that place."
+  rc=0; "$lane_sh" --send "$l" "$msg" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "stamp ahead: $l wrote $tok at $wrote (line 1 of $rep is $diff minutes ahead of the clock); sent the lane its correction"
+  else
+    echo "stamp ahead: $l wrote $tok at $wrote (line 1 of $rep is $diff minutes ahead of the clock); could NOT send the lane its correction (lane.sh exit $rc)"
+  fi
   hit=1; other=1
 }
 
