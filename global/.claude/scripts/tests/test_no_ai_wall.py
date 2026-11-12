@@ -405,6 +405,16 @@ class SecurityFindingTests(Fixture):
         for cmd in ("ls -la %s" % mod, "sha256sum %s" % clean, "ls %s; wc -l %s" % (mod, clean), "ls %s && python3 -I %s status" % (wall, mod), "/usr/bin/stat %s" % mod):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
+    def test_a_listing_program_is_a_bare_name_or_a_system_path(self):
+        """A listing program is a bare name or sits directly under /usr/bin or /bin; a path to any other folder is refused."""
+        wall = os.path.join(self.home, ".claude/no-ai-wall")
+        W, C = os.path.join(wall, "no_ai_wall.py"), os.path.join(wall, "wall_cleanup.py")
+        for cmd in ("/tmp/x/python3 %s status" % W, "./python3 -I %s" % C, "/tmp/x/ls %s" % W, "~/bin/stat %s" % C, "/usr/bin/../../tmp/x/ls %s" % W,
+                    "/usr/local/bin/ls %s" % W):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        for cmd in ("ls %s" % W, "/usr/bin/stat %s" % W, "/bin/ls %s" % W, "/usr/bin/python3 %s status" % W, "python3 -I %s" % C):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))
         self.assertIsNone(self.call("Read", file_path=os.path.join(self.home, ".claude/no-ai-wall/no_ai_wall.py")))

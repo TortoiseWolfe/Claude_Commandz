@@ -21,7 +21,7 @@ The holding folder and the log are opened before the first move, each by its own
 a symbolic link; the log must be an ordinary file with one name. If any of that fails, the run is refused and no stray is moved.
 
 Exit codes: 0 clean, or all moved, or dry run; 1 a warning or a failed move; 2 usage; 3 refused (nothing moved).
-The last line on stdout is always one summary line starting with WALL.
+On exit 0 or 1 the last line on stdout is one summary line starting with WALL. On exit 2 or 3 nothing is written to stdout: the reason goes to stderr.
 """
 import os
 import sys

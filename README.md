@@ -169,7 +169,7 @@ python3 -I ~/.claude/no-ai-wall/wall_cleanup.py            # dry run: list only
 python3 -I ~/.claude/no-ai-wall/wall_cleanup.py --apply    # move the strays
 ```
 
-The last line it prints starts with `WALL` (`WALL CLEAN`, or `WALL STRAYS <n> ...`). Exit codes: 0 fine, 1 a warning or a move
+On exit 0 or 1 the last line it prints starts with `WALL` (`WALL CLEAN`, or `WALL STRAYS <n> ...`); on exit 2 or 3 it prints only a reason on the error stream. Exit codes: 0 fine, 1 a warning or a move
 that failed, 2 wrong arguments, 3 refused with nothing moved. Tests: `python3 -m pytest global/.claude/scripts/tests/test_wall_cleanup.py`.
 
 ### Scenario C — Single repo only

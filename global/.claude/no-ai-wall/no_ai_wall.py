@@ -824,16 +824,16 @@ def _read_only_listing(command):
     The program is the first word of each part of the command, so a part that starts by setting a variable is refused: that word is not a program, and
     the real one after it would go unread. For the same reason the whole command is refused when it holds a parenthesis or a brace: those group commands and
     define functions, so they start a command where _segments sees no new part (`ls() ( python -m x file ); ls` gives the name ls a new body), and the
-    program inside would go unread too. A first word must be a plain name or path, nothing the shell would expand or define."""
+    program inside would go unread too. A first word must be a bare program name with no slash, or that name directly under /usr/bin or /bin: a path to any other folder is refused, because a program there can carry a trusted name, and so is a tilde, which the shell expands."""
     if re.search(r"[<>`(){}]", command):
         return False
     for seg in _segments(command):
         words = _words(seg)
         if not words:
             continue
-        if "=" in words[0] or not re.fullmatch(r"[A-Za-z0-9_./~+-]+", words[0]):
-            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands
-        prog = os.path.basename(words[0])
+        folder, prog = os.path.split(words[0])
+        if "=" in words[0] or not re.fullmatch(r"[A-Za-z0-9_.+-]+", prog) or folder not in ("", "/usr/bin", "/bin"):
+            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands (a tilde); nor is a path to any folder but the two system ones, where a program can carry a trusted name
         if prog in _READ_ONLY_PROGRAMS:
             continue
         if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words):
