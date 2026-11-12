@@ -4,6 +4,7 @@ Every case runs the hook as a subprocess with a temporary HOME, so no real file 
 """
 import json
 import os
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ import pytest
 
 HOOK = Path(__file__).resolve().parents[1] / "list-file-guard.py"
 NAMES = ("merge-repos.txt", "own-review-repos.txt")
+# The account the tests run as; a shell reads "~<that name>" as the home folder.
+ME = pwd.getpwuid(os.getuid()).pw_name
 
 
 @pytest.fixture()
@@ -560,9 +563,38 @@ def test_a_handful_of_relative_folder_changes_allowed(home, count):
     "git commit -am 'chmod ~/.config by hand' && git push",
     "git tag -m 'mv ~/.claude/hooks aside first' v1",
 ])
-def test_message_text_is_not_a_command(home, command):
-    """The text of a commit message or a pull request body is data, not words of the command."""
+def test_message_text_is_read_like_any_other_words(home, command):
+    """Message text is not skipped: every way of skipping it also hid a live command (the cases below)."""
+    res = bash(home, command, cwd=home / "notes")
+    assert_blocked(res)
+    assert "put the message in a file" in res.stderr
+
+
+@pytest.mark.parametrize("command", [
+    "git commit -F /tmp/message.txt",
+    "gh pr create --title 'the rm rule' --body-file body.md",
+    "git commit -m 'Fix rm handling in the cleanup step'",
+    'git commit -m "say where the lists live: ~/.config/afa"',
+    "git commit -am 'tidy' && git push",
+])
+def test_everyday_messages_and_message_files_allowed(home, command):
     assert_allowed(bash(home, command, cwd=home / "notes"))
+
+
+@pytest.mark.parametrize("command", [
+    "echo ' git x -m '; rm -rf ~/.config/afa; echo ' '",
+    'echo " git x -m "; rm -rf ~/.config/afa; echo " "',
+    "git # -m '\nrm -rf ~/.config/afa #'",
+    "cat <<EOF\n'\nEOF\necho ' ; git x -m '; rm -rf ~/.config/afa; echo ' '",
+    "eval : git y -m '; rm -rf ~/.config/afa'",
+    "git y -m 'rm -rf ~/.config/afa'; eval \"$_\"",
+    "git bisect run sh -c -m 'rm -rf ~/.config/afa'",
+    "export GIT_EDITOR=sh; git commit -e -m 'rm -rf ~/.config/afa'",
+    "declare a=(git z -m '; rm -rf ~/.config/afa'); eval : ${a[*]}",
+])
+def test_a_quote_after_a_message_flag_does_not_hide_a_command(home, command):
+    """Each of these runs rm in a real shell: the quote is not where a message starts, or the text is run later."""
+    assert_blocked(bash(home, command, cwd=home / "notes"))
 
 
 @pytest.mark.parametrize("command", [
@@ -577,6 +609,65 @@ def test_message_text_is_not_a_command(home, command):
 ])
 def test_message_flag_does_not_hide_a_command(home, command):
     assert_blocked(bash(home, command, cwd=home / "notes"))
+
+
+@pytest.mark.parametrize("command", [
+    "unzip /tmp/x.zip -d ~/.config/afa",
+    "unzip /tmp/x.zip -d$HOME/.config/afa",
+    "unzip /tmp/x.zip -d.config/afa",
+    "cd ~/.config && unzip /tmp/x.zip -d afa",
+    "bsdtar -xf /tmp/x.tar --cd ~/.config/afa",
+    "cpio -i -D ~/.config/afa",
+    "7z x /tmp/x.7z -o$HOME/.config/afa",
+    "patch -d ~/.config/afa -i /tmp/p.diff",
+    "cd ~/.config/afa && patch -i /tmp/p.diff",
+    "cd ~/.config/afa && 7z x /tmp/x.7z",
+    "tar xf /tmp/x.tar -C$HOME/.config/afa",
+    "tar xf /tmp/x.tar -C.config/afa",
+    "cd ~/.config && tar xf /tmp/x.tar -Cafa",
+])
+def test_unpacking_into_the_list_folder_blocked(home, command):
+    """An unpacking tool pointed at the list folder writes the lists without a word that names them."""
+    assert_blocked(bash(home, command, cwd=home))
+
+
+@pytest.mark.parametrize("command", [
+    "unzip /tmp/x.zip -d ~/notes",
+    "tar xf /tmp/x.tar -C/tmp",
+    "tar xf /tmp/x.tar -Cnotes",
+    "7z x /tmp/x.7z -o/tmp/out",
+    "patch -p1 -i /tmp/p.diff",
+    "ls -la ~/.config/afa",
+    "grep -rn x ~/.config/afa/machine",
+])
+def test_unpacking_elsewhere_allowed(home, command):
+    assert_allowed(bash(home, command, cwd=home))
+
+
+@pytest.mark.parametrize("command", [
+    f"rm -rf ~{ME}/.config/afa",
+    f"tee ~{ME}/.config/afa/m*",
+    f"mv ~{ME}/.claude/hooks /tmp/x",
+    f"cd ~{ME}/.config && mv afa x",
+    "cd ~/.config && rm -rf ~+/afa",
+    "cd ~/.config/afa && tee ~+/m*",
+    "cd ~/.config/afa && cd .. && rm -rf ~-",
+])
+def test_other_spellings_of_a_home_or_current_folder_blocked(home, command):
+    """A shell reads ~name as that account's home folder, ~+ as the current folder and ~- as the one before."""
+    assert_blocked(bash(home, command, cwd=home / "notes"))
+
+
+@pytest.mark.parametrize("command", [
+    f"ls ~{ME}/notes",
+    f"rm -rf ~{ME}/notes/old",
+    "ls ~root",
+    "ls ~+",
+    "cd ~-",
+    "rm -rf ~no-such-account-here/.config/afa",
+])
+def test_other_spellings_everyday_use_allowed(home, command):
+    assert_allowed(bash(home, command, cwd=home / "notes"))
 
 
 @pytest.mark.parametrize("command", [
@@ -635,8 +726,8 @@ def settings_timeout():
     return found[0]
 
 
-def bash_in_settings_time(home, command):
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(home / "notes")})
+def bash_in_settings_time(home, command, where="notes"):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(home / where)})
     env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
     return subprocess.run([sys.executable, str(HOOK)], input=payload, env=env, capture_output=True, text=True,
                           cwd=str(home), timeout=settings_timeout())
@@ -662,6 +753,35 @@ def test_long_padding_alone_is_read_in_time_and_allowed(home, pad):
     res = bash_in_settings_time(home, PADS[pad] + " ; ls")
     assert_allowed(res)
     assert res.stderr == ""
+
+
+STAND_IN_RUNS = {
+    "thirty brace pairs": "touch " + "{a,b}" * 30,
+    "three hundred brace pairs": "touch " + "{a,b}" * 300,
+    "five thousand brace pairs": "touch " + "{a,b}" * 5000,
+    "three hundred number runs": "touch " + "{1..9}" * 300,
+    "pairs between stars, dot names on": "shopt -s dotglob ; ls " + "*{a,b}" * 300,
+    "pairs that hold a slash": "ls notes/" + "{a/b,c/d}" * 300 + "/x",
+}
+
+
+@pytest.mark.parametrize("pad", sorted(STAND_IN_RUNS))
+@pytest.mark.parametrize("where", ["notes", ".", ".config"])
+def test_a_long_run_of_brace_groups_is_read_in_time_from_any_folder(home, pad, where):
+    """A run of groups is one "any characters", so it costs the same from the home folder as from anywhere else."""
+    res = bash_in_settings_time(home, STAND_IN_RUNS[pad], where)
+    assert_allowed(res)
+    assert res.stderr == ""
+
+
+@pytest.mark.parametrize("where", [".", ".config"])
+def test_a_long_run_of_brace_groups_does_not_hide_a_command(home, where):
+    """Refused for a folder it names, not for running out of time. From the home folder the run itself could
+    name the .config folder, so that is the folder the refusal gives there."""
+    res = bash_in_settings_time(home, "touch " + "{a,b}" * 300 + " ; rm -rf ~/.config/afa", where)
+    assert_blocked(res)
+    assert "folder holds the merge lists" in res.stderr, res.stderr
+    assert "too long" not in res.stderr
 
 
 def test_a_check_that_runs_too_long_is_refused(home, tmp_path):

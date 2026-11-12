@@ -23,7 +23,10 @@ Bash is refused when the command:
     and symlinks followed. Every ${HOME...} form, such as ${HOME:-x} or ${HOME%/}, is read
     as the home folder. A "$" written before a quote and a backslash at a line end are
     dropped first, as a shell drops them. A cd with no folder, or with one held in a
-    variable, counts as a change into the home folder;
+    variable, counts as a change into the home folder. "~name" is read as that account's
+    home folder (this account's own name as the home folder above), and "~+" and "~-" as
+    the current folder. A folder glued to a one-letter option, "-C/tmp" or "-d$HOME/x", is
+    checked as a word of its own;
   - has a wildcard or brace word that could match a list file, this hook, or (with a verb
     below) one of the guarded folders, resolved the same way. A brace word is expanded
     the way a shell expands it, a{b,c} into ab and ac, and each result is checked; a word
@@ -37,20 +40,22 @@ Bash is refused when the command:
     checked as ~/.config/afa/*.txt. A word that starts with command output is not checked,
     so "rm $(find . -name '*.pyc')" passes;
   - names the .config/afa folder as a whole together with a verb that moves, removes,
-    links, copies, walks or re-permissions (mv, rm, cp, find, chmod and the like);
-  - runs tar, bsdtar, unzip, cpio or find while one of the folders it changes into, or the
-    session's own folder, is the .config/afa folder. Those verbs write into or walk the
-    folder they run in without a word that names it;
+    links, copies, unpacks into, walks or re-permissions (mv, rm, cp, unzip, find, chmod
+    and the like);
+  - runs tar, bsdtar, unzip, cpio, pax, 7z, patch or find while one of the folders it
+    changes into, or the session's own folder, is the .config/afa folder. Those verbs
+    write into or walk the folder they run in without a word that names it;
   - names ~/.config or ~/.claude/hooks as a whole together with a verb that moves, removes,
     links or re-permissions it.
 A verb counts however it is written: rm, /bin/rm, ./rm, \\rm or "rm".
 
-Message text is not a command. For git and gh, the quoted text right after -m, -am,
---message, --body, --title or --notes is left out of the word checks, so a commit message
-may mention ~/.config or "rm". Only text a shell leaves exactly as written is left out:
-single-quoted, or double-quoted with no "$", backtick or backslash in it. The plain name
-check still reads it, so a message that spells a list file's name is refused; put such a
-message in a file and pass the file.
+Message text is checked like any other words. The text after "git commit -m" or
+"gh pr create --body" is not skipped, because every way of skipping it also skipped a live
+command: a quote that is not where a message starts (inside another quote, after a "#" or
+in a here-document), text that is run later ("eval $_", an array handed to eval), and git
+itself running it ("git bisect run sh -c -m ...", an editor set to sh). So a message that
+names a guarded folder beside a verb such as rm, or that spells a list file's name, is
+refused; put such a message in a file and pass the file (git commit -F, gh --body-file).
 
 Honest limit: this is a tripwire for direct and careless edits, not a wall. A command that
 builds the path from pieces, reaches it through a variable other than HOME, reaches it
@@ -62,8 +67,9 @@ lane_merge.py's refusals remain the other layers.
 Time limit: the settings file stops this hook after 5 seconds, and a hook that is stopped
 lets the command through. So a Bash check runs in a child process that this hook stops
 itself after 3 seconds, and a command whose check did not finish is refused. Long runs of
-braces and brackets are read in one pass, so ordinary long commands finish far inside the
-limit; the limit is there for a command padded to be slow.
+braces and brackets are read in one pass, and a run of "any characters" side by side (many
+brace groups in one word, "*" next to a group) is matched as one, so ordinary long commands
+finish far inside the limit; the limit is there for a command padded to be slow.
 
 Unreadable or non-JSON stdin: allow, as lane-watch-guard.py does. An unexpected error while
 checking one word skips that word after one line on stderr and the other words are still
@@ -72,6 +78,7 @@ checks off; the plain name check runs first and has nothing in it that can fail.
 """
 import json
 import os
+import pwd
 import re
 import select
 import signal
@@ -95,9 +102,10 @@ MAX_FOLDERS = 64
 # Verbs that act on a folder as a whole. The list folder gets the long list; its parent and
 # the hooks folder get the short one, because copying into or searching them is everyday work.
 PARENT_VERB_NAMES = frozenset("mv rm rmdir ln chmod chown chattr setfacl rename unlink".split())
-AFA_VERB_NAMES = PARENT_VERB_NAMES | frozenset("cp rsync install tar find".split())
-# Verbs that write into or walk the folder they run in without naming it as a word.
-CWD_VERB_NAMES = frozenset("tar bsdtar unzip cpio find".split())
+# Verbs that write into or walk the folder they run in without naming it as a word. Given a folder to unpack
+# into ("unzip x.zip -d folder"), they write its files without naming those either, so they count for both.
+CWD_VERB_NAMES = frozenset("tar bsdtar unzip cpio pax 7z 7za 7zr patch find".split())
+AFA_VERB_NAMES = PARENT_VERB_NAMES | CWD_VERB_NAMES | frozenset("cp rsync install".split())
 FOLDER_CHANGERS = ("cd", "pushd", "-C")
 # A cd or pushd with nothing after it goes to the home folder.
 BARE_CD = re.compile(r"(?<![\w./-])(?:cd|pushd)(?:[ \t]+--)?[ \t]*(?:$|[;&|)}#\n])")
@@ -119,18 +127,18 @@ ANY, LEFT, RIGHT, COMMA = "﷐", "﷑", "﷒", "﷓"
 # Two more stand-ins, both "any characters inside one name": ONE for a group whose results cannot be listed
 # (a {1..9} run, a brace word with too many results, an extended wildcard group), SUB for a command's output.
 ONE, SUB = "﷔", "﷕"
+# What the stand-ins and "*" become in a regular expression: any characters inside one name, or across folders.
+NAME_RUN, PATH_RUN = "[^/]*", ".*"
 # A "$" right before a quote ($'' and $"") is part of the quote, and a backslash before a line end joins the lines.
 DOLLAR_QUOTE = re.compile(r"\$(?=[\"'])")
 HOME_FORM = re.compile(r"\$\{HOME(?![A-Za-z0-9_])[^}]*\}")
 SUBSTITUTION = re.compile(r"\$\([^()]*\)|`[^`]*`")
 EXTENDED_GROUP = re.compile(r"[@+!?*]\([^()]*\)")
 MAX_FOLDS = 20
-# git and gh take the text after these flags as a message, never as a command. Only text that a shell leaves
-# exactly as written is dropped: single-quoted, or double-quoted with no "$", backtick or backslash in it.
-MESSAGE_ARG = re.compile(
-    r"""((?:^|[\s;&|(])(?:git|gh)\s[^;&|\n'"]{0,400}?\s(?:-m|-am|--message|--body|--title|--notes)(?:=|[ \t]+))"""
-    r"""(?:'[^']*'|"[^"$`\\]*")"""
-)
+# A folder glued to a one-letter option, as in "-C/tmp", "-d$HOME/x" or "-o./out". The folder is checked as a word too.
+GLUED_OPTION = re.compile(r"-[A-Za-z]([~/$.].*)")
+# "~name" at the start of a word is that account's home folder; "~+" and "~-" are the current and the previous folder.
+TILDE_NAME = re.compile(r"~([A-Za-z0-9_.+-]+)(?=/|$)")
 
 
 class TooManyWords(Exception):
@@ -169,7 +177,8 @@ def reason_for(what):
         )
     return (
         f"BLOCKED: the {what} folder holds the merge lists or their guard; a session may not move, remove, "
-        "link, copy over or re-permission it. A person does that in a plain terminal."
+        "link, copy into or re-permission it. A person does that in a plain terminal. If the folder is only "
+        "named in a commit message or other message text, put the message in a file and pass the file."
     )
 
 
@@ -187,9 +196,27 @@ def check_path(tool_input):
     return None
 
 
+def home_of(name):
+    """The home folder a shell gives "~name", or None when there is no such account."""
+    try:
+        if name == pwd.getpwuid(os.getuid()).pw_name:
+            return HOME
+        return pwd.getpwnam(name).pw_dir
+    except (KeyError, OSError):
+        return None
+
+
 def expand(word):
     if word == "~" or word.startswith("~/"):
         word = HOME + word[1:]
+    elif word.startswith("~"):
+        named = TILDE_NAME.match(word)
+        if named and named.group(1)[0] in "+-":
+            # The current or the previous folder. Either is read as "here", which is then checked against the
+            # session's folder and every folder the command changes into.
+            word = "." + word[named.end():]
+        elif named and home_of(named.group(1)):
+            word = home_of(named.group(1)) + word[named.end():]
     # Every ${HOME...} form (${HOME:-x}, ${HOME%/}) is read as the home folder itself.
     return HOME_FORM.sub(lambda match: HOME, word).replace("$HOME", HOME)
 
@@ -308,16 +335,6 @@ def fold_groups(text):
     return text
 
 
-def drop_messages(command):
-    """The command without the message text git and gh are given: a message is data, not words of the command."""
-    for _ in range(MAX_FOLDS):
-        cut = MESSAGE_ARG.sub(lambda match: match.group(1) + "_", command)
-        if cut == command:
-            break
-        command = cut
-    return command
-
-
 def set_regex(part, i):
     """The bracket set that opens at part[i] as a regular expression, and the index after it; (None, i) if it never closes."""
     start = i + 1
@@ -361,6 +378,16 @@ def set_regex(part, i):
 def glob_regex(pattern, dots):
     """A wildcard path as a regular expression over a whole path. "**" and the any-folders stand-in cross "/"."""
     out = []
+
+    def any_run(piece):
+        # Two "any characters" side by side match what one does, and a run of them left as written makes a
+        # failed match try every way of sharing the name out between them: 30 in a row took a second.
+        if out and out[-1] in (NAME_RUN, PATH_RUN):
+            if piece == PATH_RUN:
+                out[-1] = PATH_RUN
+        else:
+            out.append(piece)
+
     for part in pattern.split("/"):
         if not part:
             continue
@@ -382,15 +409,15 @@ def glob_regex(pattern, dots):
                 i = after
                 continue
             if ch == ANY:
-                out.append(".*")
+                any_run(PATH_RUN)
             elif ch in (ONE, SUB):
                 # Inside one name only, and it may start with a dot: its real results are not known here.
-                out.append("[^/]*")
+                any_run(NAME_RUN)
             elif ch == "*":
                 j = i
                 while j < len(part) and part[j] == "*":
                     j += 1
-                out.append(".*" if j - i > 1 else "[^/]*")
+                any_run(PATH_RUN if j - i > 1 else NAME_RUN)
                 i = j
                 continue
             elif ch == "?":
@@ -437,15 +464,19 @@ def folders_of(words, cwd, home_too):
         bases.append(HOME)
     targets = set()
     for i, word in enumerate(words):
-        if word not in FOLDER_CHANGERS:
+        if word.startswith("-C") and len(word) > 2:
+            # "-Cfolder", the folder glued to the option.
+            target = expand(word[2:])
+        elif word not in FOLDER_CHANGERS:
             continue
-        j = i + 1
-        while word != "-C" and j < len(words) and words[j].startswith("-") and words[j] != "-":
-            j += 1
-        if j >= len(words):
-            continue
-        targets.add(j)
-        target = expand(words[j])
+        else:
+            j = i + 1
+            while word != "-C" and j < len(words) and words[j].startswith("-") and words[j] != "-":
+                j += 1
+            if j >= len(words):
+                continue
+            targets.add(j)
+            target = expand(words[j])
         if "$" in target:
             # A folder held in a variable cannot be read here; the home folder stands in for it.
             new = [HOME]
@@ -529,8 +560,9 @@ def check_bash(command, cwd):
         for name in BASE_NAMES:
             if name in text:
                 return name
-    # From here on the words are checked, and message text is not words. The name check above has read it.
-    texts = readings(drop_messages(command))
+    # From here on the words are checked. The text after "git commit -m" is checked like any other words: every
+    # way of skipping it also skipped a live command (a quote that is not where a message starts, "eval $_",
+    # "git bisect run sh -c -m ...", an editor set to sh). A message that trips a check goes in a file.
     home_too = any(BARE_CD.search(text) for text in texts)
     word_lists = []
     for text in texts:
@@ -565,6 +597,9 @@ def check_bash(command, cwd):
         for i, word in enumerate(words):
             try:
                 hit = check_word(word, bases, afa_verb, parent_verb, i in cd_targets, dots)
+                glued = GLUED_OPTION.fullmatch(word)
+                if not hit and glued:
+                    hit = check_word(glued.group(1), bases, afa_verb, parent_verb, False, dots)
             except Exception as exc:
                 # One word the checks cannot read is skipped; every other word is still checked.
                 if not warned:
