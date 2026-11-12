@@ -337,6 +337,23 @@ class RepoToolsTest(unittest.TestCase):
         self.assertEqual(line.count(" | "), 2)   # path | what | when, nothing smuggled in
         self.assertLess(len(line), len(str(rd)) + 600)
 
+    def test_purpose_skips_status_labels_and_how_to_and_falls_back_to_the_title(self):
+        readme = ("# Site Thing: staging proof\n\n**Staging site: https://x.example/**\n"
+                  "(NOT the bare label, it does not resolve at all in this zone.)\n\n"
+                  "Copy the example file to the real one before the first run of the stack.\n")
+        text, _ = self.build({"widget": {"README.md": readme, **self.WIDGET}})
+        line = next(ln for ln in text.splitlines() if "/widget |" in ln)
+        self.assertIn("Site Thing: staging proof", line)
+        self.assertNotIn("NOT the bare", line)
+        self.assertNotIn("Copy the example", line)
+
+    def test_purpose_keeps_a_real_description_after_a_status_label(self):
+        readme = ("# Co-op\n\n**Staging site: https://x.example/**\n\n"
+                  "Open-source technology co-op website built for the members of the group.\n")
+        text, _ = self.build({"widget": {"README.md": readme, **self.WIDGET}})
+        line = next(ln for ln in text.splitlines() if "/widget |" in ln)
+        self.assertIn("Open-source technology co-op website", line)
+
     def test_repo_name_with_odd_characters_in_the_list_is_skipped(self):
         text, rd = self.build({"widget": self.WIDGET}, extra_rows=["bad name; rm\tx\tmain\t2026-01-01\trepo\tmain"])
         self.assertNotIn("bad name", text)

@@ -257,6 +257,7 @@ GENERIC_SERVERS = {"playwright"}      # in nearly every repo's .mcp.json: says n
 GENERIC_COMMAND_PREFIXES = ("speckit.",)  # the SpecKit commands are copied into many repos
 MAX_REPO_ITEMS = 4
 SHARED_COMMAND_REPOS = 3
+NOT_PURPOSE = re.compile(r"^(?:\*\*|\[|Inspired by\b|[^\sA-Za-z0-9\"'`(\[]|\(|(?:The following|Please|If|When|Run|Use|Open|Go to|See|Current|Copy|Install|Clone|Start|Edit|Add|Set|Create)\b(?!-))")
 RULE_OPENING = re.compile(r"^(Never|Always|No |Do not|Don't|Auto-generated|Instructions for|This file)", re.I)
 
 
@@ -289,7 +290,7 @@ def purpose_sentence(text):
     in_fence = False
     para = []
     paras = []
-    for raw in text.splitlines():
+    for raw in text.splitlines()[:30]:   # a description sits right under the title; deeper is how-to or status
         ln = raw.strip()
         if ln.startswith("```"):
             in_fence = not in_fence
@@ -304,7 +305,11 @@ def purpose_sentence(text):
         para.append(ln)
     if para:
         paras.append(" ".join(para))
-    for p in paras:
+    for p in paras[:4]:   # a description comes near the top; further down it is a how-to or a status note
+        # a status label, a notice, a link line or a to-do lead-in is not what the repo is for
+        if NOT_PURPOSE.match(p):
+            continue
+        p = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", p)
         p = re.sub(r"https?://\S+", "", p)
         p = re.sub(r"[*`]|\*\*CRITICAL\*\*:?", "", p)
         p = re.sub(r"\s+", " ", p).strip(" :-")
@@ -395,7 +400,13 @@ def repo_entry(repo, shared=frozenset()):
     cmds = [c for c in repo_commands(repo) if c not in shared]
     if not items and not cmds:
         return None
-    what = _safe_text(purpose_sentence(docs[1]) or purpose_sentence(docs[0]))
+    what = _safe_text(purpose_sentence(docs[1]))
+    if len(re.findall(r"[A-Za-z]", what)) < 8:
+        # no descriptive paragraph in the README: its own title still says what the repo is
+        title = next((ln.lstrip("# ").strip() for ln in docs[1].splitlines() if ln.startswith("# ")), "")
+        what = _safe_text(re.sub(r"[*`]", "", title))
+    if len(re.findall(r"[A-Za-z]", what)) < 8:
+        what = _safe_text(purpose_sentence(docs[0]))
     if len(re.findall(r"[A-Za-z]", what)) < 8:
         what = f"Repository {repo.name}"
     bits = items[:MAX_REPO_ITEMS]
