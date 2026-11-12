@@ -20,6 +20,7 @@ deleted in the repo is left alone in ~/.claude. Exit 0 = done, 1 = some file ref
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,24 @@ STATE_NAME = "install-global-commit"
 def die(msg):
     print(f"install_global: {msg}", file=sys.stderr)
     sys.exit(2)
+
+
+GUARD_SRC = "global/.claude/hooks/draft-recipient-guard.py"
+GATE_RE = re.compile(rb'^SELF\s*=\s*["\'][^"\']*@example\.(?:com|org|net)["\']', re.M)
+
+
+def gate_check(repo, commit):
+    """Exit 4 while the commit's draft guard still carries the placeholder address and does not read ~/.config/afa/identity-guard.json
+    at run time (see install_scripts.py gate_check). INSTALL_GATE_OVERRIDE=1 is a person's switch, never a script's."""
+    r = subprocess.run(["git", "-C", repo, "show", f"{commit}:{GUARD_SRC}"], capture_output=True)
+    if r.returncode != 0 or not GATE_RE.search(r.stdout) or b"identity-guard.json" in r.stdout:
+        return
+    if os.environ.get("INSTALL_GATE_OVERRIDE") == "1":
+        print(f"install_global: gate OVERRIDDEN (the draft guard at {commit[:7]} still has its placeholder address)", file=sys.stderr)
+        return
+    print(f"install_global: the scrubbed repo is not ready to install: {GUARD_SRC} at {commit[:7]} still carries a placeholder address "
+          f"and does not read ~/.config/afa/identity-guard.json at run time. Land the run-time read first.", file=sys.stderr)
+    sys.exit(4)
 
 
 def git(repo, *args, raw=False):
@@ -147,6 +166,8 @@ def main(argv=None):
         return 0
 
     new = resolve(repo, a.new)
+    if not a.status:
+        gate_check(repo, new)
     if a.status:
         return status(repo, a.home, new)
 

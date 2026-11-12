@@ -336,6 +336,26 @@ def wrapper_check(repo, sha, home):
     return f"wrapper check: ok (the live {WRAPPER} case block equals the fixture at {sha[:7]})"
 
 
+GATE_RE = re.compile(rb'^SELF\s*=\s*["\'][^"\']*@example\.(?:com|org|net)["\']', re.M)
+GATE_ENV = "INSTALL_GATE_OVERRIDE"  # never set by a script; a person sets it to install a known-placeholder tree on purpose
+
+
+def gate_check(repo, sha):
+    """Refuse (exit 4) while the ref's draft guard still carries the placeholder address the history scrub left and does not
+    read the private identity file at run time: installing it would put a guard into ~/.claude that refuses his own drafts.
+    Lifts itself once the ref's guard reads ~/.config/afa/identity-guard.json. Never prints the guard."""
+    r = git(repo, "show", f"{sha}:{GUARD_SRC}", check=False)
+    if r.returncode != 0:
+        return "gate: not run (no draft guard at this ref)"
+    if GATE_RE.search(r.stdout) and b"identity-guard.json" not in r.stdout:
+        if os.environ.get(GATE_ENV) == "1":
+            return f"gate: OVERRIDDEN by {GATE_ENV}=1 (the draft guard at {sha[:7]} still has its placeholder address)"
+        die(f"the scrubbed repo is not ready to install: {GUARD_SRC} at {sha[:7]} still carries a placeholder address and does not read "
+            f"~/.config/afa/identity-guard.json at run time, so the installed guard would refuse his own drafts. "
+            f"Land the run-time read first (and the LiveHook draft-recipient test), then install", code=4)
+    return f"gate: ok (the draft guard at {sha[:7]} reads its private values at run time)"
+
+
 def guard_check(repo, sha, home):
     """The line to print: refuses (dies) when the hand copy of the draft guard is not the repo's, or is missing beside a live wrapper.
     Never prints the guard."""
@@ -383,6 +403,7 @@ def main(argv=None):
     sha = r.stdout.decode().strip()
     subject = git(repo, "log", "-1", "--format=%s", sha).stdout.decode().strip()
 
+    print(gate_check(repo, sha))
     print(wrapper_check(repo, sha, home))
     print(guard_check(repo, sha, home))
     plan = classify(repo, sha, home)
