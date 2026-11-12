@@ -157,8 +157,7 @@ class BigOutputTest(unittest.TestCase):
         adir = d / "out-dir-121212.txt"
         adir.mkdir()
         self.age(adir, 3 * 86400)
-        outside = Path(self.tmp + "-outside")
-        outside.mkdir()
+        outside = Path(fresh_dir(self))  # a second folder, removed with the test like the first
         target = outside / "target.txt"
         target.write_text("keep")
         self.age(target, 3 * 86400)
