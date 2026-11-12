@@ -13,7 +13,7 @@
 // password itself and this script never reads it; the 2-step code comes from otp_code.py. It logs
 // page changes (origin and path, no query) and never a field value. It never signs out and never
 // signs in through GoDaddy's "Sign in with Google" when Chrome has no saved password, then reaches
-// Gail's account by GoDaddy's own route (help article 12373): account.godaddy.com/access, then
+// the client's account by GoDaddy's own route (help article 12373): account.godaddy.com/access, then
 // "Access Now" on the row that names the client. A step-up is answered with the authenticator
 // (otp_code.py godaddy) only when the page offers it; an SMS-only step-up exits 5.
 'use strict';
@@ -215,7 +215,7 @@ async function main() {
 
       if (host.endsWith('godaddy.com')) {
         signedIn = true;
-        // Signed in as Jonathan: reach Gail's account by GoDaddy's own route (help 12373).
+        // Signed in as the author: reach the client's account by GoDaddy's own route (help 12373).
         if (!/^\/access/.test(new URL(url).pathname)) {
           if (!delegateOpened) {
             delegateOpened = true;
@@ -231,7 +231,7 @@ async function main() {
             while (n && n !== document.body) {
               const inN = btns.filter((x) => n.contains(x)).length;
               if (inN > 1) break;
-              if (n.textContent.includes(client)) { b.setAttribute('data-gd-access', 'gail'); return true; }
+              if (n.textContent.includes(client)) { b.setAttribute('data-gd-access', 'client'); return true; }
               n = n.parentElement;
             }
           }
@@ -239,7 +239,7 @@ async function main() {
         }, CLIENT).catch(() => false);
         if (tagged) {
           log('Access Now on the client row');
-          await page.locator('[data-gd-access="gail"]').first().click().catch(() => {});
+          await page.locator('[data-gd-access="client"]').first().click().catch(() => {});
           await page.waitForTimeout(3000);
           continue;
         }

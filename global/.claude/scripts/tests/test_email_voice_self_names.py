@@ -1,4 +1,4 @@
-"""email_voice_check.py: the author's surname for the third-person self-reference check is read at run time."""
+"""email_voice_check.py: the author's names for the third-person self-reference check are read at run time."""
 import importlib.util
 import json
 import sys
@@ -20,26 +20,37 @@ class SelfNamesTest(unittest.TestCase):
         f.write_text(body if isinstance(body, str) else json.dumps(body))
         return str(f)
 
-    def test_surnames_come_from_the_private_file(self):
-        self.assertEqual(evc.author_surnames(self.cfg({"author_surnames": ["Sample", "Tester"]})), ["Sample", "Tester"])
+    def test_names_come_from_the_private_file(self):
+        f = self.cfg({"author_surnames": ["Author", "Tester"], "author_first_names": ["Sample"]})
+        self.assertEqual(evc.author_surnames(f), ["Author", "Tester"])
+        self.assertEqual(evc.author_first_names(f), ["Sample"])
 
-    def test_missing_bad_or_empty_file_gives_the_placeholder(self):
+    def test_missing_bad_or_empty_file_gives_the_placeholders(self):
         self.assertEqual(evc.author_surnames(str(Path(fresh_dir(self)) / "absent.json")), ["Doe"])
+        self.assertEqual(evc.author_first_names(str(Path(fresh_dir(self)) / "absent.json")), [])
         for body in ("not json", {"author_surnames": []}, {"author_surnames": "x"}, {"author_surnames": ["a b", 3]}, ["x"]):
-            self.assertEqual(evc.author_surnames(self.cfg(body)), ["Doe"], body)
+            f = self.cfg(body)
+            self.assertEqual(evc.author_surnames(f), ["Doe"], body)
+            self.assertEqual(evc.author_first_names(f), [], body)
 
     def test_bare_first_name_trips_but_another_persons_full_name_does_not(self):
-        rx = evc.build_self_names(["Sample"])
-        self.assertTrue(rx.search("Jon has the password"))
-        self.assertIsNone(rx.search("Jon Smith joined"))
+        rx = evc.build_self_names(["Author"], ["Sample"])
+        self.assertTrue(rx.search("Sample has the password"))
+        self.assertIsNone(rx.search("Sample Other joined"))
 
     def test_the_authors_own_full_name_still_trips(self):
-        rx = evc.build_self_names(["Sample"])
-        self.assertTrue(rx.search("Jonathan Sample has the password"))
-        self.assertTrue(rx.search("Jon Wolfe has the password"))
+        rx = evc.build_self_names(["Author"], ["Sample"])
+        self.assertTrue(rx.search("Sample Author has the password"))
+        self.assertTrue(rx.search("Sample Wolfe has the password"))
+
+    def test_the_public_handles_always_count_and_no_first_names_are_built_in(self):
+        rx = evc.build_self_names(["Author"], [])
+        self.assertTrue(rx.search("TortoiseWolfe has the password"))
+        self.assertTrue(rx.search("Turtle Wolfe has the password"))
+        self.assertIsNone(rx.search("Sample has the password"))
 
     def test_module_default_is_built_from_the_loader(self):
-        self.assertTrue(evc.SELF_NAMES.search("Jon has the password"))
+        self.assertEqual(evc.SELF_NAMES.pattern, evc.build_self_names(evc.author_surnames(), evc.author_first_names()).pattern)
 
 
 if __name__ == "__main__":

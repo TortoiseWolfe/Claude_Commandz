@@ -866,26 +866,35 @@ def has_quoted_points(text):
 # password" is the author talking about himself in the third person. The negative
 # lookahead for a following capitalised word draws that line, with the author's
 # own surnames (from the private file) allowed through so the author's full name still trips it.
-# The author's real surname lives in a private file, never in this public repo:
-#   ~/.config/afa/voice-check.json   {"author_surnames": ["Surname", ...]}   (mode 600; VOICE_CHECK_CONFIG overrides the path)
-# With no readable file the placeholder "Doe" stands in.
-def author_surnames(path=None):
+# The author's first names and surnames live in a private file, never in this public repo:
+#   ~/.config/afa/voice-check.json   {"author_first_names": ["First", ...], "author_surnames": ["Surname", ...]}
+#   (mode 600; VOICE_CHECK_CONFIG overrides the path). The public handles (TurtleWolfe, TortoiseWolfe) always count.
+# With no readable file the first names are empty and the surname placeholder is "Doe".
+def _author_list(key, path=None):
     where = os.path.expanduser(path or os.environ.get('VOICE_CHECK_CONFIG') or '~/.config/afa/voice-check.json')
     try:
         with open(where) as f:
-            names = json.load(f).get('author_surnames')
+            names = json.load(f).get(key)
     except (OSError, ValueError, AttributeError):
         names = None
-    good = [n for n in (names if isinstance(names, list) else []) if isinstance(n, str) and re.fullmatch(r'[A-Za-z]+', n)]
-    return good or ['Doe']
+    return [n for n in (names if isinstance(names, list) else []) if isinstance(n, str) and re.fullmatch(r'[A-Za-z]+', n)]
 
 
-def build_self_names(surnames):
+def author_surnames(path=None):
+    return _author_list('author_surnames', path) or ['Doe']
+
+
+def author_first_names(path=None):
+    return _author_list('author_first_names', path)
+
+
+def build_self_names(surnames, first_names=()):
     allowed = '|'.join(re.escape(s) + r'\b' for s in list(surnames) + ['Wolfe'])
-    return re.compile(r'\b(?:Jon|Jonathan|Turtle\s?Wolfe|TortoiseWolfe)\b' + r'(?!\s+(?!' + allowed + r')[A-Z][a-z])')
+    who = '|'.join([re.escape(n) for n in first_names] + [r'Turtle\s?Wolfe', 'TortoiseWolfe'])
+    return re.compile(r'\b(?:' + who + r')\b' + r'(?!\s+(?!' + allowed + r')[A-Z][a-z])')
 
 
-SELF_NAMES = build_self_names(author_surnames())
+SELF_NAMES = build_self_names(author_surnames(), author_first_names())
 
 
 URL_IN_PROSE = re.compile(r'https?://\S+')
