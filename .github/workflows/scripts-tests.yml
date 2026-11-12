@@ -56,6 +56,9 @@ jobs:
           mkdir -p "$HOME/.claude/hooks"
           cp tests/fixtures/block-outbound.case.sh "$HOME/.claude/hooks/block-outbound.sh"
           cp draft-recipient-guard.py "$HOME/.claude/hooks/draft-recipient-guard.py"
+          # The guard reads the owner's address at run time from this private file; on a runner it holds a placeholder.
+          mkdir -p "$HOME/.config/afa"
+          printf '{"draft_recipient": "owner@example.com"}\n' > "$HOME/.config/afa/identity-guard.json"
           python3 -m pytest tests --collect-only -q -p no:cacheprovider > "$RUNNER_TEMP/hooks-collected.out"
           python3 "$GITHUB_WORKSPACE/.github/scripts/ci_test_coverage.py" pytest-ran "$RUNNER_TEMP/hooks-collected.out" hooks
           python3 -m pytest tests -q -p no:cacheprovider -rs | tee "$RUNNER_TEMP/hooks-pytest.out"

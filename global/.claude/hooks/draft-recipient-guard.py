@@ -8,6 +8,10 @@ Why: the connector rewrites every <a href> into a www.google.com/url redirect, s
 block-outbound.sh pipes the hook payload here for the two draft tools. Exit 2 with the reason on stderr denies; exit 0 allows.
 Fail closed: a payload this cannot read, or a recipient it cannot parse, is denied.
 
+The owner's address is never stored in the repo. It is read at run time from ~/.config/afa/identity-guard.json, key
+"draft_recipient" (private, mode 600; IDENTITY_GUARD_CONFIG names another file for tests). With no such file or key, every
+Gmail draft is denied: a guard that cannot tell who "Jonathan himself" is must not guess.
+
   update_draft keeps the recipients of the draft when it is given none, and that draft may be a client's, so an update must
   name its To explicitly and every address must be Jonathan's.
   create_draft with replyToMessageId and no To would be addressed by the connector to the sender of the original, so the
@@ -15,17 +19,31 @@ Fail closed: a payload this cannot read, or a recipient it cannot parse, is deni
 """
 import email.utils
 import json
+import os
 import sys
 
-SELF = "owner@example.com"
+CONFIG = "~/.config/afa/identity-guard.json"
 DRAFT_TOOLS = ("mcp__claude_ai_Gmail__create_draft", "mcp__claude_ai_Gmail__update_draft")
 WHY = (
     "drafts to anyone but Jonathan go through python3 ~/.claude/scripts/gmail_api.py draft-create "
     "(--reply-to <message id> keeps the thread; --html FILE --text FILE; --to, --cc, --bcc; --inline CID=FILE; --attach FILE), "
     "because the connector rewrites every link into a google.com/url redirect. To fix a client draft that already exists: "
-    "gmail_api.py draft-fix-links <draftId>. Agent notes to owner@example.com stay on the connector "
-    "(update_draft must name to=[\"owner@example.com\"] explicitly)."
+    "gmail_api.py draft-fix-links <draftId>. Agent notes to Jonathan's own address stay on the connector "
+    "(update_draft must name that address in to explicitly)."
 )
+
+
+def load_self():
+    """The owner's address from the private config, lower-cased, or None when the file or key is missing or unreadable."""
+    path = os.path.expanduser(os.environ.get("IDENTITY_GUARD_CONFIG") or CONFIG)
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f).get("draft_recipient")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(value, str) and "@" in value.strip():
+        return value.strip().lower()
+    return None
 
 
 def addresses(value):
@@ -54,6 +72,10 @@ def check(payload):
     if tool not in DRAFT_TOOLS:
         return None
     args = payload.get("tool_input") or {}
+    SELF = load_self()
+    if SELF is None:
+        return ("%s: the owner's address is not readable from %s (key draft_recipient), so no draft can be told apart from a client's; %s"
+                % (tool.rsplit("__", 1)[-1], CONFIG, WHY))
     try:
         fields = {k: addresses(args.get(k)) for k in ("to", "cc", "bcc")}
     except ValueError as e:
