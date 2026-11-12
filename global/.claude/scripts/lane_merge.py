@@ -182,6 +182,15 @@ def scan_log(text):
     return summaries, skips
 
 
+def job_log(repo, job_id):
+    """One Actions job's log. A job log carries colour codes, and gh refuses to print those unless it is told it may."""
+    path = "repos/%s/actions/jobs/%s/logs" % (repo, job_id)
+    rc, out, err = gh(["api", "--allow-escape-sequences", path], 180)
+    if rc != 0 and "unknown flag" in err:
+        rc, out, err = gh(["api", path], 180)  # an older gh has no such flag and prints the log as it is
+    return rc, out, err
+
+
 def check_logs(repo, pr):
     """Read every Actions job log. Returns (job log count, [checks that cannot be read], [jobs whose log shows no test summary])."""
     jobs = 0
@@ -194,7 +203,7 @@ def check_logs(repo, pr):
         if not m:
             unreadable.append(name)
             continue
-        rc, out, err = gh(["api", "repos/%s/actions/jobs/%s/logs" % (repo, m.group(1))], 180)
+        rc, out, err = job_log(repo, m.group(1))
         if rc != 0:
             refuse("could not fetch the CI log for job %r (%s); zero skips is not proven; the hub checks this one"
                    % (name, (err.strip() or "gh failed")[:200]))

@@ -43,10 +43,17 @@ elif args[:2] == ["pr", "diff"]:
             sys.stderr.write("no diff\\n"); sys.exit(1)
         print(sc["diff"])
 elif args[:1] == ["api"]:
-    job = args[1].split("/")[-2]
+    allowed = "--allow-escape-sequences" in args
+    if allowed and sc.get("old_gh"):
+        sys.stderr.write("unknown flag: --allow-escape-sequences\\n"); sys.exit(1)
+    job = args[-1].split("/")[-2]
     text = sc["logs"].get(job)
     if text is None:
         sys.stderr.write("HTTP 410\\n"); sys.exit(1)
+    if "\\x1b" in text and not allowed and not sc.get("old_gh"):
+        # what the real gh does with a job log: it holds colour codes, and gh will not print them unasked
+        sys.stderr.write("the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway\\n")
+        sys.exit(1)
     sys.stdout.write(text)
 elif args[:2] == ["pr", "merge"]:
     if sc.get("merge_fail"):
@@ -306,7 +313,19 @@ class LogSkips(Base):
     def test_logs_are_fetched_with_the_api_path_for_the_job(self):
         self.go(None, "--check")
         apis = [c for c in self.calls_made() if c[0] == "api"]
-        self.assertEqual(apis, [["api", "repos/%s/actions/jobs/101/logs" % REPO], ["api", "repos/%s/actions/jobs/102/logs" % REPO]])
+        self.assertEqual(apis, [["api", "--allow-escape-sequences", "repos/%s/actions/jobs/101/logs" % REPO],
+                                ["api", "--allow-escape-sequences", "repos/%s/actions/jobs/102/logs" % REPO]])
+
+    def test_an_older_gh_without_the_colour_code_flag_is_asked_again_without_it(self):
+        r = self.go(scenario(old_gh=True), "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        apis = [c for c in self.calls_made() if c[0] == "api"]
+        self.assertEqual(apis[:2], [["api", "--allow-escape-sequences", "repos/%s/actions/jobs/101/logs" % REPO],
+                                    ["api", "repos/%s/actions/jobs/101/logs" % REPO]])
+
+    def test_an_older_gh_still_has_its_skips_read(self):
+        self.refused(self.go(scenario(old_gh=True, logs={"101": "=== 5 passed, 2 skipped in 1.0s ===\n", "102": PYTEST_OK})),
+                     "2 skipped")
 
 
 class Diff(Base):
