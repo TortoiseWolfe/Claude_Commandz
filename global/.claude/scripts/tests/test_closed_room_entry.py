@@ -1,22 +1,33 @@
 """Tests for closed_room_entry.py (ticket 81): which folders under the home the restarted pytest run keeps visible.
 
-Invented folders under pytest's tmp_path only. The account home and the checkout are swapped for those folders, so nothing here looks at
-the real ones, and nothing is started: the tests read the command line _plan() would hand to closed_room.sh.
+Invented folders under one temporary folder only (tmpdirs.fresh_dir, removed when the test ends; pytest's own tmp_path would leave a
+pytest-of-<user> folder behind, which test_no_tmp_leak.py refuses). The account home and the checkout are swapped for those folders, so
+nothing here looks at the real ones, and nothing is started: the tests read the command line _plan() would hand to closed_room.sh.
 """
 import os
+import pathlib
+import shutil
 import sys
 
 import pytest
 
 import closed_room_entry as entry
+import tmpdirs
 
 PRIVATE = (".claude", ".config", ".ssh", ".gnupg")
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    top = tmp_path / "checkout"
+def box():
+    d = tmpdirs.fresh_dir(prefix="closed-room-entry-")
+    yield pathlib.Path(d)
+    shutil.rmtree(d, True)
+
+
+@pytest.fixture
+def home(box, monkeypatch):
+    home = box / "home"
+    top = box / "checkout"
     home.mkdir()
     top.mkdir()
     monkeypatch.setattr(entry, "_account_home", lambda: os.path.realpath(home))
@@ -87,8 +98,8 @@ def test_the_home_itself_and_the_checkout_are_never_listed(home, monkeypatch):
     assert _kept(entry._plan(["python3", "-m", "pytest"])) == []
 
 
-def test_a_home_the_caller_set_elsewhere_is_kept_and_seeded(home, tmp_path, monkeypatch):
-    other = tmp_path / "ci-home"
+def test_a_home_the_caller_set_elsewhere_is_kept_and_seeded(home, box, monkeypatch):
+    other = box / "ci-home"
     other.mkdir()
     monkeypatch.setenv("HOME", str(other))
     assert entry._given_home(os.path.realpath(home)) == os.path.realpath(other)
@@ -106,9 +117,9 @@ def test_a_home_the_caller_set_inside_a_private_folder_is_not_kept_or_seeded(hom
     assert _kept(entry._plan(["python3", "-m", "pytest"])) == []
 
 
-def test_the_account_home_or_a_missing_folder_as_home_is_not_a_given_home(home, tmp_path, monkeypatch):
+def test_the_account_home_or_a_missing_folder_as_home_is_not_a_given_home(home, box, monkeypatch):
     assert entry._given_home(os.path.realpath(home)) == ""
-    monkeypatch.setenv("HOME", str(tmp_path / "not-there"))
+    monkeypatch.setenv("HOME", str(box / "not-there"))
     assert entry._given_home(os.path.realpath(home)) == ""
     monkeypatch.delenv("HOME")
     assert entry._given_home(os.path.realpath(home)) == ""
