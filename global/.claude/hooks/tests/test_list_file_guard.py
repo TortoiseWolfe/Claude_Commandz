@@ -20,6 +20,12 @@ def home(tmp_path):
     afa.mkdir(parents=True)
     for name in NAMES + ("machine",):
         (afa / name).write_text("example-owner/example-repo\n")
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "list-file-guard.py").write_text("# installed copy\n")
+    (hooks / "secret-guard.py").write_text("# other hook\n")
+    (tmp_path / ".config" / "other").mkdir()
+    (tmp_path / "notes").mkdir()
     return tmp_path
 
 
@@ -34,8 +40,11 @@ def call(home, tool, **tool_input):
     return run(home, {"tool_name": tool, "tool_input": tool_input})
 
 
-def bash(home, command):
-    return call(home, "Bash", command=command)
+def bash(home, command, cwd=None):
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
+    return run(home, payload)
 
 
 def assert_blocked(res):
@@ -151,3 +160,118 @@ def test_reason_never_echoes_the_command(home):
     folder = bash(home, f"mv ~/.config/afa /tmp/{marker}")
     assert_blocked(folder)
     assert marker not in folder.stderr
+    own = bash(home, f"cp /tmp/{marker} ~/.claude/hooks/list-file-guard.py")
+    assert_blocked(own)
+    assert marker not in own.stderr
+    assert "cp" not in own.stderr.split("BLOCKED:")[1].split()
+
+
+# ---- the rewrite: session folder, folder changes, wildcards anywhere, own copy ----
+
+@pytest.mark.parametrize("command", [
+    "cat merge-*", "rm *", "cat m*", "rm -rf .", "ls own-review-r?pos.txt",
+])
+def test_cwd_inside_list_folder_blocked(home, command):
+    assert_blocked(bash(home, command, cwd=home / ".config" / "afa"))
+
+
+@pytest.mark.parametrize("command", [
+    "cd ~/.config/afa && cat m*",
+    "cd ~/.config && mv afa afa-old",
+    "cd ~/.config && rm -r afa",
+    "pushd ~/.config/afa; sed -i s/a/b/ [mo]*",
+    "cd $HOME/.config/afa && cat *",
+])
+def test_folder_change_blocked(home, command):
+    assert_blocked(bash(home, command, cwd=home))
+
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.conf*/afa/merge*",
+    "cat ~/.config/a*/*",
+    "ls ~/.config/*/own-review-*",
+])
+def test_wildcard_in_folder_part_blocked(home, command):
+    assert_blocked(bash(home, command))
+
+
+def test_braces_blocked(home):
+    assert_blocked(bash(home, "cat ~/.config/afa/{merge,own-review}-repos.{txt,bak}"))
+
+
+@pytest.mark.parametrize("command", ["cat ~/afa-link/m*", "rm -r ~/afa-link"])
+def test_symlink_to_folder_blocked(home, command):
+    (home / "afa-link").symlink_to(home / ".config" / "afa")
+    assert_blocked(bash(home, command))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_symlink_to_list_file_blocked(home, name):
+    (home / "innocent.txt").symlink_to(home / ".config" / "afa" / name)
+    assert_blocked(bash(home, "cat ~/innocent.txt"))
+
+
+def test_variable_holding_folder_blocked(home):
+    assert_blocked(bash(home, "d=~/.config/afa; rm -r $d"))
+
+
+@pytest.mark.parametrize("command", [
+    "mv ~/.config ~/config-old",
+    "rm -rf ~/.claude/hooks",
+    "chmod -R 000 ~/.config",
+    "cd ~ && mv .config x",
+])
+def test_parent_folders_blocked(home, command):
+    assert_blocked(bash(home, command, cwd=home))
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit"])
+def test_own_copy_edit_tools_blocked(home, tool):
+    assert_blocked(call(home, tool, file_path="~/.claude/hooks/list-file-guard.py"))
+
+
+@pytest.mark.parametrize("command", [
+    "cp /tmp/x ~/.claude/hooks/list-file-guard.py",
+    "cd ~/.claude/hooks && rm list-file-g*",
+    "sed -i s/a/b/ ~/.claude/hooks/list-file-guard.py",
+])
+def test_own_copy_bash_blocked(home, command):
+    assert_blocked(bash(home, command, cwd=home))
+
+
+def test_find_delete_in_list_folder_blocked(home):
+    assert_blocked(bash(home, "find ~/.config/afa -type f -delete"))
+
+
+def test_too_many_folder_changes_blocked(home):
+    command = " && ".join(f"cd d{i}" for i in range(30))
+    res = bash(home, command, cwd=home)
+    assert_blocked(res)
+    assert "d29" not in res.stderr
+
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.config/afa/machine",
+    "ls ~/.config/afa",
+    "cd ~/.config/afa && cat machine",
+    "cp notes.txt ~/.config/other/",
+    "ls ~/.claude/hooks",
+    "cat ~/.claude/hooks/secret-guard.py",
+    "find ~/notes -name x",
+    "mv notes.txt ~/.config/other/notes.txt",
+    "ls *.txt",
+    "rm *.txt",
+])
+def test_rewrite_allowed(home, command):
+    assert_allowed(bash(home, command, cwd=home / "notes"))
+
+
+@pytest.mark.parametrize("command", [
+    "python3 -m pytest global/.claude/hooks/tests -q",
+    "git add global/.claude/hooks/list-file-guard.py",
+])
+def test_repo_copy_is_not_installed_copy(home, command):
+    repo_hook = home / "repo" / "global" / ".claude" / "hooks" / "list-file-guard.py"
+    repo_hook.parent.mkdir(parents=True)
+    repo_hook.write_text("# repo copy\n")
+    assert_allowed(bash(home, command, cwd=home / "repo"))
