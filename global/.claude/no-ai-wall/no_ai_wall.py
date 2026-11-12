@@ -806,7 +806,8 @@ def _runs_listed_python(words, seg):
     dash, an interactive run, a bundle of option letters. With one of those Python runs something other than the file, and the file would only be an argument handed to
     it. The cleanup command takes no path, so nothing may follow it but --apply.
     seg is the raw text of the part of the command the words came from. The path the rule compares must be the path the machine opens, so the file's word must be:
-    written plainly, with no quote, backslash or odd white space before or in it (the shell would hand Python other text than the rule read);
+    written plainly, with no quote or backslash and no white space of any kind before, in or after it (the shell would hand Python other text than the rule read,
+    and a white-space character on the end of the word is part of the file name the shell passes on);
     a full path from /, ~/ or $HOME/ (a relative path is opened against the working folder, not against /), with no other variable (the shell's value may differ from the
     hook's) and no ".." (it is removed as text here, but the shell follows links first); for $HOME/, a home with no white space or wildcard (the shell would split it);
     the listed file's own name, never a link to it (a link can be re-pointed between the check and the run, and its name can be a wildcard pattern)."""
@@ -816,6 +817,8 @@ def _runs_listed_python(words, seg):
     if i >= len(words) or words[i].startswith("-"):
         return False
     word = words[i]
+    if any(ch.isspace() for ch in word):
+        return False
     if re.split(r"[ \t]+", seg.strip(" \t"))[:i + 1] != words[:i + 1]:
         return False
     if not word.startswith(("/", "~/", "$HOME/")) or "$" in word[1:] or ".." in word.split("/"):

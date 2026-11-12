@@ -438,6 +438,22 @@ class SecurityFindingTests(Fixture):
                     "python3 -I $HOME/.claude/no-ai-wall/wall_cleanup.py --apply", 'python3 %s --keys-only "%s"' % (rv, self.pfile),
                     "python3\t-I\t%s\tstatus" % mod):
             self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        # No white space of any kind may end the file's word: strip() in expand() would drop it, but the shell passes it on, and Python opens a sibling file.
+        # The rule function is called directly with text only (the full check stops earlier on these texts).
+        forms = [("module", mod, ["status"]), ("module (~/ form)", "~/.claude/no-ai-wall/no_ai_wall.py", ["status"]), ("cleanup command", clean, ["--apply"]),
+                 ("redact_view.py", rv, ["--keys-only", self.pfile])]
+        for label, path, rest in forms:
+            for ch in ("\v", "\f", "\xa0", "\x1c", "\x1f", "\u2003", "\u2028"):
+                words = ["python3", path + ch] + rest
+                self.assertFalse(w._runs_listed_python(words, " ".join(words)), "%r on the end of the word for the %s" % (ch, label))
+        words = ["python3", mod, "status"]
+        self.assertTrue(w._runs_listed_python(words, " ".join(words)))
+
+    def test_a_home_folder_with_a_space_refuses_the_home_form(self):
+        """$HOME/ in a command is split by the shell when the home folder's name holds white space, so the rule refuses it."""
+        os.environ["HOME"] = os.path.join(self.tmp, "my home")
+        words = ["python3", "$HOME/.claude/no-ai-wall/no_ai_wall.py", "status"]
+        self.assertFalse(w._runs_listed_python(words, " ".join(words)))
 
     def test_a_listing_program_is_a_bare_name_or_a_system_path(self):
         """A listing program is a bare name or sits directly under /usr/bin or /bin; a path to any other folder is refused."""
