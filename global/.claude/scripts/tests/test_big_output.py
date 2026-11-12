@@ -84,6 +84,110 @@ class BigOutputTest(unittest.TestCase):
                             capture_output=True, text=True, env=env)
         self.assertEqual(r2.stdout, BIG)
 
+    # ---- latest mode and pruning ----
+    def names(self):
+        return sorted(os.listdir(self.tmp))
+
+    def age(self, path, seconds):
+        t = __import__("time").time() - seconds
+        os.utime(path, (t, t), follow_symlinks=False)
+
+    def test_latest_mode_replaces_one_fixed_file(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        _, p1 = self.run_emit(BIG, folder=self.tmp, latest=True)
+        self.assertEqual(p1.name, "out-t-latest.txt")
+        second = BIG + "extra line\n"
+        _, p2 = self.run_emit(second, folder=self.tmp, latest=True)
+        self.assertEqual(p2, p1)
+        self.assertEqual(p2.read_text(), second)
+        self.assertEqual(self.names(), ["out-t-latest.txt"])
+        self.assertEqual(oct(p2.stat().st_mode & 0o777), "0o600")
+
+    def test_latest_mode_leaves_no_temporary_file(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        self.run_emit(BIG, folder=self.tmp, latest=True)
+        self.assertEqual([n for n in self.names() if n.endswith(".tmp")], [])
+
+    def test_latest_note_names_the_latest_path(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        out, p = self.run_emit(BIG, folder=self.tmp, latest=True)
+        self.assertIn(str(Path(self.tmp) / "out-t-latest.txt"), out)
+
+    def test_latest_cli_flag(self):
+        env = dict(os.environ, AFA_BIG_OUT="1")
+        for _ in range(2):
+            subprocess.run([sys.executable, "-I", str(HERE.parent / "big_output.py"), "--name", "board", "--folder", self.tmp, "--latest"],
+                           input=BIG, capture_output=True, text=True, env=env)
+        self.assertEqual(self.names(), ["out-board-latest.txt"])
+
+    def test_pruning_removes_only_old_tool_shaped_regular_files(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        d = Path(self.tmp)
+        old = d / "out-other-101010.txt"
+        young = d / "out-t-111111.txt"
+        latest = d / "out-t-latest.txt"
+        notes = d / "notes.txt"
+        md = d / "out-report.md"
+        for f in (old, young, latest, notes, md):
+            f.write_text("x")
+        for f in (old, latest, notes, md):
+            self.age(f, 3 * 86400)
+        self.age(young, 3600)
+        adir = d / "out-dir-121212.txt"
+        adir.mkdir()
+        self.age(adir, 3 * 86400)
+        outside = Path(self.tmp + "-outside")
+        outside.mkdir()
+        target = outside / "target.txt"
+        target.write_text("keep")
+        self.age(target, 3 * 86400)
+        link = d / "out-link-131313.txt"
+        os.symlink(target, link)
+        self.age(link, 3 * 86400)
+        self.run_emit(BIG, folder=self.tmp, latest=True)
+        self.assertFalse(old.exists())
+        for f in (young, notes, md, adir):
+            self.assertTrue(f.exists(), f)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_text(), "keep")
+        self.assertEqual(latest.read_text(), BIG)  # replaced, not pruned
+
+    def test_pruning_runs_for_time_named_mode_too(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        old = Path(self.tmp) / "out-x-000001.txt"
+        old.write_text("x")
+        self.age(old, 2 * 86400)
+        _, p = self.run_emit(BIG, folder=self.tmp)
+        self.assertFalse(old.exists())
+        self.assertTrue(p.exists())
+
+    def test_under_the_limit_writes_and_prunes_nothing(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        old = Path(self.tmp) / "out-x-000001.txt"
+        old.write_text("x")
+        self.age(old, 2 * 86400)
+        out, p = self.run_emit(SMALL, folder=self.tmp, latest=True)
+        self.assertIsNone(p)
+        self.assertEqual(out, SMALL)
+        self.assertEqual(self.names(), ["out-x-000001.txt"])
+
+    def test_a_failed_delete_does_not_stop_the_answer(self):
+        os.environ["AFA_BIG_OUT"] = "1"
+        old = Path(self.tmp) / "out-x-000001.txt"
+        old.write_text("x")
+        self.age(old, 2 * 86400)
+        real = os.unlink
+
+        def boom(*a, **k):
+            raise PermissionError("no")
+        os.unlink = boom
+        try:
+            out, p = self.run_emit(BIG, folder=self.tmp, latest=True)
+        finally:
+            os.unlink = real
+        self.assertIn(str(p), out)
+        self.assertTrue(old.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
