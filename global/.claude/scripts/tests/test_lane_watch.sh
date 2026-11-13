@@ -7,6 +7,8 @@ export AFA_ENGINES_AVAILABLE="*"
 # The idle heartbeat stretch (tests/test_lane_watch_quiet.sh covers it) would turn every "--max-min 0" run here into a two-hour wait.
 export LANE_WATCH_IDLE_MAX_MIN=0
 export LANE_WATCH_IDLE_REMIND_MIN=0   # off for the older cases; the idle-reminder cases below turn it on
+# hub_transcript reads these two: left set, the hub-transcript checks would read the real session's transcript, not the test's.
+unset CLAUDE_CODE_SESSION_ID AFA_HUB_SESSION_ID
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_watch.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-watch.XXXXXX")"
@@ -1174,6 +1176,11 @@ if printf '%s\n' "$out" | grep -q '^update failed: of-lane: no new handoff.md in
 else echo "FAIL UPDATE-FAILED row: $out"; failures=$((failures + 1)); fi
 out=$(of_run)
 if ! printf '%s\n' "$out" | grep -q '^update failed:'; then echo "ok   ... and only once"; else echo "FAIL UPDATE-FAILED row reported twice: $out"; failures=$((failures + 1)); fi
+# A later column holding FAILED puts tab-FAILED-tab in the row; the third column is still UPDATE-FAILED, so it is an update failure only.
+printf '2026-11-10T09:02:00-04:00\tof-lane\tUPDATE-FAILED\tthe lane did not go idle\tFAILED\textra column\n' >> "$of_log"
+out=$(of_run)
+if printf '%s\n' "$out" | grep -q '^update failed: of-lane: the lane did not go idle' && ! printf '%s\n' "$out" | grep -q '^recycle failed:'; then echo "ok   an UPDATE-FAILED row with a later column holding FAILED is an update failure and never a recycle failure"
+else echo "FAIL UPDATE-FAILED row with a later FAILED column: $out"; failures=$((failures + 1)); fi
 printf '2026-11-10T09:05:00-04:00\tof-lane\tFAILED\tthe hand-off request did not reach the lane\n' >> "$of_log"
 out=$(of_run)
 if printf '%s\n' "$out" | grep -q '^recycle failed: of-lane: the hand-off request did not reach the lane' && ! printf '%s\n' "$out" | grep -q '^update failed:'; then echo "ok   a FAILED row is still named as a recycle failure"
@@ -1285,6 +1292,81 @@ for off in 0 off; do
   out=$(LANE_WATCH_UNANSWERED_MIN=$off ua_run)
   if ! printf '%s\n' "$out" | grep -q '^unanswered:'; then echo "ok   unanswered: LANE_WATCH_UNANSWERED_MIN=$off turns the check off"; else echo "FAIL unanswered off=$off: $out"; failures=$((failures + 1)); fi
 done
+rm -f "$ua_proj"/*.jsonl "$ua_rec"/.unanswered-*
+
+# The unanswered-question check reads the hub's own transcript (the one named by CLAUDE_CODE_SESSION_ID), not a newer file of a lane.
+{ ua_user 40 "do the thing"; ua_asst a-own 20 "Which option do you want, A or B?"; } > "$ua_proj/sess-q.jsonl"
+{ ua_user 40 "work"; ua_asst a-lane 20 "All done. Nothing more."; } > "$ua_proj/lane-q.jsonl"
+touch -d '10 minutes ago' "$ua_proj/sess-q.jsonl"; touch -d '1 minute ago' "$ua_proj/lane-q.jsonl"
+CLAUDE_CODE_SESSION_ID=sess-q ua_case "the named transcript's open question fires although a newer file has none" fire
+CLAUDE_CODE_SESSION_ID=lane-q ua_case "the named transcript has no question: the older file's question is not read" quiet
+ua_case "with no id the newest file is read (as before)" quiet
+rm -f "$ua_proj"/*.jsonl "$ua_rec"/.unanswered-*
+
+# hub_transcript: the hub's hand-off wake measures the hub's own transcript. Context size comes from a fake context-warn.py that prints the
+# file's size in bytes; AFA_HANDOFF_K=1 puts the line at 1000 bytes.
+ho_home="$TMP/ho-home"; ho_proj="$TMP/ho-proj"
+mkdir -p "$ho_home/.claude/state/lanes" "$ho_home/.claude/hooks" "$ho_proj"
+printf 'import os, sys\nprint(os.path.getsize(sys.argv[-1]))\n' > "$ho_home/.claude/hooks/context-warn.py"
+ho_run() { # ho_run <env assignments...>: one pass; prints the output
+  env "$@" HOME="$ho_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/nt-lane.sh" LANE_SPEND_CMD=/bin/true \
+    LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 AFA_HUB_PROJECTS_DIR="$ho_proj" AFA_HANDOFF_K=1 LANE_WATCH_UNANSWERED_MIN=off \
+    timeout 20 bash "$SCRIPT" --max-min 0 dd-ok 2>&1 || true
+}
+ho_big() { head -c 3000 /dev/zero | tr '\0' 'x' > "$1"; }
+ho_small() { printf 'small\n' > "$1"; }
+ho_case() { # ho_case <label> <want wake|quiet> <env assignments...>
+  local label=$1 want=$2 out got=quiet; shift 2
+  rm -f "$ho_home"/.claude/state/hub-handoff-woke.*
+  out=$(ho_run "$@")
+  printf '%s\n' "$out" | grep -q '^hub context: .*hand-off line' && got=wake
+  if [ "$got" = "$want" ]; then echo "ok   hub hand-off: $label"; else echo "FAIL hub hand-off $label: want $want, got $got: $out"; failures=$((failures + 1)); fi
+}
+ho_reset() { rm -rf "$ho_proj"; mkdir -p "$ho_proj"; }
+ho_reset; ho_small "$ho_proj/sess-a.jsonl"; ho_big "$ho_proj/sess-b.jsonl"
+touch -d '10 minutes ago' "$ho_proj/sess-a.jsonl"; touch -d '1 minute ago' "$ho_proj/sess-b.jsonl"
+ho_case "the named transcript is small and a newer one is big: no wake" quiet CLAUDE_CODE_SESSION_ID=sess-a
+ho_case "no id: the newest (big) file is read, as before" wake
+ho_reset; ho_big "$ho_proj/sess-a.jsonl"; ho_small "$ho_proj/sess-b.jsonl"
+touch -d '10 minutes ago' "$ho_proj/sess-a.jsonl"; touch -d '1 minute ago' "$ho_proj/sess-b.jsonl"
+ho_case "the named transcript is big and a newer one is small: wake" wake CLAUDE_CODE_SESSION_ID=sess-a
+ho_case "AFA_HUB_SESSION_ID (small) wins over CLAUDE_CODE_SESSION_ID (big)" quiet AFA_HUB_SESSION_ID=sess-b CLAUDE_CODE_SESSION_ID=sess-a
+ho_case "AFA_HUB_SESSION_ID (big) wins over CLAUDE_CODE_SESSION_ID (small)" wake AFA_HUB_SESSION_ID=sess-a CLAUDE_CODE_SESSION_ID=sess-b
+ho_reset; ho_small "$ho_proj/sess.a.jsonl"; ho_big "$ho_proj/sess-b.jsonl"; mkdir "$ho_proj/sub"; ho_small "$ho_proj/sub/x.jsonl"; ho_small "$ho_proj/sess-c.jsonl"
+touch -d '10 minutes ago' "$ho_proj/sess.a.jsonl" "$ho_proj/sess-c.jsonl";touch -d '1 minute ago' "$ho_proj/sess-b.jsonl"
+ho_case "an id with dots is ignored and the newest file is used" wake CLAUDE_CODE_SESSION_ID=sess.a
+ho_case "an id with a slash is ignored and the newest file is used" wake CLAUDE_CODE_SESSION_ID=sub/x
+ho_case "an id whose file is missing falls back to the newest" wake CLAUDE_CODE_SESSION_ID=sess-nothere
+ho_case "a bad AFA_HUB_SESSION_ID does not stop a good CLAUDE_CODE_SESSION_ID" quiet AFA_HUB_SESSION_ID=../x CLAUDE_CODE_SESSION_ID=sess-c
+ho_reset
+
+# A lane's report is found by its exact folder name: <YYYY-MM-DD>-<lane>, never a folder that merely ends in the lane's name.
+rf_home="$TMP/rf-home"; rf_lanes="$rf_home/.claude/state/lanes"
+mkdir -p "$rf_lanes/2026-01-01-mail" "$rf_lanes/2026-01-02-other-mail" "$rf_lanes/2026-01-03-dup" "$rf_lanes/2026-02-03-dup" "$rf_lanes/nodate-solo"
+for rf_d in 2026-01-01-mail 2026-01-02-other-mail 2026-01-03-dup 2026-02-03-dup nodate-solo; do echo r > "$rf_lanes/$rf_d/report.md"; done
+touch -d '2 days ago' "$rf_lanes/2026-01-01-mail/report.md"; touch -d '1 minute ago' "$rf_lanes/2026-01-02-other-mail/report.md"
+touch -d '2 days ago' "$rf_lanes/2026-01-03-dup/report.md"; touch -d '1 hour ago' "$rf_lanes/2026-02-03-dup/report.md"
+# sourcing stops before these two (the script returns early), so load their real text. Each is taken by its own name: lane_dir_of up to the
+# first later line that is exactly }, report_of as its one line. If either piece is empty, or report_of does not end in }, the eval is skipped.
+rf_ld=$(sed -n '/^lane_dir_of() {/,/^}$/p' "$SCRIPT")
+rf_ro=$(sed -n '/^report_of() {/p' "$SCRIPT")
+if [ -z "$rf_ld" ] || [ -z "$rf_ro" ] || [ "${rf_ro: -1}" != "}" ]; then echo "FAIL could not load lane_dir_of and report_of from the script"; failures=$((failures + 1))
+else eval "$rf_ld"; eval "$rf_ro"; fi
+rf_got=$(HOME="$rf_home" report_of mail)
+if [ "$rf_got" = "$rf_lanes/2026-01-01-mail/report.md" ]; then echo "ok   a watcher for mail reads only 2026-01-01-mail, though 2026-01-02-other-mail is newer"
+else echo "FAIL report_of mail: $rf_got"; failures=$((failures + 1)); fi
+rf_got=$(HOME="$rf_home" report_of other-mail)
+if [ "$rf_got" = "$rf_lanes/2026-01-02-other-mail/report.md" ]; then echo "ok   a watcher for other-mail reads 2026-01-02-other-mail"
+else echo "FAIL report_of other-mail: $rf_got"; failures=$((failures + 1)); fi
+rf_got=$(HOME="$rf_home" report_of dup)
+if [ "$rf_got" = "$rf_lanes/2026-02-03-dup/report.md" ]; then echo "ok   two dated folders for one lane: the newer report wins"
+else echo "FAIL report_of dup: $rf_got"; failures=$((failures + 1)); fi
+rf_got=$(HOME="$rf_home" report_of solo)
+if [ -z "$rf_got" ]; then echo "ok   a folder with no date in its name is not a lane folder"
+else echo "FAIL report_of solo: $rf_got"; failures=$((failures + 1)); fi
+rf_got=$(HOME="$rf_home" lane_dir_of mail)
+if [ "$rf_got" = "$rf_lanes/2026-01-01-mail" ]; then echo "ok   lane_dir_of prints the lane's own folder"
+else echo "FAIL lane_dir_of mail: $rf_got"; failures=$((failures + 1)); fi
 
 # A recycle lock older than LANE_WATCH_LOCK_MAX_MIN (default 30) minutes is dead: its recycle was killed. lane.sh already treats it so; the
 # watcher used to test only that the folder existed and skipped that lane's checks for good. A dead lock is named once, never removed.
@@ -1301,10 +1383,12 @@ sleep 3; lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"; ro_ru
 ro_case "a lock 31 minutes old is not a lock: a lane past its line is recycled" rl
 sleep 3; lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"
 lk_watch "$TMP/lk-out1"; lk_watch "$TMP/lk-out2"
-if grep -q '^stale recycle lock: rl (its recycle lock is 31 min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle rl clears the lock)$' "$TMP/lk-out1" \
+if grep -q '^stale recycle lock: rl (its recycle lock is 31 min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle rl clears the lock, or says why it did not)$' "$TMP/lk-out1" \
    && ! grep -q '^stale recycle lock' "$TMP/lk-out2" && [ -d "$lk_lock" ]; then
   echo "ok   a dead lock is named once, not again by a re-armed watcher, and the watcher leaves it in place"
 else echo "FAIL stale lock naming: first=$(cat "$TMP/lk-out1") second=$(cat "$TMP/lk-out2")"; failures=$((failures + 1)); fi
+sleep 3; lk_clean; mkdir "$lk_lock"; touch -d '1800 seconds ago' "$lk_lock"; ro_run 130 "$idle_pane"
+ro_case "a lock 1800 seconds old still holds a lane past its line back from a recycle" ""
 lk_clean; mkdir "$lk_lock"; touch -d '1830 seconds ago' "$lk_lock"; lk_watch "$TMP/lk-out7"
 if ! grep -q '^stale recycle lock' "$TMP/lk-out7"; then echo "ok   a lock 30 minutes and 30 seconds old is still a lock, as it is for lane.sh"
 else echo "FAIL lock 1830 seconds old: $(cat "$TMP/lk-out7")"; failures=$((failures + 1)); fi
@@ -1320,6 +1404,13 @@ else echo "FAIL lock limit abc at 31: $(cat "$TMP/lk-out5")"; failures=$((failur
 lk_clean; lk_watch "$TMP/lk-out6"
 if ! grep -q 'stale recycle lock' "$TMP/lk-out6" && [ ! -e "$rl_dir/.stalelock-rl" ]; then echo "ok   with no lock nothing is printed"
 else echo "FAIL no lock: $(cat "$TMP/lk-out6")"; failures=$((failures + 1)); fi
+# A mark with no lock beside it is removed by one pass; a mark beside a dead lock stays, and the lock is not named again.
+lk_clean; printf '%s' 12345 > "$rl_dir/.stalelock-rl"; lk_watch "$TMP/lk-out8"
+if [ ! -e "$rl_dir/.stalelock-rl" ] && ! grep -q 'stale recycle lock' "$TMP/lk-out8"; then echo "ok   a stale-lock mark with no lock is gone after one watcher pass"
+else echo "FAIL leftover mark: $(cat "$TMP/lk-out8")"; failures=$((failures + 1)); fi
+lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"; stat -c %Y "$lk_lock" | tr -d '\n' > "$rl_dir/.stalelock-rl"; lk_watch "$TMP/lk-out9"
+if [ -f "$rl_dir/.stalelock-rl" ] && [ -d "$lk_lock" ] && ! grep -q 'stale recycle lock' "$TMP/lk-out9"; then echo "ok   a mark beside a dead lock stays, and the lock is not named again"
+else echo "FAIL mark beside dead lock: $(cat "$TMP/lk-out9")"; failures=$((failures + 1)); fi
 lk_clean
 
 # --max-min must be a whole number of minutes: anything else is refused on standard error with exit 2 before the watcher watches anything.
@@ -1327,7 +1418,7 @@ mm_run() { # mm_run <value>: leaves the exit code in $mm_rc and the output in $m
   mm_rc=0; mm_out=$(HOME="$nt_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/nt-lane.sh" LANE_SPEND_CMD=/bin/true \
     LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 4 bash "$SCRIPT" --max-min "$1" dd-ok 2>&1) || mm_rc=$?
 }
-for mm_v in abc 4.5 -3 ""; do
+for mm_v in abc 4.5 -3 "" 5m; do
   mm_run "$mm_v"
   if [ "$mm_rc" = 2 ] && [ "$mm_out" = "lane_watch: --max-min needs a whole number of minutes, got: $mm_v" ]; then echo "ok   --max-min '$mm_v' is refused with exit 2 and one line"
   else echo "FAIL --max-min '$mm_v': rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
@@ -1335,6 +1426,15 @@ done
 mm_run 45
 if [ "$mm_rc" != 2 ] && ! printf '%s\n' "$mm_out" | grep -q 'needs a whole number'; then echo "ok   --max-min 45 is accepted"
 else echo "FAIL --max-min 45: rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
+# --max-min as the last argument, with no value, is refused the same way.
+mm_rc=0; mm_out=$(HOME="$nt_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/nt-lane.sh" LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 4 bash "$SCRIPT" --max-min 2>&1) || mm_rc=$?
+if [ "$mm_rc" = 2 ] && [ "$mm_out" = "lane_watch: --max-min needs a whole number of minutes, got: " ]; then echo "ok   --max-min as the last argument with no value is refused with exit 2"
+else echo "FAIL --max-min with no value: rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
+# A leading zero is decimal: bash would read 08 as octal and stop with "value too great for base".
+mm_run 08
+if [ "$mm_rc" != 2 ] && ! printf '%s\n' "$mm_out" | grep -q 'needs a whole number\|value too great for base'; then echo "ok   --max-min 08 is accepted and read as decimal"
+else echo "FAIL --max-min 08: rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

@@ -8,7 +8,7 @@
 #   - openclaw_dispatch.py open lists an unanswered receptionist question, or a new one is filed. A burst of questions wakes the
 #     hub ONCE: it waits until no new question has come for LANE_WATCH_BATCH_QUIET seconds (default 60), at most LANE_WATCH_BATCH_MAX
 #     (default 180), then prints the whole list. Each wake after the hub's cache has gone cold costs $1.2 to $1.6 against $0.05 warm.
-#   - a watched lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
+#   - a watched lane's report.md (newest ~/.claude/state/lanes/<date>-<name>/report.md) is new or changes
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
@@ -55,7 +55,7 @@
 # in thousand tokens: set at start with --recycle-at, else the default for its kind of work), the poll starts `lane.sh --recycle <lane>` in
 # the background, mid-turn if need be (the lane finishes the step in hand, writes handoff.md, gets /clear and a re-prime message) and logs it
 # to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
-# 15-minute turn went 120K to 168K and compacted). That wakes nobody. What wakes the hub is a FAILED recycle, a failed update, a lane that thrashes and the recycle stop. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
+# 15-minute turn went 120K to 168K and compacted). That wakes nobody. What wakes the hub is a FAILED recycle, a failed update, a dead recycle lock, a lane that thrashes and the recycle stop. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
 # LANE_RECYCLE_RETRY_SECS (default 300), counted across re-armed watchers (.recycle-<lane>.tried). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
 # A lane that keeps refilling its line is not recycled forever: when it has been recycled LANE_THRASH_COUNT (default 3) times inside LANE_THRASH_SECS
 # (default 1800), the watcher stops recycling it and wakes the hub ONCE per episode with one line (lane, count, times). 25-26 Oct: pokeys-site
@@ -136,14 +136,15 @@ recycle_locked() {
 # modification time. The watcher never removes the lock itself.
 stale_lock_check() {
   local l=$1 lock="$recycle_dir/.recycle-$1.lock" t age mark="$recycle_dir/.stalelock-$1"
-  [ -d "$lock" ] || return 0
+  # No lock folder: a mark left from an earlier dead lock has nothing to guard any more, so it goes.
+  [ -d "$lock" ] || { [ -e "$mark" ] && rm -f "$mark"; return 0; }
   t=$(stat -c %Y "$lock" 2>/dev/null) || return 0
   [[ "$t" =~ ^[0-9]+$ ]] || return 0
   age=$(( ($(date +%s) - t) / 60 ))
   [ "$age" -gt "$lock_max_min" ] || return 0
   [ "$(cat "$mark" 2>/dev/null)" = "$t" ] && return 0
   printf '%s' "$t" > "$mark" 2>/dev/null
-  echo "stale recycle lock: $l (its recycle lock is $age min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle $l clears the lock)"
+  echo "stale recycle lock: $l (its recycle lock is $age min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle $l clears the lock, or says why it did not)"
   hit=1; other=1
 }
 # Seconds since the watcher (this one or an earlier one the hub re-armed) last started a recycle for the lane; big if never. Kept in a
@@ -613,6 +614,32 @@ high_check() {
   hit=1; other=1
 }
 
+# hub_transcript <projects dir>: prints the hub's own transcript path (nothing if there is none). A lane started in the same folder
+# writes its transcript there too, so the newest file can be a lane's. Order: AFA_HUB_SESSION_ID (an override for tests and for a
+# watcher started some other way) when <dir>/<id>.jsonl is a file; else CLAUDE_CODE_SESSION_ID (the hub's shell has it and the watcher
+# inherits it) the same way; else the newest .jsonl, as before (a watcher started by a scheduled task has no id). An id is used only
+# when it matches ^[A-Za-z0-9-]+$, because it becomes part of a path. Limit: after the hub clears its context it has a new id, and a
+# watcher armed before the clear still holds the old one until it is re-armed; the old transcript no longer grows, so a hub that
+# passes its hand-off line after the clear is missed until the watcher is re-armed (it is re-armed after every wake). One stale
+# wake is possible in that time: if the old transcript ends in a question nobody answered, the unanswered check can name it once,
+# and if the old transcript was already past the hand-off line with no stamp yet, the hand-off wake can fire once. Each is named
+# once only (by the message's uuid, by the session id). The newest-file rule this replaces could read a lane's transcript on any poll.
+hub_transcript() {
+  local dir=$1 id f m newest="" newest_mtime=0
+  for id in "${AFA_HUB_SESSION_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}"; do
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[A-Za-z0-9-]+$ ]] || continue
+    if [ -f "$dir/$id.jsonl" ]; then printf '%s\n' "$dir/$id.jsonl"; return 0; fi
+  done
+  for f in "$dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    m=$(stat -c %Y "$f" 2>/dev/null) || continue
+    if (( m > newest_mtime )); then newest_mtime=$m; newest=$f; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
+  return 0
+}
+
 # Hub context hand-off wake. The hub's transcripts are in ~/.claude/projects/<repo-with-dashes>/*.jsonl.
 # Derive the folder from $HOME/repos the way Claude Code does (slashes to dashes). Wake once per session id
 # using a stamp file $HOME/.claude/state/hub-handoff-woke.<session-id>. Reads AFA_HANDOFF_K (default 150, at the first natural break and never mid-task; Jonathan raised it from 330K on 11 Nov; auto-compact is at 367K).
@@ -623,17 +650,8 @@ hub_handoff_check() {
   # The leading dash stays: /home/x/repos becomes -home-x-repos. AFA_HUB_PROJECTS_DIR overrides (tests).
   local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/${project_folder}}"
   [ -d "$projects_dir" ] || return 0
-  local newest=""
-  local newest_mtime=0
-  local f
-  for f in "$projects_dir"/*.jsonl; do
-    [ -f "$f" ] || continue
-    local m; m=$(stat -c %Y "$f" 2>/dev/null) || continue
-    if (( m > newest_mtime )); then
-      newest_mtime=$m
-      newest=$f
-    fi
-  done
+  local newest
+  newest=$(hub_transcript "$projects_dir")
   [ -n "$newest" ] || return 0
   local session_id="${newest##*/}"
   session_id="${session_id%.jsonl}"
@@ -655,7 +673,7 @@ hub_handoff_check() {
 
 # Unanswered-question wake. The hub asked the owner something in the terminal and 15 minutes (LANE_WATCH_UNANSWERED_MIN; 0 or "off" turns
 # it off) later he has not answered: the question goes to his phone assistant as one [CC>MUSE] note draft. Reads only the last 200 lines of
-# the hub's newest transcript (same folder as hub_handoff_check). Fires when the last assistant text comes after the last typed user
+# the hub's own transcript (hub_transcript, same folder as hub_handoff_check). Fires when the last assistant text comes after the last typed user
 # message (not a tool_result, not isMeta, not a "<" wrapper), its final paragraph outside fenced code holds a "?" or "your call" /
 # "which do you want" / "do you want" / "should I", and it is old enough. A question card (AskUserQuestion) with no tool_result yet
 # counts too, timed from the card. Named once per assistant uuid (.unanswered-<uuid> in $recycle_dir).
@@ -666,12 +684,8 @@ unanswered_check() {
   [[ "$min" =~ ^[0-9]+$ ]] && (( min > 0 )) || return 0
   local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/$(printf '%s' "${HOME}/repos" | tr / -)}"
   [ -d "$projects_dir" ] || return 0
-  local newest="" newest_mtime=0 f m
-  for f in "$projects_dir"/*.jsonl; do
-    [ -f "$f" ] || continue
-    m=$(stat -c %Y "$f" 2>/dev/null) || continue
-    if (( m > newest_mtime )); then newest_mtime=$m; newest=$f; fi
-  done
+  local newest
+  newest=$(hub_transcript "$projects_dir")
   [ -n "$newest" ] || return 0
   local res uuid clock age
   res=$(tail -n 200 "$newest" 2>/dev/null | python3 -I -c '
@@ -879,11 +893,20 @@ while [ $# -gt 0 ]; do
 done
 # 0 stays allowed: it is the one short pass the tests (and a quick look) start with.
 [[ "$max" =~ ^[0-9]+$ ]] || { echo "lane_watch: --max-min needs a whole number of minutes, got: $max" >&2; exit 2; }
+max=$((10#$max))   # a leading zero ("08") is decimal, not octal
 lanes=("$@")
 auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
 start_ts=$(date +%s)
 declare -A seen seen_turn recycling
-report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
+# lane_dir_of <lane>: the lane's hand-off folder, newest report first. lane.sh names it <YYYY-MM-DD>-<lane> (hand=...$(date +%F)-$name),
+# so only that exact form matches: a lane "mail" must not read the folder of a lane "other-mail".
+lane_dir_of() {
+  local f
+  f=$(ls -t "$HOME"/.claude/state/lanes/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-"$1"/report.md 2>/dev/null | head -1)
+  [ -n "$f" ] && dirname "$f"
+  return 0
+}
+report_of() { local d; d=$(lane_dir_of "$1"); [ -n "$d" ] && echo "$d/report.md"; return 0; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
   local l=$1 f shown

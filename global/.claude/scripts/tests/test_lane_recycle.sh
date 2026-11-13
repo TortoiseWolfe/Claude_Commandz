@@ -1007,6 +1007,12 @@ sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q 
 # function, so a caller's own dir, id, m and the rest survive the call. The function runs from its first line to the first line that is just "}".
 send_to_text="$(awk '/^send_to\(\) \{/ {on = 1} on {print} on && $0 == "}" {exit}' "$SCRIPT")"
 [ -n "$send_to_text" ] || fail 'send_to is found in lane.sh'
+# Only send_to's own lines count: a function defined inside it (took, confirmed, ...) has its own locals, so its body is skipped (a
+# one-line definition is skipped whole). Then every line is split on ";" so a name assigned in the middle of a line is seen too.
+send_to_text="$(printf '%s\n' "$send_to_text" | awk '
+  skip { if ($0 == ind "}") skip = 0; next }
+  /^[[:space:]]+[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { if ($0 !~ /\}[[:space:]]*(#.*)?$/) { ind = $0; sub(/[^[:space:]].*$/, "", ind); skip = 1 } next }
+  { print }' | tr ';' '\n')"
 send_to_locals="$(printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*local[[:space:]]+//p' | sed -E 's/=("[^"]*"|[^ ]*)//g' | tr -s ' \n' '\n\n')"
 send_to_assigned="$({ printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*(IFS="[^"]*" )?(then |else |do )?read -r( -a)? ([A-Za-z_][A-Za-z0-9_ ]*)(<<<.*)?$/\4/p' | sed -E 's/ <<<.*//' | tr -s ' ' '\n'
   printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*(then |else |do )?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p'
