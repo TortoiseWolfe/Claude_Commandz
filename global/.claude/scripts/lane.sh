@@ -1474,6 +1474,8 @@ pane_is_claude() {  # <name>
 send_to() {  # <name> <text...>
   [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; return 1; }
   local name="$1"; shift
+  # Every name this function sets is local (as in send_held), so a caller's own dir, id, m, rk and the rest are not overwritten by the call.
+  local text dir id row d n m b p rep st eff conn rk ent pm ad target how pane rc hits_before
   text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then

@@ -55,7 +55,7 @@
 # in thousand tokens: set at start with --recycle-at, else the default for its kind of work), the poll starts `lane.sh --recycle <lane>` in
 # the background, mid-turn if need be (the lane finishes the step in hand, writes handoff.md, gets /clear and a re-prime message) and logs it
 # to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
-# 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
+# 15-minute turn went 120K to 168K and compacted). That wakes nobody. What wakes the hub is a FAILED recycle, a failed update, a lane that thrashes and the recycle stop. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
 # LANE_RECYCLE_RETRY_SECS (default 300), counted across re-armed watchers (.recycle-<lane>.tried). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
 # A lane that keeps refilling its line is not recycled forever: when it has been recycled LANE_THRASH_COUNT (default 3) times inside LANE_THRASH_SECS
 # (default 1800), the watcher stops recycling it and wakes the hub ONCE per episode with one line (lane, count, times). 25-26 Oct: pokeys-site
@@ -121,7 +121,31 @@ lane_sh="${LANE_SH:-$HOME/.claude/scripts/lane.sh}"
 recycle_dir="${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}"
 recycle_log="$recycle_dir/recycle.log"
 recycle_retry=${LANE_RECYCLE_RETRY_SECS:-300}
-recycle_locked() { [ -d "$recycle_dir/.recycle-$1.lock" ]; }
+# A lock older than LANE_WATCH_LOCK_MAX_MIN minutes (default 30) is dead: its recycle was killed. "Older" means the age in whole minutes (seconds / 60, fraction dropped) is more than the limit, the same rule as find's -mmin +30, so a lock is dead from its 31st minute. The 30 must stay equal to lane.sh's own
+# limit (grep "-maxdepth 0 -mmin +30" in lane.sh). A lock whose time cannot be read counts as locked, the safe side. No lock: no process started.
+lock_max_min=${LANE_WATCH_LOCK_MAX_MIN:-30}
+[[ "$lock_max_min" =~ ^[0-9]+$ ]] || lock_max_min=30
+recycle_locked() {
+  local t
+  [ -d "$recycle_dir/.recycle-$1.lock" ] || return 1
+  t=$(stat -c %Y "$recycle_dir/.recycle-$1.lock" 2>/dev/null) || return 0
+  [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  [ $(( ($(date +%s) - t) / 60 )) -le "$lock_max_min" ]
+}
+# stale_lock_check <lane> (no subshell: it sets hit and other) names a dead lock once per lock; the mark .stalelock-<lane> holds the lock's
+# modification time. The watcher never removes the lock itself.
+stale_lock_check() {
+  local l=$1 lock="$recycle_dir/.recycle-$1.lock" t age mark="$recycle_dir/.stalelock-$1"
+  [ -d "$lock" ] || return 0
+  t=$(stat -c %Y "$lock" 2>/dev/null) || return 0
+  [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  age=$(( ($(date +%s) - t) / 60 ))
+  [ "$age" -gt "$lock_max_min" ] || return 0
+  [ "$(cat "$mark" 2>/dev/null)" = "$t" ] && return 0
+  printf '%s' "$t" > "$mark" 2>/dev/null
+  echo "stale recycle lock: $l (its recycle lock is $age min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle $l clears the lock)"
+  hit=1; other=1
+}
 # Seconds since the watcher (this one or an earlier one the hub re-armed) last started a recycle for the lane; big if never. Kept in a
 # file, not in memory, because the hub re-arms the watcher every few minutes and a retry timer that dies with it never spaces anything.
 recycle_tried_age() {
@@ -494,18 +518,20 @@ recycle_pass() {
   return 0
 }
 
-# New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
+# New "FAILED" and "UPDATE-FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
 # The offset lives in a file ($recycle_dir/.recycle-log-seen), so a FAILED row written while no watcher was armed is still reported by the next
 # one. 28 Oct 2026: a watcher started after the row and began at the log's end, and the failure was never named. No file (first run): start at the end.
 recycle_log_seen_file="$recycle_dir/.recycle-log-seen"
 recycle_log_seen=$(cat "$recycle_log_seen_file" 2>/dev/null || true)
 [[ "$recycle_log_seen" =~ ^[0-9]+$ ]] || recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
-# Sets recycle_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
+# Sets recycle_fail_out and update_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
 recycle_failures() {
-  local size; recycle_fail_out=''
+  local size rows; recycle_fail_out=''; update_fail_out=''
   size=$(stat -c %s "$recycle_log" 2>/dev/null) || return 0
   [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null; return 0; }
-  recycle_fail_out=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log" | command grep -a $'\tFAILED\t' | awk -F'\t' '{print $2 ": " $4}')
+  rows=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log")
+  recycle_fail_out=$(printf '%s\n' "$rows" | awk -F'\t' '$3 == "FAILED" {print $2 ": " $4}')
+  update_fail_out=$(printf '%s\n' "$rows" | awk -F'\t' '$3 == "UPDATE-FAILED" {print $2 ": " $4}')
   recycle_log_seen=$size
   printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null
 }
@@ -846,11 +872,13 @@ idle_max=${LANE_WATCH_IDLE_MAX_MIN:-120}
 while [ $# -gt 0 ]; do
   case "$1" in
     --recycle-once) recycle_once=1; shift ;;
-    --max-min) max=$2; shift 2 ;;
+    --max-min) max=${2-}; shift 2 2>/dev/null || shift $# ;;
     --check) check=$2; shift 2 ;;
     *) break ;;
   esac
 done
+# 0 stays allowed: it is the one short pass the tests (and a quick look) start with.
+[[ "$max" =~ ^[0-9]+$ ]] || { echo "lane_watch: --max-min needs a whole number of minutes, got: $max" >&2; exit 2; }
 lanes=("$@")
 auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
 start_ts=$(date +%s)
@@ -1046,6 +1074,7 @@ while :; do
   hit=0; other=0
   unanswered_check
   for l in "${lanes[@]}"; do
+    stale_lock_check "$l"
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ] && [ "$s" != none ] && routine_report "$(report_of "$l")"; then
       seen[$l]=$s; seen_stamp_write "$l" "$s"   # HOURLY / STATUS on line 1: routine, wakes nobody
@@ -1109,6 +1138,7 @@ while :; do
     fi
   done
   recycle_failures
+  while read -r f; do [ -n "$f" ] && { echo "update failed: ${f%%: *}: ${f#*: } (the update did not finish: look at the lane's window; if the lane is still running, lane.sh --update ${f%%: *} tries again)"; hit=1; other=1; }; done <<<"$update_fail_out"
   while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
   spend_check
   if [ -n "$spend_out" ]; then

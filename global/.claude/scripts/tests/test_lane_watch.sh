@@ -1166,6 +1166,23 @@ else echo "FAIL missed FAILED row: $out"; failures=$((failures + 1)); fi
 out=$(of_run)
 if ! printf '%s\n' "$out" | grep -q '^recycle failed:'; then echo "ok   ... and only once"; else echo "FAIL FAILED row reported twice: $out"; failures=$((failures + 1)); fi
 
+# An UPDATE-FAILED row (lane.sh --update) is named too, as "update failed"; only the third column counts, so a reason that holds the word
+# FAILED in a row of another kind is not a match. A row written while no watcher was armed is named by the next one (the offset file).
+printf '2026-11-10T09:00:00-04:00\tof-lane\tUPDATE-FAILED\tno new handoff.md in 600s with the lane idle; the lane was left running\n' >> "$of_log"
+out=$(of_run)
+if printf '%s\n' "$out" | grep -q '^update failed: of-lane: no new handoff.md in 600s' && printf '%s\n' "$out" | grep -q 'the update did not finish' && ! printf '%s\n' "$out" | grep -q '^recycle failed:'; then echo "ok   an UPDATE-FAILED row is named as an update failure, by the next watcher, and not as a recycle failure"
+else echo "FAIL UPDATE-FAILED row: $out"; failures=$((failures + 1)); fi
+out=$(of_run)
+if ! printf '%s\n' "$out" | grep -q '^update failed:'; then echo "ok   ... and only once"; else echo "FAIL UPDATE-FAILED row reported twice: $out"; failures=$((failures + 1)); fi
+printf '2026-11-10T09:05:00-04:00\tof-lane\tFAILED\tthe hand-off request did not reach the lane\n' >> "$of_log"
+out=$(of_run)
+if printf '%s\n' "$out" | grep -q '^recycle failed: of-lane: the hand-off request did not reach the lane' && ! printf '%s\n' "$out" | grep -q '^update failed:'; then echo "ok   a FAILED row is still named as a recycle failure"
+else echo "FAIL FAILED row after the change: $out"; failures=$((failures + 1)); fi
+printf '2026-11-10T09:10:00-04:00\tof-lane\trecycled\tearlier run said FAILED and UPDATE-FAILED, this one is fine\n' >> "$of_log"
+out=$(of_run)
+if ! printf '%s\n' "$out" | grep -q '^update failed:\|^recycle failed:'; then echo "ok   a row whose reason text holds FAILED but whose third column is another word is not named"
+else echo "FAIL reason text matched: $out"; failures=$((failures + 1)); fi
+
 # A new open line in this machine's own inbox wakes the hub once: peer-inbox.md off NX-01, hub-inbox.md on NX-01. The first run (no state file)
 # records what is open without waking, and a ticked line is forgotten. (1 Nov: twelve tower notes sat unseen for hours.)
 nt_home="$TMP/nt-home"; mkdir -p "$nt_home/.claude/state/lanes" "$nt_home/.config/afa"
@@ -1268,6 +1285,56 @@ for off in 0 off; do
   out=$(LANE_WATCH_UNANSWERED_MIN=$off ua_run)
   if ! printf '%s\n' "$out" | grep -q '^unanswered:'; then echo "ok   unanswered: LANE_WATCH_UNANSWERED_MIN=$off turns the check off"; else echo "FAIL unanswered off=$off: $out"; failures=$((failures + 1)); fi
 done
+
+# A recycle lock older than LANE_WATCH_LOCK_MAX_MIN (default 30) minutes is dead: its recycle was killed. lane.sh already treats it so; the
+# watcher used to test only that the folder existed and skipped that lane's checks for good. A dead lock is named once, never removed.
+lk_lock="$rl_dir/.recycle-rl.lock"
+lk_clean() { rmdir "$lk_lock" 2>/dev/null || true; rm -f "$rl_dir/.stalelock-rl"; rl_reset; }
+lk_watch() { # lk_watch <out> [env...]: one pass over rl with the fake tmux, lane under its line
+  local o=$1; shift
+  echo 50 > "$CTX_FILE"
+  env "$@" HOME="$rc_home" PATH="$TMP/fakebin-rc:$PATH" OPENCLAW_DISPATCH="$fake_dispatch" OPENCLAW_RECONCILE=/nonexistent LANE_SPEND_CMD=/bin/true \
+    LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 LANE_RECYCLE_RETRY_SECS=600 timeout 20 bash "$SCRIPT" --max-min 0 rl > "$o" 2>&1 || true
+}
+sleep 3; lk_clean; mkdir "$lk_lock"; ro_run 130 "$idle_pane"; ro_case "a fresh recycle lock still holds the lane back from a recycle" ""
+sleep 3; lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"; ro_run 130 "$idle_pane"
+ro_case "a lock 31 minutes old is not a lock: a lane past its line is recycled" rl
+sleep 3; lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"
+lk_watch "$TMP/lk-out1"; lk_watch "$TMP/lk-out2"
+if grep -q '^stale recycle lock: rl (its recycle lock is 31 min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle rl clears the lock)$' "$TMP/lk-out1" \
+   && ! grep -q '^stale recycle lock' "$TMP/lk-out2" && [ -d "$lk_lock" ]; then
+  echo "ok   a dead lock is named once, not again by a re-armed watcher, and the watcher leaves it in place"
+else echo "FAIL stale lock naming: first=$(cat "$TMP/lk-out1") second=$(cat "$TMP/lk-out2")"; failures=$((failures + 1)); fi
+lk_clean; mkdir "$lk_lock"; touch -d '1830 seconds ago' "$lk_lock"; lk_watch "$TMP/lk-out7"
+if ! grep -q '^stale recycle lock' "$TMP/lk-out7"; then echo "ok   a lock 30 minutes and 30 seconds old is still a lock, as it is for lane.sh"
+else echo "FAIL lock 1830 seconds old: $(cat "$TMP/lk-out7")"; failures=$((failures + 1)); fi
+lk_clean; mkdir "$lk_lock"; touch -d '6 minutes ago' "$lk_lock"; lk_watch "$TMP/lk-out3" LANE_WATCH_LOCK_MAX_MIN=5
+if grep -q '^stale recycle lock: rl (its recycle lock is 6 min old' "$TMP/lk-out3"; then echo "ok   LANE_WATCH_LOCK_MAX_MIN=5 makes a 6 minute old lock stale"
+else echo "FAIL lock limit 5: $(cat "$TMP/lk-out3")"; failures=$((failures + 1)); fi
+lk_clean; mkdir "$lk_lock"; touch -d '6 minutes ago' "$lk_lock"; lk_watch "$TMP/lk-out4" LANE_WATCH_LOCK_MAX_MIN=abc
+if ! grep -q '^stale recycle lock' "$TMP/lk-out4"; then echo "ok   LANE_WATCH_LOCK_MAX_MIN=abc behaves as 30 (a 6 minute old lock is not stale)"
+else echo "FAIL lock limit abc: $(cat "$TMP/lk-out4")"; failures=$((failures + 1)); fi
+lk_clean; mkdir "$lk_lock"; touch -d '31 minutes ago' "$lk_lock"; lk_watch "$TMP/lk-out5" LANE_WATCH_LOCK_MAX_MIN=abc
+if grep -q '^stale recycle lock: rl' "$TMP/lk-out5"; then echo "ok   ... and a 31 minute old lock is stale under it"
+else echo "FAIL lock limit abc at 31: $(cat "$TMP/lk-out5")"; failures=$((failures + 1)); fi
+lk_clean; lk_watch "$TMP/lk-out6"
+if ! grep -q 'stale recycle lock' "$TMP/lk-out6" && [ ! -e "$rl_dir/.stalelock-rl" ]; then echo "ok   with no lock nothing is printed"
+else echo "FAIL no lock: $(cat "$TMP/lk-out6")"; failures=$((failures + 1)); fi
+lk_clean
+
+# --max-min must be a whole number of minutes: anything else is refused on standard error with exit 2 before the watcher watches anything.
+mm_run() { # mm_run <value>: leaves the exit code in $mm_rc and the output in $mm_out
+  mm_rc=0; mm_out=$(HOME="$nt_home" PATH="$TMP/dd-bin:$PATH" OPENCLAW_RECONCILE=/nonexistent LANE_SH="$TMP/nt-lane.sh" LANE_SPEND_CMD=/bin/true \
+    LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 4 bash "$SCRIPT" --max-min "$1" dd-ok 2>&1) || mm_rc=$?
+}
+for mm_v in abc 4.5 -3 ""; do
+  mm_run "$mm_v"
+  if [ "$mm_rc" = 2 ] && [ "$mm_out" = "lane_watch: --max-min needs a whole number of minutes, got: $mm_v" ]; then echo "ok   --max-min '$mm_v' is refused with exit 2 and one line"
+  else echo "FAIL --max-min '$mm_v': rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
+done
+mm_run 45
+if [ "$mm_rc" != 2 ] && ! printf '%s\n' "$mm_out" | grep -q 'needs a whole number'; then echo "ok   --max-min 45 is accepted"
+else echo "FAIL --max-min 45: rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
 
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch tests passed"

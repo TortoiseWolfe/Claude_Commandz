@@ -1003,4 +1003,17 @@ assert_eq "$(recycle_stop_file q-lane)" "$STOPF" 'recycle_stop_file prints the p
 HOME="$OLD_HOME"
 sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q clear_recycle_stop || fail 'the start/restart index row is preceded by clear_recycle_stop'; ok
 
+# send_to keeps its variables to itself: every name it assigns (on a "read -r" line or as a plain NAME=value) is declared local in the same
+# function, so a caller's own dir, id, m and the rest survive the call. The function runs from its first line to the first line that is just "}".
+send_to_text="$(awk '/^send_to\(\) \{/ {on = 1} on {print} on && $0 == "}" {exit}' "$SCRIPT")"
+[ -n "$send_to_text" ] || fail 'send_to is found in lane.sh'
+send_to_locals="$(printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*local[[:space:]]+//p' | sed -E 's/=("[^"]*"|[^ ]*)//g' | tr -s ' \n' '\n\n')"
+send_to_assigned="$({ printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*(IFS="[^"]*" )?(then |else |do )?read -r( -a)? ([A-Za-z_][A-Za-z0-9_ ]*)(<<<.*)?$/\4/p' | sed -E 's/ <<<.*//' | tr -s ' ' '\n'
+  printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*(then |else |do )?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p'
+  printf '%s\n' "$send_to_text" | sed -nE 's/^[[:space:]]*(if|elif) .*; then ([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p'; } | sort -u | grep -v '^$' | grep -vx IFS || true)"   # IFS=... before read is a one-command setting, not an assignment that stays
+[ -n "$send_to_assigned" ] || fail 'send_to: the check found no assigned names to test'
+send_to_missing=""
+for v in $send_to_assigned; do printf '%s\n' "$send_to_locals" | grep -qx -- "$v" || send_to_missing="$send_to_missing $v"; done
+[ -z "$send_to_missing" ] || fail "send_to assigns names it has not declared local:$send_to_missing"; ok
+
 printf 'ok - %s checks passed\n' "$checks"
