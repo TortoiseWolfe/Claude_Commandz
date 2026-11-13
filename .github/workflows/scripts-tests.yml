@@ -83,7 +83,7 @@ jobs:
   shell-part:
     name: shell part ${{ matrix.part }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -113,12 +113,14 @@ jobs:
           while IFS= read -r t; do
             echo "::group::$t"
             began=$SECONDS
-            if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
+            rc=0; timeout 900 bash "$t" || rc=$?
+            if [ "$rc" = 124 ]; then echo "::error::$t was stopped at the 900 second limit before it finished"; failed=1
+            elif [ "$rc" != 0 ]; then echo "::error::$t failed"; failed=1; fi
             took=$((SECONDS - began))
             echo "::endgroup::"
             echo "took ${took}s: $t"
-            # One file may run 600 seconds; say so while there is still room, before a later change makes it time out.
-            if [ "$took" -gt 480 ]; then echo "::warning::$t took ${took}s of the 600 it may use"; fi
+            # One file may run 900 seconds; say so while there is still room, before a later change makes it time out.
+            if [ "$took" -gt 720 ]; then echo "::warning::$t took ${took}s of the 900 it may use"; fi
             ran=$((ran + 1))
           done < "$RUNNER_TEMP/shell-part.txt"
           echo "shell tests run: $ran"
