@@ -1331,6 +1331,56 @@ def access_proof_ok(proof):
 # rewrites hrefs into google.com/url redirects (probed 21 Oct), so a lane checks RAW afterwards.
 
 FORMAT_RECIPIENTS = {'greg', 'devops'}
+PLAIN_LETTER_RECIPIENTS = {'greg', 'devops', 'team', 'william'} | CO_OP_RECIPIENTS
+CARD_SOURCE = 'ScriptHammer/supabase/functions/_shared/email-templates.ts'
+
+
+# House cards run 600 to 640 px wide (the 6 Nov card is 620), so any fixed card width in this range counts.
+CARD_MIN_PX, CARD_MAX_PX = 480, 720
+
+
+class _CardWrapperParser(HTMLParser):
+    """Find a card: a table or block container with an inline style and a fixed width of 480-720 px."""
+
+    def __init__(self):
+        super().__init__()
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if self.found or tag not in ('table', 'div', 'td', 'section', 'main'):
+            return
+        attr_map = {k.lower(): v or '' for k, v in attrs}
+        style = attr_map.get('style', '')
+        if not style:
+            return
+        widths = re.findall(r'(?:^|[;\s])(?:max-)?width\s*:\s*(\d+)px', style, re.I)
+        m = re.fullmatch(r'\s*(\d+)(?:px)?\s*', attr_map.get('width', ''))
+        if m:
+            widths.append(m.group(1))
+        if any(CARD_MIN_PX <= int(w) <= CARD_MAX_PX for w in widths):
+            self.found = True
+
+
+def has_card_wrapper(html):
+    """True if the HTML holds a house card (see _CardWrapperParser)."""
+    if not html:
+        return False
+    parser = _CardWrapperParser()
+    parser.feed(html)
+    parser.close()
+    return parser.found
+
+
+def card_wrapper_matches(html, recipient='client'):
+    """Return [(category, message)] if HTML lacks a house card for a client outside plain-letter set."""
+    rcpt = (recipient or '').strip().lower()
+    if rcpt in PLAIN_LETTER_RECIPIENTS:
+        return []
+    if not has_card_wrapper(html):
+        return [('format_no_card',
+                 f'client mail to {recipient}: HTML body has no house card '
+                 f'(a table or container with an inline style, 480-720 px wide). Card source: {CARD_SOURCE}')]
+    return []
 
 _BLOCK_TAGS = {'p', 'div', 'li', 'ul', 'ol', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
                'br', 'tr', 'table', 'pre', 'section'}
@@ -1745,13 +1795,29 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
     house = house_rule_matches(text, recipient=recipient, is_reply=is_reply,
                                recipient_explicit=recipient_explicit, html=html, chat=chat)
     warnings = []
-    if not chat and html is None and (recipient or '').lower() in FORMAT_RECIPIENTS:
-        unchecked = ('mail to Greg or the devops list: the HTML format '
-                     '(real <h2>, <ul>, bold addresses) was NOT checked. Pass the HTML body with --html <file>')
-        if strict:
-            house = list(house) + [('format_unchecked', unchecked)]
-        else:
-            warnings.append(('format_unchecked', unchecked))
+    rcpt_low = (recipient or '').strip().lower()
+    if not chat and html is None:
+        if rcpt_low in FORMAT_RECIPIENTS:
+            unchecked = ('mail to Greg or the devops list: the HTML format '
+                         '(real <h2>, <ul>, bold addresses) was NOT checked. Pass the HTML body with --html <file>')
+            if strict:
+                house = list(house) + [('format_unchecked', unchecked)]
+            else:
+                warnings.append(('format_unchecked', unchecked))
+        elif rcpt_low not in PLAIN_LETTER_RECIPIENTS:
+            unchecked = (f'client mail to {recipient}: the HTML card format was NOT checked. '
+                         f'Pass the HTML body with --html <file>. Card source: {CARD_SOURCE}')
+            if strict:
+                house = list(house) + [('format_unchecked', unchecked)]
+            else:
+                warnings.append(('format_unchecked', unchecked))
+    if not chat and html is not None and rcpt_low not in PLAIN_LETTER_RECIPIENTS:
+        card_findings = card_wrapper_matches(html, recipient=recipient)
+        if card_findings:
+            if strict:
+                house = list(house) + card_findings
+            else:
+                warnings.extend(card_findings)
     if chat:
         warnings += [('sender_we', m) for m in sender_we_messages(text)]
         chat_findings = chat_rule_matches(text)
@@ -1902,78 +1968,88 @@ def main():
         skip.add(facts_path)
     args = [a for a in args if a not in skip]
 
+    text = None
     if not args:
-        print("Usage: python3 email_voice_check.py <text_file> [--strict]")
-        print("       python3 email_voice_check.py --stdin [--strict] [--chat] [--recipient greg|devops --html <body.html>]")
-        print("\nScreens a client-email body for AI-ish voice (lexical + structural).")
-        print("\nVerdicts (default):")
-        print("  PASS       (0-2 signals, 0 structural)")
-        print("  FLAG       (3-4 signals, OR any 1-2 structural tells)")
-        print("  MAJOR FLAG (5+ signals, OR 3+ structural tells)")
-        print("\n--strict: zero-tolerance self-gate — ANY signal = FAIL. Use before sending.")
-        print("--chat: apply plain-chat voice rules instead of recipient-specific email rules.")
-        print("--recipient <name>: house rules apply to 'greg' (default). Others exempt.")
-        print("--reply: this is a reply, so it must quote the recipient's points with '>'.")
-        print("\nHouse rules for greg (each is a hard FAIL, not a flag):")
-        print(f"  length  — body over {GREG_WORD_LIMIT} words")
-        print("  jargon  — technical terms with no plain-English gloss in the same sentence.")
-        print("            Keep a correct term and explain it in that sentence (\", which means ...\");")
-        print("            never swap it for a vaguer word.")
-        print("  quoting — a reply that never quotes his points back with '>'")
-        print("\n--html <file>: the HTML body, for greg and devops. Hard FAIL on the old plain shape (17 Oct rule):")
-        print("  [format_bullets] typed '- ' / '* ' bullets   [format_markdown] '#' or '**'")
-        print("  [format_headings] 2+ topic titles as plain lines with no <h2>   [format_links] (every recipient) an address or URL not a bold <a href=\"https://...\"> link")
-        print("  The quoted part ('>' lines, <blockquote>, below 'On ... wrote:') never counts. Without --html a")
-        print("  warning says the format was not checked.")
-        print("\nUnlinked references (every recipient except --chat): [unlinked_ref] a card, issue, ticket, pull request,")
-        print("  message or commit named by its number (card 110, issue #45, PR 12, message 1535, commit abc1234, #123)")
-        print("  that is not a link. Every number in a list ('cards 110 ... and 97') needs its own link. In --html a")
-        print("  reference must sit in an <a>; in plain text a full URL must sit in the same sentence. Counts")
-        print("  ('3 cards', 'page 2 of the PDF') are fine. Warns by default; fails under --strict and in HTML.")
-        print("\nRecorded-work claims (every recipient): [record_claim] add a URL or HTML link beside anything you say")
-        print("  you recorded, noted, wrote up, filed, logged, tracked or put on a list. Warns by default; fails under --strict.")
-        print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
-        print("  Say how far it got instead (for example, \"It's prepared but not running: <what proves it>\").")
-        print("  Warns by default; fails under --strict.")
-        print("\nAcronyms (email profiles): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
-        print("  e.g. CSS (Cascading Style Sheets, the code that controls how a page looks), or spelled out first:")
-        print("  Cascading Style Sheets (CSS). Warns by default, hard FAIL under --strict. Skipped: URLs, addresses,")
-        print("  code, '>' lines, [CC>MUSE] tags, and a short allow list (AM PM OK US ID ET ...).")
-        print("\nChat profile (--chat): email-only jargon glosses, acronyms, reply quoting, HTML formats, the Greg word")
-        print("  limit and reader questions are off. [sender_we] is a warning only. Under --strict, chat_length (>60")
-        print("  body words), data_dump (two machine-like details, or any IP/hash), glosses and chat_structure fail.")
-        print("  Promises and open_work remain strict checks; up to three short numbered choice lines are allowed.")
-        print("\nTeam text (--recipient team, 29 Oct 'team text is teaching text'): hard FAIL on [bare_ref] a ticket number")
-        print("  (#274, PR #274, owner/repo#274) outside a link, or a link whose text is only the number or has fewer")
-        print("  than two words besides it; and [jargon] as for greg (no word limit). Code is exempt.")
-        print("  A line starting Closes/Fixes/Resolves #N (any case) is exempt: GitHub needs that syntax. Under team the")
-        print("  email-only rules are OFF: [question_to_reader], [promises_future_work], [open_work], [sender_we].")
-        print("  --keep-facts-from <original>: FAIL, under 'FACTS DROPPED:', when the new text loses a URL, ticket")
-        print("  number, code, file path, number with unit, date or time, changes the checkbox counts, or adds an @-mention.")
-        print("\nSender \"we\" (every recipient except greg/william/devops, and when no --recipient is given):")
-        print("  [sender_we] we/we'll/us/our/let us in prose = hard FAIL. Jonathan is one person: I / me / my.")
-        print("  For greg/william/devops it is a warning only. Quoted ('>') lines and \"quoted\" words are skipped.")
-        print("\nPromises future work (--strict only):")
-        print("  [promises_future_work] I'll / I can / I could / happy to / if you want / plan to / soon /")
-        print("  next week / going to / offer. Do the work first, or cut the line. Skipped: '>' lines,")
-        print("  questions to the reader, \"quoted\" words, and lines starting 'Jon:' (his verbatim words).")
-        print("\nOpen work and questions (--strict only; a HOLD, not a style nit):")
-        print("  [open_work] still open / not yet / next up / we plan / on my list. Do the work first, then")
-        print("  report it done; never trim the line. [question_to_reader] any prose question to the reader:")
-        print("  research and decide it ourselves. A question passes only one at a time:")
-        print('  --only-they-know "<start of the question>::<what we checked, and why only the reader can answer>"')
-        print("  (repeatable; reason 25+ characters, never a stock phrase; a start matching no question fails).")
-        print("  PASS lists each kept question with its reason.")
-        print("\nAsks the reader for access (every recipient except team):")
-        print("  [access_ask] a sentence asking for access: add <address> as a Viewer, invite me, give me access,")
-        print("  grant/share access, sign-in/login for, admin access, add me to, send me the password. Warns by")
-        print("  default; under --strict a hard FAIL naming each sentence unless --access-proof \"<the access")
-        print("  record and the live check that show we lack it>\" is given (20+ characters).")
-        print("\nExit codes: 0 = PASS. Non-zero for FLAG, MAJOR FLAG and FAIL alike,")
-        print("so `check && post` is safe. Previously a FLAG exited 0.")
-        sys.exit(1)
+        if html is not None:
+            text = html
+        else:
+            print("Usage: python3 email_voice_check.py <text_file> [--strict]")
+            print("       python3 email_voice_check.py --stdin [--strict] [--chat] [--recipient <name> --html <body.html>]")
+            print("\nScreens a client-email body for AI-ish voice (lexical + structural).")
+            print("\nVerdicts (default):")
+            print("  PASS       (0-2 signals, 0 structural)")
+            print("  FLAG       (3-4 signals, OR any 1-2 structural tells)")
+            print("  MAJOR FLAG (5+ signals, OR 3+ structural tells)")
+            print("\n--strict: zero-tolerance self-gate — ANY signal = FAIL. Use before sending.")
+            print("--chat: apply plain-chat voice rules instead of recipient-specific email rules.")
+            print("--recipient <name>: house rules apply to 'greg' (default). Others exempt.")
+            print("--reply: this is a reply, so it must quote the recipient's points with '>'.")
+            print("\nHouse rules for greg (each is a hard FAIL, not a flag):")
+            print(f"  length  — body over {GREG_WORD_LIMIT} words")
+            print("  jargon  — technical terms with no plain-English gloss in the same sentence.")
+            print("            Keep a correct term and explain it in that sentence (\", which means ...\");")
+            print("            never swap it for a vaguer word.")
+            print("  quoting — a reply that never quotes his points back with '>'")
+            print("\n--html <file>: the HTML body. For greg and devops, hard FAIL on the old plain shape (17 Oct rule):")
+            print("  [format_bullets] typed '- ' / '* ' bullets   [format_markdown] '#' or '**'")
+            print("  [format_headings] 2+ topic titles as plain lines with no <h2>   [format_links] (every recipient) an address or URL not a bold <a href=\"https://...\"> link")
+            print("  For clients outside the plain-letter set (greg, devops, team, william, CO_OP_RECIPIENTS):")
+            print("  [format_no_card] HTML must hold a house card (a table or container with an inline style, 480-720 px wide).")
+            print("  Missing --html for such a client under --strict is [format_unchecked]. Card source:")
+            print(f"  {CARD_SOURCE}")
+            print("  The quoted part ('>' lines, <blockquote>, below 'On ... wrote:') never counts. Without --html a")
+            print("  warning says the format was not checked.")
+            print("\nUnlinked references (every recipient except --chat): [unlinked_ref] a card, issue, ticket, pull request,")
+            print("  message or commit named by its number (card 110, issue #45, PR 12, message 1535, commit abc1234, #123)")
+            print("  that is not a link. Every number in a list ('cards 110 ... and 97') needs its own link. In --html a")
+            print("  reference must sit in an <a>; in plain text a full URL must sit in the same sentence. Counts")
+            print("  ('3 cards', 'page 2 of the PDF') are fine. Warns by default; fails under --strict and in HTML.")
+            print("\nRecorded-work claims (every recipient): [record_claim] add a URL or HTML link beside anything you say")
+            print("  you recorded, noted, wrote up, filed, logged, tracked or put on a list. Warns by default; fails under --strict.")
+            print("  [flat_answer] in HTML replies, do not open the first paragraph after a blockquote with a bare Yes/No.")
+            print("  Say how far it got instead (for example, \"It's prepared but not running: <what proves it>\").")
+            print("  Warns by default; fails under --strict.")
+            print("\nAcronyms (email profiles): [acronym] a word of 2-5 capitals needs a plain explanation at its first use,")
+            print("  e.g. CSS (Cascading Style Sheets, the code that controls how a page looks), or spelled out first:")
+            print("  Cascading Style Sheets (CSS). Warns by default, hard FAIL under --strict. Skipped: URLs, addresses,")
+            print("  code, '>' lines, [CC>MUSE] tags, and a short allow list (AM PM OK US ID ET ...).")
+            print("\nChat profile (--chat): email-only jargon glosses, acronyms, reply quoting, HTML formats, the Greg word")
+            print("  limit and reader questions are off. [sender_we] is a warning only. Under --strict, chat_length (>60")
+            print("  body words), data_dump (two machine-like details, or any IP/hash), glosses and chat_structure fail.")
+            print("  Promises and open_work remain strict checks; up to three short numbered choice lines are allowed.")
+            print("\nTeam text (--recipient team, 29 Oct 'team text is teaching text'): hard FAIL on [bare_ref] a ticket number")
+            print("  (#274, PR #274, owner/repo#274) outside a link, or a link whose text is only the number or has fewer")
+            print("  than two words besides it; and [jargon] as for greg (no word limit). Code is exempt.")
+            print("  A line starting Closes/Fixes/Resolves #N (any case) is exempt: GitHub needs that syntax. Under team the")
+            print("  email-only rules are OFF: [question_to_reader], [promises_future_work], [open_work], [sender_we].")
+            print("  --keep-facts-from <original>: FAIL, under 'FACTS DROPPED:', when the new text loses a URL, ticket")
+            print("  number, code, file path, number with unit, date or time, changes the checkbox counts, or adds an @-mention.")
+            print("\nSender \"we\" (every recipient except greg/william/devops, and when no --recipient is given):")
+            print("  [sender_we] we/we'll/us/our/let us in prose = hard FAIL. Jonathan is one person: I / me / my.")
+            print("  For greg/william/devops it is a warning only. Quoted ('>') lines and \"quoted\" words are skipped.")
+            print("\nPromises future work (--strict only):")
+            print("  [promises_future_work] I'll / I can / I could / happy to / if you want / plan to / soon /")
+            print("  next week / going to / offer. Do the work first, or cut the line. Skipped: '>' lines,")
+            print("  questions to the reader, \"quoted\" words, and lines starting 'Jon:' (his verbatim words).")
+            print("\nOpen work and questions (--strict only; a HOLD, not a style nit):")
+            print("  [open_work] still open / not yet / next up / we plan / on my list. Do the work first, then")
+            print("  report it done; never trim the line. [question_to_reader] any prose question to the reader:")
+            print("  research and decide it ourselves. A question passes only one at a time:")
+            print('  --only-they-know "<start of the question>::<what we checked, and why only the reader can answer>"')
+            print("  (repeatable; reason 25+ characters, never a stock phrase; a start matching no question fails).")
+            print("  PASS lists each kept question with its reason.")
+            print("\nAsks the reader for access (every recipient except team):")
+            print("  [access_ask] a sentence asking for access: add <address> as a Viewer, invite me, give me access,")
+            print("  grant/share access, sign-in/login for, admin access, add me to, send me the password. Warns by")
+            print("  default; under --strict a hard FAIL naming each sentence unless --access-proof \"<the access")
+            print("  record and the live check that show we lack it>\" is given (20+ characters).")
+            print("\nExit codes: 0 = PASS. Non-zero for FLAG, MAJOR FLAG and FAIL alike,")
+            print("so `check && post` is safe. Previously a FLAG exited 0.")
+            sys.exit(1)
 
-    if args[0] == '--stdin':
+    if text is not None:
+        pass
+    elif args[0] == '--stdin':
         text = sys.stdin.read()
     else:
         path = Path(args[0])
