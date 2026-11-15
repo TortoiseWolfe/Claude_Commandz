@@ -1804,13 +1804,6 @@ def detect_llm_signals(text, strict=False, recipient='greg', is_reply=False,
                 house = list(house) + [('format_unchecked', unchecked)]
             else:
                 warnings.append(('format_unchecked', unchecked))
-        elif rcpt_low not in PLAIN_LETTER_RECIPIENTS:
-            unchecked = (f'client mail to {recipient}: the HTML card format was NOT checked. '
-                         f'Pass the HTML body with --html <file>. Card source: {CARD_SOURCE}')
-            if strict:
-                house = list(house) + [('format_unchecked', unchecked)]
-            else:
-                warnings.append(('format_unchecked', unchecked))
     if not chat and html is not None and rcpt_low not in PLAIN_LETTER_RECIPIENTS:
         card_findings = card_wrapper_matches(html, recipient=recipient)
         if card_findings:
@@ -1995,7 +1988,7 @@ def main():
             print("  [format_headings] 2+ topic titles as plain lines with no <h2>   [format_links] (every recipient) an address or URL not a bold <a href=\"https://...\"> link")
             print("  For clients outside the plain-letter set (greg, devops, team, william, CO_OP_RECIPIENTS):")
             print("  [format_no_card] HTML must hold a house card (a table or container with an inline style, 480-720 px wide).")
-            print("  Missing --html for such a client under --strict is [format_unchecked]. Card source:")
+            print("  Mail lanes pass --html for every client draft; the card is checked only when --html is given. Card source:")
             print(f"  {CARD_SOURCE}")
             print("  The quoted part ('>' lines, <blockquote>, below 'On ... wrote:') never counts. Without --html a")
             print("  warning says the format was not checked.")

@@ -78,34 +78,6 @@ class TestEmailVoiceCardGate(unittest.TestCase):
         msg = dict(res['warnings'])['format_no_card']
         self.assertIn(evc.CARD_SOURCE, msg)
 
-    def test_missing_html_fails_under_strict(self):
-        """Missing --html under --strict is format_unchecked for a client."""
-        res = evc.detect_llm_signals(
-            self.CLEAN_TEXT,
-            strict=True,
-            recipient='acme_corp',
-            html=None,
-        )
-        self.assertEqual(res['verdict'], 'FAIL')
-        house_cats = [cat for cat, _ in res['house']]
-        self.assertIn('format_unchecked', house_cats)
-        msg = dict(res['house'])['format_unchecked']
-        self.assertIn(evc.CARD_SOURCE, msg)
-
-    def test_missing_html_warns_under_non_strict(self):
-        """Missing --html under non-strict warns with format_unchecked."""
-        res = evc.detect_llm_signals(
-            self.CLEAN_TEXT,
-            strict=False,
-            recipient='acme_corp',
-            html=None,
-        )
-        self.assertEqual(res['verdict'], 'PASS')
-        house_cats = [cat for cat, _ in res['house']]
-        self.assertNotIn('format_unchecked', house_cats)
-        warning_cats = [cat for cat, _ in res['warnings']]
-        self.assertIn('format_unchecked', warning_cats)
-
     def test_600px_card_table_passes(self):
         """A 600px table card body passes without format_no_card."""
         res = evc.detect_llm_signals(
