@@ -163,11 +163,33 @@ recycle_line() {
 }
 # recycle_due <lane>, the lane's pane on stdin: 0 when its context is at or over its line, a working lane included.
 recycle_due() {
-  local l=$1 pane c; pane=$(cat)
+  local l=$1 pane c n; pane=$(cat)
   recycle_locked "$l" && return 1
   printf '%s\n' "$pane" | dialog_waiting && return 1
   c=$("$lane_sh" --ctx "$l" 2>/dev/null)
+  # Count the readings that came back as exactly a question mark (ctx_unknown_check names the lane); a number or n/a ends the run.
+  # In files, because this runs in a pipeline's subshell. Writes nothing to standard output.
+  if [ "$c" = "?" ]; then
+    n=$(cat "$recycle_dir/.ctxunknown-$l" 2>/dev/null) || n=0
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    printf '%s' $(( 10#$n + 1 )) > "$recycle_dir/.ctxunknown-$l"
+  elif [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" = "n/a" ]; then
+    rm -f "$recycle_dir/.ctxunknown-$l" "$recycle_dir/.ctxunknown-$l.named"
+  fi
   [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$(recycle_line "$l")" ]
+}
+# Unreadable context. ctx_unknown_check <lane> (no subshell: it sets hit and other) names a lane whose context has read as unknown
+# LANE_WATCH_CTX_UNKNOWN (default 10) polls in a row, because recycle_due cannot test its recycle line then. 0 or "off" turns it off.
+# The mark .ctxunknown-<lane>.named stops a second naming; recycle_due clears both files when a number or n/a is read.
+ctx_unknown_check() {
+  local l=$1 lim=${LANE_WATCH_CTX_UNKNOWN:-10} n mark="$recycle_dir/.ctxunknown-$1.named"
+  [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -gt 0 ] || return 0
+  n=$(cat "$recycle_dir/.ctxunknown-$l" 2>/dev/null) || n=0
+  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge "$lim" ] || return 0
+  [ -e "$mark" ] && return 0
+  : > "$mark"
+  echo "context unknown: $l (its context has read as unknown $n times in a row, so its recycle line cannot be checked) -- look at the lane"
+  hit=1; other=1
 }
 # Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
 # recycled thrash_count times within thrash_secs by the rows of the recycle log. The marker (.thrash-<lane>) holds the newest recycled stamp
@@ -876,7 +898,7 @@ client_line_open() {
 # "report stale: ..." when lane.sh --status says the lane's report.md is not its last word (input arrived after it, or a background job is
 # still running), else nothing. 19 Oct: a lane was closed on "report:yes idle" while it was mid-work.
 stale_note() {
-  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
+  "$lane_sh" --status --full 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
 }
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
@@ -921,7 +943,7 @@ watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last f
 # The live lanes now: rows of lane.sh --status that start in column one and are not "dead", and that have a tmux window.
 live_lanes() {
   local wins; wins=$(tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null) || return 0
-  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
+  "$lane_sh" --status --full 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
     while read -r n; do printf '%s\n' "$wins" | grep -qx "$n" && echo "$n"; done
 }
 refresh_watched() { # no names given: add the lanes that started since the last poll
@@ -1132,6 +1154,7 @@ while :; do
       fi
       dead_check "$l"
       high_check "$l"
+      ctx_unknown_check "$l"
       green_pr_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then

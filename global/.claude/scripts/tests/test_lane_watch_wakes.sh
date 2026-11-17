@@ -409,5 +409,86 @@ mm_run 08
 if [ "$mm_rc" != 2 ] && ! printf '%s\n' "$mm_out" | grep -q 'needs a whole number\|value too great for base'; then echo "ok   --max-min 08 is accepted and read as decimal"
 else echo "FAIL --max-min 08: rc=$mm_rc out=$mm_out"; failures=$((failures + 1)); fi
 
+# An unreadable context is named. lane.sh --ctx answers "?" when a lane's transcript holds no usage record; recycle_due counts those answers in
+# $recycle_dir/.ctxunknown-<lane> and ctx_unknown_check names the lane once per run (mark .ctxunknown-<lane>.named). A number or n/a ends the run.
+cu_dir="$TMP/cu-state"; mkdir -p "$cu_dir"; cu_ctx="$TMP/cu-ctx"; cu_log="$TMP/cu-status-calls"
+cu_lane_sh="$TMP/cu-lane.sh"
+cat > "$cu_lane_sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  --ctx) cat "$CU_CTX" ;;
+  --recycle-point) echo 1000 ;;
+  --status) printf '%s\n' "$*" >> "$CU_LOG" ;;
+esac
+SH
+chmod +x "$cu_lane_sh"
+export CU_CTX="$cu_ctx" CU_LOG="$cu_log"
+cu_save_lane_sh="$lane_sh"; cu_save_dir="$recycle_dir"; lane_sh="$cu_lane_sh"; recycle_dir="$cu_dir"
+cu_read() { # cu_read <answer> [times]: the watcher reads the lane's context that many times (recycle_due runs in a pipeline, as in the loop)
+  local i; echo "$1" > "$cu_ctx"
+  for ((i = 0; i < ${2:-1}; i++)); do printf '%s\n' "$idle_pane" | recycle_due cu-lane || true; done
+}
+cu_name() { # cu_name [limit]: one ctx_unknown_check; the line it printed is in $cu_said
+  hit=0; other=0
+  LANE_WATCH_CTX_UNKNOWN="${1:-10}" ctx_unknown_check cu-lane > "$TMP/cu-said"; cu_said=$(cat "$TMP/cu-said")
+}
+cu_expect() { # cu_expect <label> <1 if named, else 0>
+  local got=0; [ -n "$cu_said" ] && got=1
+  if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: said '$cu_said'"; failures=$((failures + 1)); fi
+}
+rm -f "$cu_dir"/.ctxunknown-*
+cu_read '?' 9; cu_name; cu_expect "9 unknown readings name nobody" 0
+cu_read '?' 1; cu_name
+if [ "$cu_said" = "context unknown: cu-lane (its context has read as unknown 10 times in a row, so its recycle line cannot be checked) -- look at the lane" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   the 10th unknown reading names the lane once, with the line and hit/other set"
+else echo "FAIL 10th reading: said '$cu_said' hit=$hit other=$other"; failures=$((failures + 1)); fi
+cu_read '?' 3; cu_name; cu_expect "more unknown readings do not name it again" 0
+cu_read 50; cu_name
+if [ ! -e "$cu_dir/.ctxunknown-cu-lane" ] && [ ! -e "$cu_dir/.ctxunknown-cu-lane.named" ]; then echo "ok   a number clears the count and the mark"
+else echo "FAIL a number left files: $(ls -A "$cu_dir")"; failures=$((failures + 1)); fi
+cu_read '?' 10; cu_name; cu_expect "a new run of 10 names the lane again" 1
+cu_read 'n/a'; cu_name
+if [ ! -e "$cu_dir/.ctxunknown-cu-lane" ] && [ ! -e "$cu_dir/.ctxunknown-cu-lane.named" ]; then echo "ok   n/a clears the count and the mark"
+else echo "FAIL n/a left files: $(ls -A "$cu_dir")"; failures=$((failures + 1)); fi
+cu_read 'n/a' 20; cu_name; cu_expect "n/a never counts" 0
+[ ! -e "$cu_dir/.ctxunknown-cu-lane" ] || { echo "FAIL n/a wrote a count"; failures=$((failures + 1)); }
+cu_out=$(cu_read '?' 1)
+if [ -z "$cu_out" ]; then echo "ok   recycle_due writes nothing to standard output when it counts"; else echo "FAIL recycle_due printed: $cu_out"; failures=$((failures + 1)); fi
+for cu_off in 0 off; do
+  rm -f "$cu_dir"/.ctxunknown-*; cu_read '?' 12; cu_name "$cu_off"; cu_expect "LANE_WATCH_CTX_UNKNOWN=$cu_off turns the check off" 0
+done
+# The same check wired into the poll loop: a short poll and a threshold of 2, so the real watcher names the lane once.
+rm -f "$cu_dir"/.ctxunknown-*; echo '?' > "$cu_ctx"
+mkdir -p "$TMP/cu-bin"
+cat > "$TMP/cu-bin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) echo cu-lane ;;
+  capture-pane) printf '%s\n' '⏺ Merged.' '✻ Worked for 4m 2s · done 1:05 PM' '❯ ' ;;
+esac
+SH
+chmod +x "$TMP/cu-bin/tmux"
+cu_home="$TMP/cu-home"; mkdir -p "$cu_home/.claude/state/lanes" "$cu_home/.claude/scripts"
+cat > "$cu_home/.claude/scripts/lane.sh" <<'SH'
+#!/usr/bin/env bash
+echo "lane.sh under the fake HOME was called: $*" >> "$CU_LOG"
+SH
+chmod +x "$cu_home/.claude/scripts/lane.sh"
+: > "$cu_log"
+cu_watch_out=$(HOME="$cu_home" PATH="$TMP/cu-bin:$PATH" LANE_SH="$cu_lane_sh" LANE_RECYCLE_DIR="$cu_dir" OPENCLAW_RECONCILE=/nonexistent LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 LANE_WATCH_CTX_UNKNOWN=2 LANE_RECYCLE_RETRY_SECS=0 timeout 7 bash "$SCRIPT" --max-min 5 cu-lane 2>&1 || true)
+if [ "$(printf '%s\n' "$cu_watch_out" | grep -c '^context unknown: cu-lane (its context has read as unknown [0-9]* times in a row')" = 1 ]; then echo "ok   the poll loop names a lane whose context stays unknown, once"
+else echo "FAIL poll loop naming: $cu_watch_out"; failures=$((failures + 1)); fi
+
+# The status calls go through $lane_sh (LANE_SH), not a fixed path under HOME: with a fake lane.sh in LANE_SH and another under the fake HOME, a
+# poll with no lane names (it reads the live lanes from --status) asks the one in LANE_SH, and the one under HOME is never run.
+: > "$cu_log"
+HOME="$cu_home" PATH="$TMP/cu-bin:$PATH" LANE_SH="$cu_lane_sh" LANE_RECYCLE_DIR="$cu_dir" OPENCLAW_RECONCILE=/nonexistent LANE_SPEND_CMD=/bin/true \
+  LANE_WATCH_SPEND_SECS=99999 LANE_WATCH_POLL=1 timeout 4 bash "$SCRIPT" --max-min 5 >/dev/null 2>&1 || true
+if grep -q '^--status --full$' "$cu_log"; then echo "ok   a poll calls the lane.sh in LANE_SH with --status"
+else echo "FAIL no --status call reached the LANE_SH fake: log=$(cat "$cu_log")"; failures=$((failures + 1)); fi
+if ! grep -q 'under the fake HOME' "$cu_log"; then echo "ok   the lane.sh under the fake HOME is not called"
+else echo "FAIL the HOME lane.sh was called: $(cat "$cu_log")"; failures=$((failures + 1)); fi
+lane_sh="$cu_save_lane_sh"; recycle_dir="$cu_save_dir"
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch wake tests passed"

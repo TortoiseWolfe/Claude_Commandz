@@ -392,7 +392,8 @@ echo "calm  report:yes idle    done"
 SH
 chmod +x "$stale_home/.claude/scripts/lane.sh"
 echo "Done." > "$stale_home/.claude/state/lanes/2026-10-19-told/report.md"
-note=$(HOME="$stale_home" stale_note told); calm=$(HOME="$stale_home" stale_note calm)
+# stale_note reads lane.sh through $lane_sh (set once when the script is sourced), so the fake is named there, not only through HOME.
+note=$(lane_sh="$stale_home/.claude/scripts/lane.sh"; stale_note told); calm=$(lane_sh="$stale_home/.claude/scripts/lane.sh"; stale_note calm)
 if [ "${note#report stale: the lane got input}" != "$note" ] && [ -z "$calm" ]; then
   echo "ok   a stale report gets a note saying so; a settled one gets none"
 else

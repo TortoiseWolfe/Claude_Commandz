@@ -155,7 +155,41 @@ lane --ctx new-lane
 rm -f "$PROJ/fresh-sess.jsonl"; sed -i '/\tnew-lane\t/d' "$INDEX"
 add_row cx-lane codex -
 lane --ctx cx-lane
-[ "$LAST_OUT" = '?' ] || fail "--ctx for a Codex lane prints ?, got: $LAST_OUT"; ok
+[ "$LAST_OUT" = 'n/a' ] || fail "--ctx for a Codex lane prints n/a (no reading by design), got: $LAST_OUT"; ok
+lane --turn cx-lane
+[ "$LAST_OUT" = '?' ] || fail "--turn for a Codex lane still prints ?, got: $LAST_OUT"; ok
+
+# A status call does not rewrite the index when no row would change (the watcher calls --status every poll): same file (inode) and same bytes.
+fi_keep="$TMP/index-keep"; cp "$INDEX" "$fi_keep"
+fi_now="$(date +%s)"
+fi_row() {  # fi_row <name> <session> <start>: a full 15-column row
+  printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\t%s\t%s\thigh\toff\t-\t-\t-\t-\n' "$(date +%F)" "$1" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$2" "$3"
+}
+fi_status_keeps() {  # fi_status_keeps <label>: --status leaves the index file (inode) and its bytes alone
+  local ino sum; ino="$(stat -c %i "$INDEX")"; sum="$(cksum <"$INDEX")"
+  lane --status
+  assert_exit 0 "$LAST_RC" "$1: --status exits 0"
+  assert_eq "$(stat -c %i "$INDEX")" "$ino" "$1: the index is the same file"
+  assert_eq "$(cksum <"$INDEX")" "$sum" "$1: the index has the same bytes"
+}
+fi_row fi-full fi-sess-1 "$fi_now" >"$INDEX"
+fi_status_keeps 'every row has an id and 15 columns'
+fi_row fi-noproof - "$fi_now" >>"$INDEX"
+rm -f "$HOME_T/.claude/state/lanes/sessions/fi-noproof"
+fi_status_keeps 'a row needs an id and none can be proven'
+fi_row fi-proof - "$fi_now" >>"$INDEX"
+printf 'fi-sess-2\t%s\t-\n' "$((fi_now + 1))" >"$HOME_T/.claude/state/lanes/sessions/fi-proof"
+lane --status
+assert_exit 0 "$LAST_RC" 'a provable id: --status exits 0'
+assert_eq "$(awk -F'\t' '$2 == "fi-proof" {print $8}' "$INDEX")" fi-sess-2 'a row that needs an id and can be proven gets it'
+assert_eq "$(awk -F'\t' '$2 == "fi-full" {print $8}' "$INDEX")" fi-sess-1 'the other rows keep their ids'
+printf '%s\tfi-short\t%s\tsonnet\tsubscription\t%s\t%s\tfi-sess-3\t%s\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$fi_now" >>"$INDEX"
+lane --status
+assert_exit 0 "$LAST_RC" 'a short row: --status exits 0'
+assert_eq "$(awk -F'\t' '$2 == "fi-short" {print NF}' "$INDEX")" 15 'a row with fewer than 15 columns is padded to 15'
+assert_eq "$(awk -F'\t' '$2 == "fi-short" {print $8}' "$INDEX")" fi-sess-3 'the padded row keeps its id'
+assert_eq "$(awk -F'\t' 'NF != 15' "$INDEX" | wc -l)" 0 'every row has 15 columns after the pad'
+cp "$fi_keep" "$INDEX"; rm -f "$HOME_T/.claude/state/lanes/sessions"/fi-*
 
 # --turn says whether the lane's last turn only answered a Monitor event (lane_watch.sh then does not wake the hub), from its transcript.
 MON='<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: \"download progress\"</summary>\n<event>10%</event>\n</task-notification>'

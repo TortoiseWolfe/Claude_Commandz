@@ -42,9 +42,11 @@
 # The model is passed through when it is one of agy's own (gemini-*, gpt-oss-*, claude-*-4-6*); any other
 # name (a Claude Code alias) becomes gemini-3.8-flash-high (see agy_model).
 # --engine opencode runs opencode_lane.sh (beside this script): OpenCode, headless, edit files AND run commands, on a free API key read from
-# ~/.config/gemini and ~/.config/openrouter at run time (never in the command line). Model: google/gemini-3-flash-preview, with
-# openrouter/nvidia/nemotron-3-ultra-550b-a55b:free as the fallback when the first is out of quota; any other model name (a Claude alias) becomes the
-# first. Both free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
+# ~/.config/gemini and ~/.config/openrouter at run time (never in the command line). Models, in order: google/gemini-3-flash-preview,
+# openrouter/nvidia/nemotron-3-ultra-550b-a55b:free, then opencode/big-pickle (OpenCode's own keyless free tier). lane.sh only picks the model the
+# lane starts on: the one named when it is a google/, openrouter/ or opencode/ model, else the first, and when that provider's key file is missing the
+# first of the three whose key is present. The quota fall-back itself is opencode_lane.sh's: when a run hits a quota or rate limit it stops the run and
+# the next provider takes the same prompt, until none is left. Both keyed free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
 # like Codex/Copilot: git, tests and the report are the lane's own. Order for his own-repo code lanes: agy, codex, copilot, opencode, then Claude Sonnet.
 # --engine local runs local_lane.sh (beside this script): the same OpenCode, on an Ollama server on this machine (LOCAL_LANE_URL, default
 # http://127.0.0.1:11434), so no prompt, file or key leaves the machine and there is no quota. Model: ollama/<name> (default ollama/qwen3-coder:30b);
@@ -102,7 +104,7 @@
 #                                       it then restarts the same way, so a lane started before a lane.sh change takes up the new folders and rules.
 #   lane.sh [--dry-run] --unlock-gone   free the worktree locks lane.sh made (it locks a lane's linked worktree at start/--resume so `git worktree remove`
 #                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
-#   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
+#   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, n/a for an engine lane, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
@@ -174,6 +176,15 @@ SESSION=lanes
 # The day Codex is back (its free plan hit the usage limit 7 Nov 2026 4:13 AM). The only place this date is written; the help text and the
 # own-repo refusal read it from here. Change it here when it moves.
 CODEX_BACK="${CODEX_BACK:-6 Dec 2026 12:43 PM}"
+# The phrase the help and the refusal show: the date while it is ahead; once it has passed (or date -d cannot read it) a line saying to check it.
+codex_back_phrase() {
+  local e
+  if e="$(date -d "$CODEX_BACK" +%s 2>/dev/null)" && [ "$e" -gt "$(date +%s)" ]; then
+    printf 'until Codex returns on %s' "$CODEX_BACK"
+  else
+    printf 'Codex was due back on %s; check it and update CODEX_BACK' "$CODEX_BACK"
+  fi
+}
 
 # Plugins switched off in every Claude lane (set to false through --settings enabledPlugins).
 # Kept on: afa-mods (--status reads its band), security-guidance, code-review.
@@ -280,7 +291,8 @@ lane_docker_env() {
 }
 
 usage() {
-  cat <<'USAGE' | sed "s/@CODEX_BACK@/$CODEX_BACK/g"
+  local cb; cb="$(codex_back_phrase)"
+  cat <<'USAGE' | sed "s|@CODEX_BACK@|${cb//&/\\&}|g"
 Usage:
   lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
@@ -316,7 +328,7 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
-his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
 needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
@@ -589,10 +601,19 @@ fill_ids_locked() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" "${pm:--}" "${ad:--}" >>"$tmp"
   done <"$INDEX"
+  # Nothing changed (the usual case for a status call): drop the copy and leave the index file alone.
+  if cmp -s "$tmp" "$INDEX"; then rm -f "$tmp"; return 0; fi
   index_commit "$tmp"
 }
 fill_ids() {
   [ -s "$INDEX" ] || return 0
+  # One lock-free read first: a row could change when it needs an id (column 8 empty or "-" with column 9 set and not "-"),
+  # when it has other than 15 columns, or when any of columns 8 to 15 is empty. If no row could, there is nothing to rewrite.
+  awk -F'\t' '
+    NF != 15 { f = 1; exit }
+    { for (i = 8; i <= 15; i++) if ($i == "") { f = 1; exit } }
+    ($8 == "-") && $9 != "" && $9 != "-" { f = 1; exit }
+    END { exit !f }' "$INDEX" || return 0
   index_locked fill_ids_locked || true
 }
 
@@ -1243,7 +1264,6 @@ print(",".join(out))
   return 0
 }
 
-# Context size in K tokens from the last assistant usage in a lane's transcript.
 # yes / input / job / no for a lane's report: "yes" only when report.md is newer than everything the lane was told and no background job
 # is running (lane_report_state.py reads the transcript). 19 Oct: "report:yes idle" got a lane closed mid-work.
 report_word() {  # <report.md> <dir> <session-id>
@@ -1256,6 +1276,7 @@ report_word() {  # <report.md> <dir> <session-id>
   fi
   echo yes
 }
+# Context size in K tokens from the last assistant usage in a lane's transcript.
 ctx_k() {  # <dir> <session-id>
   local f
   f="$(transcript_of "$1" "$2")"
@@ -1402,7 +1423,7 @@ if [ "$mode" = status ]; then
       row="$(index_row "$w")"
       IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"${row:-}"
       if [ -z "$row" ]; then
-        rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
+        rep="$(ls -t "$HOME"/.claude/state/lanes/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
         extra="(not in index)"
       else extra=""; fi
@@ -1771,14 +1792,16 @@ if [ "$mode" = pane ]; then
   exit 0
 fi
 
-# --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
+# --ctx <name>: the lane's context in K tokens as a bare number, n/a for an engine lane (no reading by design), or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
 if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
-  case "${b:-subscription}" in codex|copilot|agy|opencode|local) echo "?"; exit 0 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy|opencode|local)   # no context reading exists for these by design (--turn stays ?)
+    if [ "$mode" = ctx ]; then echo "n/a"; else echo "?"; fi; exit 0 ;;
+  esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(proven_session "$1" "$st")"
@@ -2600,7 +2623,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     return 0
   fi
   {
-    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on $CODEX_BACK (his rule, 22 Oct 3:30 PM). Use:"
+    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy $(codex_back_phrase) (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
     echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
@@ -2891,7 +2914,7 @@ if [ -n "$ask_id" ]; then
   if [ "$dry" = 1 ]; then
     echo "# would run: openclaw_dispatch.py claim $ask_id $name"
   else
-    claim_py="${AFA_OPENCLAW_DISPATCH:-$HOME/repos/Claude_Commandz/global/.claude/scripts/openclaw_dispatch.py}"
+    claim_py="${AFA_OPENCLAW_DISPATCH:-$HOME/.claude/scripts/openclaw_dispatch.py}"
     if claim_out="$(python3 "$claim_py" claim "$ask_id" "$name" 2>&1)"; then echo "claim:  $claim_out"
     else echo "WARNING: the lane is running but claiming ask $ask_id failed: $claim_out" >&2; fi
   fi
