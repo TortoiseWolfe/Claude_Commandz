@@ -40,17 +40,20 @@ P_SITE="$TMP/site.md"; printf 'Fit the photos in data/sites/example-01.\n' >"$P_
 P_MAIL="$TMP/mail.md"; printf 'Draft a reply to the email the client sent about the invoice.\n' >"$P_MAIL"
 
 # ---- own repo + Claude, no reason: refused with the agy command --------------------------------------------------------------------------
-lane --dry-run fix-header "$OWN" sonnet "$P_CODE"
+CODEX_BACK='6 Dec 2999 12:43 PM' lane --dry-run fix-header "$OWN" sonnet "$P_CODE"
 assert_exit 1 "$LAST_RC" 'an own-repo code lane on Claude with no reason is refused'
 assert_contains "$LAST_OUT" 'lane.sh --engine agy fix-header' 'the refusal prints the agy command with the lane name'
 assert_contains "$LAST_OUT" "$OWN gemini-3.8-flash-high $P_CODE" 'the refusal prints the caller own dir and prompt file'
 assert_contains "$LAST_OUT" '--claude-because' 'the refusal names the override'
-assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2026 12:43 PM' 'the refusal names the day Codex is back, from the one variable'
+assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2999 12:43 PM' 'the refusal names the day Codex is back, from the one variable'
 assert_not_contains "$LAST_OUT" '31 Oct' 'and not the old date'
 for kind in 'needs Docker' 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review or planning (strongest tier)' 'not code'; do
   assert_contains "$LAST_OUT" "$kind" "the refusal lists the accepted reason: $kind"
 done
 assert_not_contains "$LAST_OUT" 'mkdir -p' 'a refused lane makes no hand-off folder'
+CODEX_BACK='1 Jan 2020' lane --dry-run fix-header "$OWN" sonnet "$P_CODE"
+assert_exit 1 "$LAST_RC" 'a refusal with a past Codex date is still a refusal'
+assert_contains "$LAST_OUT" 'Codex was due back on 1 Jan 2020; check it and update CODEX_BACK' 'the refusal uses the same wording for a past date'
 for m in opus fable haiku; do
   lane --dry-run fix-header "$OWN" "$m" "$P_CODE"
   assert_exit 1 "$LAST_RC" "the same lane on $m is refused too"
@@ -110,13 +113,19 @@ assert_exit 0 "$LAST_RC" 'with no client lists the repo cannot be told apart, so
 unset LANE_HOME
 
 # ---- other modes are untouched -----------------------------------------------------------------------------------------------------------
-lane --help
+CODEX_BACK='6 Dec 2999 12:43 PM' lane --help
 assert_contains "$LAST_OUT" '--claude-because' 'help documents the option'
 assert_contains "$LAST_OUT" 'gemini-3.8-flash-high' 'help names the agy command'
-assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2026 12:43 PM' 'help names the day Codex is back'
+assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2999 12:43 PM' 'help names the day Codex is back'
 assert_not_contains "$LAST_OUT" '31 Oct' 'help carries no old date'
-CODEX_BACK='1 Jan 2030' lane --help
-assert_contains "$LAST_OUT" 'until Codex returns on 1 Jan 2030' 'the date lives in one variable'
+CODEX_BACK='1 Jan 2999' lane --help
+assert_contains "$LAST_OUT" 'until Codex returns on 1 Jan 2999' 'the date lives in one variable'
+# The wording follows the clock: a date ahead says "returns on", a date that has passed (or cannot be read) says to check and update it.
+CODEX_BACK='1 Jan 2020' lane --help
+assert_contains "$LAST_OUT" 'Codex was due back on 1 Jan 2020; check it and update CODEX_BACK' 'a past date says Codex was due back and to update it'
+assert_not_contains "$LAST_OUT" 'until Codex returns on 1 Jan 2020' 'a past date is not shown as still ahead'
+CODEX_BACK='sometime soon' lane --help
+assert_contains "$LAST_OUT" 'Codex was due back on sometime soon; check it and update CODEX_BACK' 'a date that cannot be read gets the check-and-update wording'
 head -6 "$SCRIPT" | grep -q -- '--claude-because' || fail 'the header usage names the option'; ok
 
 printf 'ok - %s checks passed\n' "$checks"

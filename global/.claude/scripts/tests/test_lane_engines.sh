@@ -48,7 +48,11 @@ printf '%s\0' "$@" >>"$TMUX_CALLS"
 case "$1" in
   has-session) [ "${TMUX_HAS_SESSION:-0}" = 1 ] ;;
   list-windows) for window in ${TMUX_WINDOWS:-}; do printf '%s\n' "$window"; done ;;
-  display) [ "${5:-}" = '#{pane_current_command}' ] && printf '%s\n' "${TMUX_PANE_CMD:-claude}" ;;
+  display)
+    case "${5:-}" in
+      '#{pane_current_command}') printf '%s\n' "${TMUX_PANE_CMD:-claude}" ;;
+      '#{pane_current_path}') printf '%s\n' "${TMUX_PANE_PATH:-/}" ;;   # a window that is not in the index: --status asks where its pane is
+    esac ;;
   capture-pane)
     if [ -n "${TMUX_PANE_FILE:-}" ]; then
       # Like real tmux: colour escapes only come out when -e is passed.
@@ -1024,6 +1028,16 @@ printf '%s\ttier-res-plain\t%s\tsonnet\tsubscription\t%s\t%s\tsess-tier-3\t-\thi
 run_lane --dry-run --resume tier-res-low
 assert_exit 1 "$LAST_STATUS" 'resuming a sonnet site lane is refused'
 assert_contains "$LAST_OUTPUT" 'refusing model sonnet' 'the resume refusal names the model'
+# A window that is not in the index finds its report in the exact dated folder, not in any folder whose name merely ends with the window name:
+# "mail" must not show the report of "other-mail", even when that one is newer.
+LD="$HOME_TEST/.claude/state/lanes"; mkdir -p "$LD/2026-01-01-mail" "$LD/2026-01-02-other-mail"
+echo "mail report" >"$LD/2026-01-01-mail/report.md"; : >"$LD/2026-01-02-other-mail/report.md"; touch -d '-1 hour' "$LD/2026-01-01-mail/report.md"
+unlisted_status() { TMUX_PANE_FILE="$TMP/pane-bare" TMUX_HAS_SESSION=1 TMUX_WINDOWS=mail HOME="$HOME_TEST" PATH="$BIN:$PATH" TMUX_CALLS="$TMP/status-calls" TMUX_SENT="$TMP/status-sent" bash "$SCRIPT" --status 2>&1; }
+UNLISTED="$(unlisted_status)"
+assert_contains "$UNLISTED" '(not in index)' 'the unlisted window is reported as not in the index'
+assert_contains "$(printf '%s\n' "$UNLISTED" | awk '$1 == "mail"')" 'report:yes' 'an unlisted window shows its own dated folder report, not the newer one of other-mail'
+rm -rf "$LD/2026-01-01-mail" "$LD/2026-01-02-other-mail"
+
 run_lane --dry-run --allow-low-tier --resume tier-res-low
 assert_exit 0 "$LAST_STATUS" '--allow-low-tier lets a sonnet site lane resume'
 run_lane --dry-run --resume tier-res-fable
