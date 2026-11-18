@@ -139,7 +139,7 @@ if printf '%s\n' "$out" | grep -q '^spend: lane acme-mail has cost \$62.48 API-e
 else echo "FAIL spend wake: $out"; failures=$((failures + 1)); fi
 if grep -qx -- '--over 25' "$sp_args"; then echo "ok   the ledger is asked for lanes at or over 25 dollars"; else echo "FAIL spend args: $(cat "$sp_args")"; failures=$((failures + 1)); fi
 out=$(sp_run)
-if ! printf '%s\n' "$out" | grep -q '^spend:' && [ "$out" = "heartbeat: nothing new in 0 min" ]; then
+if ! printf '%s\n' "$out" | grep -q '^spend:' && [ "$out" = "$(printf 'WAKE-REASON heartbeat\nheartbeat: nothing new in 0 min')" ]; then
   echo "ok   a lane already named today does not wake the hub again"
 else echo "FAIL spend named twice: $out"; failures=$((failures + 1)); fi
 before=$(wc -l < "$sp_calls")
@@ -171,13 +171,13 @@ if printf '%s\n' "$out" | grep -q '^spend: the hub has cost \$80.50 API-equivale
   echo "ok   the hub past the limit wakes the hub (a lane under its limit does not)"
 else echo "FAIL hub spend wake: $out"; failures=$((failures + 1)); fi
 out=$(HUB_SPEND_LIMIT=75 hub_sp_run)
-if ! printf '%s\n' "$out" | grep -q '^spend: the hub' && [ "$out" = "heartbeat: nothing new in 0 min" ]; then
+if ! printf '%s\n' "$out" | grep -q '^spend: the hub' && [ "$out" = "$(printf 'WAKE-REASON heartbeat\nheartbeat: nothing new in 0 min')" ]; then
   echo "ok   the hub already named today does not wake the hub again"
 else echo "FAIL hub spend named twice: $out"; failures=$((failures + 1)); fi
 
 printf '#!/usr/bin/env bash\nexit 1\n' > "$sp_cmd"; rm -f "$sp_home"/.claude/state/lanes/.spend-alarm-*
 out=$(sp_run)
-if [ "$out" = "heartbeat: nothing new in 0 min" ]; then echo "ok   a failing ledger read wakes nobody and stops nothing"; else echo "FAIL spend failure: $out"; failures=$((failures + 1)); fi
+if [ "$out" = "$(printf 'WAKE-REASON heartbeat\nheartbeat: nothing new in 0 min')" ]; then echo "ok   a failing ledger read wakes nobody and stops nothing"; else echo "FAIL spend failure: $out"; failures=$((failures + 1)); fi
 
 # High-tier alarm (22 Oct 8 PM: ten lanes ran on Opus all day, one was entitled): a live lane on opus or fable with no logged reason is
 # named once per lane per day, with its model and today's spend. An entitled lane and a sonnet lane are not.

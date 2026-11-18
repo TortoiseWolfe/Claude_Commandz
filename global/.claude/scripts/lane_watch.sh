@@ -2,6 +2,7 @@
 # Wake the hub when a lane has something to report, so Jonathan never has to ask for progress.
 #
 #   lane_watch.sh [--max-min N] [--check 'cmd'] [<lane-name>...]
+#   lane_watch.sh --wake-counts [DAYS]  wakes per reason code over the last DAYS days (default 7), then exit
 #   lane_watch.sh --recycle-once        one silent recycle pass over every live lane, then exit (the 15-minute scheduled task)
 #
 # Exits (printing one line per event) as soon as any of these happens:
@@ -76,6 +77,13 @@
 # every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
 # Also left alone (line1_rests): a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
+# Every wake prints WAKE-REASON <code> as its first line (the existing lines follow unchanged) and appends one tab-separated row (ISO time from
+# date -Is, code, lane or -) to $LANE_WATCH_WAKE_LOG (default: wake.log in the lane state folder, $LANE_RECYCLE_DIR); a log that cannot be written
+# never stops the wake. The code comes from the first output line, one per kind of wake, from the table in wake_code: report, window-gone, dialog,
+# turn-ended, idle-remind, job-idle, handoff-orphan, step-no-link, done-no-proof, stamp-ahead, pane-dead, stale-lock, context-unknown, recycle-thrash,
+# recycle-failed, update-failed, tier, green-pr, spend, hub-context, unanswered, bridge, outbox, undelivered, ask-open, ask-openclaw, budget-reading,
+# client-talk, note, check-passed, heartbeat (other for a line the table does not know). A false wake is counted with
+# lane_watch.sh --wake-counts [DAYS] (default 7): the number of wakes per code in that window, most first.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
 export AFA_BIG_OUT=0
@@ -85,6 +93,87 @@ _lw_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # Leave the folder the watcher was started from. 6 Nov 2026: the hub started it inside a lane worktree, the lane removed the worktree after
 # its merge, and the watcher died with "getcwd: cannot access parent directories". Nothing here needs the starting folder.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then cd "${HOME:-/}" 2>/dev/null || cd / || true; fi
+
+# The one table of wake reason codes: wake_code <kind> prints the code of that kind of wake.
+wake_code() {
+  case "$1" in
+    report) echo report ;;           gone) echo window-gone ;;        dialog) echo dialog ;;
+    turn) echo turn-ended ;;         idle-remind) echo idle-remind ;; job-idle) echo job-idle ;;
+    handoff) echo handoff-orphan ;;  step-url) echo step-no-link ;;   done-proof) echo done-no-proof ;;
+    stamp) echo stamp-ahead ;;       dead) echo pane-dead ;;          lock) echo stale-lock ;;
+    ctx) echo context-unknown ;;     thrash) echo recycle-thrash ;;   recycle-failed) echo recycle-failed ;;
+    update-failed) echo update-failed ;; tier) echo tier ;;           green) echo green-pr ;;
+    spend) echo spend ;;             hub-context) echo hub-context ;; unanswered) echo unanswered ;;
+    bridge) echo bridge ;;           outbox) echo outbox ;;           undelivered) echo undelivered ;;
+    ask-open) echo ask-open ;;       ask-openclaw) echo ask-openclaw ;; budget) echo budget-reading ;;
+    talk) echo client-talk ;;        note) echo note ;;               check) echo check-passed ;;
+    heartbeat) echo heartbeat ;;     *) echo other ;;
+  esac
+}
+# wake_classify <first output line>: prints "<code> <lane or ->".
+wake_classify() {
+  local l=$1 kind=other lane=- re
+  case "$l" in
+    "report: "*) kind=report; re='^report: ([^ ]+) ' ;;
+    "gone: "*) kind=gone; re='^gone: ([^ ]+)' ;;
+    "waiting on a dialog: "*) kind=dialog; re='^waiting on a dialog: ([^ ]+)' ;;
+    "idle: "*"ended a turn"*) kind=turn; re='^idle: ([^ ]+) ' ;;
+    "idle: "*"background job"*) kind=job-idle; re='^idle: ([^ ]+) ' ;;
+    "idle: "*) kind=idle-remind; re='^idle: ([^ ]+) ' ;;
+    "handoff: lane "*) kind=handoff; re='^handoff: lane ([^ ]+) ' ;;
+    "step without URL: "*) kind=step-url; re='^step without URL: ([^ ]+) ' ;;
+    "done without proof: "*) kind=done-proof; re='^done without proof: ([^ ]+) ' ;;
+    "stamp ahead: "*) kind=stamp; re='^stamp ahead: ([^ ]+) ' ;;
+    "dead: "*) kind=dead; re='^dead: ([^ ]+) ' ;;
+    "stale recycle lock: "*) kind=lock; re='^stale recycle lock: ([^ ]+) ' ;;
+    "context unknown: "*) kind=ctx; re='^context unknown: ([^ ]+) ' ;;
+    "thrash: lane "*) kind=thrash; re='^thrash: lane ([^ ]+) ' ;;
+    "recycle failed: "*) kind=recycle-failed; re='^recycle failed: ([^:]+):' ;;
+    "update failed: "*) kind=update-failed; re='^update failed: ([^:]+):' ;;
+    "tier: lane "*) kind=tier; re='^tier: lane ([^ ]+) ' ;;
+    "green: "*) kind=green; re="^green: ([^ ]+)'s " ;;
+    "spend: lane "*) kind=spend; re='^spend: lane ([^ ]+) ' ;;
+    "spend: the hub"*) kind=spend; lane=hub ;;
+    "hub context: "*) kind=hub-context ;;
+    "unanswered: "*) kind=unanswered ;;
+    "bridge: "*) kind=bridge ;;
+    "outbox: "*) kind=outbox ;;
+    "undelivered: "*) kind=undelivered ;;
+    "ask: open receptionist"*) kind=ask-open ;;
+    "ask: "*) kind=ask-openclaw ;;
+    "budget reading failed"*) kind=budget ;;
+    "client talk: "*) kind=talk ;;
+    "note: "*) kind=note ;;
+    "check passed: "*) kind=check ;;
+    "heartbeat: "*) kind=heartbeat ;;
+  esac
+  [ -z "${re:-}" ] || { [[ "$l" =~ $re ]] && lane=${BASH_REMATCH[1]}; }
+  printf '%s %s\n' "$(wake_code "$kind")" "$lane"
+}
+# --wake-counts [DAYS]: wakes per code in the window, most first. Rows are: ISO time, code, lane.
+wake_counts() {
+  local days=${1:-7} cut
+  [[ "$days" =~ ^[0-9]+$ ]] || days=7
+  cut=$(date -d "-$days days" +%Y-%m-%dT%H:%M:%S)
+  awk -F'\t' -v cut="$cut" 'substr($1, 1, 19) >= cut { n[$2]++ } END { for (c in n) printf "%d\t%s\n", n[c], c }' "$wake_log" 2>/dev/null | sort -t$'\t' -k1,1nr -k2,2
+}
+# The wake log: one row per wake in the lane state folder. Never fails the wake.
+wake_log="${LANE_WATCH_WAKE_LOG:-${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}/wake.log}"
+wake_buf=""   # set once the watch holds its output: 1 when stdout is the held copy, read back through descriptor 4
+# wake_exit: every wake path ends here. If the watch printed anything it is a wake. Print WAKE-REASON first, then what was printed, then log the row.
+wake_emit() {
+  local all first cl code lane
+  [ -n "$wake_buf" ] || return 0
+  all=$(cat <&4)
+  exec 1>&3 3>&- 4<&-
+  wake_buf=""
+  [ -n "$all" ] || return 0
+  first=${all%%$'\n'*}
+  cl=$(wake_classify "$first"); code=${cl%% *}; lane=${cl#* }
+  printf 'WAKE-REASON %s\n%s\n' "$code" "$all"
+  { mkdir -p "$(dirname "$wake_log")" && printf '%s\t%s\t%s\n' "$(date -Is)" "$code" "$lane" >> "$wake_log"; } 2>/dev/null || true
+}
+wake_exit() { wake_emit; exit 0; }
 
 # Does this pane text show a dialog that waits on the hub? Reads the pane on stdin.
 # Claude Code menus say "Enter to select"; its permission prompts say "Do you want to proceed"
@@ -537,7 +626,7 @@ recycle_pass() {
   printf '%s\n' "$pane" | recycle_due "$l" || return 1
   recycle_thrash "$l" "$quiet" && return 0   # a lane recycled again and again is named to the hub instead
   date +%s > "$recycle_dir/.recycle-$l.tried"
-  setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 </dev/null &
+  setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 </dev/null 3>&- 4<&- &
   return 0
 }
 
@@ -689,7 +778,7 @@ hub_handoff_check() {
     mkdir -p "$(dirname "$stamp_file")" 2>/dev/null
     printf '%s\n' "$(date +%s)" > "$stamp_file"
     echo "hub context: ${tokens_k}K, past the ${handoff_k}K hand-off line. Write the hand-off, run /session-prime, ask for a fresh terminal."
-    exit 0
+    wake_exit
   fi
 }
 
@@ -908,6 +997,7 @@ idle_max=${LANE_WATCH_IDLE_MAX_MIN:-120}
 while [ $# -gt 0 ]; do
   case "$1" in
     --recycle-once) recycle_once=1; shift ;;
+    --wake-counts) wake_counts "${2-}"; exit 0 ;;
     --max-min) max=${2-}; shift 2 2>/dev/null || shift $# ;;
     --check) check=$2; shift 2 ;;
     *) break ;;
@@ -971,6 +1061,13 @@ if [ "$recycle_once" = 1 ]; then
   exit 0
 fi
 
+# From here the watcher can wake the hub: hold its output in a file and let wake_exit print it behind a WAKE-REASON line (no trap: a watcher killed by a timeout stays as quiet as before).
+# Descriptor 3 keeps the real stdout; the background children below close it, so none holds the caller's pipe open.
+# The held copy is an unlinked temp file (nothing is left behind when a timeout kills the watcher): descriptor 1 writes it, 4 reads it back.
+if wb=$(mktemp "${TMPDIR:-/tmp}/lane-watch-wake.XXXXXX" 2>/dev/null) && exec 4<"$wb"; then
+  exec 3>&1 >"$wb"; rm -f "$wb"; wake_buf=1
+fi
+
 # A real watcher announces itself before it watches: the pid file is how a later pass (or the Stop hook) finds it without reading a
 # command line and without knowing which Claude Code session started it. Starting also ends any gap a previous pass marked, so a watcher
 # that ran between two 15-minute passes is never named as missing. A stale file is harmless because watcher_running checks the start time.
@@ -1030,7 +1127,7 @@ check_open_questions() {
     fresh=$(python3 "$dispatch" open 2>/dev/null) && [ "$fresh" != none ] && questions=$fresh  # the burst's later questions too
     echo "ask: open receptionist questions:"
     printf '%s\n' "$questions"
-    exit 0
+    wake_exit
   fi
 }
 # A message of his that reached nobody: the reconciler puts it on the hub's list (so the next wake sees it as an open question, not again
@@ -1041,7 +1138,7 @@ check_undelivered() {
   u=$(timeout 60 python3 "$reconcile" --file --quiet 2>/dev/null | grep -E '^(undelivered \||filed with the hub:)') || return 0
   echo "undelivered: messages of Jonathan's that reached no lane and not the hub (now on the hub's list):"
   printf '%s\n' "$u"
-  exit 0
+  wake_exit
 }
 # The outbox (everything the hub sends to his chat) is retried from here as well as from the every-minute poller, because the poller is
 # started by Windows and stops when Windows cannot reach WSL (19 Oct from 5:21 PM). The pump runs in the background: a post that is
@@ -1050,21 +1147,21 @@ outbox="${OPENCLAW_OUTBOX:-$(dirname "$dispatch")/openclaw_dispatch.py}"
 check_outbox() {
   local w
   [ -f "$outbox" ] || return 0
-  setsid nohup timeout 600 python3 "$outbox" queue pump >/dev/null 2>&1 &
+  setsid nohup timeout 600 python3 "$outbox" queue pump >/dev/null 2>&1 3>&- 4<&- &
   w=$(timeout 60 python3 "$outbox" queue check 2>/dev/null | grep -E '^outbox: ') || return 0
   printf '%s\n' "$w"
-  exit 0
+  wake_exit
 }
 # The bridge watchdog runs from every poll, detached (a heal can take a minute and the watch must not stop for it; it takes its own lock
 # and heals at most once in five minutes). When it raises the alert the hub wakes.
 watchdog="${WSL_BRIDGE_WATCHDOG:-$(dirname "$(readlink -f "$0")")/wsl_bridge_watchdog.py}"
 check_bridge() {
   local w
-  [ -f "$watchdog" ] && { setsid nohup timeout 300 python3 "$watchdog" >/dev/null 2>&1 & }
+  [ -f "$watchdog" ] && { setsid nohup timeout 300 python3 "$watchdog" >/dev/null 2>&1 3>&- 4<&- & }
   w=$(bridge_alert)
   [ -n "$w" ] || return 0
   echo "bridge: $w"
-  exit 0
+  wake_exit
 }
 # The weekly budget reading failed. usage_calibrate.js writes its outcome to usage-calibrate-status.json; the Windows task that runs it hides the
 # script's exit code (conhost --headless), so a Cloudflare check or a signed-out page used to leave the budget gauge stale with nothing to say so.
@@ -1086,7 +1183,7 @@ PY
   [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
   printf '%s' "$sum" > "$mark"
   echo "$line"
-  exit 0
+  wake_exit
 }
 check_bridge
 check_calibrate
@@ -1131,9 +1228,9 @@ while :; do
       stamp_ahead_check "$l"
       done_proof_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
-      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 &
+      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 3>&- 4<&- &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
-      setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 &
+      setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 3>&- 4<&- &
     fi
     if ! tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null | grep -qx "$l"; then
       echo "gone: $l"; hit=1; other=1
@@ -1235,7 +1332,7 @@ while :; do
         echo "ask: open receptionist questions:"; printf '%s\n' "$fresh"
       fi
     fi
-    exit 0
+    wake_exit
   fi
   if [ "$(date +%s)" -ge "$end" ]; then
     # Stretch the heartbeat while the whole fleet is idle and no client line is open (31 Oct: a 45-minute wake at 9:15 AM with nothing new).
@@ -1243,7 +1340,7 @@ while :; do
       stretched=1
     else
       if [ "$stretched" = 1 ]; then echo "heartbeat: nothing new in $(( ($(date +%s) - start_ts) / 60 )) min"; else echo "heartbeat: nothing new in ${max} min"; fi
-      exit 0
+      wake_exit
     fi
   fi
   sleep "${LANE_WATCH_POLL:-30}"
