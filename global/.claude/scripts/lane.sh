@@ -657,7 +657,8 @@ ad_flags() {  # <colon list>
 # folder, so Claude Code's "Read outside the working directories" dialog froze the lane on every file in one (sh-1414, 29 Oct 2026, three times;
 # each stop woke the hub). Each existing checkout of the lane's own repo becomes an --add-dir: no global allow and the guard stays on, and
 # another repo's checkouts stay out of reach. <repo> is the first folder under ~/repos (or, for a lane started in a checkout, the part of
-# its name before "--"). A checkout made after the lane started is not covered until the lane is restarted or resumed.
+# its name before "--"). Only a folder that git lists for that repo counts (git worktree list), not any folder with a matching name. A checkout made after the
+# lane started is not covered until the lane is restarted or resumed.
 own_checkouts() {  # <lane folder>: one existing checkout folder per line
   local root wt rel repo c
   root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || return 0
@@ -666,10 +667,15 @@ own_checkouts() {  # <lane folder>: one existing checkout folder per line
   repo="${rel%%/*}"
   if [ "$repo" = .worktrees ]; then rel="${rel#.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"; fi
   case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  # Only checkouts git itself lists for this repo (18 Nov 2026: a folder left behind after its worktree was pruned, still holding an env file and a database
+  # snapshot, was added as a working directory; Claude Code asked to trust it and the lane never started). Git's own list answers who is registered.
+  local listed
+  listed="$(timeout 10 git -C "$root/$repo" worktree list --porcelain 2>/dev/null)" || return 0
   # Only plain folders with plain names: a symlink could point anywhere, and a colon, tab or newline in a name would split the colon list in index column 15.
   for c in "$wt/$repo"--*; do
     [ -d "$c" ] && [ ! -L "$c" ] || continue
     case "${c##*/}" in *[!A-Za-z0-9._-]*) continue ;; esac
+    case $'\n'"$listed"$'\n' in *$'\nworktree '"$c"$'\n'*) ;; *) continue ;; esac
     printf '%s\n' "$c"
   done
   return 0
