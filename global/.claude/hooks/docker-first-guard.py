@@ -100,7 +100,8 @@ ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 # (a quoted delimiter shows as QQQQQ). The delimiter is the whole shell word after <<, quotes anywhere
 # in it included. <<< (herestring) and 1<<2 are not heredocs.
 HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*([^\s;|&<>()]+)")
-COMMENT = re.compile(r"(?:^|(?<=[\s;|&(]))#[^\n]*", re.M)
+# A # starts a comment at the start of a word: after whitespace, an operator or a parenthesis.
+COMMENT = re.compile(r"(?:^|(?<=[\s;|&()<>]))#[^\n]*", re.M)
 ARITHMETIC = re.compile(r"\$?\(\([^\n]*?\)\)")
 
 
@@ -389,8 +390,19 @@ def fed_to_shell(line):
             continue
         if shell_inner_command(args) is not None:
             continue
-        flags = [a for a in args if a.startswith("-") and a != "-"]
-        rest = [a for a in args if not a.startswith("-") or a == "-"]
+        # sort the arguments into options and operands; -o, +o, -O, +O and --rcfile take a value that is
+        # not an operand (bash -o pipefail <<EOF still reads its script from stdin)
+        flags, rest = [], []
+        take_value = False
+        for a in args:
+            if take_value:
+                take_value = False
+            elif a.startswith(("-", "+")) and a not in ("-", "+"):
+                flags.append(a)
+                if re.fullmatch(r"[-+][A-Za-z]*[oO]", a) or a in ("--rcfile", "--init-file"):
+                    take_value = True
+            else:
+                rest.append(a)
         reads_stdin = (
             not rest
             or "-" in rest

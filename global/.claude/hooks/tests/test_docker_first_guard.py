@@ -560,6 +560,12 @@ class HeredocBodiesAreText(Base):
             "bash - <<EOF",
             "bash /dev/stdin <<EOF",
             "bash -l <<EOF",
+            "bash -o pipefail <<EOF",
+            "bash -eo pipefail <<EOF",
+            "bash +o history <<EOF",
+            "bash -O extglob <<EOF",
+            "bash --norc --rcfile x <<EOF",
+            "bash -e -o errexit -x <<EOF",
             "sudo bash <<EOF",
             "env X=1 sh <<EOF",
             "cat <<EOF | bash",
@@ -571,6 +577,7 @@ class HeredocBodiesAreText(Base):
         # a shell given a script file or -c does not read the body
         self.allowed("bash script.sh <<EOF\nnpm ci\nEOF")
         self.allowed("bash -c 'echo hi' <<EOF\nnpm ci\nEOF")
+        self.allowed("bash -o pipefail script.sh <<EOF\nnpm ci\nEOF")
 
     def test_a_shell_body_is_checked_in_the_folder_in_effect_at_its_line(self):
         # exempt session folder, but the command leaves it before the shell reads the body: not exempt
@@ -585,6 +592,10 @@ class HeredocBodiesAreText(Base):
         self.refused(f"echo hi # <<EOF\nnpm ci\nEOF")
         self.refused("ls # note <<'EOF'\nnpx next build\nEOF")
         self.refused("echo hi; # <<EOF\nvite\nEOF")
+        # a # right after a closing parenthesis or a redirection starts a comment too
+        self.refused("(true)# <<EOF\nnpm ci\nEOF")
+        self.refused("echo hi >/dev/null # <<EOF\nnpm ci\nEOF")
+        self.refused("echo $(date)#<<EOF\nnpm ci\nEOF")
         # a # inside a word or a quoted string is not a comment, and a real heredoc after text still works
         self.allowed(f"echo a#b; cat <<'EOF'\n{self.NOTE}\nEOF")
         self.allowed(f"echo '# not a comment'; cat <<'EOF'\n{self.NOTE}\nEOF")
