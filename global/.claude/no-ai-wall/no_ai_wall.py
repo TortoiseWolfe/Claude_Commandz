@@ -20,7 +20,7 @@ Command line (used by the bash helper no_ai_wall.sh):
   no_ai_wall.py check-text FILE              exit 3 when the text names a listed path
 Environment overrides (tests): NO_AI_PATHS_FILE, NO_AI_REFUSAL_LOG.
 
-Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py). The tamper
+Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py, wall_cleanup.py). The tamper
 guard below covers that folder, the list, and the settings*.json files, and nothing else under ~/.claude, so ordinary tooling in
 ~/.claude/scripts and ~/.claude/hooks installs without anyone's hands. The hook loads this file by absolute path from its own folder.
 """
@@ -46,7 +46,7 @@ def paths_file():
 
 
 WALL_FOLDER = "no-ai-wall"
-_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh")
+_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh", "wall_cleanup.py")
 
 
 def wall_dir():
@@ -429,7 +429,7 @@ def pattern_start(pattern, root, cwd):
 
 
 def protected_files():
-    """Files no session may change: the list itself, and the hook, the module and its bash helper in the wall's own folder. The three places
+    """Files no session may change: the list itself, and the hook, the module, its bash helper and the cleanup command in the wall's own folder. The three places
     the wall lived before that folder existed count too, while a file is still there (a machine not yet moved runs from them); once the
     install has moved them away, ~/.claude/scripts and ~/.claude/hooks hold no wall file and are ordinary folders. A session that could edit
     a protected file could turn the wall off. They are checked by realpath, so a symlink to one counts too."""
@@ -1056,23 +1056,64 @@ def _segments(command):
     return [seg for seg in re.split(r"\|\||&&|[;|&\n]", command) if seg.strip()]
 
 
+_PY_RUN_OPTIONS = ("-I", "-B", "-s", "-S", "-u")  # the only options a run of a listed Python file may carry: none can name code, a module or another file to run. -E is left out: bash_writes_guarded reads it as another interpreter's inline-code option, and -I already covers it
+
+
+def _runs_listed_python(words, seg):
+    """True for `python [options] <file> [the file's own arguments]`, where <file> is redact_view.py, the module or the cleanup command and every word before it is one of
+    _PY_RUN_OPTIONS written alone. Anything else before the file is refused, whether or not it is joined to a value: an option that names code or a module to run, a lone
+    dash, an interactive run, a bundle of option letters. With one of those Python runs something other than the file, and the file would only be an argument handed to
+    it. The cleanup command takes no path, so nothing may follow it but --apply.
+    seg is the raw text of the part of the command the words came from. The path the rule compares must be the path the machine opens, so the file's word must be:
+    written plainly, with no quote or backslash and no white space of any kind before, in or after it (the shell would hand Python other text than the rule read,
+    and a white-space character on the end of the word is part of the file name the shell passes on);
+    a full path from /, ~/ or $HOME/ (a relative path is opened against the working folder, not against /), with no other variable (the shell's value may differ from the
+    hook's) and no ".." (it is removed as text here, but the shell follows links first); for $HOME/, a home with no white space or wildcard (the shell would split it);
+    the listed file's own name, never a link to it (a link can be re-pointed between the check and the run, and its name can be a wildcard pattern)."""
+    i = 1
+    while i < len(words) and words[i] in _PY_RUN_OPTIONS:
+        i += 1
+    if i >= len(words) or words[i].startswith("-"):
+        return False
+    word = words[i]
+    if any(ch.isspace() for ch in word):
+        return False
+    if re.split(r"[ \t]+", seg.strip(" \t"))[:i + 1] != words[:i + 1]:
+        return False
+    if not word.startswith(("/", "~/", "$HOME/")) or "$" in word[1:] or ".." in word.split("/"):
+        return False
+    if word.startswith("$HOME/") and re.search(r"[\s*?\[]", home()):
+        return False
+    p = expand(word, "/")
+    cleanup = os.path.join(wall_dir(), "wall_cleanup.py")
+    if p in (cleanup, os.path.realpath(cleanup)):
+        return all(a == "--apply" for a in words[i + 1:])
+    listed = (os.path.join(home(), ".claude", "scripts", "redact_view.py"), os.path.join(wall_dir(), "no_ai_wall.py"))
+    return p in listed or p in tuple(os.path.realpath(f) for f in listed)  # run, not edited
+
+
 def _read_only_listing(command):
-    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands (no redirection,
-    no command substitution, no program outside the short list)."""
-    if re.search(r"[<>`]|\$\(", command):
+    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands, or runs the wall's cleanup
+    command wall_cleanup.py (which takes no path and moves only strays out of the wall's folder), with no redirection, no command substitution and no program outside the
+    short list. A Python file on that list is there to be run as itself and nothing else: _runs_listed_python holds the rule. This is the only gate for such a command
+    (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file.
+    The program is the first word of each part of the command, so a part that starts by setting a variable is refused: that word is not a program, and
+    the real one after it would go unread. For the same reason the whole command is refused when it holds a parenthesis or a brace: those group commands and
+    define functions, so they start a command where _segments sees no new part (`ls() ( python -m x file ); ls` gives the name ls a new body), and the
+    program inside would go unread too. A first word must be a bare program name with no slash, or that name directly under /usr/bin or /bin: a path to any other folder is refused, because a program there can carry a trusted name, and so is a tilde, which the shell expands."""
+    if re.search(r"[<>`(){}]", command):
         return False
     for seg in _segments(command):
         words = _words(seg)
         if not words:
             continue
-        prog = os.path.basename(words[0])
+        folder, prog = os.path.split(words[0])
+        if "=" in words[0] or not re.fullmatch(r"[A-Za-z0-9_.+-]+", prog) or folder not in ("", "/usr/bin", "/bin"):
+            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands (a tilde); nor is a path to any folder but the two system ones, where a program can carry a trusted name
         if prog in _READ_ONLY_PROGRAMS:
             continue
-        if prog.startswith("python"):
-            rest = [w for w in words[1:] if not w.startswith("-")]
-            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py"))]  # run, not edited
-            if rest and os.path.realpath(expand(rest[0], "/")) in ok:
-                continue
+        if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words, seg):
+            continue
         return False
     return True
 

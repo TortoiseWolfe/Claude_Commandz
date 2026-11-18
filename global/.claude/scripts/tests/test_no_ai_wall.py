@@ -1,10 +1,12 @@
 """The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir."""
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "no-ai-wall")  # the wall's own folder in the repo (mirror of ~/.claude/no-ai-wall)
@@ -357,6 +359,133 @@ class SecurityFindingTests(Fixture):
         self.assertIsNone(self.call("Bash", command="python3 -I %s status" % os.path.join(self.home, ".claude/no-ai-wall/no_ai_wall.py")))
         self.assertIsNotNone(self.call("Bash", command="python3 /tmp/other.py " + self.pfile))
         self.assertIsNotNone(self.call("Bash", command="cat " + self.pfile))  # the contents stay out of the transcript
+
+    def test_python_may_run_a_listed_file_only_as_itself(self):
+        """The read-only rule is the only gate for `python <wall file>`. Every form where Python would run something other than the
+        file (and the file is just an argument handed to it) must be refused, joined to its value or not."""
+        wall = os.path.join(self.home, ".claude/no-ai-wall")
+        mod, clean = os.path.join(wall, "no_ai_wall.py"), os.path.join(wall, "wall_cleanup.py")
+        rv = os.path.join(self.home, ".claude/scripts/redact_view.py")
+        for cmd in ("python3 %s status" % mod, "python3 -I -B %s status" % mod, "python3 -I %s check-path /tmp/x" % mod, "/usr/bin/python3.12 -s -S -u %s status" % mod,
+                    "python3 %s" % clean, "python3 -I %s --apply" % clean, "python3 -I %s --keys-only %s" % (rv, self.pfile)):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        for target in (mod, clean, rv + " " + self.pfile):
+            for before in ("-m somemodule", "-msomemodule", "-I -msomemodule", "-Imsomemodule", "-c pass", "-cpass", "-Bcpass", "-", "-i", "-X dev", "-Xdev", "-W error",
+                           "-Werror", "--version", "-IB", "-E", "/tmp/other.py"):
+                cmd = "python3 %s %s" % (before, target)
+                r = self.call("Bash", command=cmd)
+                self.assertIsNotNone(r, cmd)
+                self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("python3 %s /tmp/somewhere" % clean, "python3 %s --apply /tmp/somewhere" % clean, "python3 %s --force" % clean, "python3 -I %s -- --apply" % clean,
+                    "python3-config %s" % mod, "pythonw %s status" % mod):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # A variable set in front of the program is not the program, even when its value ends in a trusted name.
+        for target in (mod, clean, rv + " " + self.pfile):
+            for first in ("A=/ls", "A=/usr/bin/wc", "A=/stat", "A=/x/python3", "A=1 B=/ls", "A=ls", "A=1"):
+                for run in ("python3 -m somemodule", "python3 -cpass", "python3 -I", "python3"):
+                    cmd = "%s %s %s" % (first, run, target)
+                    r = self.call("Bash", command=cmd)
+                    self.assertIsNotNone(r, cmd)
+                    self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("A=/ls cat %s" % mod, "ls %s; A=/wc python3 -m somemodule %s" % (mod, mod), "A=/ls ls %s" % clean):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # Parentheses and braces start a command where the rule sees no new part: a function body, a group, a subshell. The program inside must not go unread.
+        for target in (mod, clean, rv + " " + self.pfile):
+            for shape in ("ls() ( python3 -m somemodule %s ); ls", "ls () ( python3 -m somemodule %s ); ls", "ls() ( python3 -m somemodule %s )",
+                          "wc() ( python3 -cpass %s ) ; wc", "ls() { python3 -m somemodule %s; }; ls", "ls() {\npython3 -m somemodule %s\n}\nls",
+                          "function ls { python3 -m somemodule %s; }; ls", "(python3 -m somemodule %s)", "{ python3 -m somemodule %s; }",
+                          "ls; (python3 -m somemodule %s)", "stat() ( python3 -I -m somemodule %s ); stat /tmp"):
+                cmd = shape % target
+                r = self.call("Bash", command=cmd)
+                self.assertIsNotNone(r, cmd)
+                self.assertEqual(r[1], "protected file", cmd)
+        # A first word the shell would expand is not a plain program name, so it is not read as one.
+        for cmd in ("$P -m somemodule %s" % mod, '"$P" -m somemodule %s' % mod, "ls %s; $P %s" % (mod, mod), "l[s] %s; python[3] -m somemodule %s" % (mod, mod),
+                    "ls* %s" % clean, "ls {a,b} %s" % mod):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        # The honest forms still pass: a lone look, two looks, a look and then the module's own check.
+        for cmd in ("ls -la %s" % mod, "sha256sum %s" % clean, "ls %s; wc -l %s" % (mod, clean), "ls %s && python3 -I %s status" % (wall, mod), "/usr/bin/stat %s" % mod):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        # The path the rule compares must be the path the machine opens: quotes, white space, links, relative paths and other variables are refused.
+        os.makedirs(wall, exist_ok=True)
+        os.makedirs(os.path.dirname(rv), exist_ok=True)
+        for f in (mod, clean, rv):
+            if not os.path.exists(f):
+                open(f, "w").close()
+        x = tempfile.mkdtemp(dir=self.tmp)
+        self.addCleanup(shutil.rmtree, x, ignore_errors=True)
+        os.makedirs(os.path.join(x, "far", "sub"))
+        os.symlink(os.path.join(x, "far", "sub"), os.path.join(x, "l"))
+        os.symlink(mod, os.path.join(x, "no_ai_wall.py"))
+        os.symlink(clean, os.path.join(x, "wall_cleanup.py"))
+        os.symlink(mod, os.path.join(x, "w[x]"))
+        refused = ('python3 " %s" status' % mod, 'python3 "%s " status' % mod, 'python3 " %s" --keys-only %s' % (rv, self.pfile),
+                   "python3 '~/.claude/no-ai-wall/no_ai_wall.py' status", 'python3 "~/.claude/scripts/redact_view.py" --keys-only %s' % self.pfile,
+                   "python3 '$HOME/.claude/no-ai-wall/no_ai_wall.py' status", "python3 \\~/.claude/no-ai-wall/no_ai_wall.py status",
+                   "python3 \r%s status" % mod, "python3 %s check-path %s" % (mod.lstrip("/"), mod),
+                   "python3 -I %s/l/../wall_cleanup.py --apply" % x, "python3 %s/l/../no_ai_wall.py status" % x,
+                   "python3 %s/no_ai_wall.py status" % x, "python3 %s/w[x] status" % x)
+        for cmd in refused:
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+        with mock.patch.dict(os.environ, {"WALLX": wall}):
+            cmd = "python3 $WALLX/no_ai_wall.py status"
+            r = self.call("Bash", command=cmd)
+            self.assertIsNotNone(r, cmd)
+            self.assertEqual(r[1], "protected file", cmd)
+        for cmd in ("python3 ~/.claude/no-ai-wall/no_ai_wall.py status", "python3 $HOME/.claude/scripts/redact_view.py --keys-only %s" % self.pfile,
+                    "python3 -I $HOME/.claude/no-ai-wall/wall_cleanup.py --apply", 'python3 %s --keys-only "%s"' % (rv, self.pfile),
+                    "python3\t-I\t%s\tstatus" % mod):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
+        # No white space of any kind may end the file's word: strip() in expand() would drop it, but the shell passes it on, and Python opens a sibling file.
+        # The rule function is called directly with text only (the full check stops earlier on these texts).
+        forms = [("module", mod, ["status"]), ("module (~/ form)", "~/.claude/no-ai-wall/no_ai_wall.py", ["status"]), ("cleanup command", clean, ["--apply"]),
+                 ("redact_view.py", rv, ["--keys-only", self.pfile])]
+        for label, path, rest in forms:
+            for ch in ("\v", "\f", "\xa0", "\x1c", "\x1f", "\u2003", "\u2028"):
+                words = ["python3", path + ch] + rest
+                self.assertFalse(w._runs_listed_python(words, " ".join(words)), "%r on the end of the word for the %s" % (ch, label))
+        words = ["python3", mod, "status"]
+        self.assertTrue(w._runs_listed_python(words, " ".join(words)))
+
+    def test_python_rule_refuses_dotdot_after_a_link_and_any_other_variable(self):
+        """A ".." after a link means the folder above the link's target, not above the link, and a variable other than the leading $HOME may hold anything:
+        the rule compares text, so it must refuse both. Each case would be allowed if its clause were removed."""
+        claude = os.path.join(self.home, ".claude")
+        os.makedirs(claude, exist_ok=True)
+        far = tempfile.mkdtemp(dir=self.tmp)
+        self.addCleanup(shutil.rmtree, far, ignore_errors=True)
+        os.symlink(far, os.path.join(claude, "lnk"))
+        cases = [["python3", "%s/lnk/../no-ai-wall/no_ai_wall.py" % claude, "status"],
+                 ["python3", "~/.claude/lnk/../no-ai-wall/no_ai_wall.py", "status"],
+                 ["python3", "-I", "$HOME/.claude/lnk/../no-ai-wall/wall_cleanup.py", "--apply"],
+                 ["python3", "%s/lnk/../scripts/redact_view.py" % claude, "--keys-only", self.pfile]]
+        for words in cases:
+            cmd = " ".join(words)
+            self.assertFalse(w._runs_listed_python(words, cmd), cmd)
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        with mock.patch.dict(os.environ, {"EMPTYV": "", "FOLDERV": "no-ai-wall"}):
+            for word in ("$HOME/.claude/no-ai-wall/no_ai_wall.py$EMPTYV", "$HOME/$EMPTYV.claude/no-ai-wall/no_ai_wall.py",
+                         "$HOME/.claude/$FOLDERV/no_ai_wall.py", "~/.claude/$FOLDERV/no_ai_wall.py"):
+                words = ["python3", word, "status"]
+                self.assertFalse(w._runs_listed_python(words, " ".join(words)), word)
+
+    def test_a_home_folder_with_a_space_refuses_the_home_form(self):
+        """$HOME/ in a command is split by the shell when the home folder's name holds white space, so the rule refuses it."""
+        os.environ["HOME"] = os.path.join(self.tmp, "my home")
+        words = ["python3", "$HOME/.claude/no-ai-wall/no_ai_wall.py", "status"]
+        self.assertFalse(w._runs_listed_python(words, " ".join(words)))
+
+    def test_a_listing_program_is_a_bare_name_or_a_system_path(self):
+        """A listing program is a bare name or sits directly under /usr/bin or /bin; a path to any other folder is refused."""
+        wall = os.path.join(self.home, ".claude/no-ai-wall")
+        W, C = os.path.join(wall, "no_ai_wall.py"), os.path.join(wall, "wall_cleanup.py")
+        for cmd in ("/tmp/x/python3 %s status" % W, "./python3 -I %s" % C, "/tmp/x/ls %s" % W, "~/bin/stat %s" % C, "/usr/bin/../../tmp/x/ls %s" % W,
+                    "/usr/local/bin/ls %s" % W):
+            self.assertIsNotNone(self.call("Bash", command=cmd), cmd)
+        for cmd in ("ls %s" % W, "/usr/bin/stat %s" % W, "/bin/ls %s" % W, "/usr/bin/python3 %s status" % W, "python3 -I %s" % C):
+            self.assertIsNone(self.call("Bash", command=cmd), cmd)
 
     def test_read_tool_refuses_the_list_but_may_read_the_hook_and_module(self):
         self.assertIsNotNone(self.call("Read", file_path=self.pfile))
