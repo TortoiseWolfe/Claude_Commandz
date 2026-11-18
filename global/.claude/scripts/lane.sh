@@ -173,17 +173,10 @@
 # opt-in (Esc).
 set -euo pipefail
 SESSION=lanes
-# The day Codex is back (its free plan hit the usage limit 7 Nov 2026 4:13 AM). The only place this date is written; the help text and the
-# own-repo refusal read it from here. Change it here when it moves.
-CODEX_BACK="${CODEX_BACK:-6 Dec 2026 12:43 PM}"
-# The phrase the help and the refusal show: the date while it is ahead; once it has passed (or date -d cannot read it) a line saying to check it.
+# When Codex is back comes from the one engine-blocks file (engine_blocks.py, next to this script; the dispatcher writes it, AFA_ENGINE_BLOCKS
+# moves it). The phrase is "until Codex returns on <date>" while Codex is blocked and empty when it is not.
 codex_back_phrase() {
-  local e
-  if e="$(date -d "$CODEX_BACK" +%s 2>/dev/null)" && [ "$e" -gt "$(date +%s)" ]; then
-    printf 'until Codex returns on %s' "$CODEX_BACK"
-  else
-    printf 'Codex was due back on %s; check it and update CODEX_BACK' "$CODEX_BACK"
-  fi
+  python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/engine_blocks.py" phrase codex 2>/dev/null || true
 }
 
 # Plugins switched off in every Claude lane (set to false through --settings enabledPlugins).
@@ -291,8 +284,8 @@ lane_docker_env() {
 }
 
 usage() {
-  local cb; cb="$(codex_back_phrase)"
-  cat <<'USAGE' | sed "s|@CODEX_BACK@|${cb//&/\\&}|g"
+  local cb; cb="$(codex_back_phrase)"; [ -z "$cb" ] || cb=" $cb"
+  cat <<'USAGE' | sed "s| @CODEX_BACK@|${cb//&/\\&}|g"
 Usage:
   lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
@@ -2623,7 +2616,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     return 0
   fi
   {
-    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy $(codex_back_phrase) (his rule, 22 Oct 3:30 PM). Use:"
+    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy$(cb="$(codex_back_phrase)"; [ -z "$cb" ] || printf " %s" "$cb") (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
     echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."

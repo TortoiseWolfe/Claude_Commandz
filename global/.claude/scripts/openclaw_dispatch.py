@@ -81,6 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
+import engine_blocks as eb  # noqa: E402  the one file of engine usage blocks, shared with lane.sh
 
 HOME = Path(os.path.expanduser("~"))
 STATE = HOME / ".claude/state"
@@ -1305,7 +1306,7 @@ def resolve_engine(state, engine, now):
         if not engine_installed(e):
             missing.append(label)
             continue
-        if state.get(e + "_blocked_until", 0) > now:
+        if eb.until(e, now) > now:
             skipped.append(label)
             continue
         return (e, None, "") if not (skipped or missing) else (e,) + _out_of_usage(skipped, missing)
@@ -1374,7 +1375,8 @@ def try_again_at(tail, now):
 
 def block_until(state, key, tail, now, seconds):
     """Set state[key] after an engine reported a limit: the engine's own "try again at <date>" when it gives one, else a monthly-quota
-    message blocks until 00:00 on the 1st of next month (local time), any other limit for `seconds`. An existing later block stands."""
+    message blocks until 00:00 on the 1st of next month (local time), any other limit for `seconds`. The block is written to the shared
+    engine-blocks file (newest evidence wins, so a later block no longer stands over a newer, earlier one); state[key] is kept for old readers."""
     until = try_again_at(tail, now)
     if until is None:
         until = now + seconds
@@ -1383,6 +1385,11 @@ def block_until(state, key, tail, now, seconds):
             y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
             until = time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1))
     state[key] = max(state.get(key, 0), until)
+    engine = key[:-len("_blocked_until")] if key.endswith("_blocked_until") else key
+    try:
+        eb.block(engine, until, evidence=now, source="dispatcher: %s reported its usage limit" % engine)
+    except (eb.Malformed, OSError):
+        pass  # a damaged or unwritable file is left alone; the next block tries again
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1771,6 +1778,11 @@ def _sweep(ctx, host, now=None):
             if verdict is None:
                 continue
             lane["status"], changed = verdict, True
+            if verdict == "reported" and isinstance(lane.get("started"), (int, float)):
+                try:  # a lane that finished and reported ran clean: a block recorded before it started is out of date
+                    eb.clear(lane["engine"], evidence=lane["started"], source="dispatcher: a lane on %s ran clean" % lane["engine"])
+                except (eb.Malformed, OSError):
+                    pass
             if verdict == "dead":
                 lane["detail"], lane["failed"] = detail, True
                 tail = " ".join(_log_exit(Path(lane["report"]).parent)[1])

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import state_guard  # noqa: E402,F401  first: no test of this suite (or of the mutation harness) may write the live ~/.claude/state
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_gateway as gw  # noqa: E402
+import engine_blocks as eb  # noqa: E402
 import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 from tmpdirs import fresh_dir  # noqa: E402
@@ -107,6 +108,31 @@ def live_state(case, where):
         case.addCleanup(p.stop)
 
 
+def seed_blocks(old_save):
+    """A save_state that also seeds the engine-blocks file (the one record the dispatcher now honors) for any *_blocked_until key a test
+    changes by hand. Evidence 0, so a block the dispatcher records itself (evidence = now) always replaces it. A record the dispatcher or a test wrote
+    itself (source other than \"test\") is never overwritten by a state key."""
+    def save(path, state):
+        try:
+            prev = dp.load_state(path)
+        except Exception:
+            prev = {}
+        data = eb._load()
+        for k, v in list(state.items()):
+            if not k.endswith("_blocked_until") or v == prev.get(k, 0):
+                continue
+            e = k[:-len("_blocked_until")]
+            if v > 0 and data.get(e, {}).get("source", "test") != "test":
+                continue  # the dispatcher (or a test's own eb.block) holds this record; the old key never overrides it
+            if v > 0 and eb._num(data.get(e, {}), "until") != v:
+                data[e] = {"until": v, "evidence": 0, "source": "test", "note": ""}
+            elif not v:
+                data.pop(e, None)
+        eb._save(data)
+        return old_save(path, state)
+    return save
+
+
 class Base(unittest.TestCase):
     def private_paths(self):
         """The lane index, pass flag and results log default to the live ones under ~/.claude; a test must never write those."""
@@ -115,6 +141,12 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(fresh_dir(self))
         live_state(self, self.tmp / "state")
+        patcher = mock.patch.dict(os.environ, {"AFA_ENGINE_BLOCKS": str(self.tmp / "engine-blocks.json")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(dp, "save_state", seed_blocks(dp.save_state))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.root = self.tmp / "repos"
         for name in ("own-app", "own-docker", "client-app", "foreign", "docs"):
             (self.root / name / ".git").mkdir(parents=True)
@@ -1330,7 +1362,9 @@ class Sweep(Base):
 
     def test_one_choice_honors_every_block(self):
         now = NOW
-        r = lambda state, engine: dp.resolve_engine(state, engine, now)
+        def r(state, engine):  # the blocks come from the engine-blocks file; a state key alone decides nothing
+            eb._save({k[:-len("_blocked_until")]: {"until": v, "evidence": 0, "source": "test", "note": ""} for k, v in state.items() if v > 0})
+            return dp.resolve_engine({}, engine, now)
         late = now + 100
         none = {}
         for e in ("agy", "codex", "copilot", "opencode"):
@@ -1374,15 +1408,26 @@ class Sweep(Base):
         self.assertGreater(want - (NOW + 100), dp.COPILOT_BLOCK_SECONDS)
         self.assertEqual(self.state()["copilot_blocked_until"], want)
 
-    def test_an_existing_later_block_is_never_shortened(self):
-        later = self.first_of_next_month(NOW + 100) + 30 * 86400
-        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS, copilot_blocked_until=later)
-        # an ordinary 12 hour usage-limit message, and then a monthly one, both reported while the later block stands
-        self.out_of_usage("Copilot usage limit reached", NOW)
-        self.assertEqual(self.state()["copilot_blocked_until"], later)
-        self.block(copilot_blocked_until=later)
-        self.out_of_usage("You have exceeded your monthly quota", NOW + 1000)
-        self.assertEqual(self.state()["copilot_blocked_until"], later)
+    def copilot_lane_then_block(self, block_evidence):
+        """A lane starts on Copilot; then a block is recorded (as another lane's report would); then the lane reports its own limit at NOW + 100."""
+        self.agy_out()
+        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS)
+        self.start("own-app", "ran on copilot")
+        lane = self.host.started[-1][0]
+        self.assertEqual(self.host.started[-1][2], "copilot")
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("Copilot usage limit reached\nexit 1\n")
+        eb.block("copilot", NOW + 10**6, block_evidence, "another lane")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+
+    def test_newest_evidence_wins_so_a_new_report_can_move_a_block_earlier(self):
+        self.copilot_lane_then_block(0)  # older evidence than the lane's report at NOW + 100
+        self.assertEqual(eb.until("copilot", NOW), NOW + 100 + dp.COPILOT_BLOCK_SECONDS)
+
+    def test_a_report_with_older_evidence_does_not_replace_a_newer_block(self):
+        self.copilot_lane_then_block(NOW + 5000)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
 
     CODEX_LIMIT = "ERROR: You\u2019ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at %s."
 
@@ -1412,19 +1457,6 @@ class Sweep(Base):
         self.agy_out()
         self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027", NOW)
         self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 0, 0))
-
-    def test_codex_block_never_shortens_an_existing_later_one(self):
-        later = self.local_epoch(2027, 3, 1, 0, 0)
-        self.agy_out()
-        self.start("own-app", "ran on codex")  # the lane started on Codex; the later block was set by another lane's report meanwhile
-        lane = self.host.started[-1][0]
-        self.assertEqual(self.host.started[-1][2], "codex")
-        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(self.CODEX_LIMIT % "Feb 3rd, 2027 2:38 PM" + "\nexit 1\n")
-        self.block(codex_blocked_until=later)
-        dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertEqual(self.state()["codex_blocked_until"], later)
 
     AGY_LIMIT = ("error: Individual quota reached. Please upgrade your subscription to increase your limits. %s\n"
                  'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. %s","status":"RESOURCE_EXHAUSTED"}\nexit 3\n')
@@ -1799,6 +1831,55 @@ EDGES = [  # (when, phase)
     (ET(2026, 10, 20, 6, 1), 3), (ET(2026, 10, 21, 11, 59), 3),
     (ET(2026, 10, 21, 12, 1), 1),
 ]
+
+
+class EngineBlocksFile(Base):
+    """block_until, resolve_engine and a lane's clean run all go through the one engine-blocks file."""
+
+    def test_block_until_writes_the_file_and_keeps_the_state_key(self):
+        state = {}
+        dp.block_until(state, "codex_blocked_until", "usage limit", NOW, dp.CODEX_BLOCK_SECONDS)
+        self.assertEqual(eb.until("codex", NOW), NOW + dp.CODEX_BLOCK_SECONDS)
+        self.assertEqual(state["codex_blocked_until"], NOW + dp.CODEX_BLOCK_SECONDS)
+        rec = json.loads(Path(os.environ["AFA_ENGINE_BLOCKS"]).read_text())["codex"]
+        self.assertEqual((rec["evidence"], rec["source"]), (NOW, "dispatcher: codex reported its usage limit"))
+
+    def test_resolve_engine_honors_the_file(self):
+        eb.block("agy", NOW + 1000, NOW, "test")
+        self.assertEqual(dp.resolve_engine({}, "agy", NOW)[0], "codex")
+        self.assertEqual(dp.resolve_engine({}, "agy", NOW + 2000)[0], "agy")
+
+    def test_resolve_engine_ignores_a_stale_state_key(self):
+        self.assertEqual(dp.resolve_engine({"agy_blocked_until": NOW + 10**6}, "agy", NOW)[0], "agy")
+
+    def lane_with_report(self, name, engine, started, status="reported"):
+        state = self.state()
+        rep = self.tmp / name / "report.md"
+        rep.parent.mkdir(parents=True)
+        state["lanes"][name] = {"repo": "own-app", "engine": engine, "model": "sonnet", "started": started, "status": "started", "report": str(rep)}
+        dp.save_state(self.ctx.state_path, state)
+        if status == "reported":
+            rep.write_text("done\n")
+        else:
+            (rep.parent / "out.log").write_text("something broke\nexit 1\n")
+
+    def test_a_reported_lane_clears_a_block_recorded_before_it_started(self):
+        eb.block("copilot", NOW + 10**6, NOW - 500, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100)
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), 0)
+
+    def test_a_reported_lane_does_not_clear_a_block_recorded_after_it_started(self):
+        eb.block("copilot", NOW + 10**6, NOW - 50, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100)
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
+
+    def test_a_dead_lane_does_not_clear(self):
+        eb.block("copilot", NOW + 10**6, NOW - 500, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100, status="dead")
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
 
 
 class TheWeeksPhases(unittest.TestCase):
