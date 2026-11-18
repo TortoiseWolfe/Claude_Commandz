@@ -4,8 +4,9 @@
 Why: lane.sh used to send the whole of hub/lane-rules.md (about 14K tokens) to every lane, and every lane re-reads it on
 every turn. About 60 percent of it covers mail, browser sign-ins and job forms, streams, co-op work and running the fleet.
 Now the rules are split into parts: core.md (every lane gets it) and one part per kind of work. A lane gets core plus each
-part whose trigger words appear in its name, folder, prompt text, or (for mail) its connectors setting. When unsure, the
-part goes in: a trigger is a plain word list below, and a lane that mentions any of them gets the rules.
+part whose trigger words appear in its name, folder, task text (the prompt above its tools list), or (for mail) its
+connectors setting. A trigger is a plain word list below. Core's own table points to every part, so a lane that needs one
+opens it.
 
   lane_rules_compose.py --name N --dir D --connectors on|off --prompt FILE --out FILE [--model M] [--rules-dir DIR]
   lane_rules_compose.py ... --rules LIST      auto (default: the keyword picking), all, none (core only) or part names, e.g. mail,coop
@@ -13,8 +14,8 @@ part goes in: a trigger is a plain word list below, and a lane that mentions any
   lane_rules_compose.py --stats FILE...       which parts each prompt file would get, and the characters sent
 
 The first line of the output says which parts it holds and where the others are, so a lane that thinks a rule is missing
-can read hub/lane-rules/<part>.md. A short "key rules" block (hub/lane-rules/key-rules-lane.txt) sits above core; the
-event hook (rules_reminder.py) repeats the same block every 30 tool calls.
+can read hub/lane-rules/<part>.md. The key rules block (hub/lane-rules/key-rules-lane.txt) is not pasted here; the
+event hook (rules_reminder.py) repeats it every 30 tool calls.
 
 With --rules naming parts, the hub has decided: the lane gets exactly core plus those parts, and the keywords only warn, in one
 line of the head comment per part the words would have loaded (the hit words, at most 4).
@@ -29,10 +30,10 @@ HOME = Path.home()
 DEFAULT_DIR = Path(os.environ.get("LANE_RULES_DIR") or HOME / "repos/hub/lane-rules")
 ORDER = ["core", "mail", "browser", "streams", "coop", "fleet"]
 
-# Plain word lists. Matched against lower-case "name + folder + first 30000 characters of the prompt".
+# Plain word lists. Matched against lower-case "name + folder + first 30000 characters of the task" (the prompt above
+# its "Tools you already have" list, so a tool's description cannot load a part).
 TRIGGERS = {
-    "mail": r"gmail|e-?mail|inbox|draft|calendar|newsletter|recruiter|invoice|outreach|"
-            r"listmonk|resend|mailbox|\bmail\b|reply to|client reply|absorb",
+    "mail": r"gmail|e-?mail|inbox|newsletter|listmonk",
     "browser": r"browser|sign[- ]?in|log ?in|login|chromium|playwright|puppeteer|\bcdp\b|cloudflare|captcha|passkey|"
                r"\bapply\b|job form|application form|\bforms? (?:fill|submit|answers)|lever|greenhouse|ashby|rippling|"
                r"upwork|godaddy|stripe|resume|career|cover letter|agent_browser|oauth|2fa|\bsudo\b|collaborator|webauthn|\bsso\b",
@@ -73,9 +74,6 @@ def load_private_triggers(path=None):
     return out
 
 
-WORKSPACE_DIRS = ("/repos", "/repos/hub")
-
-
 def read_part(rules_dir, name):
     try:
         return (rules_dir / f"{name}.md").read_text()
@@ -83,9 +81,15 @@ def read_part(rules_dir, name):
         return ""
 
 
+def task_text(prompt_text):
+    """The prompt above its first '## Tools you already have for this job' heading (the whole text if there is none)."""
+    m = re.search(r"(?im)^## Tools you already have for this job", prompt_text)
+    return prompt_text[:m.start()] if m else prompt_text
+
+
 def pick_hits(name, dirpath, connectors, prompt_text):
     """{part: [matched words, lower case, at most 4]} for every part the keywords would load (core excluded)."""
-    text = f"{name}\n{dirpath}\n{prompt_text[:30000]}".lower()
+    text = f"{name}\n{dirpath}\n{task_text(prompt_text)[:30000]}".lower()
     hits = {}
     private = load_private_triggers()
     for part in ORDER[1:]:
@@ -100,9 +104,6 @@ def pick_hits(name, dirpath, connectors, prompt_text):
             hits[part] = words[:4]
         elif part == "mail" and connectors == "on":
             hits[part] = ["connectors on"]
-    d = (dirpath or "").rstrip("/")
-    if d.endswith(WORKSPACE_DIRS) and "fleet" not in hits:  # a lane started in the workspace or hub folder may run the fleet
-        hits["fleet"] = ["workspace folder"]
     return hits
 
 
@@ -131,11 +132,6 @@ def parse_rules(spec):
 
 
 def compose(parts, rules_dir, warn=None):
-    key = ""
-    try:
-        key = (rules_dir / "key-rules-lane.txt").read_text().strip()
-    except OSError:
-        pass
     others = [p for p in ORDER if p not in parts]
     head = "<!-- lane rules parts loaded: %s%s -->" % (
         ", ".join(parts),
@@ -145,8 +141,6 @@ def compose(parts, rules_dir, warn=None):
     for part, words in (warn or {}).items():
         chunks[0] += "\n<!-- not loaded, but the prompt mentions: %s (%s); read hub/lane-rules/%s.md if the work needs it -->" % (
             part, ", ".join(words), part)
-    if key:
-        chunks.append(key)
     for p in parts:
         t = read_part(rules_dir, p).rstrip("\n")
         if t:
@@ -160,7 +154,7 @@ def routes_for(name, dirpath, prompt_text, routes_file=None):
         raw = Path(routes_file or os.environ.get("HUB_ROUTES_FILE") or HOME / "repos/hub/routes.md").read_text()
     except OSError:
         return ""
-    text = f"{name}\n{dirpath}\n{prompt_text[:30000]}".lower()
+    text = f"{name}\n{dirpath}\n{task_text(prompt_text)[:30000]}".lower()
     out = []
     for sec in re.split(r"(?m)^(?=## )", raw):
         m = re.match(r"## (.+)", sec)
