@@ -124,6 +124,10 @@ def main():
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             return 0
+        # A lane started in the hub's folder is not the hub (issue 75): lane.sh marks every lane with AFA_LANE, and a lane has its own recycle line
+        # and its own figure (lane.sh --ctx), so it gets none of the hub's lines.
+        if os.environ.get("AFA_LANE"):
+            return 0
         hub_dir = Path(os.path.expanduser(os.environ.get("AFA_HUB_DIR", "~/repos"))).resolve()
         cwd = Path(payload["cwd"]).resolve()
         if cwd != hub_dir:
