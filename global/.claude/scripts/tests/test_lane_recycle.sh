@@ -506,6 +506,13 @@ mrow m-off off 100 140000 121000 7200 200000
 is_line 150 'without connectors the measured line stops at 150K, as a line set by hand does' m-off
 mrow m-plain off 100 110000 70000 7200 200000
 is_line 120 'a plain lane that starts at 70K gets 120K' m-plain
+# Issue 83, item 4: the project's instruction file is read again for each working copy a lane steps into, so the line gets 5K more for each other working copy the prompt names.
+printf 'Work in .worktrees/proj--one, then .worktrees/proj--two (again .worktrees/proj--two) and .worktrees/proj--three.\n' >"$HAND/copies-prompt.md"
+mrow m-copies off 100 110000 64000 7200 200000
+sed -i "/	m-copies	/s#$HAND/prompt.md#$HAND/copies-prompt.md#" "$INDEX"
+is_line 129 'a start load of 64K plus 50K plus three named working copies at 5K each is 129K' m-copies
+mrow m-nocopies off 100 110000 64000 7200 200000
+is_line 114 'the same lane with a prompt that names no working copy gets 114K' m-nocopies
 mrow m-nocol off - 110000 70000 7200 200000
 is_line 120 'a row with no stored line is measured from its default' m-nocol
 # The process compacts by itself at about 0.84 of the window it was STARTED with, and /clear keeps the process: the line stays under it.
