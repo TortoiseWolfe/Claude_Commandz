@@ -97,9 +97,14 @@ NETWORK_CODE = re.compile(
 STARTS_PROGRAMS = re.compile(
     r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bPopen\b|\bpty\b|\bctypes\b|\bpexpect\b"
     r"|\b(?:eval|exec|compile|__import__)\s*\(|\bimportlib\b|\brunpy\b|\bchild_process\b|\bspawn(?:Sync)?\s*\("
-    r"|\bexecFile(?:Sync)?\b|\bexecSync\b|\bsystem\s*\(|\bpopen\b|`|%x[\[({]|\bshell_exec\b|\bpassthru\b|\bproc_open\b",
+    r"|\bexecFile(?:Sync)?\b|\bexecSync\b|\bsystem\s*\(|\bpopen\b|`|%x[\[({]|\bshell_exec\b|\bpassthru\b|\bproc_open\b"
+    # a script that can load a file it is handed as code (or reach a program through a loader) is not trusted with data files
+    r"|\brequire\b|\bimport\s*\(|\bsys\.path\b|\bexec[lv]p?e?\b|\bpickle\b|\bmarshal\b|\bload_(?:source|module)\b|\bdlopen\b"
+    r"|\bwebbrowser\b|\bsource\b|\bdo\s+[\"'$]",
     re.I,
 )
+# A file with one of these endings is code an interpreter can load, so the data-file rule never skips it.
+SOURCE_SUFFIXES = (".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".pm", ".php", ".sh", ".bash", ".zsh", ".lua", ".tcl")
 # Reading the account address from where it lives, straight into a command.
 DYNAMIC_ADDRESS = re.compile(
     r"git\s+config\b[^\n;|&]*\buser\.email\b|\$\{?(?:GIT_AUTHOR_EMAIL|GIT_COMMITTER_EMAIL|EMAIL)\b"
@@ -272,7 +277,7 @@ def sinks(cmd, cwd, allowed):
         for tok, path in files:
             if tok == first and plain_form and is_allowed_tool(path, allowed):
                 continue
-            if data_mode and tok != first:
+            if data_mode and tok != first and not path.lower().endswith(SOURCE_SUFFIXES):
                 continue
             if trusted and tok != first and is_binary(path):  # an attachment for a mail tool: data, not code, so not scanned
                 continue

@@ -244,6 +244,15 @@ class Refuses(unittest.TestCase):
             self.assertIsNotNone(verdict(bash("/tmp/evil/python3 %s %s" % (quiet, data))))
             # a file with the address and network code run as the program itself is still read
             self.assertIsNotNone(verdict(bash("python3 %s" % data)))
+            # a script that can load a handed file as code is not trusted with it, and a source file is never skipped as data
+            for body in ("import sys, pickle\npickle.load(open(sys.argv[1], 'rb'))\n", "import sys\nexec(open(sys.argv[1]).read())\n",
+                         "const f = process.argv[2]; require(f)\n", "import sys, runpy\nrunpy.run_path(sys.argv[1])\n"):
+                loader = Path(d) / "loader.py"
+                loader.write_text(body)
+                self.assertIsNotNone(verdict(bash("python3 %s %s" % (loader, data))), body)
+            src = Path(d) / "plugin.py"
+            src.write_text("import requests\nrequests.get('https://x.io')\n%s\n" % ME)
+            self.assertIsNotNone(verdict(bash("python3 %s %s" % (quiet, src))))
 
     def test_a_later_flag_on_another_command_does_not_hide_the_script(self):
         with tempfile.TemporaryDirectory() as d:
