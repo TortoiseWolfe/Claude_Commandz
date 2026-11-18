@@ -155,5 +155,75 @@ class ComposeTest(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
 
 
+def run_rules(spec, prompt="Check the browser sign-in page and the draft in the inbox, then the calendar.", name="x"):
+    """Run with --rules SPEC (None: no option). Returns (returncode, stderr, stdout parts, text or None)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = rules_dir(tmp)
+        kf = Path(tmp) / "keywords.json"
+        env = {**os.environ, "HUB_ROUTES_FILE": str(Path(tmp) / "none.md"), "LANE_RULES_KEYWORDS": str(kf)}
+        pf = Path(tmp) / "prompt.md"
+        pf.write_text(prompt)
+        out = Path(tmp) / "rules.md"
+        cmd = [sys.executable, "-I", str(SCRIPT), "--name", name, "--dir", "/home/u/repos/proj", "--prompt", str(pf),
+               "--out", str(out), "--rules-dir", str(d)]
+        if spec is not None:
+            cmd += ["--rules", spec]
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        return r.returncode, r.stderr, r.stdout.strip().split(","), (out.read_text() if out.exists() else None)
+
+
+class RulesOptionTest(unittest.TestCase):
+    def test_named_parts_load_exactly_and_warn(self):
+        rc, _, parts, text = run_rules("mail,coop", prompt="Open the browser and log in.")
+        self.assertEqual(rc, 0)
+        self.assertEqual(parts, ["core", "mail", "coop"])
+        self.assertIn("rule text of coop", text)
+        self.assertNotIn("rule text of browser", text)
+        head = text.splitlines()[0]
+        self.assertTrue(head.startswith("<!-- lane rules parts loaded: core, mail, coop; not loaded: browser, streams, fleet"), head)
+        self.assertIn("<!-- not loaded, but the prompt mentions: browser (", text)
+        self.assertIn("read hub/lane-rules/browser.md if the work needs it -->", text)
+
+    def test_none_is_core_only(self):
+        rc, _, parts, text = run_rules("none")
+        self.assertEqual((rc, parts), (0, ["core"]))
+        self.assertNotIn("rule text of mail", text)
+        self.assertIn("not loaded, but the prompt mentions: mail (", text)
+
+    def test_all_equals_all_flag(self):
+        _, _, parts, text = run_rules("all")
+        self.assertEqual(parts, PARTS)
+        self.assertNotIn("not loaded", text)
+
+    def test_auto_equals_no_option(self):
+        a = run_rules("auto")
+        b = run_rules(None)
+        self.assertEqual((a[2], a[3]), (b[2], b[3]))
+        self.assertNotIn("but the prompt mentions", a[3])
+
+    def test_unknown_part_exits_2_and_writes_nothing(self):
+        rc, err, _, text = run_rules("mail,bogus")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(text)
+        self.assertIn("bogus", err)
+        for p in PARTS[1:]:
+            self.assertIn(p, err)
+
+    def test_hit_words_lower_case_and_at_most_four(self):
+        prompt = "Gmail GMAIL inbox Draft calendar newsletter recruiter invoice outreach"
+        _, _, _, text = run_rules("none", prompt=prompt)
+        line = [x for x in text.splitlines() if "prompt mentions: mail" in x][0]
+        words = re.search(r"mail \(([^)]*)\)", line).group(1).split(", ")
+        self.assertLessEqual(len(words), 4)
+        self.assertGreaterEqual(len(words), 1)
+        self.assertEqual(words, [w.lower() for w in words])
+
+    def test_pick_keeps_its_return(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import lane_rules_compose as m
+        self.assertEqual(m.pick("x", "", "off", "plain fix"), ["core"])
+        self.assertIn("mail", m.pick_hits("x", "", "off", "a draft"))
+
+
 if __name__ == "__main__":
     unittest.main()
