@@ -164,6 +164,13 @@ lane --resume wtr
 has "$(last_cmd)" "--add-dir $WT/proj--late " "--resume adds a checkout made since the start"
 hasnt "$(last_cmd)" "topic-b" "--resume drops a removed checkout"
 [ "$(ad_of wtr)" = "$WT/proj--topic-a:$WT/proj--late" ] || fail "the index follows, got $(ad_of wtr)"; ok
+# 18 Nov 2026: a list an older lane.sh recorded can hold a leftover folder that still exists but that git no longer lists; it is dropped from the start line and from column 15
+printf '2026-11-04\twts\t%s\tsonnet\tsubscription\t%s\t%s\tsess-3\t1700000000\thigh\toff\t100\t-\t-\t%s\n' "$WORK" "$LANES/wtr/prompt.md" "$LANES/wtr/report.md" "$WT/proj--stale:$WT/proj--topic-a" >>"$LANES/index.tsv"
+lane --resume wts
+[ "$LAST_RC" = 0 ] || fail "--resume with a recorded leftover folder works ($LAST_OUT)"; ok
+hasnt "$(last_cmd)" "proj--stale" "--resume drops a recorded folder that git does not list"
+has "$(last_cmd)" "--add-dir $WT/proj--topic-a " "--resume keeps the recorded folder that git lists"
+hasnt "$(ad_of wts)" "proj--stale" "the index row is rewritten without the leftover folder"
 # a symlink and a name with a colon are never added (the colon would split the list in column 15)
 ln -s "$TMP/outside" "$WT/proj--link"; G worktree add -q -b tc "$WT/proj--co:lon"
 lane wtq "$WORK" sonnet "$TMP/p1.md"
