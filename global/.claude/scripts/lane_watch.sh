@@ -339,6 +339,34 @@ orphan_check() {
   hit=1; other=1
 }
 
+# line1_class <report line 1>: THE one table of line-1 words. Prints exactly one class word; every check that reads line 1 asks it (step_url_check,
+# line1_done_claim, line1_rests) and none keeps its own list of spellings. Precedence is the order below. LC_ALL=C is set for this function only:
+# [A-Z] means the 26 plain capitals on every machine. The first word is capitals joined by hyphens and must end at a character that is not a
+# letter, digit, underscore or hyphen, so HUBRIS, DONE-ISH and "Hub: ..." are other, and so is lowercase "queue empty".
+#   empty    QUEUE EMPTY at the start, or EMPTY alone, "EMPTY <rest>", "EMPTY:..." or "EMPTY|...". The standing rule's ending, and the end-of-queue line
+#            the lane prompts have always asked for (6 Nov 2026: six lanes wrote "EMPTY <time> | ..." and were named every 20 minutes).
+#   blocked  BLOCKED at the start (the standing rule's other ending: BLOCKED (who/what)).
+#   step     STEP-FOR-JONATHAN at the start. A step for him needs its https:// link (26 Oct 2026, Jonathan: "so you are asking me to do something
+#            with out givng me the url to do it, again"); step_url_check asks for it.
+#   waiting  a first word with HUB or JONATHAN as one hyphen-joined part (HUB-ACT, NEED-HUB, READY-FOR-HUB), other than step. The hub is woken once
+#            by the report itself; naming the lane every 20 minutes woke it for nothing (8 Nov 2026, "HUB-ACT 3:23 AM | ...").
+#   done     DONE as the whole first word, unless DONE is followed by BY, UNTIL, TILL, DEADLINE, DUE, BEFORE or ETA (stamp_ahead_check's target
+#            words): that says when the lane WILL be done, so it is other. 6 Nov 2026: two finished lanes wrote DONE and were named, one after
+#            197 minutes, and the hub had to ask each to rewrite the line as QUEUE EMPTY.
+#   other    everything else (WORKING, HOURLY, STATUS, HUBRIS, DONE-ISH, "Hub: ...", lowercase "queue empty").
+line1_class() {
+  local first=$1 w LC_ALL=C
+  case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) echo empty; return 0 ;; esac
+  case "$first" in "BLOCKED"*) echo blocked; return 0 ;; esac
+  [[ $first =~ ^STEP-FOR-JONATHAN([^A-Za-z0-9_-]|$) ]] && { echo step; return 0; }
+  if [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]]; then
+    w=${BASH_REMATCH[1]}
+    case "-$w-" in *-HUB-*|*-JONATHAN-*) echo waiting; return 0 ;; esac
+    if [ "$w" = DONE ] && [[ ! $first =~ ^DONE\ +(BY|UNTIL|TILL|DEADLINE|DUE|BEFORE|ETA)([^A-Za-z0-9_-]|$) ]]; then echo done; return 0; fi
+  fi
+  echo other
+}
+
 # A step for Jonathan with no link. step_url_check <lane> (no subshell: it sets hit and other) looks at the lane's report.md: when line 1 starts
 # with STEP-FOR-JONATHAN and holds no https:// URL, it names the lane to the hub ("step without URL: <lane>") and types a note into the lane
 # through lane.sh --send asking it to rewrite line 1 with the URL. Once per distinct line 1, so a lane that rewrites it is checked again.
@@ -348,7 +376,7 @@ step_url_check() {
   local l=$1 rep first sum mark
   rep=$(report_of "$l"); [ -n "$rep" ] || return 0
   first=$(head -n 1 "$rep" 2>/dev/null)
-  case "$first" in STEP-FOR-JONATHAN*) ;; *) return 0 ;; esac
+  [ "$(line1_class "$first")" = step ] || return 0
   case "$first" in *https://*) return 0 ;; esac
   sum=$(printf '%s' "$first" | cksum | cut -d' ' -f1)
   mark="$recycle_dir/.stepurl-$l"
@@ -397,11 +425,8 @@ done_proof_counts() {
 # DONE as the whole first word. BLOCKED, WORKING, HUB and JONATHAN words, HOURLY, STATUS and the rest are false. DONE followed by one of
 # stamp_ahead_check's target words in capitals (BY, UNTIL, TILL, DEADLINE, DUE, BEFORE, ETA) says when the lane WILL be done, so it is no claim.
 line1_done_claim() {
-  local first=$1 LC_ALL=C
-  case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
-  [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]] || return 1
-  [ "${BASH_REMATCH[1]}" = DONE ] || return 1
-  [[ ! $first =~ ^DONE\ +(BY|UNTIL|TILL|DEADLINE|DUE|BEFORE|ETA)([^A-Za-z0-9_-]|$) ]]
+  case "$(line1_class "$1")" in empty|done) return 0 ;; esac
+  return 1
 }
 
 # A finished line with nothing to show for it. done_proof_check <lane> (no subshell: it sets hit and other) looks at a changed report.md: when
@@ -527,12 +552,8 @@ job_idle_check() {
 # The first word is capitals joined by hyphens and must end at a character that is not a letter, digit, underscore or hyphen, so HUBRIS,
 # DONE-ISH and "Hub: ..." are not taken. LC_ALL=C is set for this function only: [A-Z] means the 26 plain capitals on every machine.
 line1_rests() {
-  local first=$1 w low LC_ALL=C
-  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
-  [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]] || return 1
-  w=${BASH_REMATCH[1]}
-  case "-$w-" in *-HUB-*|*-JONATHAN-*) return 0 ;; esac
-  [ "$w" = DONE ] || return 1
+  local first=$1 low
+  case "$(line1_class "$first")" in empty|blocked|step|waiting) return 0 ;; done) ;; *) return 1 ;; esac
   low=${first,,}
   [[ ! $low =~ needs?\ (the\ )?(hub|jonathan):?\ *[1-9] ]]
 }
