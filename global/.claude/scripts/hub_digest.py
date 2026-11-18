@@ -690,11 +690,14 @@ def weekly_reset_ts(budget):
 
 def week_start_ts(budget, now_ts):
     """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
-    report's); without one it is the dispatcher's rule, the one place the Wednesday 12:00 PM Eastern boundary lives (the same call
+    report's); without one it is the dispatcher's rule, the one place the Wednesday 16:00 UTC boundary lives (the same call
     phase_note makes). None when the dispatcher module can't be read."""
     try:
         from openclaw_dispatch import _week_edges
-        reset = _week_edges(now_ts, weekly_reset_ts(budget))[3]
+        named = weekly_reset_ts(budget)
+        reset = _week_edges(now_ts, named)[3]
+        if named is None:  # the rule's reset is a fixed UTC instant (Wed 16:00 UTC), so the week began exactly seven days earlier
+            return reset.timestamp() - 7 * 86400
         return (reset - timedelta(days=7)).timestamp()  # wall-clock: a DST change in the week moves nothing
     except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
         return None
