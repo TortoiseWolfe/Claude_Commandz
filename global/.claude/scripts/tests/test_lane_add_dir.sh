@@ -123,13 +123,20 @@ hasnt "$(last_cmd)" "--add-dir $OTHER " "a removed folder is not passed on a res
 #     (29 Oct 2026: sh-1414 froze three times on "Read outside the working directories" for files in its own checkout). Another repo's
 #     checkouts, a repo whose name merely starts the same, and a folder outside ~/repos get none.
 WT="$HOME_T/repos/.worktrees"
-mkdir -p "$WT/proj--topic-a" "$WT/proj--topic-b" "$WT/projx--other" "$WT/elsewhere--c" "$TMP/outside"
+# 18 Nov 2026: only checkouts git lists for the repo count, so these are real worktrees of a real repo. proj--stale is the leftover kind: a plain folder with a
+# matching name whose .git file points at a checkout that was pruned (it must never become a working directory).
+mkdir -p "$WT" "$WT/projx--other" "$WT/elsewhere--c" "$TMP/outside"
+G() { git -c user.name=t -c user.email=t@example.test -C "$WORK" "$@"; }
+G init -q; G commit -q --allow-empty -m init
+G worktree add -q -b ta "$WT/proj--topic-a"; G worktree add -q -b tb "$WT/proj--topic-b"
+mkdir -p "$WT/proj--stale"; printf 'gitdir: %s/proj--gone/.git/worktrees/x\n' "$WT" >"$WT/proj--stale/.git"
 lane wt "$WORK" sonnet "$TMP/p1.md"
 [ "$LAST_RC" = 0 ] || fail "a start in a repo with checkouts works ($LAST_OUT)"; ok
 c="$(last_cmd)"
 has "$c" "--add-dir $WT/proj--topic-a --add-dir $WT/proj--topic-b " "both checkouts of the lane's repo are added, each before a flag"
 hasnt "$c" "projx--other" "a repo whose name starts the same is not matched"
 hasnt "$c" "elsewhere--c" "another repo's checkout is not added"
+hasnt "$c" "proj--stale" "a leftover folder that git no longer lists is not added"
 # 7 Nov 2026: the hub reversed the old rule "the whole .worktrees folder is never added". A path given to --add-dir must exist, so a worktree the lane makes after
 # launch can only be covered by its parent folder; before this every read in one stopped the lane on the "outside the working directories" dialog.
 has "$c" "--add-dir $WT " "the .worktrees folder is added, so worktrees made after launch read without the dialog"
@@ -150,7 +157,7 @@ lane out "$TMP/outside" sonnet "$TMP/p1.md"
 lane --dry-run dry "$WORK" sonnet "$TMP/p1.md"
 has "$LAST_OUT" "proj--topic-a" "a dry run shows the checkouts"
 # a checkout made after the lane started is picked up by --resume, and a removed one is dropped
-mkdir -p "$WT/proj--late"; rmdir "$WT/proj--topic-b"
+G worktree add -q -b tl "$WT/proj--late"; G worktree remove --force "$WT/proj--topic-b"
 printf '2026-11-04\twtr\t%s\tsonnet\tsubscription\t%s\t%s\tsess-2\t1700000000\thigh\toff\t100\t-\t-\t%s\n' "$WORK" "$LANES/wtr/prompt.md" "$LANES/wtr/report.md" "$WT/proj--topic-a:$WT/proj--topic-b" >>"$LANES/index.tsv"
 lane --resume wtr
 [ "$LAST_RC" = 0 ] || fail "--resume with a new checkout works ($LAST_OUT)"; ok
@@ -158,11 +165,11 @@ has "$(last_cmd)" "--add-dir $WT/proj--late " "--resume adds a checkout made sin
 hasnt "$(last_cmd)" "topic-b" "--resume drops a removed checkout"
 [ "$(ad_of wtr)" = "$WT/proj--topic-a:$WT/proj--late" ] || fail "the index follows, got $(ad_of wtr)"; ok
 # a symlink and a name with a colon are never added (the colon would split the list in column 15)
-ln -s "$TMP/outside" "$WT/proj--link"; mkdir -p "$WT/proj--co:lon"
+ln -s "$TMP/outside" "$WT/proj--link"; G worktree add -q -b tc "$WT/proj--co:lon"
 lane wtq "$WORK" sonnet "$TMP/p1.md"
 hasnt "$(last_cmd)" "proj--link" "a symlinked checkout is not added"
 hasnt "$(last_cmd)" "co:lon" "a checkout with a colon in its name is not added"
-rm -f "$WT/proj--link"; rmdir "$WT/proj--co:lon"
+rm -f "$WT/proj--link"; G worktree remove --force "$WT/proj--co:lon"
 # the HOME of a lane with no ~/repos/.worktrees at all is untouched
 rm -rf "$WT"
 lane nowt "$WORK" sonnet "$TMP/p1.md"
