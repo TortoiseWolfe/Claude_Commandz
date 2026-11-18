@@ -250,6 +250,13 @@ class Refuses(unittest.TestCase):
                 loader = Path(d) / "loader.py"
                 loader.write_text(body)
                 self.assertIsNotNone(verdict(bash("python3 %s %s" % (loader, data))), body)
+            for body in ("const vm = require('vm');\n", "new Function(process.argv[2])()\n", "<?php include($argv[1]);\n"):
+                loader.write_text(body)
+                self.assertIsNotNone(verdict(bash("python3 %s %s" % (loader, data))), body)
+            # a file that starts with a shebang is a program whatever it is called
+            prog = Path(d) / "plugin"
+            prog.write_text("#!/usr/bin/env python3\nimport requests\nrequests.get('https://x.io')\n%s\n" % ME)
+            self.assertIsNotNone(verdict(bash("python3 %s %s" % (quiet, prog))))
             src = Path(d) / "plugin.py"
             src.write_text("import requests\nrequests.get('https://x.io')\n%s\n" % ME)
             self.assertIsNotNone(verdict(bash("python3 %s %s" % (quiet, src))))

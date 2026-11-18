@@ -100,7 +100,7 @@ STARTS_PROGRAMS = re.compile(
     r"|\bexecFile(?:Sync)?\b|\bexecSync\b|\bsystem\s*\(|\bpopen\b|`|%x[\[({]|\bshell_exec\b|\bpassthru\b|\bproc_open\b"
     # a script that can load a file it is handed as code (or reach a program through a loader) is not trusted with data files
     r"|\brequire\b|\bimport\s*\(|\bsys\.path\b|\bexec[lv]p?e?\b|\bpickle\b|\bmarshal\b|\bload_(?:source|module)\b|\bdlopen\b"
-    r"|\bwebbrowser\b|\bsource\b|\bdo\s+[\"'$]",
+    r"|\bwebbrowser\b|\bsource\b|\bdo\s*[\"'$(]|\bvm\b|\bFunction\s*\(|\binclude(?:_once)?\b|\brequire_once\b|\b(?:instance|class)_eval\b",
     re.I,
 )
 # A file with one of these endings is code an interpreter can load, so the data-file rule never skips it.
@@ -223,6 +223,15 @@ def is_binary(path):
     return False
 
 
+def starts_with_shebang(path):
+    """True when the file's first two bytes are #!, whatever it is called: a program, not data."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return True
+
+
 def script_is_quiet(path):
     """True when the script's own text can be read in full and holds no network code and starts no other program."""
     try:
@@ -277,7 +286,7 @@ def sinks(cmd, cwd, allowed):
         for tok, path in files:
             if tok == first and plain_form and is_allowed_tool(path, allowed):
                 continue
-            if data_mode and tok != first and not path.lower().endswith(SOURCE_SUFFIXES):
+            if data_mode and tok != first and not path.lower().endswith(SOURCE_SUFFIXES) and not starts_with_shebang(path):
                 continue
             if trusted and tok != first and is_binary(path):  # an attachment for a mail tool: data, not code, so not scanned
                 continue
