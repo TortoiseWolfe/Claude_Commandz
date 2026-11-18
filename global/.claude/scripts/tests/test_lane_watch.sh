@@ -494,6 +494,9 @@ echo 130 > "$CTX_FILE"; : > "$RC_CALLS"; printf '%s\n' "$busy_pane" > "$RC_PANE"
 if [ "$(cat "$RC_CALLS")" = rl ]; then echo "ok   the watcher recycles a lane past its line while its turn is still running"; else echo "FAIL no mid-turn recycle: calls=$(cat "$RC_CALLS") out=$(cat "$TMP/rc-outbusy")"; failures=$((failures + 1)); fi
 run_rc_watcher 100 6 "$TMP/rc-out2"
 if [ ! -s "$RC_CALLS" ]; then echo "ok   a lane under the line is not recycled"; else echo "FAIL recycled at 100K: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
+# A reading lane.sh --ctx cannot give (it prints ?) is never a reason to clear a lane: the whole watcher starts no recycle on it.
+run_rc_watcher '?' 6 "$TMP/rc-outq"
+if [ ! -s "$RC_CALLS" ]; then echo "ok   a lane whose context reads ? is not recycled by the watcher"; else echo "FAIL recycled on an unreadable context: $(cat "$RC_CALLS")"; failures=$((failures + 1)); fi
 : > "$RC_FAIL"
 run_rc_watcher 130 20 "$TMP/rc-out3"
 if grep -q '^recycle failed: rl: no new handoff.md' "$TMP/rc-out3"; then echo "ok   a failed recycle wakes the hub, naming the lane and why"; else echo "FAIL recycle failure not reported: $(cat "$TMP/rc-out3")"; failures=$((failures + 1)); fi
