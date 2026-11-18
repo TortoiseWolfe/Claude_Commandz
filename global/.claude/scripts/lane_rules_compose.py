@@ -8,12 +8,16 @@ part whose trigger words appear in its name, folder, prompt text, or (for mail) 
 part goes in: a trigger is a plain word list below, and a lane that mentions any of them gets the rules.
 
   lane_rules_compose.py --name N --dir D --connectors on|off --prompt FILE --out FILE [--model M] [--rules-dir DIR]
+  lane_rules_compose.py ... --rules LIST      auto (default: the keyword picking), all, none (core only) or part names, e.g. mail,coop
   lane_rules_compose.py --all --out FILE      every part (a lane whose composing failed still gets all the rules)
   lane_rules_compose.py --stats FILE...       which parts each prompt file would get, and the characters sent
 
 The first line of the output says which parts it holds and where the others are, so a lane that thinks a rule is missing
 can read hub/lane-rules/<part>.md. A short "key rules" block (hub/lane-rules/key-rules-lane.txt) sits above core; the
 event hook (rules_reminder.py) repeats the same block every 30 tool calls.
+
+With --rules naming parts, the hub has decided: the lane gets exactly core plus those parts, and the keywords only warn, in one
+line of the head comment per part the words would have loaded (the hit words, at most 4).
 """
 import argparse
 import os
@@ -79,22 +83,54 @@ def read_part(rules_dir, name):
         return ""
 
 
-def pick(name, dirpath, connectors, prompt_text):
+def pick_hits(name, dirpath, connectors, prompt_text):
+    """{part: [matched words, lower case, at most 4]} for every part the keywords would load (core excluded)."""
     text = f"{name}\n{dirpath}\n{prompt_text[:30000]}".lower()
-    got = ["core"]
+    hits = {}
     private = load_private_triggers()
     for part in ORDER[1:]:
-        if part == "mail" and connectors == "on":
-            got.append(part)
-        elif re.search(TRIGGERS[part], text) or (part in private and re.search(private[part], text)):
-            got.append(part)
+        words = []
+        for rx in (TRIGGERS[part], private.get(part)):
+            if rx:
+                for m in re.finditer(rx, text):
+                    w = m.group(0).strip().lower()
+                    if w and w not in words:
+                        words.append(w)
+        if words:
+            hits[part] = words[:4]
+        elif part == "mail" and connectors == "on":
+            hits[part] = ["connectors on"]
     d = (dirpath or "").rstrip("/")
-    if d.endswith(WORKSPACE_DIRS) and "fleet" not in got:  # a lane started in the workspace or hub folder may run the fleet
-        got.append("fleet")
+    if d.endswith(WORKSPACE_DIRS) and "fleet" not in hits:  # a lane started in the workspace or hub folder may run the fleet
+        hits["fleet"] = ["workspace folder"]
+    return hits
+
+
+def pick(name, dirpath, connectors, prompt_text):
+    hits = pick_hits(name, dirpath, connectors, prompt_text)
+    got = ["core"] + [p for p in ORDER[1:] if p in hits]
+    if connectors == "on" and "mail" not in got:
+        got.insert(1, "mail")
     return got
 
 
-def compose(parts, rules_dir):
+def parse_rules(spec):
+    """'auto', 'all', 'none' or a comma list of part names -> None (auto) or the list of parts to load. Exits 2 on an unknown name."""
+    spec = (spec or "auto").strip().lower()
+    if spec == "auto":
+        return None
+    if spec == "all":
+        return list(ORDER)
+    names = [n.strip() for n in spec.split(",") if n.strip()]
+    bad = [n for n in names if n not in ORDER and n != "none"]
+    if bad or not names:
+        sys.stderr.write("lane_rules_compose: unknown rule part %s; valid: auto, all, none, or a comma list of %s\n"
+                         % (", ".join(bad) or repr(spec), ", ".join(ORDER[1:])))
+        sys.exit(2)
+    return ["core"] + [p for p in ORDER[1:] if p in names]
+
+
+def compose(parts, rules_dir, warn=None):
     key = ""
     try:
         key = (rules_dir / "key-rules-lane.txt").read_text().strip()
@@ -106,6 +142,9 @@ def compose(parts, rules_dir):
         ("; not loaded: %s (read ~/repos/hub/lane-rules/<part>.md if a rule of that kind seems missing)" % ", ".join(others))
         if others else "")
     chunks = [head]
+    for part, words in (warn or {}).items():
+        chunks[0] += "\n<!-- not loaded, but the prompt mentions: %s (%s); read hub/lane-rules/%s.md if the work needs it -->" % (
+            part, ", ".join(words), part)
     if key:
         chunks.append(key)
     for p in parts:
@@ -148,6 +187,7 @@ def main():
     ap.add_argument("--prompt", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--rules-dir", default=str(DEFAULT_DIR))
+    ap.add_argument("--rules", default="auto")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--stats", nargs="*")
     a = ap.parse_args()
@@ -169,14 +209,21 @@ def main():
         return 0
     if not a.out:
         sys.exit("lane_rules_compose: --out FILE is required")
+    wanted = parse_rules(a.rules)
     pf = Path(a.prompt) if a.prompt else None
-    if a.all or pf is None or not pf.is_file():  # no prompt to judge by: every part
+    warn = None
+    if a.all or (wanted is None and (pf is None or not pf.is_file())):  # no prompt to judge by: every part
         parts = ORDER
+    elif wanted is not None:
+        parts = wanted
+        if pf is not None and pf.is_file():
+            hits = pick_hits(a.name, a.dir, a.connectors, pf.read_text(errors="replace"))
+            warn = {p: w for p, w in hits.items() if p not in parts}
     else:
         parts = pick(a.name, a.dir, a.connectors, pf.read_text(errors="replace"))
     if not read_part(rules_dir, "core").strip():
         sys.exit("lane_rules_compose: %s/core.md is missing or empty" % rules_dir)
-    text = compose(parts, rules_dir)
+    text = compose(parts, rules_dir, warn)
     if pf is not None and pf.is_file() and not a.all:
         extra = routes_for(a.name, a.dir, pf.read_text(errors="replace"))
         if extra:

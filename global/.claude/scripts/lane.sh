@@ -117,6 +117,8 @@
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
 #                                       Claude lanes also get ~/.claude/state, Claude's temp folder, ~/repos/.worktrees and (in a worktree) the repo's main checkout as --add-dir,
 #                                       computed at each start and resume, never recorded (see shared_read_flags).
+#   lane.sh --rules <list> ...          at start: which rule parts the lane loads: auto (default, the keyword picking), all, none (core only) or part names
+#                                       from mail, browser, streams, coop, fleet, comma-separated (core always loads); an unknown name is refused before anything starts
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
 #                                       --headless), "dead <cmd>" when the pane shows a bare shell or nothing; lane_watch.sh wakes the hub on dead
@@ -156,7 +158,8 @@
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
 #     the rules, composed per lane by lane_rules_compose.py from the parts in LANE_RULES_DIR (default ~/repos/hub/lane-rules/):
 #     core.md always, plus mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
-#     setting might match (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
+#     setting might match; a start command that names --rules <list> loads exactly core plus that list, and the keywords only add a warning line
+#     to the head comment for each part they would have loaded (the hub knows what the job needs). (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
 #     ~/repos/hub/lane-rules.md) is now a short pointer that prompts saying "Read lane-rules.md first" still read cheaply;
 #     both happen only when that file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
 #     memory index (MEMORY.md, about 4K tokens) is not loaded: the rule file carries the rules;
@@ -287,7 +290,7 @@ usage() {
   local cb; cb="$(codex_back_phrase)"; [ -z "$cb" ] || cb=" $cb"
   cat <<'USAGE' | sed "s| @CODEX_BACK@|${cb//&/\\&}|g"
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--rules <auto|all|none|part[,part]>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -338,7 +341,7 @@ NO_AI_WALL_SH="${HOME:-/nonexistent}/.claude/no-ai-wall/no_ai_wall.sh"
 [ -r "$NO_AI_WALL_SH" ] || { echo "refusing: ~/.claude/no-ai-wall/no_ai_wall.sh is missing, so the no-AI wall cannot be checked" >&2; exit 1; }
 # shellcheck source=../no-ai-wall/no_ai_wall.sh
 . "$NO_AI_WALL_SH"
-add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
+add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; rules_opt=; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -356,6 +359,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--recycle-at requires a number of K tokens (40 to 150)" >&2; exit 1; }
       recycle_at_opt="$2"; recycle_at_set=1; shift 2 ;;
     --recycle-at=*) recycle_at_opt="${1#*=}"; recycle_at_set=1; shift ;;
+    --rules)
+      [ $# -ge 2 ] || { echo "--rules requires auto, all, none or a comma list of: mail, browser, streams, coop, fleet" >&2; exit 1; }
+      rules_opt="$2"; shift 2 ;;
+    --rules=*) rules_opt="${1#*=}"; shift ;;
     --add-dir)
       [ $# -ge 2 ] || { echo "--add-dir requires a folder path" >&2; exit 1; }
       add_dirs_opt+=("$2"); shift 2 ;;
@@ -453,6 +460,14 @@ case "$effort_opt" in
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
 esac
 
+if [ -n "$rules_opt" ]; then
+  case "$mode" in start) ;; *) echo "--rules only applies when starting a lane" >&2; exit 1 ;; esac
+  case "$rules_opt" in auto|all|none) ;; *)
+    for _rp in ${rules_opt//,/ }; do
+      case "$_rp" in core|mail|browser|streams|coop|fleet|none) ;;
+        *) echo "unknown rule part $_rp; valid: auto, all, none, or a comma list of mail, browser, streams, coop, fleet" >&2; exit 2 ;; esac
+    done ;; esac
+fi
 if [ "$recycle_at_set" = 1 ]; then
   # A connector lane starts near 77K, and with large tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
   # go to LANE_RECYCLE_MAX_CONN_K (165, just under where Claude Code compacts, about 168K); the 150 ceiling holds for the rest.
@@ -1186,12 +1201,13 @@ deny_rules() {  # <lane folder> [write]
 # the file the lane started with. Under --dry-run nothing is written in the lane
 # folder; the composed text goes to ~/.claude/state/out/dry-rules-<name>.md. When composing fails the lane gets every part, then
 # the pointer file, so a lane never starts with no rules.
-lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1>
+lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1> [rules list]
   local f="$HOME/.claude/state/lanes/.rules/$(basename "$1").md" me; me="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_rules_compose.py"
   if [ "${6:-0}" = 1 ] && [ -s "$f" ]; then printf '%s' "$f"; return 0; fi
   [ "$dry" = 1 ] && f="$HOME/.claude/state/out/dry-rules-$2.md"
   mkdir -p -m 700 "$(dirname "$f")" 2>/dev/null || true
-  if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
+  local ra=(); [ -z "${7:-}" ] || ra=(--rules "$7")
+  if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" ${ra[@]+"${ra[@]}"} >/dev/null 2>&1; then printf '%s' "$f"
   elif python3 -I "$me" --all --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
   else printf '%s' "$LANE_RULES"; fi
 }
@@ -1251,7 +1267,7 @@ print(",".join(out))
   [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
   if [ -f "$LANE_RULES" ]; then
     local rf="$LANE_RULES"
-    [ -z "${8:-}" ] || [ "$8" = - ] || rf="$(lane_rules_for "$8" "${3:-lane}" "${5:-.}" "$2" "${9:-}" "${10:-0}")"
+    [ -z "${8:-}" ] || [ "$8" = - ] || rf="$(lane_rules_for "$8" "${3:-lane}" "${5:-.}" "$2" "${9:-}" "${10:-0}" "${rules_opt:-}")"
     printf -- ' --append-system-prompt-file %q' "$rf"
   fi
   return 0
