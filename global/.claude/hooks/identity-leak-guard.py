@@ -93,6 +93,13 @@ NETWORK_CODE = re.compile(
     r"|\b(?:curl|wget)\s+-|\bnew\s+WebSocket\b",
     re.I,
 )
+# A script that starts other programs can reach the network through them, so for the data-file rule it counts as network code.
+STARTS_PROGRAMS = re.compile(
+    r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bPopen\b|\bpty\b|\bctypes\b|\bpexpect\b"
+    r"|\b(?:eval|exec|compile|__import__)\s*\(|\bimportlib\b|\brunpy\b|\bchild_process\b|\bspawn(?:Sync)?\s*\("
+    r"|\bexecFile(?:Sync)?\b|\bexecSync\b|\bsystem\s*\(|\bpopen\b|`|%x[\[({]|\bshell_exec\b|\bpassthru\b|\bproc_open\b",
+    re.I,
+)
 # Reading the account address from where it lives, straight into a command.
 DYNAMIC_ADDRESS = re.compile(
     r"git\s+config\b[^\n;|&]*\buser\.email\b|\$\{?(?:GIT_AUTHOR_EMAIL|GIT_COMMITTER_EMAIL|EMAIL)\b"
@@ -211,6 +218,16 @@ def is_binary(path):
     return False
 
 
+def script_is_quiet(path):
+    """True when the script's own text can be read in full and holds no network code and starts no other program."""
+    try:
+        with open(path, errors="replace") as f:
+            body = f.read(MAX_SCRIPT_BYTES + 1)
+    except OSError:
+        return False
+    return len(body) <= MAX_SCRIPT_BYTES and not NETWORK_CODE.search(body) and not STARTS_PROGRAMS.search(body)
+
+
 def sinks(cmd, cwd, allowed):
     """Network sinks in the command: names as strings, or ("script file", text) for a script that uses the network.
     A script is judged by its own text. One that can't be found, read in full or told apart from a mail tool counts as a sink.
@@ -247,8 +264,15 @@ def sinks(cmd, cwd, allowed):
             if tok == first and plain_form and is_allowed_tool(path, allowed):
                 trusted = True
                 break
+        # A script with no network code, started in its plainest form: the other files it is given are its data, not code.
+        data_mode = False
+        if plain_form and not trusted:
+            own = [p for t, p in files if t == first]
+            data_mode = bool(own) and all(script_is_quiet(p) for p in own)
         for tok, path in files:
             if tok == first and plain_form and is_allowed_tool(path, allowed):
+                continue
+            if data_mode and tok != first:
                 continue
             if trusted and tok != first and is_binary(path):  # an attachment for a mail tool: data, not code, so not scanned
                 continue
@@ -261,7 +285,7 @@ def sinks(cmd, cwd, allowed):
             if len(body) > MAX_SCRIPT_BYTES:
                 found.append("a script too large to read in full")
             elif NETWORK_CODE.search(body):
-                found.append(("script file", body))
+                found.append(("script file", body, path))
         if first is not None and not any(t == first for t, _ in files):
             found.append("a script this hook can't find")
     return found
@@ -275,7 +299,7 @@ def check_bash(cmd, cwd, addrs, allowed):
         return "a Bash call carries the address to a network sink"
     for f in found:
         if isinstance(f, tuple) and has_address(f[1], addrs):
-            return "a script this call runs holds the address and uses the network"
+            return "the file %s holds the address and uses the network" % (f[2] if len(f) > 2 else "a script this call runs")
     return None
 
 
