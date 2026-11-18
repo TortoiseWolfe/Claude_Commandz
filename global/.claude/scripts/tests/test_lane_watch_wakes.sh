@@ -576,6 +576,7 @@ blocked|n|y|BLOCKED (hub) needs a key
 blocked|n|y|BLOCKED
 step|n|y|STEP-FOR-JONATHAN https://example.com/x do it
 step|n|y|STEP-FOR-JONATHAN no link
+other|n|n|STEP-FOR-JONATHANX https://example.com/x
 waiting|n|y|HUB-ACT 3:23 AM x
 waiting|n|y|NEED-HUB: x
 waiting|n|y|READY-FOR-HUB

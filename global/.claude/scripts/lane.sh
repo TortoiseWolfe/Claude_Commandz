@@ -1104,6 +1104,17 @@ lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | 
 # 100K line left it 23K of room and it recycled every few turns. Its line is its start load plus the same 50K of working room as above.
 LANE_CONNECTOR_START_K=${LANE_CONNECTOR_START_K:-77}
 LANE_WORKING_ROOM_K=${LANE_WORKING_ROOM_K:-50}
+# The project's instruction file is read again for each working copy of the code a lane steps into (issue 83: a 20 KB file, about 5K tokens a time, and one lane
+# stepped into three). The start load is measured at the first message, when only the lane's own folder has been read, so the line gets this much more room for
+# each other working copy the lane's prompt names.
+LANE_INSTRUCTION_K=${LANE_INSTRUCTION_K:-5}
+named_copies() {  # <prompt-file> <lane folder> -> how many distinct ~/repos/.worktrees/<repo>--<topic> folders the prompt names, not counting the lane's own folder
+  local own n=0
+  [ -r "${1:-}" ] || { echo 0; return 0; }
+  case "${2:-}" in */.worktrees/*) own=".worktrees/${2##*/.worktrees/}" ;; *) own="" ;; esac
+  n="$({ head -c 200000 -- "$1" | grep -aoE '\.worktrees/[A-Za-z0-9._-]+--[A-Za-z0-9._-]+' || true; } | sort -u | { grep -vxF -- "${own:-/}" || true; } | wc -l)"
+  echo "${n// /}"
+}
 default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
   local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
@@ -1900,7 +1911,9 @@ if [ "$mode" = recycle ]; then
     # that starts at 100K with a 127K line is back at it in minutes however often it is cleared. The session being cleared is the measure;
     # the fresh one loads the same rules and tool lists. A line already above that stays.
     startk="$([ -n "${id:-}" ] && [ "$id" != - ] && start_k "$dir" "$id" || echo '?')"; startk="${startk%K}"
-    if [[ "$startk" =~ ^[0-9]+$ ]] && [ $(( startk + LANE_WORKING_ROOM_K )) -gt "$rk_next" ]; then rk_next=$(( startk + LANE_WORKING_ROOM_K )); fi
+    # One instruction file more for each other working copy the prompt names (issue 83, item 4).
+    copies_k=$(( $(named_copies "${p:-}" "$dir") * LANE_INSTRUCTION_K ))
+    if [[ "$startk" =~ ^[0-9]+$ ]] && [ $(( startk + LANE_WORKING_ROOM_K + copies_k )) -gt "$rk_next" ]; then rk_next=$(( startk + LANE_WORKING_ROOM_K + copies_k )); fi
     if [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ] && [ "$rk_next" -lt $(( rk_now + 20 )) ]; then
       rk_next=$(( rk_now + 20 ))
     fi

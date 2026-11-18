@@ -358,7 +358,7 @@ line1_class() {
   local first=$1 w LC_ALL=C
   case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) echo empty; return 0 ;; esac
   case "$first" in "BLOCKED"*) echo blocked; return 0 ;; esac
-  case "$first" in STEP-FOR-JONATHAN*) echo step; return 0 ;; esac
+  [[ $first =~ ^STEP-FOR-JONATHAN([^A-Za-z0-9_-]|$) ]] && { echo step; return 0; }
   if [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]]; then
     w=${BASH_REMATCH[1]}
     case "-$w-" in *-HUB-*|*-JONATHAN-*) echo waiting; return 0 ;; esac
