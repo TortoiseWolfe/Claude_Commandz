@@ -143,6 +143,14 @@ class SettingsHookTests(unittest.TestCase):
         self.assertIn(("Bash", "python3 ~/.claude/hooks/own-review-merge-guard.py"), commands("PreToolUse"))
         self.assertTrue((HOOKS_DIR / "own-review-merge-guard.py").exists())
 
+    def test_docker_first_guard_runs_before_every_shell_call(self):
+        # Jonathan, 18 Nov 2026: "always Docker first! for all our projects". The hook refuses a host npm, pnpm, yarn, bun,
+        # vite, next or expo run. install_docker_first_guard.py adds this same entry on a machine, so the two must agree.
+        self.assertEqual(
+            [m for m, c in commands("PreToolUse") if c == "python3 ~/.claude/hooks/docker-first-guard.py"], ["Bash"]
+        )
+        self.assertTrue((HOOKS_DIR / "docker-first-guard.py").exists(), "no copy of docker-first-guard.py")
+
     def test_list_file_guard_covers_bash_and_the_edit_tools(self):
         found = [m for m, c in commands("PreToolUse") if c == "python3 ~/.claude/hooks/list-file-guard.py"]
         self.assertEqual(len(found), 1)
