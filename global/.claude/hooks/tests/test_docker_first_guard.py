@@ -595,7 +595,7 @@ class HeredocBodiesAreText(Base):
         # a # right after a closing parenthesis or a redirection starts a comment too
         self.refused("(true)# <<EOF\nnpm ci\nEOF")
         self.refused("echo hi >/dev/null # <<EOF\nnpm ci\nEOF")
-        self.refused("echo $(date)#<<EOF\nnpm ci\nEOF")
+        self.refused("(true)#<<EOF\nnpm ci\nEOF")
         # a # inside a word or a quoted string is not a comment, and a real heredoc after text still works
         self.allowed(f"echo a#b; cat <<'EOF'\n{self.NOTE}\nEOF")
         self.allowed(f"echo '# not a comment'; cat <<'EOF'\n{self.NOTE}\nEOF")

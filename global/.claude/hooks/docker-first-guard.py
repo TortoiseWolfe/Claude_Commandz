@@ -100,7 +100,10 @@ ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 # (a quoted delimiter shows as QQQQQ). The delimiter is the whole shell word after <<, quotes anywhere
 # in it included. <<< (herestring) and 1<<2 are not heredocs.
 HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*([^\s;|&<>()]+)")
-# A # starts a comment at the start of a word: after whitespace, an operator or a parenthesis.
+# A # starts a comment at the start of a word: after whitespace, an operator or a parenthesis. Masking
+# too much is the safe side: a << hidden in a mask is not stripped, so its lines are checked as
+# commands (at worst a false refusal, as for echo $(date)#<<EOF). Masking too little would strip a
+# body that bash runs as commands.
 COMMENT = re.compile(r"(?:^|(?<=[\s;|&()<>]))#[^\n]*", re.M)
 ARITHMETIC = re.compile(r"\$?\(\([^\n]*?\)\)")
 
