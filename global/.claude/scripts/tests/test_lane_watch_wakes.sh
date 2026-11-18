@@ -554,5 +554,48 @@ if [ "$wc_rc" = 0 ] && [ "$wc_out" = "$(printf '3\treport\n1\theartbeat')" ]; th
 if [ "$wc_out30" = "$(printf '3\theartbeat\n3\treport')" ]; then echo "ok   --wake-counts DAYS widens the window"; else echo "FAIL wake-counts 30: $wc_out30"; failures=$((failures + 1)); fi
 unset LANE_WATCH_WAKE_LOG
 
+# line1_class is the one table of line-1 words; line1_done_claim and line1_rests ask it. One row per spelling: class|done claim y/n|rests y/n|line 1 (last, so it may hold "|").
+l1_n=0; l1_bad=0
+while IFS='|' read -r want_class want_claim want_rests line; do
+  [ -n "$want_class" ] || continue
+  l1_n=$((l1_n + 1))
+  got=$(line1_class "$line")
+  c=n; line1_done_claim "$line" && c=y
+  r=n; line1_rests "$line" && r=y
+  if [ "$got" != "$want_class" ] || [ "$c" != "$want_claim" ] || [ "$r" != "$want_rests" ]; then
+    echo "FAIL line1 '$line': class=$got (want $want_class) claim=$c (want $want_claim) rests=$r (want $want_rests)"; l1_bad=$((l1_bad + 1))
+  fi
+done <<'ROWS'
+empty|y|y|QUEUE EMPTY
+empty|y|y|QUEUE EMPTY 3:00 AM nothing left
+empty|y|y|EMPTY
+empty|y|y|EMPTY 3:17 AM nothing left
+empty|y|y|EMPTY: all done
+empty|y|y|EMPTY|3:17 AM|x
+blocked|n|y|BLOCKED (hub) needs a key
+blocked|n|y|BLOCKED
+step|n|y|STEP-FOR-JONATHAN https://example.com/x do it
+step|n|y|STEP-FOR-JONATHAN no link
+waiting|n|y|HUB-ACT 3:23 AM x
+waiting|n|y|NEED-HUB: x
+waiting|n|y|READY-FOR-HUB
+waiting|n|y|WAIT-JONATHAN 2 PM
+done|y|y|DONE
+done|y|y|DONE 4:00 PM items 3
+done|y|y|DONE needs hub 0
+done|y|n|DONE needs hub 2
+done|y|n|DONE needs Jonathan 1
+other|n|n|HUBRIS
+other|n|n|DONE-ISH
+other|n|n|Hub: waiting on a reply
+other|n|n|DONE BY 5 PM
+other|n|n|DONE UNTIL noon
+done|y|y|DONE by 5 PM
+other|n|n|queue empty
+other|n|n|WORKING 8:30 AM
+other|n|n|HOURLY 9 AM
+ROWS
+if [ "$l1_bad" = 0 ]; then echo "ok   line1_class table: $l1_n spellings give their class, done claim and rest"; else failures=$((failures + l1_bad)); fi
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch wake tests passed"
