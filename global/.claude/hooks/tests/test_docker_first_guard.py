@@ -476,5 +476,90 @@ class MalformedAndOtherToolsAllowed(Base):
         self.assertEqual(r.stderr.strip(), "docker-first-guard: allowed after an error (ZeroDivisionError)")
 
 
+class HeredocBodiesAreText(Base):
+    """A heredoc body is a note, not a list of commands. Found when "done; next one" in a hand-off note
+    was read as the command next and refused."""
+
+    NOTE = "item 2 is done; next one is item 3"
+
+    def test_the_reported_case_passes(self):
+        self.allowed(f"cat >> f.md <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_every_guarded_word_at_the_start_of_a_body_line_passes(self):
+        for line in (
+            "done; next one is item 3",
+            "next steps",
+            "vite is the dev server",
+            "expo start is how we preview",
+            "bun is fast; yarn lint is slow",
+            "npm ci then pnpm install",
+            "npx next build && npm run build",
+            "yarn",
+        ):
+            for opener in ("cat > note.md <<'EOF'", 'cat > note.md <<"EOF"', "cat > note.md <<\\EOF"):
+                with self.subTest(line=line, opener=opener):
+                    self.allowed(f"{opener}\n{line}\nEOF")
+
+    def test_unquoted_delimiter_and_dash_form_pass(self):
+        self.allowed(f"cat <<EOF\n{self.NOTE}\nEOF")
+        self.allowed(f"cat <<-EOF\n\t{self.NOTE}\n\tEOF")
+        self.allowed(f"cat <<EOF > f.md\n{self.NOTE}\nEOF")
+
+    def test_body_runs_to_the_end_when_no_closing_line(self):
+        self.allowed(f"cat <<'EOF'\n{self.NOTE}")
+
+    def test_two_heredocs_on_one_line(self):
+        self.allowed(f"cat <<A <<'B'\n{self.NOTE}\nA\nnext one; vite\nB")
+
+    def test_text_after_the_closing_line_is_a_command_again(self):
+        self.refused(f"cat <<'EOF' > f.md\n{self.NOTE}\nEOF\nnpm ci")
+        self.refused(f"cat <<'EOF' > f.md\n{self.NOTE}\nEOF\nnpx next build")
+
+    def test_a_host_run_on_the_command_line_that_opens_the_heredoc_is_refused(self):
+        self.refused(f"npm ci <<'EOF'\n{self.NOTE}\nEOF")
+        self.refused(f"cat <<'EOF' > f.md && npm ci\n{self.NOTE}\nEOF")
+        self.refused(f"npm ci && cat <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_a_host_run_before_the_heredoc_is_refused(self):
+        self.refused(f"cd x\nnpm run build\ncat <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_a_body_fed_to_a_shell_is_still_checked(self):
+        self.refused("bash <<'EOF'\nnpm ci\nEOF")
+        self.refused("sh <<EOF\ncd app\nnext build\nEOF")
+        self.refused("cat <<'EOF' | bash -s\nvite\nEOF")
+        self.allowed("bash <<'EOF'\necho hi; ls\nEOF")  # a harmless script
+        self.allowed("docker run --rm -i node:22 bash <<'EOF'\nnpm ci\nEOF")
+
+    def test_unquoted_body_substitution_runs_so_it_is_checked(self):
+        self.refused("cat <<EOF\nbuilt with $(npm ci)\nEOF")
+        self.refused("cat <<EOF\nbuilt with `npx next build`\nEOF")
+        self.allowed("cat <<'EOF'\nbuilt with $(npm ci)\nEOF")  # quoted delimiter: literal text
+        self.allowed("cat <<EOF\nbuilt with \\$(npm ci)\nEOF")  # backslash shields it
+
+    def test_herestring_and_arithmetic_are_not_heredocs(self):
+        self.refused("grep x <<< foo\nnpm ci")
+        self.refused("echo $((1<<2))\nnpm ci")
+
+
+class QuotedTextIsNeverACommand(Base):
+    def test_quoted_text_with_separators_passes(self):
+        for command in (
+            "echo 'item 2 is done; next one is item 3'",
+            'echo "item 2 is done; next one is item 3"',
+            "echo 'done, then next one'",
+            "echo 'a\nnext one; vite\nyarn lint'",
+            "git commit -m 'fix: next build; vite and expo start are named'",
+            "printf '%s\\n' 'x; bun add y'",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_a_real_host_run_on_the_same_line_as_quoted_text_is_refused(self):
+        self.refused("echo 'note; next one' && npx next build")
+        self.refused("echo 'done' ; npm ci")
+        self.refused("echo \"$(npm ci)\"")
+        self.refused("echo 'a\nb'\nyarn lint")
+
+
 if __name__ == "__main__":
     unittest.main()

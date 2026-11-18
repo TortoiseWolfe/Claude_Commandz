@@ -90,6 +90,19 @@ class InstallTests(Base):
         self.assertIn("already registered", out)
         self.assertTrue(self.last(out).startswith("PASS"))
 
+    def test_a_rerun_after_a_hook_fix_replaces_the_old_file_and_adds_no_second_entry(self):
+        # the heredoc fix ships as a new hook file: Jonathan re-runs the one line, the file is updated, the entry is not doubled
+        self.run_cli()
+        installed = self.home / "hooks" / "docker-first-guard.py"
+        installed.write_bytes(b"#!/usr/bin/env python3\n# the version before the heredoc fix\nimport sys\nsys.exit(0)\n")
+        settings_once = self.settings.read_bytes()
+        code, out, _ = self.run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(installed.read_bytes(), HOOK.read_bytes())
+        self.assertEqual(self.settings.read_bytes(), settings_once)
+        self.assertEqual(entry_count(self.live()), 1)
+        self.assertTrue(self.last(out).startswith("PASS"), out)
+
     def test_the_file_is_in_place_before_the_settings_entry_is_written(self):
         # a settings entry that points at a missing file makes every Bash call fail, so the order is part of the contract
         src = Path(idg.__file__).read_text()

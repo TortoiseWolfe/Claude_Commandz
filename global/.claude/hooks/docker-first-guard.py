@@ -13,6 +13,10 @@ Refuses a command that runs a package manager or dev server on the host:
     (./node_modules/.bin/vite);
 when the command is not docker run, docker exec or docker compose (docker-compose).
 
+Heredoc bodies (cat <<'EOF' ... EOF) are text, not commands: their lines are never split into commands,
+so "done; next one" in a hand-off note passes. The body is still checked where the shell would run it:
+a $( ) or backtick in an unquoted-delimiter body, and a body fed to sh or bash (bash <<EOF).
+
 Looked through, so they cannot hide a host run: chains (&& || ; | newline &), $( ) and backticks
 (also inside double quotes), sh -c / bash -lc strings, subshells and groups, if/then/do keywords,
 wrappers (sudo, env, nice -n 5, timeout 10, nohup, xargs, corepack) and find -exec.
@@ -87,7 +91,13 @@ QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 SINGLE_QUOTED = re.compile(r"'[^']*'")
 SEPARATOR = re.compile(r"&&|\|\||\|&|\||;|(?<![><])&(?![><&])|\n")
 SUBSTITUTION = re.compile(r"\$\((.*?)\)|`([^`]*)`")
+# In an unquoted-delimiter heredoc body the shell runs $( ) and backticks, but a backslash shields them.
+HEREDOC_SUBSTITUTION = re.compile(r"(?<!\\)\$\((.*?)\)|(?<!\\)`([^`]*)`")
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+# A heredoc operator, found in text whose quoted strings are already masked with Q (so a quoted
+# delimiter shows as QQQQQ). << followed by a letter or _ is a delimiter; <<< (herestring) and
+# arithmetic like 1<<2 are not.
+HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*(Q+|\\?[A-Za-z_]\w*)")
 
 
 def read_exemptions():
@@ -252,10 +262,101 @@ def check_segment(tokens, current_cwd, exemptions):
     return None
 
 
+def strip_heredocs(command):
+    """Cut heredoc bodies out of a command line.
+
+    Returns (text, heredocs). text is the command with every body and its closing line removed (the
+    line carrying << stays, so the command that reads the body is still checked). heredocs is a list
+    of (body, quoted, line): the body text, whether its delimiter was quoted (a quoted delimiter means
+    the shell does no expansion in it), and the command line that carried the operator. A body with
+    no closing line runs to the end, as the shell reads it."""
+    heredocs = []
+    text = command
+    scan = 0
+    while True:
+        plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), text)
+        m = HEREDOC_OP.search(plain, scan)
+        if not m:
+            break
+        nl = plain.find("\n", m.end())
+        if nl == -1:
+            break  # no body follows
+        line_start = plain.rfind("\n", 0, m.start()) + 1
+        line = text[line_start:nl]
+        pos = nl + 1
+        for op in HEREDOC_OP.finditer(plain, m.start(), nl):
+            raw = text[op.start(2):op.end(2)]
+            quoted = raw[0] in "'\"\\"
+            delim = raw.strip("'\"\\")
+            dash = op.group(1) == "-"
+            body_lines = []
+            end = len(text)
+            cur = pos
+            while cur < len(text):
+                eol = text.find("\n", cur)
+                eol = len(text) if eol == -1 else eol
+                row = text[cur:eol]
+                if (row.lstrip("\t") if dash else row) == delim:
+                    end = min(eol + 1, len(text))
+                    break
+                body_lines.append(row)
+                cur = eol + 1
+            else:
+                end = len(text)
+            heredocs.append(("\n".join(body_lines), quoted, line))
+            pos = end
+        text = text[:nl + 1] + text[pos:]
+        scan = nl + 1
+    return text, heredocs
+
+
+def fed_to_shell(line):
+    """True if a command line pipes or redirects into a shell reading its script from stdin
+    (bash <<EOF, cat <<EOF | sh -s). A shell given -c or a script file reads something else."""
+    plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), line)
+    start = 0
+    segs = []
+    for m in SEPARATOR.finditer(plain):
+        segs.append(line[start:m.start()])
+        start = m.end()
+    segs.append(line[start:])
+    for seg in segs:
+        tokens = get_tokens(seg)
+        if not tokens or is_docker_command(tokens):
+            continue
+        i = command_start(tokens)
+        if i >= len(tokens):
+            continue
+        base = re.sub(r"\.(exe|cmd)$", "", os.path.basename(tokens[i])).lower()
+        if base not in SHELL_INTERPRETERS:
+            continue
+        args = [a for a in tokens[i + 1:] if not a.startswith("<<")]
+        if shell_inner_command(args) is not None:
+            continue
+        if all(a.startswith("-") for a in args):
+            return True
+    return False
+
+
 def check_command_text(command, cwd, exemptions):
     """Check a command line for host runs. Returns a refusal reason or None."""
     if not command or not isinstance(command, str):
         return None
+
+    # A heredoc body is text, not commands. Check it only where the shell would act on it.
+    command, heredocs = strip_heredocs(command)
+    for body, quoted, line in heredocs:
+        if fed_to_shell(line):
+            reason = check_command_text(body, cwd, exemptions)
+            if reason:
+                return reason
+        elif not quoted:
+            for m in HEREDOC_SUBSTITUTION.finditer(body):
+                sub_cmd = m.group(1) if m.group(1) is not None else m.group(2)
+                if sub_cmd and sub_cmd.strip():
+                    reason = check_command_text(sub_cmd, cwd, exemptions)
+                    if reason:
+                        return reason
 
     # $( ) and backticks run even inside double quotes, but never inside single quotes.
     unsingled = SINGLE_QUOTED.sub(lambda m: " " * len(m.group(0)), command)
