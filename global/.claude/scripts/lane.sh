@@ -1838,6 +1838,8 @@ fi
 # line: the line goes up at least 20K. Both stop at raise_ceiling_k, and a recycle never lowers a line.
 #   LANE_RECYCLE_IDLE_SECS (300)  how long a dialog may hold the request back
 #   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking, and for the subagents the lane started (issue 35)
+#   LANE_HANDOFF_MAX_BYTES (4096)  a handoff.md over this is sent back once to be shortened (waits up to LANE_RECYCLE_WAIT_SECS again);
+#                                 the clear goes on either way, and a hand-off still over leaves one HANDOFF-OVER row in recycle.log. 0 = no check
 #   LANE_RECYCLE_JOB_SECS (180)   how long to wait for the lane's background shell jobs once handoff.md is written
 #   LANE_RECYCLE_HELPER_QUIET_SECS (1200)  a subagent with no end logged and nothing written for this long is not waited for
 if [ "$mode" = recycle ]; then
@@ -1898,6 +1900,7 @@ if [ "$mode" = recycle ]; then
     echo "  1b. keep the current handoff.md as handoff-prev<N>.md and delete all but the newest ${LANE_HANDOFF_PREV_KEEP:-5} handoff-prev files"
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
+    echo "  3-size. if $handoff is over ${LANE_HANDOFF_MAX_BYTES:-4096} bytes (LANE_HANDOFF_MAX_BYTES, 0 = off): ask once for a shorter one and wait again (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); the clear goes on either way, a hand-off still over leaves a HANDOFF-OVER row"
     echo "  3a. wait for the helpers the lane started: subagents for the rest of that time (still running at the end: the lane is not cleared), background jobs up to ${LANE_RECYCLE_JOB_SECS:-180}s (then cleared anyway, with a row in recycle.log)"
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
     echo "  4. send: /clear"
@@ -2167,6 +2170,27 @@ PY
     sleep 2; lane_idle && written=1   # only background jobs are left, and the time for them is up
   fi
   [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
+  # A hand-off over LANE_HANDOFF_MAX_BYTES (4096; 0 turns this off) is sent back once to be shortened. Whatever the second size is, the
+  # recycle goes on: a long hand-off never blocks the clear, it only leaves one HANDOFF-OVER row.
+  h_max="${LANE_HANDOFF_MAX_BYTES:-4096}"; [[ "$h_max" =~ ^[0-9]+$ ]] || h_max=4096
+  if [ "$h_max" -gt 0 ]; then
+    h_size="$(stat -c %s "$handoff" 2>/dev/null || echo 0)"
+    if [ "$h_size" -gt "$h_max" ]; then
+      before="$(stamp)"; t0="$(date +%s)"
+      if send_to "$name" "Hub: your handoff.md is $h_size bytes and the limit is $h_max. Rewrite $handoff under $(( h_max / 1024 )) KB (one job: what is done, what is in flight, the next step, what to re-arm; move detail to status.md) and stop again." >/dev/null; then
+        end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} ))
+        while [ "$(date +%s)" -lt "$end" ]; do
+          handoff_new && lane_idle && { sleep 2; lane_idle && break; }
+          sleep 2
+        done
+        h_size="$(stat -c %s "$handoff" 2>/dev/null || echo 0)"
+      fi
+      if [ "$h_size" -gt "$h_max" ]; then
+        echo "recycle $name: handoff.md is $h_size bytes after one request to shorten it (limit $h_max); clearing anyway" >&2
+        printf '%s\t%s\tHANDOFF-OVER\thandoff.md is %s bytes after one request to shorten it (limit %s)\n' "$(date -Is)" "$name" "$h_size" "$h_max" >>"$rlog"
+      fi
+    fi
+  fi
   jobs_note=""
   if [ "$h_jobs" != 0 ]; then
     echo "recycle $name: $h_jobs background job(s) the lane started were still running after ${LANE_RECYCLE_JOB_SECS:-180}s; clearing anyway, their finish notices reach the fresh session" >&2
