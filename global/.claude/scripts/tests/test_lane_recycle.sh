@@ -86,6 +86,9 @@ if "context was cleared" in text and (os.environ.get("FAKE_DROP_ALWAYS") == "1" 
     sys.exit(0)
 with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+# A lane asked to shorten: FAKE_HANDOFF_BIG=again writes another long file, anything else a short one.
+if "and the limit is" in text and os.environ.get("FAKE_HANDOFF_BIG"):
+    open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\n" + ("x" * 350 if os.environ["FAKE_HANDOFF_BIG"] == "again" else "short") + "\n")
 if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
     open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\nnext step: carry on\n")
     if os.environ.get("FAKE_QUEUE"):
@@ -102,6 +105,8 @@ if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
             # real typed text sits in the input line
             open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f queued text\n")
             open(os.path.join(st, "typed-pane"), "w").close()
+    if os.environ.get("FAKE_HANDOFF_BIG"):
+        open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\n" + "x" * 300 + "\n")
     if os.environ.get("FAKE_IDLE_AFTER") == "1":
         open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f \n")
 PY
@@ -244,6 +249,34 @@ lane --ctx rl-lane
 [ "$LAST_OUT" != 130 ] || fail '--ctx still reads the old transcript after the recycle'; ok
 [ -d "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock" ] && fail 'recycle lock left behind'; ok
 grep -q "recycled" "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no recycled row'; ok
+
+# Hand-off size: over the limit, the lane is asked once to shorten it; the clear goes on whatever the second size is.
+size_keep="$TMP/index-size-keep"; cp "$INDEX" "$size_keep"
+size_sent() { grep -c 'and the limit is' "$ST/sent.log" || true; }
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (a) under the limit: exits 0'
+assert_eq "$(size_sent)" 0 'size (a): no shorten message'
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" HANDOFF-OVER 'size (a): no HANDOFF-OVER row'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 LANE_RECYCLE_WAIT_SECS=30 FAKE_HANDOFF_BIG=once FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (b) over then under: exits 0'
+assert_eq "$(size_sent)" 1 'size (b): exactly one shorten message'
+grep -qx /clear "$ST/sent.log" || fail 'size (b): the clear happens'; ok
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" HANDOFF-OVER 'size (b): no HANDOFF-OVER row'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 LANE_RECYCLE_WAIT_SECS=30 FAKE_HANDOFF_BIG=again FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (c) over twice: exits 0'
+assert_eq "$(size_sent)" 1 'size (c): exactly one shorten message'
+grep -qx /clear "$ST/sent.log" || fail 'size (c): the clear still happens'; ok
+assert_eq "$(grep -c $'\tHANDOFF-OVER\t' "$HOME_T/.claude/state/lanes/recycle.log")" 1 'size (c): one HANDOFF-OVER row'
+assert_contains "$LAST_OUT" 'after one request to shorten it' 'size (c): one line on stderr'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=0 FAKE_HANDOFF_BIG=again FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (d) limit 0: exits 0'
+assert_eq "$(size_sent)" 0 'size (d): no check'
+
+cp "$size_keep" "$INDEX"; rm -f "$PROJ"/new-sess-*.jsonl
 
 # #275: a lane started in the repo folder that moved into a worktree before its recycle. After /clear its new transcript lands under the
 # worktree's own folder. The recycle must still confirm the re-prime, find the new session and record it (3 failures on 6 Nov 2026).
