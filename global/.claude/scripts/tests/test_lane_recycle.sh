@@ -241,6 +241,18 @@ assert_contains "$LAST_OUT" '## Proof' 'the re-prime asks for a ## Proof section
 [ ! -e "$ST/sent.log" ] || fail '--dry-run typed into the window'; ok
 [ ! -e "$HAND/handoff.md" ] || fail '--dry-run wrote handoff.md'; ok
 
+# A reading that cannot be shown ("?") is never put to the lane as a size: it is told the reading is unavailable and the recycle was by hand.
+printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' >"$PROJ/old-sess.jsonl"
+reset_fake
+lane --ctx rl-lane
+[ "$LAST_OUT" = '?' ] || fail "--ctx on a transcript with no usage record prints ?, got: $LAST_OUT"; ok
+lane --dry-run --recycle rl-lane
+assert_exit 0 "$LAST_RC" '--recycle --dry-run with an unreadable context exits 0 (a by-hand recycle still works)'
+assert_contains "$LAST_OUT" 'your context reading is unavailable and I started this recycle by hand' 'the request says the reading is unavailable'
+assert_not_contains "$LAST_OUT" 'your context is at ?' 'the request never says the context is at ?'
+assert_contains "$LAST_OUT" '4. send: /clear' 'the by-hand recycle still goes on to clear the lane'
+usage_rec 130000 >"$PROJ/old-sess.jsonl"
+
 # A real recycle: hand-off request, handoff.md, /clear, re-prime, in that order; the index row follows the new session.
 # 23 Oct: a session in the lane's folder that is not the lane's (the hub's own) was born meanwhile; the row must not take it.
 reset_fake; rows_before="$(wc -l <"$INDEX")"
@@ -411,7 +423,7 @@ assert_contains "${sent[0]}" 'Finish only the step in hand' 'the request says to
 assert_contains "${sent[0]}" 'start no new step' 'the request says to start no new step'
 assert_contains "${sent[0]}" 'very next action' 'the request makes the hand-off the very next action'
 assert_contains "${sent[0]}" 'ready to recycle' 'the request asks the lane to stop and say ready'
-assert_contains "${sent[0]}" 'recycle line (100K)' "the request names the lane's own line"
+assert_contains "${sent[0]}" 'recycle line of 100K' "the request names the lane's own line"
 # A dialog on screen holds the request back (typing would answer it) and the lane is left alone.
 reset_fake; cur_for rl-lane; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
 FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_IDLE_SECS=2 lane --recycle rl-lane

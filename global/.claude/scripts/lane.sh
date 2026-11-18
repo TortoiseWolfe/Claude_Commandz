@@ -1312,7 +1312,7 @@ for line in sys.stdin:
     except ValueError:
         continue
     m = o.get("message")
-    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" else None
+    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" and m.get("model") != "<synthetic>" else None
     if u:
         last = u
 if last is None:
@@ -1897,7 +1897,10 @@ if [ "$mode" = recycle ]; then
   fi
   target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
   rid="$(date +%s)"   # marks this recycle's request and re-prime, so a leftover copy of the request in a fresh session is recognisable
-  msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
+  # A reading that is "?" is never shown as a size: the lane is told the reading is unavailable and that the recycle was started by hand.
+  if [ "$ctxk" = "?" ]; then ctx_phrase="your context reading is unavailable and I started this recycle by hand (it may not be past your recycle line of ${rk_now}K), but Claude Code compacts on its own at a high size"
+  else ctx_phrase="your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it"; fi
+  msg_handoff="Hub: $ctx_phrase. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
