@@ -490,5 +490,69 @@ if ! grep -q 'under the fake HOME' "$cu_log"; then echo "ok   the lane.sh under 
 else echo "FAIL the HOME lane.sh was called: $(cat "$cu_log")"; failures=$((failures + 1)); fi
 lane_sh="$cu_save_lane_sh"; recycle_dir="$cu_save_dir"
 
+# 18 Nov 2026 (K17): every wake prints WAKE-REASON <code> first and appends <ISO time> <code> <lane or -> to $LANE_WATCH_WAKE_LOG, so a false wake can be
+# counted. wr_case <label> <output text> <want code> <want lane>: the first line is the reason and the log's last row has the code and lane.
+export LANE_WATCH_WAKE_LOG="$TMP/wake-log.tsv"
+wr_case() {
+  local first row
+  first=$(printf '%s\n' "$2" | head -n 1); row=$(tail -n 1 "$LANE_WATCH_WAKE_LOG" 2>/dev/null)
+  if [ "$first" = "WAKE-REASON $3" ] && printf '%s\n' "$row" | awk -F'\t' -v c="$3" -v l="$4" '$1 ~ /^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/ && $2 == c && $3 == l { ok = 1 } END { exit !ok }'; then echo "ok   $1"
+  else echo "FAIL $1: first='$first' row='$row'"; failures=$((failures + 1)); fi
+}
+rm -f "$LANE_WATCH_WAKE_LOG" "$rl_dir"/.reportseen-* "$rl_dir"/.stampahead-*; mkdir -p "$su_dir"
+su_watch "WORKING $(date '+%-I:%M %p') | done: 1" "$TMP/wr-report"
+wr_case "a new report wakes with WAKE-REASON report and logs the lane" "$(cat "$TMP/wr-report")" report rl
+if [ "$(sed -n 2p "$TMP/wr-report" | cut -c1-12)" = "report: rl (" ]; then echo "ok   the existing report line follows the reason line unchanged"; else echo "FAIL line after the reason: $(cat "$TMP/wr-report")"; failures=$((failures + 1)); fi
+rm -rf "$su_dir"; rm -f "$rl_dir"/.reportseen-* "$rl_dir"/.stepurl-* "$rl_dir"/.stampahead-*
+echo claude > "$TMP/dd/dd-gone"; dd_run >/dev/null; echo 'dead bash' > "$TMP/dd/dd-gone"
+out=$(dd_run)
+wr_case "a dead pane wakes with WAKE-REASON pane-dead and logs the lane" "$out" pane-dead dd-gone
+rm -f "$rl_dir"/.calibrate-failed "$rl_dir"/.reportseen-*
+printf '{"at":"2026-11-06T07:30:01-04:00","code":6,"ok":false,"reason":"check did not clear"}\n' > "$cal_file"
+cal_watch "$TMP/wr-cal"
+wr_case "a failed budget reading wakes with WAKE-REASON budget-reading and logs no lane" "$(cat "$TMP/wr-cal")" budget-reading -
+rm -f "$cal_file" "$rl_dir"/.calibrate-failed
+printf '2026-11-18T09:00:00-04:00\tof-lane\tFAILED\tagain\n' >> "$of_log"
+out=$(of_run)
+wr_case "a FAILED recycle row wakes with WAKE-REASON recycle-failed and logs the lane" "$out" recycle-failed of-lane
+out=$(of_run)
+wr_case "a heartbeat wakes with WAKE-REASON heartbeat and logs no lane" "$out" heartbeat -
+
+# A log that cannot be written (its folder is a file) must not stop the wake or change its lines.
+printf x > "$TMP/wr-notdir"
+out=$(LANE_WATCH_WAKE_LOG="$TMP/wr-notdir/wake.log" of_run)
+if [ "$(printf '%s\n' "$out" | head -n 1)" = "WAKE-REASON heartbeat" ] && printf '%s\n' "$out" | grep -q '^heartbeat: nothing new in 0 min'; then echo "ok   an unwritable wake log does not stop the wake"
+else echo "FAIL unwritable log: $out"; failures=$((failures + 1)); fi
+
+# The classifier alone: one code per kind of first line.
+wc_n=0; wc_bad=0
+wc_check() { wc_n=$((wc_n + 1)); [ "$(wake_classify "$1")" = "$2" ] || { echo "FAIL classify '$1': got '$(wake_classify "$1")' want '$2'"; wc_bad=$((wc_bad + 1)); }; }
+wc_check "gone: a" "window-gone a"; wc_check "waiting on a dialog: b (waiting on a read of /x)" "dialog b"
+wc_check "idle: c ended a turn (1:05) without a new report; it may be asking the hub" "turn-ended c"
+wc_check "idle: d has been idle 31 min with a background job still running; x" "job-idle d"
+wc_check "idle: e has been idle 20 min and its report line 1 is not QUEUE EMPTY or BLOCKED" "idle-remind e"
+wc_check "handoff: lane f wrote handoff.md at 1:00 PM" "handoff-orphan f"; wc_check "step without URL: g (line 1)" "step-no-link g"
+wc_check "done without proof: h (x)" "done-no-proof h"; wc_check "stamp ahead: i wrote 1:00 PM" "stamp-ahead i"
+wc_check "stale recycle lock: j (its lock)" "stale-lock j"; wc_check "context unknown: k (its)" "context-unknown k"
+wc_check "thrash: lane l was recycled 3 times" "recycle-thrash l"; wc_check "recycle failed: m: no handoff" "recycle-failed m"
+wc_check "update failed: n: x" "update-failed n"; wc_check "tier: lane o is on opus" "tier o"
+wc_check "green: p's pull request 5 in r has" "green-pr p"; wc_check "spend: lane q has cost" "spend q"; wc_check "spend: the hub has cost" "spend hub"
+wc_check "hub context: 150K, past" "hub-context -"; wc_check "unanswered: your question" "unanswered -"; wc_check "bridge: down" "bridge -"
+wc_check "outbox: 2 posts" "outbox -"; wc_check "undelivered: messages" "undelivered -"; wc_check "ask: open receptionist questions:" "ask-open -"
+wc_check "ask: a new 'Jonathan via OpenClaw:' line" "ask-openclaw -"; wc_check "client talk: a co-op" "client-talk -"; wc_check "note: x" "note -"
+wc_check "check passed: true" "check-passed -"; wc_check "something new" "other -"
+if [ "$wc_bad" = 0 ]; then echo "ok   $wc_n first-line kinds map to their reason code and lane"; else failures=$((failures + wc_bad)); fi
+
+# --wake-counts [DAYS]: wakes per code in the window, most first; an old row falls outside it; it exits 0 without starting a watch.
+wk="$TMP/wake-counts.tsv"; : > "$wk"
+for i in 1 2 3; do printf '%s\treport\trl\n' "$(date -Is -d "-$i hours")" >> "$wk"; done
+printf '%s\theartbeat\t-\n' "$(date -Is -d '-1 day')" >> "$wk"
+printf '%s\theartbeat\t-\n%s\theartbeat\t-\n' "$(date -Is -d '-10 days')" "$(date -Is -d '-11 days')" >> "$wk"
+wc_rc=0; wc_out=$(LANE_WATCH_WAKE_LOG="$wk" timeout 10 bash "$SCRIPT" --wake-counts) || wc_rc=$?
+wc_out30=$(LANE_WATCH_WAKE_LOG="$wk" timeout 10 bash "$SCRIPT" --wake-counts 30)
+if [ "$wc_rc" = 0 ] && [ "$wc_out" = "$(printf '3\treport\n1\theartbeat')" ]; then echo "ok   --wake-counts lists the last 7 days, most first, and exits 0"; else echo "FAIL wake-counts: rc=$wc_rc out=$wc_out"; failures=$((failures + 1)); fi
+if [ "$wc_out30" = "$(printf '3\theartbeat\n3\treport')" ]; then echo "ok   --wake-counts DAYS widens the window"; else echo "FAIL wake-counts 30: $wc_out30"; failures=$((failures + 1)); fi
+unset LANE_WATCH_WAKE_LOG
+
 [ "$failures" = 0 ] || { echo "$failures failed"; exit 1; }
 echo "all lane_watch wake tests passed"

@@ -90,7 +90,7 @@ expect_read_path NONE "a working screen is not the read dialog" "$working"
 # No lane names: the heartbeat still runs and exits 0.
 home="$TMP/home"; mkdir -p "$home"
 rc=0; out=$(HOME="$home" bash "$SCRIPT" --max-min 0) || rc=$?
-if [ "$rc" = 0 ] && [ "$out" = "heartbeat: nothing new in 0 min" ]; then
+if [ "$rc" = 0 ] && [ "$out" = "$(printf 'WAKE-REASON heartbeat\nheartbeat: nothing new in 0 min')" ]; then
   echo "ok   no lane names runs and exits 0 with heartbeat"
 else
   echo "FAIL no lane names: rc=$rc out=$out"; failures=$((failures + 1))
@@ -104,7 +104,7 @@ if sys.argv[1:] == ["queue", "check"]:
     print("outbox: 4 post(s) for Jonathan have not reached his chat since 5:21 PM (6 tries; the next at 5:52 PM).")
 PY
 rc=0; out=$(HOME="$home" OPENCLAW_OUTBOX="$fake_box" OPENCLAW_RECONCILE=/nonexistent bash "$SCRIPT" --max-min 0) || rc=$?
-if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$out" | head -1)" = "outbox: 4 post(s) for Jonathan have not reached his chat since 5:21 PM (6 tries; the next at 5:52 PM)." ]; then
+if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$out" | sed -n 1p)" = "WAKE-REASON outbox" ] && [ "$(printf '%s\n' "$out" | sed -n 2p)" = "outbox: 4 post(s) for Jonathan have not reached his chat since 5:21 PM (6 tries; the next at 5:52 PM)." ]; then
   echo "ok   a post that keeps failing to land wakes the hub"
 else
   echo "FAIL outbox wake: rc=$rc out=$out"; failures=$((failures + 1))
@@ -124,7 +124,7 @@ print("undelivered | 3:35 PM | oc-d5c135d5 | his reply was meant for a lane | \"
 print("filed with the hub: oc-d5c135d5")
 PY
 rc=0; out=$(HOME="$home" OPENCLAW_RECONCILE="$fake_rec" bash "$SCRIPT" --max-min 0) || rc=$?
-if [ "$rc" = 0 ] && printf '%s\n' "$out" | head -1 | grep -q "^undelivered: messages of Jonathan's" \
+if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$out" | sed -n 1p)" = "WAKE-REASON undelivered" ] && printf '%s\n' "$out" | sed -n 2p | grep -q "^undelivered: messages of Jonathan's" \
    && printf '%s\n' "$out" | grep -q "^undelivered | 3:35 PM | oc-d5c135d5" && printf '%s\n' "$out" | grep -q "^filed with the hub: oc-d5c135d5"; then
   echo "ok   an undelivered message wakes the hub with the reconciler's lines"
 else
@@ -145,7 +145,8 @@ print("oc-aaaaaaaa | 18 min | deferred | Which sample status?")
 print("oc-bbbbbbbb | 12 min | fallback-lane | Where is the sample change?")
 PY
 rc=0; out=$(HOME="$home" OPENCLAW_DISPATCH="$fake_open" bash "$SCRIPT" --max-min 0) || rc=$?
-if [ "$rc" = 0 ] && [ "$out" = "ask: open receptionist questions:
+if [ "$rc" = 0 ] && [ "$out" = "WAKE-REASON ask-open
+ask: open receptionist questions:
 oc-aaaaaaaa | 18 min | deferred | Which sample status?
 oc-bbbbbbbb | 12 min | fallback-lane | Where is the sample change?" ]; then
   echo "ok   open receptionist questions print every ask and exit"
@@ -162,7 +163,7 @@ p.write_text(p.read_text() + "x" if p.exists() else "x")
 print("none")
 PY
 rc=0; out=$(HOME="$home" OPENCLAW_DISPATCH="$fake_open" OPEN_COUNT="$call_count" bash "$SCRIPT" --max-min 0) || rc=$?
-if [ "$rc" = 0 ] && [ "$out" = "heartbeat: nothing new in 0 min" ] && [ "$(cat "$call_count")" = "xx" ]; then
+if [ "$rc" = 0 ] && [ "$out" = "$(printf 'WAKE-REASON heartbeat\nheartbeat: nothing new in 0 min')" ] && [ "$(cat "$call_count")" = "xx" ]; then
   echo "ok   empty question queue is checked at arm and on heartbeat"
 else
   echo "FAIL empty question queue: rc=$rc out=$out calls=$(cat "$call_count" 2>/dev/null || echo missing)"; failures=$((failures + 1))
