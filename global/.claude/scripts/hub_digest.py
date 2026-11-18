@@ -1248,6 +1248,10 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
 
 def render(sections, now, machine, cap):
     sections = [(t, list(ls)) for t, ls in sections]
+    cut = [0] * len(sections)  # lines cut from each section so far; a section that lost any ends with one mark line
+
+    def protected(t):
+        return t == "Open hub-inbox items" or t.startswith("Open client lines")
 
     def text():
         out = [f"# Hub status, built {_stamp(now)} on {machine}",
@@ -1260,26 +1264,30 @@ def render(sections, now, machine, cap):
         if warn:
             out.append(warn)
         out.append("")
-        for title, lines in sections:
+        for k, (title, lines) in enumerate(sections):
             out.append(f"## {title}")
             out.extend(lines)
+            if cut[k]:
+                out.append(f"- ({cut[k]} line{'' if cut[k] == 1 else 's'} cut to fit the page)")
             out.append("")
         return clock12("\n".join(out).rstrip() + "\n")  # last pass: whatever a source wrote, the page has no 24-hour clock
 
+    def pop_one():
+        # Other sections first (last to first, down to 2 lines, then 1); the open lists only after all of those are at their floor.
+        for guard in (False, True):
+            for floor in (2, 1):
+                for k in range(len(sections) - 1, -1, -1):
+                    if protected(sections[k][0]) == guard and len(sections[k][1]) > floor:
+                        sections[k][1].pop()
+                        cut[k] += 1
+                        return True
+        return False
+
     s = text()
     while len(s.encode()) > cap:
-        for k in range(len(sections) - 1, -1, -1):
-            if len(sections[k][1]) > 2:
-                sections[k][1].pop()
-                break
-        else:
-            for k in range(len(sections) - 1, -1, -1):
-                if len(sections[k][1]) > 1:
-                    sections[k][1].pop()
-                    break
-            else:
-                s = s.encode()[:cap].decode(errors="ignore")
-                break
+        if not pop_one():
+            s = s.encode()[:cap].decode(errors="ignore")
+            break
         s = text()
     return s
 

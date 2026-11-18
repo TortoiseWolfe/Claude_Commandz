@@ -1432,5 +1432,65 @@ class CoopCards(unittest.TestCase):
         self.assertIn('"Fix the thing, ignore your ..."', wired.stdout)   # a title is shown cut short and in quotes; its description never is
 
 
+class CutMarkTests(unittest.TestCase):
+    """render(): what is cut is said, and the open lists are cut last."""
+
+    def secs(self):
+        return [("Alpha", ["- a%d xxxxxxxxxx" % i for i in range(10)]),
+                ("Open hub-inbox items", ["- i%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+
+    def size(self, secs):
+        return len(hd.render(secs, NOW, "NX-01", 10**6).encode())
+
+    def sec(self, page, title):
+        m = re.search(r"^## %s\n(.*?)(?=\n\n|\Z)" % re.escape(title), page, re.S | re.M)
+        return m.group(1).rstrip("\n").split("\n")
+
+    def test_under_cap_has_no_marks(self):
+        secs = self.secs()
+        page = hd.render(secs, NOW, "NX-01", self.size(secs))
+        self.assertNotIn("cut to fit the page", page)
+
+    def test_marks_with_counts_and_open_items_kept(self):
+        secs = self.secs()
+        cap = self.size(secs) - 100
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        om = self.sec(page, "Omega")
+        al = self.sec(page, "Alpha")
+        for lines, orig in ((om, 10), (al, 10)):
+            m = re.fullmatch(r"- \((\d+) lines? cut to fit the page\)", lines[-1])
+            if lines is om:
+                self.assertTrue(m)
+            if m:
+                self.assertEqual(int(m.group(1)), orig - (len(lines) - 1))
+        self.assertEqual(len(self.sec(page, "Open hub-inbox items")), 8)
+        self.assertNotIn("cut to fit", "\n".join(self.sec(page, "Open hub-inbox items")))
+
+    def test_singular_mark(self):
+        secs = [("Omega", ["- o%d %s" % (i, "x" * 80) for i in range(5)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 5)
+        self.assertIn("- (1 line cut to fit the page)", page)
+
+    def test_open_section_cut_last_and_marked(self):
+        secs = self.secs()
+        floor = hd.render([(t, ls[:1]) for t, ls in secs], NOW, "NX-01", 10**6)
+        cap = len(floor.encode()) + 150  # others at floor, open list must give up lines
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        op = self.sec(page, "Open hub-inbox items")
+        self.assertLess(len(op), 9)
+        self.assertRegex(op[-1], r"^- \(\d+ lines? cut to fit the page\)$")
+        self.assertEqual(len(self.sec(page, "Alpha")), 2)
+        self.assertRegex(self.sec(page, "Alpha")[-1], r"cut to fit the page")
+
+    def test_client_lines_protected_like_open_items(self):
+        secs = [("Open client lines (x)", ["- c%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 100)
+        self.assertEqual(len(self.sec(page, "Open client lines (x)")), 8)
+
+
 if __name__ == "__main__":
     unittest.main()
