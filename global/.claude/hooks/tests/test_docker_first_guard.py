@@ -476,5 +476,157 @@ class MalformedAndOtherToolsAllowed(Base):
         self.assertEqual(r.stderr.strip(), "docker-first-guard: allowed after an error (ZeroDivisionError)")
 
 
+class HeredocBodiesAreText(Base):
+    """A heredoc body is a note, not a list of commands. Found when "done; next one" in a hand-off note
+    was read as the command next and refused."""
+
+    NOTE = "item 2 is done; next one is item 3"
+
+    def test_the_reported_case_passes(self):
+        self.allowed(f"cat >> f.md <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_every_guarded_word_at_the_start_of_a_body_line_passes(self):
+        for line in (
+            "done; next one is item 3",
+            "next steps",
+            "vite is the dev server",
+            "expo start is how we preview",
+            "bun is fast; yarn lint is slow",
+            "npm ci then pnpm install",
+            "npx next build && npm run build",
+            "yarn",
+        ):
+            for opener in ("cat > note.md <<'EOF'", 'cat > note.md <<"EOF"', "cat > note.md <<\\EOF"):
+                with self.subTest(line=line, opener=opener):
+                    self.allowed(f"{opener}\n{line}\nEOF")
+
+    def test_unquoted_delimiter_and_dash_form_pass(self):
+        self.allowed(f"cat <<EOF\n{self.NOTE}\nEOF")
+        self.allowed(f"cat <<-EOF\n\t{self.NOTE}\n\tEOF")
+        self.allowed(f"cat <<EOF > f.md\n{self.NOTE}\nEOF")
+
+    def test_a_heredoc_with_no_closing_line_fails_closed(self):
+        # not stripped: its lines are checked as commands, so nothing can hide behind a missing closer
+        self.refused(f"cat <<'EOF'\n{self.NOTE}")
+        self.refused("cat <<'EOF'\nnpm ci")
+        self.allowed("cat <<'EOF'\njust a note")
+
+    def test_the_delimiter_is_the_whole_shell_word(self):
+        self.allowed(f'cat <<E"O"F\n{self.NOTE}\nEOF')
+        self.allowed(f"cat <<'EO'F\n{self.NOTE}\nEOF")
+        self.allowed(f"cat << EOF\n{self.NOTE}\nEOF")
+        self.allowed(f"cat <<-'EOF'\n\t{self.NOTE}\n\tEOF")
+        # a partly quoted delimiter means no expansion, so $( ) in the body is plain text
+        self.allowed('cat <<E"O"F\nbuilt with $(npm ci)\nEOF')
+        self.refused(f"cat <<E\"O\"F\n{self.NOTE}\nEOF\nnpm ci")
+
+    def test_two_heredocs_on_one_line(self):
+        self.allowed(f"cat <<A <<'B'\n{self.NOTE}\nA\nnext one; vite\nB")
+
+    def test_text_after_the_closing_line_is_a_command_again(self):
+        self.refused(f"cat <<'EOF' > f.md\n{self.NOTE}\nEOF\nnpm ci")
+        self.refused(f"cat <<'EOF' > f.md\n{self.NOTE}\nEOF\nnpx next build")
+
+    def test_a_host_run_on_the_command_line_that_opens_the_heredoc_is_refused(self):
+        self.refused(f"npm ci <<'EOF'\n{self.NOTE}\nEOF")
+        self.refused(f"cat <<'EOF' > f.md && npm ci\n{self.NOTE}\nEOF")
+        self.refused(f"npm ci && cat <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_a_host_run_before_the_heredoc_is_refused(self):
+        self.refused(f"cd x\nnpm run build\ncat <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_a_body_fed_to_a_shell_is_still_checked(self):
+        self.refused("bash <<'EOF'\nnpm ci\nEOF")
+        self.refused("sh <<EOF\ncd app\nnext build\nEOF")
+        self.refused("cat <<'EOF' | bash -s\nvite\nEOF")
+        self.allowed("bash <<'EOF'\necho hi; ls\nEOF")  # a harmless script
+        self.allowed("docker run --rm -i node:22 bash <<'EOF'\nnpm ci\nEOF")
+
+    def test_unquoted_body_substitution_runs_so_it_is_checked(self):
+        self.refused("cat <<EOF\nbuilt with $(npm ci)\nEOF")
+        self.refused("cat <<EOF\nbuilt with `npx next build`\nEOF")
+        self.allowed("cat <<'EOF'\nbuilt with $(npm ci)\nEOF")  # quoted delimiter: literal text
+        self.allowed("cat <<EOF\nbuilt with \\$(npm ci)\nEOF")  # backslash shields it
+
+    def test_every_way_of_feeding_a_shell_its_script_is_seen(self):
+        for opener in (
+            "bash << EOF",
+            "bash <<- EOF",
+            "bash >/dev/null <<EOF",
+            "bash > out.txt <<EOF",
+            "bash 2>&1 <<EOF",
+            "bash -s <<EOF",
+            "bash -s -- a b <<EOF",
+            "bash - <<EOF",
+            "bash /dev/stdin <<EOF",
+            "bash -l <<EOF",
+            "bash -o pipefail <<EOF",
+            "bash -eo pipefail <<EOF",
+            "bash +o history <<EOF",
+            "bash -O extglob <<EOF",
+            "bash --norc --rcfile x <<EOF",
+            "bash -e -o errexit -x <<EOF",
+            "sudo bash <<EOF",
+            "env X=1 sh <<EOF",
+            "cat <<EOF | bash",
+            "source /dev/stdin <<EOF",
+            ". /dev/stdin <<EOF",
+        ):
+            with self.subTest(opener=opener):
+                self.refused(f"{opener}\nnpm ci\nEOF")
+        # a shell given a script file or -c does not read the body
+        self.allowed("bash script.sh <<EOF\nnpm ci\nEOF")
+        self.allowed("bash -c 'echo hi' <<EOF\nnpm ci\nEOF")
+        self.allowed("bash -o pipefail script.sh <<EOF\nnpm ci\nEOF")
+
+    def test_a_shell_body_is_checked_in_the_folder_in_effect_at_its_line(self):
+        # exempt session folder, but the command leaves it before the shell reads the body: not exempt
+        self.refused("cd /tmp && bash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        self.refused("cd /tmp\nbash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        # still exempt when it stays, or when it moves into an exempt folder
+        self.allowed("bash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        self.allowed(f"cd {self.exempt_dir}/src && bash <<EOF\nnpm ci\nEOF", cwd=self.non_exempt_dir)
+        self.refused("bash <<EOF\nnpm ci\nEOF", cwd=self.non_exempt_dir)
+
+    def test_a_heredoc_operator_in_a_comment_hides_nothing(self):
+        self.refused(f"echo hi # <<EOF\nnpm ci\nEOF")
+        self.refused("ls # note <<'EOF'\nnpx next build\nEOF")
+        self.refused("echo hi; # <<EOF\nvite\nEOF")
+        # a # right after a closing parenthesis or a redirection starts a comment too
+        self.refused("(true)# <<EOF\nnpm ci\nEOF")
+        self.refused("echo hi >/dev/null # <<EOF\nnpm ci\nEOF")
+        self.refused("(true)#<<EOF\nnpm ci\nEOF")
+        # a # inside a word or a quoted string is not a comment, and a real heredoc after text still works
+        self.allowed(f"echo a#b; cat <<'EOF'\n{self.NOTE}\nEOF")
+        self.allowed(f"echo '# not a comment'; cat <<'EOF'\n{self.NOTE}\nEOF")
+
+    def test_herestring_and_arithmetic_are_not_heredocs(self):
+        self.refused("grep x <<< foo\nnpm ci")
+        self.refused("echo $((1<<2))\nnpm ci")
+        self.refused("echo $((x<<EOF))\nnpm ci\nEOF")
+        self.refused("(( x<<y ))\nnpm ci\ny")
+        self.refused("n=$((1 << y))\nnpx next build\ny")
+
+
+class QuotedTextIsNeverACommand(Base):
+    def test_quoted_text_with_separators_passes(self):
+        for command in (
+            "echo 'item 2 is done; next one is item 3'",
+            'echo "item 2 is done; next one is item 3"',
+            "echo 'done, then next one'",
+            "echo 'a\nnext one; vite\nyarn lint'",
+            "git commit -m 'fix: next build; vite and expo start are named'",
+            "printf '%s\\n' 'x; bun add y'",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_a_real_host_run_on_the_same_line_as_quoted_text_is_refused(self):
+        self.refused("echo 'note; next one' && npx next build")
+        self.refused("echo 'done' ; npm ci")
+        self.refused("echo \"$(npm ci)\"")
+        self.refused("echo 'a\nb'\nyarn lint")
+
+
 if __name__ == "__main__":
     unittest.main()
