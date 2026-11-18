@@ -25,6 +25,15 @@ class TaskAction(unittest.TestCase):
         self.assertIn("usage_calibrate.vbs", t.xml_text())
 
 
+class WednesdayTrigger(unittest.TestCase):
+    def test_the_wednesday_run_is_11_05_in_winter(self):
+        x = t.xml_text()
+        self.assertIn("T11:05:00</StartBoundary>", x)
+        self.assertNotIn("T12:05:00", x)
+        self.assertIn("11:05 AM", t.__doc__)
+        self.assertIn("12:05 PM", t.__doc__)
+
+
 class Launcher(unittest.TestCase):
     def test_launcher_waits_for_wsl_and_quits_with_its_code(self):
         v = t.vbs_text()

@@ -690,11 +690,14 @@ def weekly_reset_ts(budget):
 
 def week_start_ts(budget, now_ts):
     """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
-    report's); without one it is the dispatcher's rule, the one place the Wednesday 12:00 PM Eastern boundary lives (the same call
+    report's); without one it is the dispatcher's rule, the one place the Wednesday 16:00 UTC boundary lives (the same call
     phase_note makes). None when the dispatcher module can't be read."""
     try:
         from openclaw_dispatch import _week_edges
-        reset = _week_edges(now_ts, weekly_reset_ts(budget))[3]
+        named = weekly_reset_ts(budget)
+        reset = _week_edges(now_ts, named)[3]
+        if named is None:  # the rule's reset is a fixed UTC instant (Wed 16:00 UTC), so the week began exactly seven days earlier
+            return reset.timestamp() - 7 * 86400
         return (reset - timedelta(days=7)).timestamp()  # wall-clock: a DST change in the week moves nothing
     except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
         return None
@@ -1248,6 +1251,10 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
 
 def render(sections, now, machine, cap):
     sections = [(t, list(ls)) for t, ls in sections]
+    cut = [0] * len(sections)  # lines cut from each section so far; a section that lost any ends with one mark line
+
+    def protected(t):
+        return t == "Open hub-inbox items" or t.startswith("Open client lines")
 
     def text():
         out = [f"# Hub status, built {_stamp(now)} on {machine}",
@@ -1260,26 +1267,30 @@ def render(sections, now, machine, cap):
         if warn:
             out.append(warn)
         out.append("")
-        for title, lines in sections:
+        for k, (title, lines) in enumerate(sections):
             out.append(f"## {title}")
             out.extend(lines)
+            if cut[k]:
+                out.append(f"- ({cut[k]} line{'' if cut[k] == 1 else 's'} cut to fit the page)")
             out.append("")
         return clock12("\n".join(out).rstrip() + "\n")  # last pass: whatever a source wrote, the page has no 24-hour clock
 
+    def pop_one():
+        # Other sections first (last to first, down to 2 lines, then 1); the open lists only after all of those are at their floor.
+        for guard in (False, True):
+            for floor in (2, 1):
+                for k in range(len(sections) - 1, -1, -1):
+                    if protected(sections[k][0]) == guard and len(sections[k][1]) > floor:
+                        sections[k][1].pop()
+                        cut[k] += 1
+                        return True
+        return False
+
     s = text()
     while len(s.encode()) > cap:
-        for k in range(len(sections) - 1, -1, -1):
-            if len(sections[k][1]) > 2:
-                sections[k][1].pop()
-                break
-        else:
-            for k in range(len(sections) - 1, -1, -1):
-                if len(sections[k][1]) > 1:
-                    sections[k][1].pop()
-                    break
-            else:
-                s = s.encode()[:cap].decode(errors="ignore")
-                break
+        if not pop_one():
+            s = s.encode()[:cap].decode(errors="ignore")
+            break
         s = text()
     return s
 
