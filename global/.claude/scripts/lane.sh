@@ -98,6 +98,13 @@
 #                                       marker ~/.claude/state/lanes/.recycle-stop-<name>; a plain --recycle, a --send hold and the watcher then start
 #                                       nothing. A recycle held three times (LANE_RECYCLE_HELPER_TRIES) by running subagents stops the same way.
 #                                       lane.sh --recycle-at <K> --recycle <name> clears the marker and recycles; a restart clears it too.
+#                                       Issue 89: just before /clear the lane is looked at once more; a turn that started in the gap is waited for
+#                                       (LANE_RECYCLE_QUEUE_SECS, default 120) and the queue drained again, else the lane is NOT cleared. After /clear
+#                                       the new session id is waited for (up to 20s, lanes with a SessionStart record only) before the re-prime is typed.
+#                                       "recycled" is logged only when the re-prime is in the new session: a re-prime found only in the old session's
+#                                       record writes one REPRIME-OLD-SESSION row to recycle.log and is typed once more; if it still misses, the
+#                                       recycle FAILS (the lane was cleared; the message is printed to send by hand). REPRIME-RETRY rows count tries
+#                                       of a re-prime that did not land at all (3 at most per round).
 #   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
 #                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
 #                                       A lane already on the installed version is skipped unless --restart is given too (lane.sh --restart --update <name>):
@@ -1906,9 +1913,12 @@ if [ "$mode" = recycle ]; then
     echo "  3-size. if $handoff is over ${LANE_HANDOFF_MAX_BYTES:-4096} bytes (LANE_HANDOFF_MAX_BYTES, 0 = off): ask once for a shorter one and wait again (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); the clear goes on either way, a hand-off still over leaves a HANDOFF-OVER row"
     echo "  3a. wait for the helpers the lane started: subagents for the rest of that time (still running at the end: the lane is not cleared), background jobs up to ${LANE_RECYCLE_JOB_SECS:-180}s (then cleared anyway, with a row in recycle.log)"
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
+    echo "  3c. look once more just before /clear: a turn that started after the hand-off is waited for (up to ${LANE_RECYCLE_QUEUE_SECS:-120}s) and the queue drained again; if the lane is still busy the lane is not cleared"
     echo "  4. send: /clear"
+    echo "  4a. wait up to 20s for the fresh session's id to be recorded (SessionStart hook) before the re-prime is typed"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime (plus, when $hand/hub-pending.md exists by then, the sentence that sends the lane to read it: words lane.sh --send held back while the lane was past its line)"
+    echo "  5b. the recycle counts as done only when the re-prime is in the new session; a re-prime found only in the old one writes a REPRIME-OLD-SESSION row, is typed once more, and fails the recycle if it misses again"
     echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
@@ -2208,6 +2218,24 @@ PY
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
   cpane=""
   wait_no_dialog 30 || rfail "a dialog came up before /clear was typed; the lane was NOT cleared"
+  # A turn can start in the gap between the idle look above and now (12 Nov, issue 89): /clear and the re-prime typed behind a running turn
+  # are queued, and the re-prime then reaches the old session. Look once more; if a turn is running, wait for it (LANE_RECYCLE_QUEUE_SECS),
+  # drain the queue again, and clear only an idle lane.
+  if ! lane_idle; then
+    echo "recycle $name: a turn started after the hand-off was written; waiting up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to end before /clear" >&2
+    gap_end=$(( $(date +%s) + ${LANE_RECYCLE_QUEUE_SECS:-120} ))
+    until lane_idle; do
+      [ "$(date +%s)" -lt "$gap_end" ] || break
+      sleep 1
+    done
+    lane_idle && { drain_queue || rfail "input was queued in the lane after a turn started past the hand-off, and Escape did not clear it; the lane was NOT cleared"; }
+    lane_idle || rfail "a turn started after the hand-off; the lane was NOT cleared"
+  fi
+  oldf=""; old_lines=0
+  if [ -n "${id:-}" ] && [ "$id" != - ]; then
+    oldf="$(ls "$PROJ"/*/"$id.jsonl" 2>/dev/null | head -n 1 || true)"
+    [ -z "$oldf" ] || old_lines="$(wc -l <"$oldf")"
+  fi
   clear_at="$(date +%s)"
   tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5
   wait_no_dialog 0 || { tmux send-keys -t "$SESSION:$name" C-u; rfail "a dialog came up while /clear was typed; no Enter was sent"; }
@@ -2229,25 +2257,52 @@ PY
       echo "warning: could not set $name to $target_model after the recycle; it is still on $m" >&2
     fi
   fi
+  # Wait (up to 20s) for the fresh session to exist before the re-prime is typed: the SessionStart hook records the new id as soon as /clear
+  # has run, before any message. A lane whose process predates the hook has no record, and gets no wait.
+  if [ -s "$SESS_DIR/$name" ]; then
+    for _ in $(seq 1 20); do
+      s_new="$(proven_session "$name" "$clear_at")"
+      [ -z "$s_new" ] || [ "$s_new" = "${id:--}" ] || break
+      sleep 1
+    done
+  fi
   msg_reprime="$(build_reprime)"   # a --send that arrived while the recycle ran has left hub-pending.md by now
   # The re-prime is the one message that must land (#275: sh-backlog-3 was cleared and the message never reached it). A failed send is retried
   # twice, but only after looking in every project folder for the words: a message that did land under a worktree's folder is not typed again.
   reprime_tail="${msg_reprime##*$'\n'}"; [ -n "$reprime_tail" ] || reprime_tail="$msg_reprime"
-  for attempt in 1 2 3; do
-    if LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null; then break; fi
-    if [ -n "$(session_with_text "$dir" "$clear_at" "$reprime_tail")" ]; then break; fi
-    [ "$attempt" -lt 3 ] || rfail "the lane was cleared but the re-prime message did not reach it after 3 tries; send it by hand: $msg_reprime"
-    printf '%s\t%s\tREPRIME-RETRY\ttry %s did not land; typing it again\n' "$(date -Is)" "$name" "$attempt" >>"$rlog"
-    sleep 3
-  done
-
-  newid=""
-  for _ in $(seq 1 20); do
-    newid="$(proven_session "$name" "$t0")"
-    [ -n "$newid" ] || newid="$(session_with_text "$dir" "$t0" "$msg_reprime")"   # a lane whose process predates the hook
-    [ -n "$newid" ] && break; sleep 1
-  done
-  [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
+  send_reprime() {  # up to 3 tries; a try that is not found is typed again only after every project folder was searched for the words
+    for attempt in 1 2 3; do
+      if LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null; then break; fi
+      if [ -n "$(session_with_text "$dir" "$clear_at" "$reprime_tail")" ]; then break; fi
+      [ "$attempt" -lt 3 ] || rfail "the lane was cleared but the re-prime message did not reach it after 3 tries; send it by hand: $msg_reprime"
+      printf '%s\t%s\tREPRIME-RETRY\ttry %s did not land; typing it again\n' "$(date -Is)" "$name" "$attempt" >>"$rlog"
+      sleep 3
+    done
+  }
+  find_newid() {
+    newid=""
+    for _ in $(seq 1 20); do
+      newid="$(proven_session "$name" "$t0")"
+      [ -n "$newid" ] || newid="$(session_with_text "$dir" "$t0" "$msg_reprime")"   # a lane whose process predates the hook
+      [ -n "$newid" ] && break; sleep 1
+    done
+    [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
+  }
+  reprime_in_old() {  # true when the "new" session is the old one, or the words are only in lines the old transcript gained since /clear
+    [ -n "${id:-}" ] && [ "$id" != - ] || return 1
+    [ "$newid" != "$id" ] || return 0
+    local nf; nf="$(ls "$PROJ"/*/"$newid.jsonl" 2>/dev/null | head -n 1 || true)"
+    [ -n "$oldf" ] || return 1   # a new session with no transcript yet holds nothing, so it counts as missing the words
+    { [ -z "$nf" ] || ! grep -qF -- "$reprime_tail" "$nf" 2>/dev/null; } && tail -n +$(( old_lines + 1 )) "$oldf" 2>/dev/null | grep -qF -- "$reprime_tail"
+  }
+  send_reprime
+  find_newid
+  if reprime_in_old; then
+    printf '%s\t%s\tREPRIME-OLD-SESSION\tthe re-prime landed in the old session\n' "$(date -Is)" "$name" >>"$rlog"
+    send_reprime
+    find_newid
+    ! reprime_in_old || rfail "the lane was cleared but the re-prime reached the old session, not the new one; send it by hand: $msg_reprime"
+  fi
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK%s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" "$start_note" >>"$rlog"
