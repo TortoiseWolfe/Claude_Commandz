@@ -1016,7 +1016,7 @@ class TheCapCountsRealWork(PassBase):
         self.assertEqual(self.host.chats[-1], dp.held_day_text(NOW))
 
 
-class StartForAnAsk(PassBase):
+class StartHelpers(PassBase):
     def setUp(self):
         super().setUp()
         self.hand()
@@ -1040,6 +1040,8 @@ class StartForAnAsk(PassBase):
         a.update(kw)
         return dp.start_for_ask(self.ctx, self.host, **a)
 
+
+class StartForAnAsk(StartHelpers):
     def test_a_good_start_runs_lane_sh_with_the_ask_and_registers_the_lane(self):
         ok, msg = self.go()
         self.assertTrue(ok, msg)
@@ -1233,6 +1235,49 @@ class StartForAnAsk(PassBase):
         self.assertFalse(ok)
         self.assertEqual(self.host.chats, [])
         self.assertNotIn("post", dp.PASS_VERBS)
+
+
+class StartForAnAskStepsDown(StartHelpers):
+    """The dispatch pass's start door takes the same budget step-down as the direct door (step_down)."""
+
+    def phase_1(self):
+        self.host.reset = ET(2027, 1, 20, 11)  # NOW is Fri 15 Jan 2027: the week's first phase, so the projected figure gates
+
+    def started_model(self, task="do the thing", **kw):
+        if task != "do the thing":
+            state = self.state()
+            dp.asks_of(state)[ASK]["task"] = task
+            dp.save_state(self.ctx.state_path, state)
+        ok, msg = self.go(model="opus", now=kw.pop("now", NOW + 5), **kw)
+        self.assertTrue(ok, msg)
+        return self.host.started[-1][3], msg
+
+    def test_over_the_limit_opus_becomes_sonnet_and_the_message_says_why(self):
+        self.host.proj = 108
+        self.phase_1()
+        model, msg = self.started_model()
+        self.assertEqual(model, "sonnet")
+        self.assertIn("(Sonnet only: the week is projected at 108%", msg)
+
+    def test_a_stale_budget_steps_opus_down_too(self):
+        self.host.proj, self.host.used, self.host.stale, self.host.calibrated_at = 50, 50, True, NOW - 40 * 3600
+        model, msg = self.started_model()
+        self.assertEqual(model, "sonnet")
+        self.assertIn("the budget figures are unchecked since", msg)
+
+    def test_a_site_model_task_keeps_opus_even_over_the_limit(self):
+        self.host.proj, self.host.stale = 108, True
+        self.phase_1()
+        model, msg = self.started_model(task="rebuild the site model for the lobby")
+        self.assertEqual(model, "opus")
+        self.assertNotIn("Sonnet only", msg)
+
+    def test_under_the_limit_and_fresh_keeps_opus(self):
+        self.host.proj, self.host.used = 50, 50
+        self.phase_1()
+        model, msg = self.started_model()
+        self.assertEqual(model, "opus")
+        self.assertNotIn("Sonnet only", msg)
 
 
 class TheWaitingRoom(PassBase):

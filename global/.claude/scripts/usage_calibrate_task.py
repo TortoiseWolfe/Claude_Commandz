@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Register \\AFA\\UsageCalibrate with Windows Task Scheduler: usage_calibrate.js every day at 7:30 AM and
-once more at 12:05 PM on Wednesdays (just after the weekly limit resets at 12:00 PM).
+once more on Wednesdays just after the weekly limit resets. The reset is one fixed instant, Wednesday 16:00 UTC: 11:00 AM
+Eastern in winter, 12:00 PM in summer. Task Scheduler triggers use the local wall clock, not UTC, so the Wednesday trigger is
+registered for 11:05 AM (winter, from 1 Nov 2026) and must be moved to 12:05 PM on the March clock change: edit WEDNESDAY_AT
+below and rerun install, one line.
 
     usage_calibrate_task.py install     idempotent (schtasks /F); prints the task afterward
     usage_calibrate_task.py xml         print the task XML, register nothing
@@ -15,6 +18,7 @@ import sys
 from pathlib import Path
 
 TASK = "\\AFA\\UsageCalibrate"
+WEDNESDAY_AT = "11:05:00"  # local wall clock: 11:05 AM in winter, 12:05 PM from the March clock change
 SCRIPT = Path(__file__).resolve().with_name("usage_calibrate.js")
 
 XML = """<?xml version="1.0" encoding="UTF-16"?>
@@ -42,7 +46,7 @@ XML = """<?xml version="1.0" encoding="UTF-16"?>
       <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
     </CalendarTrigger>
     <CalendarTrigger>
-      <StartBoundary>2026-10-28T12:05:00</StartBoundary>
+      <StartBoundary>2026-10-28T%(wed)s</StartBoundary>
       <ScheduleByWeek>
         <DaysOfWeek><Wednesday /></DaysOfWeek>
         <WeeksInterval>1</WeeksInterval>
@@ -74,7 +78,7 @@ def vbs_text():
 
 
 def xml_text(vbs=VBS_DEFAULT):
-    return XML % {"task": TASK, "vbs": vbs}
+    return XML % {"task": TASK, "vbs": vbs, "wed": WEDNESDAY_AT}
 
 
 def _wsl_path(cmd_var):

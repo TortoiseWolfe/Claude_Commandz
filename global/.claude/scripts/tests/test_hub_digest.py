@@ -629,7 +629,8 @@ class WeekStart(unittest.TestCase):
     def test_a_reset_already_past_is_ignored_for_the_rule(self):
         # a stale cached budget line from last week must not move the start back a week
         now = datetime(2026, 11, 5, 9, 0, tzinfo=self.EST).timestamp()
-        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 12, 0, tzinfo=self.EST).timestamp())
+        # no reset in the rule's week: Wed 4 Nov 16:00 UTC is 11:00 AM in winter
+        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 11, 0, tzinfo=self.EST).timestamp())
 
     def test_lane_spend_is_asked_for_the_week_only_when_the_start_is_known(self):
         now = datetime(2026, 10, 29, 8, 0, tzinfo=self.EST).timestamp()
