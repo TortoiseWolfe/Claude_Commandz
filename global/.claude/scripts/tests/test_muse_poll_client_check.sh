@@ -153,14 +153,16 @@ ok 'the payment notice from the same domain still comes out' 1 "$(printf '%s\n' 
 ok 'a Promotions message from a non-payment client still comes out' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_promo_other |")"
 
 # No model pass: the stub is called as `messages-list <query>` and nothing else, and its IDs come out byte for byte.
+# The ID is built from the clock: a fixed one aged past the script's 30-day window on 18 Nov 2026 and failed every CI run.
+id_exact=$(printf '%016x' $(( (now_ms2 << 20) | 75555 )))
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
 echo "\$*" >"$TMP/stub-args"
-echo "MSG 1a15559aee5b0b47 | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 | INBOX,UNREAD | 1a15559aee5b0b47"
+echo "MSG $id_exact | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 | INBOX,UNREAD | $id_exact"
 MOCK
 rm -f "$TMP/stub-args"
 out=$(check)
-ok 'the ID prints exactly as listed' 1 "$(printf '%s\n' "$out" | grep -c '^NEW 1a15559aee5b0b47 | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 $' || true)"
+ok 'the ID prints exactly as listed' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_exact | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 \$" || true)"
 ok 'the lister gets the subcommand and the sender query' 1 "$(grep -c '^messages-list from:(.*shop.example.test.*) newer_than:2d -from:me$' "$TMP/stub-args" || true)"
 
 # A failing lister (dead token, no network) is loud: nothing NEW, exit 1, the reason on stderr, never a quiet "nothing new".
