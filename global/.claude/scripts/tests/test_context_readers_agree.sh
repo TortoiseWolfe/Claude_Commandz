@@ -65,6 +65,11 @@ agree 'later non-assistant records and a broken line' 125
 { rec 12 100000 24988; rec 5 40000 995 ',"isSidechain":true'; } >"$T"
 agree 'a later sidechain turn' 41
 
+# 3b. A later synthetic record (Claude Code writes one with zero usage for an interrupted or errored turn) is not a reading: all three
+# skip it and keep the real turn before it. lane.sh and lane_brief read 0K here until 18 Nov (found by the issue 83 test).
+{ rec 12 100000 24988; printf '{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n'; } >"$T"
+agree 'a later synthetic record' 125
+
 # 4. Rounding: 125500 tokens is 126K for round(), and 124499 is 124K.
 { rec 0 125000 500; } >"$T"
 agree 'rounds half up at .5K' 126

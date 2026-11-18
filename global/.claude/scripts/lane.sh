@@ -1299,7 +1299,7 @@ for line in sys.stdin:
     except ValueError:
         continue
     m = o.get("message")
-    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" else None
+    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" and m.get("model") != "<synthetic>" else None
     if u:
         last = u
 if last is None:
