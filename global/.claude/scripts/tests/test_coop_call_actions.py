@@ -5,6 +5,8 @@ The test text is invented. No real call is read."""
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +16,12 @@ sys.path.insert(0, SCRIPTS)
 import coop_call_actions as cca  # noqa: E402
 
 TOOL = os.path.join(SCRIPTS, "coop_call_actions.py")
+
+
+@pytest.fixture
+def tmp_path():  # pytest's own tmp_path leaves a pytest-of-<user> folder, which test_no_tmp_leak refuses
+    with tempfile.TemporaryDirectory(prefix="cc-test-") as d:
+        yield Path(d)
 
 
 def test_whole_flow_selftest_passes():
