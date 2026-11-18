@@ -505,8 +505,20 @@ class HeredocBodiesAreText(Base):
         self.allowed(f"cat <<-EOF\n\t{self.NOTE}\n\tEOF")
         self.allowed(f"cat <<EOF > f.md\n{self.NOTE}\nEOF")
 
-    def test_body_runs_to_the_end_when_no_closing_line(self):
-        self.allowed(f"cat <<'EOF'\n{self.NOTE}")
+    def test_a_heredoc_with_no_closing_line_fails_closed(self):
+        # not stripped: its lines are checked as commands, so nothing can hide behind a missing closer
+        self.refused(f"cat <<'EOF'\n{self.NOTE}")
+        self.refused("cat <<'EOF'\nnpm ci")
+        self.allowed("cat <<'EOF'\njust a note")
+
+    def test_the_delimiter_is_the_whole_shell_word(self):
+        self.allowed(f'cat <<E"O"F\n{self.NOTE}\nEOF')
+        self.allowed(f"cat <<'EO'F\n{self.NOTE}\nEOF")
+        self.allowed(f"cat << EOF\n{self.NOTE}\nEOF")
+        self.allowed(f"cat <<-'EOF'\n\t{self.NOTE}\n\tEOF")
+        # a partly quoted delimiter means no expansion, so $( ) in the body is plain text
+        self.allowed('cat <<E"O"F\nbuilt with $(npm ci)\nEOF')
+        self.refused(f"cat <<E\"O\"F\n{self.NOTE}\nEOF\nnpm ci")
 
     def test_two_heredocs_on_one_line(self):
         self.allowed(f"cat <<A <<'B'\n{self.NOTE}\nA\nnext one; vite\nB")
@@ -536,9 +548,53 @@ class HeredocBodiesAreText(Base):
         self.allowed("cat <<'EOF'\nbuilt with $(npm ci)\nEOF")  # quoted delimiter: literal text
         self.allowed("cat <<EOF\nbuilt with \\$(npm ci)\nEOF")  # backslash shields it
 
+    def test_every_way_of_feeding_a_shell_its_script_is_seen(self):
+        for opener in (
+            "bash << EOF",
+            "bash <<- EOF",
+            "bash >/dev/null <<EOF",
+            "bash > out.txt <<EOF",
+            "bash 2>&1 <<EOF",
+            "bash -s <<EOF",
+            "bash -s -- a b <<EOF",
+            "bash - <<EOF",
+            "bash /dev/stdin <<EOF",
+            "bash -l <<EOF",
+            "sudo bash <<EOF",
+            "env X=1 sh <<EOF",
+            "cat <<EOF | bash",
+            "source /dev/stdin <<EOF",
+            ". /dev/stdin <<EOF",
+        ):
+            with self.subTest(opener=opener):
+                self.refused(f"{opener}\nnpm ci\nEOF")
+        # a shell given a script file or -c does not read the body
+        self.allowed("bash script.sh <<EOF\nnpm ci\nEOF")
+        self.allowed("bash -c 'echo hi' <<EOF\nnpm ci\nEOF")
+
+    def test_a_shell_body_is_checked_in_the_folder_in_effect_at_its_line(self):
+        # exempt session folder, but the command leaves it before the shell reads the body: not exempt
+        self.refused("cd /tmp && bash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        self.refused("cd /tmp\nbash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        # still exempt when it stays, or when it moves into an exempt folder
+        self.allowed("bash <<EOF\nnpm ci\nEOF", cwd=self.exempt_dir)
+        self.allowed(f"cd {self.exempt_dir}/src && bash <<EOF\nnpm ci\nEOF", cwd=self.non_exempt_dir)
+        self.refused("bash <<EOF\nnpm ci\nEOF", cwd=self.non_exempt_dir)
+
+    def test_a_heredoc_operator_in_a_comment_hides_nothing(self):
+        self.refused(f"echo hi # <<EOF\nnpm ci\nEOF")
+        self.refused("ls # note <<'EOF'\nnpx next build\nEOF")
+        self.refused("echo hi; # <<EOF\nvite\nEOF")
+        # a # inside a word or a quoted string is not a comment, and a real heredoc after text still works
+        self.allowed(f"echo a#b; cat <<'EOF'\n{self.NOTE}\nEOF")
+        self.allowed(f"echo '# not a comment'; cat <<'EOF'\n{self.NOTE}\nEOF")
+
     def test_herestring_and_arithmetic_are_not_heredocs(self):
         self.refused("grep x <<< foo\nnpm ci")
         self.refused("echo $((1<<2))\nnpm ci")
+        self.refused("echo $((x<<EOF))\nnpm ci\nEOF")
+        self.refused("(( x<<y ))\nnpm ci\ny")
+        self.refused("n=$((1 << y))\nnpx next build\ny")
 
 
 class QuotedTextIsNeverACommand(Base):

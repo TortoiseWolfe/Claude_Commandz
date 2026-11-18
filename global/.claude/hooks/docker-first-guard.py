@@ -15,7 +15,9 @@ when the command is not docker run, docker exec or docker compose (docker-compos
 
 Heredoc bodies (cat <<'EOF' ... EOF) are text, not commands: their lines are never split into commands,
 so "done; next one" in a hand-off note passes. The body is still checked where the shell would run it:
-a $( ) or backtick in an unquoted-delimiter body, and a body fed to sh or bash (bash <<EOF).
+a $( ) or backtick in an unquoted-delimiter body, and a body fed to sh or bash (bash <<EOF, bash -s,
+bash -, source /dev/stdin), in the folder in effect at that line. A heredoc with no closing line, or a
+<< inside a comment, arithmetic or quotes, is not treated as one: its lines are checked as commands.
 
 Looked through, so they cannot hide a host run: chains (&& || ; | newline &), $( ) and backticks
 (also inside double quotes), sh -c / bash -lc strings, subshells and groups, if/then/do keywords,
@@ -94,10 +96,12 @@ SUBSTITUTION = re.compile(r"\$\((.*?)\)|`([^`]*)`")
 # In an unquoted-delimiter heredoc body the shell runs $( ) and backticks, but a backslash shields them.
 HEREDOC_SUBSTITUTION = re.compile(r"(?<!\\)\$\((.*?)\)|(?<!\\)`([^`]*)`")
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
-# A heredoc operator, found in text whose quoted strings are already masked with Q (so a quoted
-# delimiter shows as QQQQQ). << followed by a letter or _ is a delimiter; <<< (herestring) and
-# arithmetic like 1<<2 are not.
-HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*(Q+|\\?[A-Za-z_]\w*)")
+# A heredoc operator, found in text whose quoted strings, arithmetic and comments are already masked
+# (a quoted delimiter shows as QQQQQ). The delimiter is the whole shell word after <<, quotes anywhere
+# in it included. <<< (herestring) and 1<<2 are not heredocs.
+HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*([^\s;|&<>()]+)")
+COMMENT = re.compile(r"(?:^|(?<=[\s;|&(]))#[^\n]*", re.M)
+ARITHMETIC = re.compile(r"\$?\(\([^\n]*?\)\)")
 
 
 def read_exemptions():
@@ -262,19 +266,52 @@ def check_segment(tokens, current_cwd, exemptions):
     return None
 
 
+def mask(text):
+    """text with quoted strings, arithmetic and comments blanked out (same length), so what is left
+    is only what the shell reads as operators and words. Quoted text shows as Q."""
+    plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), text)
+    plain = ARITHMETIC.sub(lambda m: " " * len(m.group(0)), plain)
+    return COMMENT.sub(lambda m: " " * len(m.group(0)), plain)
+
+
+def split_segments(text):
+    """Split a command line at the separators outside quotes."""
+    plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), text)
+    segments = []
+    last = 0
+    for m in SEPARATOR.finditer(plain):
+        part = text[last:m.start()].strip()
+        if part:
+            segments.append(part)
+        last = m.end()
+    tail = text[last:].strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def cwd_after(text, cwd):
+    """The folder in effect after the cd and pushd commands in text."""
+    for seg in split_segments(text):
+        cwd = update_cwd(get_tokens(seg), cwd)
+    return cwd
+
+
 def strip_heredocs(command):
     """Cut heredoc bodies out of a command line.
 
     Returns (text, heredocs). text is the command with every body and its closing line removed (the
     line carrying << stays, so the command that reads the body is still checked). heredocs is a list
-    of (body, quoted, line): the body text, whether its delimiter was quoted (a quoted delimiter means
-    the shell does no expansion in it), and the command line that carried the operator. A body with
-    no closing line runs to the end, as the shell reads it."""
+    of (body, quoted, line, head): the body text, whether any part of its delimiter was quoted (then
+    the shell does no expansion in it), the command line that carried the operator, and all the text
+    up to the end of that line. Fails closed: a heredoc with no closing line is not stripped, so its
+    lines are checked as commands. A << inside a comment, an arithmetic expression or a quoted
+    string is not a heredoc."""
     heredocs = []
     text = command
     scan = 0
     while True:
-        plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), text)
+        plain = mask(text)
         m = HEREDOC_OP.search(plain, scan)
         if not m:
             break
@@ -284,13 +321,15 @@ def strip_heredocs(command):
         line_start = plain.rfind("\n", 0, m.start()) + 1
         line = text[line_start:nl]
         pos = nl + 1
+        found = []
+        closed = True
         for op in HEREDOC_OP.finditer(plain, m.start(), nl):
             raw = text[op.start(2):op.end(2)]
-            quoted = raw[0] in "'\"\\"
-            delim = raw.strip("'\"\\")
+            quoted = any(c in raw for c in "'\"\\")
+            delim = re.sub(r"['\"\\]", "", raw)
             dash = op.group(1) == "-"
             body_lines = []
-            end = len(text)
+            end = None
             cur = pos
             while cur < len(text):
                 eol = text.find("\n", cur)
@@ -301,26 +340,28 @@ def strip_heredocs(command):
                     break
                 body_lines.append(row)
                 cur = eol + 1
-            else:
-                end = len(text)
-            heredocs.append(("\n".join(body_lines), quoted, line))
+            if end is None:
+                closed = False
+                break
+            found.append(("\n".join(body_lines), quoted, line, text[:nl]))
             pos = end
+        if not closed:
+            scan = nl + 1
+            continue
+        heredocs.extend(found)
         text = text[:nl + 1] + text[pos:]
         scan = nl + 1
     return text, heredocs
 
 
+REDIRECTION = re.compile(r"\d*(?:>>?|<|&>|>&)")
+STDIN_FILES = ("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0")
+
+
 def fed_to_shell(line):
-    """True if a command line pipes or redirects into a shell reading its script from stdin
-    (bash <<EOF, cat <<EOF | sh -s). A shell given -c or a script file reads something else."""
-    plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), line)
-    start = 0
-    segs = []
-    for m in SEPARATOR.finditer(plain):
-        segs.append(line[start:m.start()])
-        start = m.end()
-    segs.append(line[start:])
-    for seg in segs:
+    """True if a command line gives a shell its script on stdin (bash <<EOF, bash - <<EOF, bash -s <<EOF,
+    cat <<EOF | sh, source /dev/stdin <<EOF). A shell given -c or a script file reads something else."""
+    for seg in split_segments(line):
         tokens = get_tokens(seg)
         if not tokens or is_docker_command(tokens):
             continue
@@ -328,12 +369,35 @@ def fed_to_shell(line):
         if i >= len(tokens):
             continue
         base = re.sub(r"\.(exe|cmd)$", "", os.path.basename(tokens[i])).lower()
+        args = []
+        skip = False
+        for a in tokens[i + 1:]:
+            if skip:
+                skip = False
+                continue
+            if a in ("<<", "<<-") or REDIRECTION.fullmatch(a):
+                skip = True  # the delimiter or file that follows
+                continue
+            if a.startswith("<<") or REDIRECTION.match(a):
+                continue
+            args.append(a)
+        if base in ("source", "."):
+            if any(a in STDIN_FILES for a in args):
+                return True
+            continue
         if base not in SHELL_INTERPRETERS:
             continue
-        args = [a for a in tokens[i + 1:] if not a.startswith("<<")]
         if shell_inner_command(args) is not None:
             continue
-        if all(a.startswith("-") for a in args):
+        flags = [a for a in args if a.startswith("-") and a != "-"]
+        rest = [a for a in args if not a.startswith("-") or a == "-"]
+        reads_stdin = (
+            not rest
+            or "-" in rest
+            or any(a in STDIN_FILES for a in rest)
+            or any(re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", f) for f in flags)
+        )
+        if reads_stdin:
             return True
     return False
 
@@ -345,16 +409,17 @@ def check_command_text(command, cwd, exemptions):
 
     # A heredoc body is text, not commands. Check it only where the shell would act on it.
     command, heredocs = strip_heredocs(command)
-    for body, quoted, line in heredocs:
+    for body, quoted, line, head in heredocs:
+        body_cwd = cwd_after(head, cwd)  # the folder in effect where the shell reads the body
         if fed_to_shell(line):
-            reason = check_command_text(body, cwd, exemptions)
+            reason = check_command_text(body, body_cwd, exemptions)
             if reason:
                 return reason
         elif not quoted:
             for m in HEREDOC_SUBSTITUTION.finditer(body):
                 sub_cmd = m.group(1) if m.group(1) is not None else m.group(2)
                 if sub_cmd and sub_cmd.strip():
-                    reason = check_command_text(sub_cmd, cwd, exemptions)
+                    reason = check_command_text(sub_cmd, body_cwd, exemptions)
                     if reason:
                         return reason
 
@@ -367,21 +432,8 @@ def check_command_text(command, cwd, exemptions):
             if sub_reason:
                 return sub_reason
 
-    # Split into segments at the separators outside quotes.
-    plain = QUOTED.sub(lambda m: "Q" * len(m.group(0)), command)
-    segments = []
-    last = 0
-    for m in SEPARATOR.finditer(plain):
-        part = command[last:m.start()].strip()
-        if part:
-            segments.append(part)
-        last = m.end()
-    tail = command[last:].strip()
-    if tail:
-        segments.append(tail)
-
     current_cwd = cwd
-    for seg in segments:
+    for seg in split_segments(command):
         tokens = get_tokens(seg)
         if not tokens:
             continue
