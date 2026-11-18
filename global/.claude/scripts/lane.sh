@@ -625,6 +625,19 @@ fill_ids() {
   index_locked fill_ids_locked || true
 }
 
+# A recorded folder written by an older lane.sh can be a leftover that git no longer lists (18 Nov 2026: a start copied a pruned folder forward from the index and
+# Claude Code stopped at its trust prompt). True only for a direct child of ~/repos/.worktrees named <repo>--<topic> whose repo git answers for and does not list it.
+ad_unlisted() {  # <path>
+  local root n repo listed
+  root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || return 1
+  [ "${1%/*}" = "$root/.worktrees" ] || return 1
+  n="${1##*/}"; case "$n" in *--*) ;; *) return 1 ;; esac
+  repo="${n%%--*}"; [ -d "$root/$repo" ] || return 1
+  listed="$(timeout 10 git -C "$root/$repo" worktree list --porcelain 2>/dev/null)" || return 1
+  [ -n "$listed" ] || return 1
+  case $'\n'"$listed"$'\n' in *$'\nworktree '"$1"$'\n'*) return 1 ;; esac
+  return 0
+}
 # Extra folders (--add-dir): index column 15 holds them as a colon list, "-" = none.
 ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded ones first, as a colon list or "-"
   local -a have=() all=()
@@ -635,6 +648,7 @@ ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded on
     # A recorded folder can be gone by the next start (a worktree removed after its merge); the engines refuse a missing --add-dir, so
     # drop it here and the index row is rewritten without it (1 Nov 2026: job-replies round 2 died at start on round 1's removed worktree).
     [ -d "$p" ] || { echo "lane.sh: dropping extra folder that no longer exists: $p" >&2; continue; }
+    ad_unlisted "$p" && { echo "lane.sh: dropping recorded folder that git does not list as a checkout: $p" >&2; continue; }
     dup=0; for q in "${all[@]}"; do [ "$q" = "$p" ] && dup=1; done
     [ "$dup" = 1 ] || all+=("$p")
   done
@@ -2611,7 +2625,7 @@ if [ "$mode" = resume ]; then
   [ -z "$project_mcp_opt" ] || index_set "$name" 14 "$pm"
   # The extra folders it started with stay; any --add-dir given now is added and recorded.
   mapfile -t _own < <(own_checkouts "$dir")
-  if [ "${#add_dirs_new[@]}" -gt 0 ] || [ "${#_own[@]}" -gt 0 ]; then
+  if [ "${#add_dirs_new[@]}" -gt 0 ] || [ "${#_own[@]}" -gt 0 ] || [ "${ad:--}" != - ]; then
     _ad_old="${ad:--}"
     ad="$(ad_merge "${ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
     [ "$dry" = 1 ] || [ "$ad" = "$_ad_old" ] || index_set "$name" 15 "$ad"
