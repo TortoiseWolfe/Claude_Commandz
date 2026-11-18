@@ -65,7 +65,7 @@ class ComposeTest(unittest.TestCase):
         self.assertIn("rule text of core", text)
         self.assertNotIn("rule text of mail", text)
         self.assertIn("not loaded: mail, browser, streams, coop, fleet", text.splitlines()[0])
-        self.assertLess(text.index("keep them in view"), text.index("rule text of core"))
+        self.assertNotIn("keep them in view", text)  # the key rules block is repeated by the event hook, not pasted
 
     def test_connectors_on_adds_mail(self):
         self.assertEqual(run("Fix a bug.", connectors="on")[0], ["core", "mail"])
@@ -79,8 +79,27 @@ class ComposeTest(unittest.TestCase):
             self.assertIn(part, parts, prompt)
             self.assertIn(f"rule text of {part}", text)
 
-    def test_workspace_folder_gets_fleet(self):
-        self.assertIn("fleet", run("Count the repos.", folder="/home/u/repos")[0])
+    def test_workspace_folder_does_not_add_fleet(self):
+        for folder in ("/home/u/repos", "/home/u/repos/hub"):
+            self.assertEqual(run("Count the repos.", folder=folder)[0], ["core"], folder)
+
+    def test_task_text_cuts_at_the_tools_heading(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import lane_rules_compose as m
+        text = "Fix the parser.\n\n## Tools you already have for this job\n\n- gmail_api.py: drafts in Gmail\n"
+        self.assertEqual(m.task_text(text), "Fix the parser.\n\n")
+        self.assertEqual(m.task_text("no heading here, gmail"), "no heading here, gmail")
+
+    def test_a_trigger_word_below_the_tools_heading_loads_nothing_above_it_does(self):
+        tools = "\n\n## Tools you already have for this job\n\n- gmail_api.py: drafts in Gmail\n"
+        self.assertEqual(run("Fix the parser." + tools)[0], ["core"])
+        self.assertIn("mail", run("Check the Gmail thread." + tools)[0])
+        self.assertIn("mail", run("Check the Gmail thread, no tools list.")[0])  # no heading: the whole text counts
+
+    def test_mail_words_draft_and_calendar_alone_do_not_load_mail(self):
+        for prompt in ("Write a draft of the plan.", "Add it to the calendar.", "A draft and the calendar, then a reply to Sam."):
+            self.assertEqual(run(prompt)[0], ["core"], prompt)
+        self.assertIn("mail", run("Read the gmail thread.")[0])
 
     def test_missing_prompt_gets_every_part(self):
         self.assertEqual(run("", missing_prompt=True)[0], PARTS)
@@ -100,7 +119,7 @@ class ComposeTest(unittest.TestCase):
 
     def test_the_public_trigger_lists_name_no_client_or_person(self):
         src = SCRIPT.read_text()
-        start, end = src.index("TRIGGERS = {"), src.index("WORKSPACE_DIRS")
+        start, end = src.index("TRIGGERS = {"), src.index("# Client, organisation")
         lists = src[start:end].lower()
         # Made-up names stand in for the real ones; the live private file (when this machine has one) is checked too,
         # so a real name pasted into the public lists fails here without being written into this test.
@@ -222,7 +241,7 @@ class RulesOptionTest(unittest.TestCase):
         sys.path.insert(0, str(SCRIPT.parent))
         import lane_rules_compose as m
         self.assertEqual(m.pick("x", "", "off", "plain fix"), ["core"])
-        self.assertIn("mail", m.pick_hits("x", "", "off", "a draft"))
+        self.assertIn("mail", m.pick_hits("x", "", "off", "the inbox"))
 
 
 if __name__ == "__main__":
