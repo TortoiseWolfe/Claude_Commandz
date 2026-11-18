@@ -3,6 +3,7 @@
 # latest_context_size via --size). They must give the same K figure for the same transcript, or the watcher, the brief and the warning
 # disagree about when a lane is full. One saved transcript is written here and fed to all three.
 set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
 
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
