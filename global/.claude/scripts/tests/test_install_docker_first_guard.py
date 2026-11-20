@@ -287,8 +287,67 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(found, [idg.ENTRY])
 
     def test_the_entry_is_the_documented_command(self):
-        self.assertEqual(idg.COMMAND, "python3 ~/.claude/hooks/docker-first-guard.py")
+        self.assertEqual(idg.COMMAND, "python3 -I ~/.claude/hooks/docker-first-guard.py")
+        self.assertEqual(idg.LEGACY_COMMAND, "python3 ~/.claude/hooks/docker-first-guard.py")
         self.assertEqual(idg.RULE, "always Docker first! for all our projects")
+
+
+class IsolatedFormTests(Base):
+    def with_old_entry(self, extra=False):
+        d = json.loads(json.dumps(self.before_dict))
+        old = {"type": "command", "command": idg.LEGACY_COMMAND, "timeout": 5}
+        d["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [old]})
+        if extra:
+            d["hooks"]["PreToolUse"].append(json.loads(json.dumps(idg.ENTRY)))
+        self.settings.write_bytes(idg.dump(d, self.before))
+        return d
+
+    def commands(self):
+        return [h["command"] for g in self.live()["hooks"]["PreToolUse"] for h in g["hooks"]]
+
+    def test_a_fresh_install_writes_the_dash_I_form(self):
+        code, out, _ = self.run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertIn("python3 -I ~/.claude/hooks/docker-first-guard.py", self.commands())
+        self.assertNotIn(idg.LEGACY_COMMAND, self.commands())
+
+    def test_an_old_plain_entry_is_upgraded_in_place_with_no_duplicate(self):
+        self.with_old_entry()
+        code, out, _ = self.run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.last(out)[:4], "PASS", out)
+        self.assertEqual(self.commands().count(idg.COMMAND), 1)
+        self.assertNotIn(idg.LEGACY_COMMAND, self.commands())
+        self.assertEqual(self.live()["hooks"]["PreToolUse"][-1], idg.ENTRY)
+
+    def test_a_plain_entry_beside_an_I_entry_is_dropped(self):
+        self.with_old_entry(extra=True)
+        self.run_cli()
+        self.assertEqual(self.commands().count(idg.COMMAND), 1)
+        self.assertNotIn(idg.LEGACY_COMMAND, self.commands())
+
+    def test_the_upgrade_is_stable_on_a_second_run(self):
+        self.with_old_entry()
+        self.run_cli()
+        first = self.settings.read_bytes()
+        self.run_cli()
+        self.assertEqual(self.settings.read_bytes(), first)
+
+    def test_uninstall_removes_the_old_plain_form(self):
+        self.with_old_entry()
+        code, out, _ = self.run_cli("--uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.live(), self.before_dict)
+
+    def test_uninstall_removes_the_dash_I_form(self):
+        self.run_cli()
+        self.run_cli("--uninstall")
+        self.assertEqual(self.live(), self.before_dict)
+
+    def test_uninstall_removes_both_forms_at_once(self):
+        self.with_old_entry(extra=True)
+        self.run_cli("--uninstall")
+        self.assertEqual(self.live(), self.before_dict)
 
 
 if __name__ == "__main__":
