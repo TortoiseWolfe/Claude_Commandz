@@ -35,7 +35,9 @@ import sys
 import tempfile
 
 HOOK_NAME = "docker-first-guard.py"
-COMMAND = "python3 ~/.claude/hooks/docker-first-guard.py"
+# -I: the guard starts from known code only, so a stray file or a PYTHON variable cannot change how it behaves.
+COMMAND = "python3 -I ~/.claude/hooks/docker-first-guard.py"
+LEGACY_COMMAND = "python3 ~/.claude/hooks/docker-first-guard.py"  # written before issue 82; upgraded in place, removed by --uninstall
 ENTRY = {"matcher": "Bash", "hooks": [{"type": "command", "command": COMMAND, "timeout": 5}]}
 RULE = "always Docker first! for all our projects"
 PLACEHOLDER_RE = re.compile(rb"@example\.(?:com|org|net)|REDACTED|<redacted|PLACEHOLDER", re.I)
@@ -111,21 +113,44 @@ def dump(settings, raw):
     return text.encode("utf-8")
 
 
+def legacy_registered(settings):
+    """Every (group, hook) still written the old plain way, without -I."""
+    found = []
+    for group in settings.get("hooks", {}).get("PreToolUse", []):
+        for hook in group.get("hooks", []):
+            if hook.get("command") == LEGACY_COMMAND:
+                found.append((group, hook))
+    return found
+
+
 def add_entry(settings):
-    """True when the entry had to be added. A second run finds ours and adds nothing."""
-    if registered(settings):
-        return False
-    settings.setdefault("hooks", {}).setdefault("PreToolUse", []).append(json.loads(json.dumps(ENTRY)))
+    """True when settings had to change. A second run finds ours and adds nothing.
+    An old plain entry is upgraded in place to the -I form (a plain one beside an -I one is dropped), never duplicated."""
+    old = legacy_registered(settings)
+    have_new = bool(registered(settings))
+    if not old:
+        if have_new:
+            return False
+        settings.setdefault("hooks", {}).setdefault("PreToolUse", []).append(json.loads(json.dumps(ENTRY)))
+        return True
+    groups = settings["hooks"]["PreToolUse"]
+    for i, (group, hook) in enumerate(old):
+        if i == 0 and not have_new:
+            hook["command"] = COMMAND
+        else:
+            group["hooks"].remove(hook)
+            if not group["hooks"] and group in groups:
+                groups.remove(group)
     return True
 
 
 def remove_entry(settings):
-    """True when something was removed. A group left with no hooks is dropped; every other group stays."""
+    """True when something was removed (the -I form and the old plain form). A group left with no hooks is dropped; every other group stays."""
     removed = False
     groups = settings.get("hooks", {}).get("PreToolUse", [])
     for group in list(groups):
         before = len(group.get("hooks", []))
-        group["hooks"] = [h for h in group.get("hooks", []) if h.get("command") != COMMAND]
+        group["hooks"] = [h for h in group.get("hooks", []) if h.get("command") not in (COMMAND, LEGACY_COMMAND)]
         if len(group["hooks"]) != before:
             removed = True
             if not group["hooks"]:
