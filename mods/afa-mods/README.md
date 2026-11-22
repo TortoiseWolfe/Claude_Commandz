@@ -128,7 +128,11 @@ claude plugin install afa-mods@afa-mods --scope user
 ```
 
 On this machine the marketplace is the local clone (`claude plugin marketplace add ~/repos/Claude_Commandz`),
-so a `git pull` plus `/reload-plugins` picks up edits.
+the marketplace folder is that clone's working tree, so it must be on `main` when you update. Claude Code keeps one copy per
+version number under `~/.claude/plugins/cache/`, so an edit that does not raise `version` in `.claude-plugin/plugin.json` is never
+installed (0.3.6 stayed in the cache for six later commits). Every change to `src/` raises the version in the same pull request.
+To install a merged version: `git -C ~/repos/Claude_Commandz switch main && git -C ~/repos/Claude_Commandz pull --ff-only`, then
+`claude plugin marketplace update afa-mods` and `claude plugin update afa-mods@afa-mods`, then open a new terminal (changes load only in new `claude` processes).
 
 ## Turn it off
 
