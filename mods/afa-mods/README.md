@@ -26,6 +26,9 @@ commands are not held. Interactively it lists what the command would
 touch and asks `1 - Run it` / `2 - Refuse`. In a non-interactive session (`claude -p`, the Console
 lanes) it never waits: force pushes and production deploys are denied with a reason, the rest are
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.
+If the guard itself fails (an exception, or the Run it? dialog breaking) the command is held, the refusal names the cause,
+and a `guard failed` line with the same cause is appended to that log. An unpinned or unreadable deploy script is an
+ordinary hold, never a failure.
 Regenerable caches and paths strictly inside `/tmp`, `$TMPDIR`, or an individual lane's scratch
 area are allowed without a prompt and logged as `allowed (own scratch)`.
 That includes a path built from variables the command sets itself (`S=/tmp/x; P=$S/prof; rm -rf $P`) and a relative one after a literal
