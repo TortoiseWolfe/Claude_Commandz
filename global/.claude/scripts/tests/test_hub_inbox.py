@@ -366,6 +366,31 @@ class Hook(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("agent-notes (before other work,): no new notes from Hatch or the tower (notes_check.py)", r.stdout)
 
+    def test_open_muse_cc_job_line_counts_as_a_note_from_hatch(self):
+        # 21 Nov 2026: Hatch's Kickstarter note sat open as a Job line while the hook said "no new notes".
+        home = Path(fresh_dir(self))
+        (home / "repos").mkdir()
+        st = home / ".claude/state"
+        st.mkdir(parents=True)
+        (st / "agent-notes-processed.txt").write_text("x\n")
+        (st / "hub-inbox.md").write_text(
+            "- [ ] 2026-11-20 14:24 | Job: [MUSE>CC] older Hatch job | d | r-1\n"
+            "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter build | d | r-2\n"
+            "- [ ] 2026-11-21 20:40 | Job: not from Hatch | d | r-3\n"
+            "- [x] 2026-11-21 20:50 | Job: [MUSE>CC] ticked one | d | r-4\n")
+        env = dict(os.environ, HOME=str(home), CLAUDE_PROJECT_DIR=str(home / "repos"),
+                   NOTES_CHECK_CMD="echo 'notes: none new'", MUSE_POLL_LOCK=str(home / "muse-poll.lock"))
+        env.pop("HUB_INBOX", None)
+        env.pop("MUSE_INBOX", None)
+        env.pop("MUSE_POLL", None)
+        r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh")], input="{}", capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("no new notes from Hatch or the tower", r.stdout)
+        self.assertIn("2 open [MUSE>CC] line(s)", r.stdout)
+        self.assertIn("2026-11-20 14:24, 2026-11-21 20:36", r.stdout)
+        self.assertNotIn("Kickstarter", r.stdout)  # stamps only, never the line text
+        self.assertNotIn("ticked one", r.stdout)
+
     def test_notes_check_with_note_lines_stub(self):
         home = Path(fresh_dir(self))
         (home / "repos").mkdir()

@@ -538,6 +538,54 @@ class Page(unittest.TestCase):
         self.assertIn("- unavailable: lane_spend.py gave no readable answer", self.build(spend="lane_spend.py gave no readable answer"))
         self.assertIn("- all lanes and the hub together: $0", self.build(spend={"lanes": [], "total": 0}))
 
+    def test_new_since_block_lists_every_line_of_the_last_two_days_and_owner_groups_read_newest_first(self):
+        # 21 Nov 2026: Hatch's Kickstarter Job line (queued 8:36 PM) never reached the hub: each group listed the oldest five.
+        now = datetime(2026, 11, 21, 21, 30)
+        old = "".join("- [ ] 2026-11-0%d 10:00 | Job: old job %d | d | r-%d\n" % (i, i, i) for i in range(1, 9))
+        new = ("- [ ] 2026-11-19 20:00 | Job: three days old, outside the window | d | r-30\n"
+               "- [ ] 2026-11-20 14:24 | Waiting on tower: yesterday wait | d | r-31\n"
+               "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter " + "build the Hog Ball project draft " * 8 + "| d | r-32\n"
+               "- [ ] 2026-11-21 20:50 | Something unsorted | note | r-33\n"
+               "- [x] 2026-11-21 20:55 | Job: ticked | d | r-34\n")
+        page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                           git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", 100000)
+        sec = page.split("## New since the last look")[1].split("\n## ")[0]
+        rows = [l for l in sec.splitlines() if l.startswith("- ")]
+        self.assertIn("(3 open lines", sec.splitlines()[0])
+        self.assertEqual(len(rows), 3, sec)
+        self.assertIn("Something unsorted", rows[0])  # newest first
+        self.assertIn("Kickstarter", rows[1])
+        self.assertIn("yesterday wait", rows[2])
+        self.assertLessEqual(len(rows[1]) - 2, hd.NOTE_LIMIT + 8)  # trimmed to about 160 characters
+        self.assertNotIn("three days old", sec)
+        self.assertNotIn("ticked", sec)
+        jobs = page.split("Jobs (")[1].split("\n## ")[0]
+        self.assertLess(jobs.index("Kickstarter"), jobs.index("old job 8"))  # the Jobs group is newest first
+        self.assertNotIn("old job 1 ", jobs)  # and its oldest lines are the ones left off
+        # Under a tight cap the block shortens its titles and keeps every line before the page cuts any of them.
+        tight = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                            git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", len(page.encode()) - 120)
+        tsec = tight.split("## New since the last look")[1].split("\n## ")[0]
+        self.assertEqual(len([l for l in tsec.splitlines() if l.startswith("- ") and "cut to fit" not in l]), 3, tsec)
+        self.assertIn("Kickstarter", tsec)
+
+    def test_new_since_block_counts_routine_scoutjob_lines_in_one_summary_line(self):
+        # 21 Nov 2026, hub word: skip ScoutJob check-ins and "N new job mail" lines in the block so real lines fit, keep them counted.
+        now = datetime(2026, 11, 21, 21, 30)
+        inbox = ("- [ ] 2026-11-21 11:00 | Job: ScoutJob check-in 11:00 AM: 0 changed, 4 stalled | move | r-40\n"
+                 "- [ ] 2026-11-21 13:31 | Job: 1 new job mail in /x/mail-jobs.md | for the director | r-41\n"
+                 "- [ ] 2026-11-21 14:00 | Job: ScoutJob check-in 2:00 PM: 0 changed, 18 stalled | move | r-42\n"
+                 "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter: build the Hog Ball draft | d | r-43\n")
+        for tight in (100000, 0):
+            page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=inbox,
+                                               git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", tight or 4000)
+            sec = page.split("## New since the last look")[1].split("\n## ")[0]
+            rows = [l for l in sec.splitlines() if l.startswith("- ")]
+            self.assertIn("Kickstarter", sec)
+            self.assertNotIn("check-in 11:00", sec)
+            self.assertNotIn("1 new job mail", sec)
+            self.assertTrue(any("plus 3 routine" in r for r in rows), sec)
+
     def test_cap_holds_with_a_huge_inbox_and_log(self):
         inbox = "\n".join(f"- [ ] 2026-10-1{i % 9} 10:00 | Waiting on Hatch: item {i} " + "word " * 60 + "| detail | r-{i}" for i in range(80))
         log = "\n".join(f"abc{i:04d} 16 10:00 " + "message " * 40 for i in range(10))
