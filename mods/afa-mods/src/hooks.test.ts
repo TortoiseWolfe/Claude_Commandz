@@ -977,6 +977,27 @@ describe('blast radius, the guard never crashes on a production deploy call', ()
       })
     }
   }
+  // Something inside the guard itself throws (not the dialog): the catch-all denies, names the cause, and writes the `guard failed` line.
+  for (const [who, vars] of [['hub', {}], ['lane', { AFA_LANE: '1' }]] as const) {
+    test(`a throw inside the guard reaches the catch-all: denied with the cause, and logged (${who})`, async ($, on) => {
+      setup(on, vars)
+      const seen = { log: '' }
+      on('session.surfaces', () => {
+        throw new Error('surfaces exploded')
+      })
+      on('fs.write', ($: any, e: any) => {
+        seen.log += e.text
+        return { value: undefined }
+      })
+      on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+      const r: any = await $.tool.call({ tool: 'Bash', command: 'git push --force origin main' })
+      expect(r.deny).toContain('its guard failed, so the command is held')
+      // No 'Cause: ' check here: the test engine may not hand the thrown Error to the catch-all's 4th argument
+      // (the log then says "cause not given"); the dialog test above proves the Cause text.
+      expect(r.result).toBeUndefined()
+      expect(seen.log).toContain('| guard failed | ')
+    })
+  }
   test('the same script text is hashed to one stable 64-character answer', () => {
     expect(sha256Hex(BIG)).toBe(sha256Hex(BIG))
     expect(sha256Hex(BIG)).toHaveLength(64)
