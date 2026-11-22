@@ -157,13 +157,61 @@ ok 'a Promotions message from a non-payment client still comes out' 1 "$(printf 
 id_exact=$(printf '%016x' $(( (now_ms2 << 20) | 75555 )))
 cat >"$TMP/claude" <<MOCK
 #!/usr/bin/env bash
-echo "\$*" >"$TMP/stub-args"
+echo "\$*" >>"$TMP/stub-args"
 echo "MSG $id_exact | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 | INBOX,UNREAD | $id_exact"
 MOCK
 rm -f "$TMP/stub-args"
 out=$(check)
 ok 'the ID prints exactly as listed' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_exact | orders@shop.example.test | Pat <orders@shop.example.test> | Re: order | Mon, 19 Oct 2026 21:00:00 \$" || true)"
-ok 'the lister gets the subcommand and the sender query' 1 "$(grep -c '^messages-list from:(.*shop.example.test.*) newer_than:2d -from:me$' "$TMP/stub-args" || true)"
+ok 'the lister gets the subcommand and the sender query (senders, list subject tags)' 1 "$(grep -c '^messages-list (from:(.*shop.example.test.*) OR subject:"\[Advisors\]" OR subject:"\[Devops\]") newer_than:2d -from:me$' "$TMP/stub-args" || true)"
+ok 'the lister also gets the co-op list query' 1 "$(grep -c '^messages-list list:list.chattanooga.digital newer_than:2d -from:me$' "$TMP/stub-args" || true)"
+
+# 21 Nov 2026: co-op members who write from a personal address never matched a sender row, so their mail got no line.
+# A row naming the personal address matches it exactly; an unlisted address is taken only for a [Advisors] / [Devops]
+# subject or when the list query (list:list.chattanooga.digital) returns it; no-reply, DRAFT, SENT, seen and no-label
+# lines are still dropped (fail closed).
+now_ms3=$(( $(date +%s) * 1000 ))
+mk() { printf '%016x' $(( (now_ms3 << 20) | $1 )); }
+id_member=$(mk 81111); id_adv=$(mk 82222); id_plain=$(mk 83333); id_dev=$(mk 84444); id_listonly=$(mk 85555)
+id_listdraft=$(mk 86666); id_advnoreply=$(mk 87777); id_advnolabels=$(mk 88888); id_advseen=$(mk 89999); id_advsent=$(mk 91111)
+printf 'client\trepo_dir\tkind\tgmail_from\nCoop\t/x\tmail\tlist.example.test\nCoop\t/x\tmail\tmember@personal.example.test\n' >"$TMP/senders.tsv"
+echo "$id_advseen" >"$TMP/seen.txt"
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+echo "\$*" >>"$TMP/stub-args2"
+case "\$2" in
+list:*) cat <<OUT
+MSG $id_listonly | someone@elsewhere.example.test | Rob <someone@elsewhere.example.test> | Re: Meeting recap | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_listonly
+MSG $id_listdraft | someone@elsewhere.example.test | Rob <someone@elsewhere.example.test> | Re: Meeting recap | Sat, 21 Nov 2026 09:00:00 | DRAFT | $id_listdraft
+OUT
+;;
+*) cat <<OUT
+MSG $id_member | member@personal.example.test | Sofia <member@personal.example.test> | Plain subject | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_member
+MSG $id_adv | sofia@other.example.test | Sofia <sofia@other.example.test> | [Advisors] Re: Input on slogans | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_adv
+MSG $id_plain | stranger@other.example.test | Pat <stranger@other.example.test> | Plain subject, unlisted | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_plain
+MSG $id_dev | rob@other.example.test | Rob <rob@other.example.test> | Re: [Devops] Backup window | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_dev
+MSG $id_advnoreply | no-reply@other.example.test | Bot <no-reply@other.example.test> | [Advisors] bot | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_advnoreply
+MSG $id_advnolabels | sofia@other.example.test | Sofia <sofia@other.example.test> | [Advisors] no trailer | Sat, 21 Nov 2026 09:00:00
+MSG $id_advseen | sofia@other.example.test | Sofia <sofia@other.example.test> | [Advisors] already absorbed | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_advseen
+MSG $id_advsent | sofia@other.example.test | Sofia <sofia@other.example.test> | [Advisors] our reply | Sat, 21 Nov 2026 09:00:00 | SENT | $id_advsent
+OUT
+;;
+esac
+MOCK
+out=$(check)
+ok 'a member on a personal-address row comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_member | member@personal.example.test |")"
+ok 'an unlisted sender with an [Advisors] subject comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_adv | sofia@other.example.test |")"
+ok 'an unlisted sender with "Re: [Devops]" comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_dev |")"
+ok 'a message only the list query returned comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_listonly |")"
+ok 'an unlisted sender with a plain subject is still skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_plain" || true)"
+ok 'a list-query DRAFT is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_listdraft" || true)"
+ok 'a no-reply sender with an [Advisors] subject is skipped' 0 "$(printf '%s\n' "$out" | grep -c "$id_advnoreply" || true)"
+ok 'a tagged line with no labels or thread ID is dropped (fail closed)' 0 "$(printf '%s\n' "$out" | grep -c "$id_advnolabels" || true)"
+ok 'that drop is logged' 1 "$(grep -c "dropped $id_advnolabels: no thread ID" "$ST/muse-poll.log")"
+ok 'an already-absorbed tagged message is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_advseen" || true)"
+ok 'our own SENT reply with the tag is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_advsent" || true)"
+ok 'the list query went out with the List-Id operator' 1 "$(grep -c '^messages-list list:list.chattanooga.digital newer_than:2d -from:me$' "$TMP/stub-args2" || true)"
+: >"$TMP/seen.txt"
 
 # A failing lister (dead token, no network) is loud: nothing NEW, exit 1, the reason on stderr, never a quiet "nothing new".
 cat >"$TMP/claude" <<'MOCK'
