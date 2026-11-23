@@ -470,7 +470,12 @@ def _strip_heredocs(command, runner_bodies=None, receivers=None):
             if runner_bodies is not None and _heredoc_runs_it(receiver):
                 runner_bodies.append("\n".join(lines[i:j]))
                 if receivers is not None:
-                    receivers[receiver] = receivers.get(receiver, 0) + 1  # an interpreter that reads a heredoc this function really dropped
+                    holder = _shell_commands(line[:m.start()]) or [[]]
+                    prog, rest = _program_of(holder[-1])
+                    if prog == receiver and not _has_own_program(prog, rest):
+                        # credit only an interpreter that really reads this heredoc as its program (a `python3 a.py <<EOF` runs a.py, so a later
+                        # pipe-fed python gets none of it)
+                        receivers[receiver] = receivers.get(receiver, 0) + 1
             i = j + 1
         else:
             out.extend(lines[i:j + 1])
@@ -688,7 +693,7 @@ _SCRIPT_FILE = re.compile(r"\.(?:py|pyw|js|mjs|cjs|ts|pl|rb|php|lua|tcl|ps1)\Z")
 _CAN_RUN = {"git", "gh", "tar", "rsync", "sort", "curl", "wget", "dd", "install", "ln"}
 _RUNS_CODE_ARG = re.compile(r"^-e|^-[A-Za-z]*I$|^--(?:config|exec|extcmd|ext-diff|textconv|upload-pack|receive-pack|to-command|use-compress-program|"
                             r"compress-program|checkpoint-action|info-script|new-volume-script|rsh|rsync-path|proxy-command|ssh-command|pager|editor)|^!|=!|"
-                            r"^(?:alias|extension|exec|foreach|run)$")
+                            r"^(?:alias|extension|exec|foreach|run|config)$")  # config: git config core.pager/sshCommand/editor name a program to run later
 _GIT_CONFIG_ARG = re.compile(r"^-c$|^-c\S*=")  # git -c name=value sets a config value that can name a program (core.pager, alias.x=!...); tar -c is just create
 
 

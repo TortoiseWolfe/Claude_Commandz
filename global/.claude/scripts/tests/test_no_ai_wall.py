@@ -1200,6 +1200,10 @@ class Issue130Tests(Fixture):
         for cmd in (code + "python3 - <<'EOF'\nprint(1)", code + "python3 -W ignore -X dev", code + "python3 --check-hash-based-pycs never",
                     "echo 'system(\"find %s\");' | node --max-old-space-size 64" % parent):
             self.refused(cmd)
+        # a heredoc's credit belongs to the command holding the marker, and only when that command has no program of its own: a python that runs
+        # a.py and gets a heredoc as its stdin data gives no credit to a later pipe-fed python
+        for cmd in ("python3 a.py <<'EOF'\nx\nEOF\n" + code + "python3", "python3 -c 'print(1)' <<'EOF'\nx\nEOF\n" + code + "python3"):
+            self.refused(cmd)
         self.allowed("python3 -I %s/src/tool.py" % self.proj, cwd=self.proj)
         self.allowed("python3 - <<'EOF'\nprint('find them')\nEOF", cwd=self.proj)
         self.allowed("echo '{}' | python3 -m json.tool", cwd=self.proj)
@@ -1212,7 +1216,8 @@ class Issue130Tests(Fixture):
                     "tar -xf a.tar --to-command='sh a.md'", "tar -cf a.tar --checkpoint=1 --checkpoint-action=exec='sh a.md' a.md", "sort --compress-program=sh a.md",
                     "rsync -e 'sh a.md' a.md host:/x", "GIT_PAGER='sh a.md' git log", "env GIT_SSH_COMMAND='sh a.md' git fetch", "PAGER='sh a.md' gh pr view 1",
                     "git bisect run sh a.md", "git submodule foreach 'sh a.md'", "tar -cf a.tar --new-volume-script=a.md a.md", "tar -cf a.tar --info-script=a.md a.md",
-                    "git difftool --extcmd='sh a.md'", "git -c 'filter.x.clean=sh a.md' add a.md"):
+                    "git difftool --extcmd='sh a.md'", "git -c 'filter.x.clean=sh a.md' add a.md",
+                    "git config core.pager 'sh a.md' && git log", "git config core.sshCommand 'sh a.md'", "git -C . config core.editor 'sh a.md'"):
             self.refused(write + cmd)
         self.allowed("printf 'find them' > notes.md; git add notes.md && git status", cwd=self.proj)
         self.allowed("printf 'find them' > notes.md; tar -czf out.tgz notes.md; sort notes.md > out.md", cwd=self.proj)
