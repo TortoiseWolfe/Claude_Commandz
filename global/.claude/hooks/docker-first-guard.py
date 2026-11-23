@@ -40,6 +40,10 @@ Exemption list: ~/.config/afa/docker-first-exempt.txt. Path prefixes, one per li
 # lines are ignored; a missing or unreadable file means no exemptions. This hook only reads it and
 never writes it: entries go in only on Jonathan's word.
 
+Log: every time a command word in WATCHED_WORDS (a package manager, node, vite, next, expo) is checked, one tab-separated line goes to
+~/.claude/state/docker-first-guard.log (or $DOCKER_FIRST_LOG): time, refused or allowed or exempt, the word, the folder. Never the command text.
+Past 1 MB the log moves to .1. The hook never makes the folder: no folder, no log. A log failure never changes the decision. A command in docker run, exec or compose is not logged.
+
 Fails open: unreadable or non-JSON stdin, another tool, a command that is not a string, or an
 unexpected error while checking all exit 0 (an error also prints one line on stderr). A fault here
 must never stop every shell call, and this hook is a reminder of the house rule, not a wall: a
@@ -50,6 +54,7 @@ import os
 import re
 import shlex
 import sys
+import time
 
 RULE_QUOTE = '"always Docker first! for all our projects"'
 REFUSAL_MESSAGE = (
@@ -120,6 +125,30 @@ HEREDOC_OP = re.compile(r"(?<![<\d])<<(?!<)(-?)[ \t]*([^\s;|&<>()]+)")
 # body that bash runs as commands.
 COMMENT = re.compile(r"(?:^|(?<=[\s;|&()<>]))#[^\n]*", re.M)
 ARITHMETIC = re.compile(r"\$?\(\([^\n]*?\)\)")
+
+
+WATCHED_WORDS = frozenset({"npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx", "node", "nodejs", "vite", "next", "expo"})
+LOG_LIMIT = 1_000_000  # bytes; past this the log moves to <name>.1 (one older copy kept)
+
+
+def log_decision(word, outcome, folder):
+    """Append one line to the guard's log: time, outcome (refused, allowed or exempt), the command word and the folder.
+    Never the command text, which can hold secrets. Any failure here is swallowed: logging must not change a decision."""
+    try:
+        path = os.environ.get("DOCKER_FIRST_LOG") or os.path.expanduser("~/.claude/state/docker-first-guard.log")
+        if not os.path.isdir(os.path.dirname(path)):
+            return  # the hook never makes folders; ~/.claude/state is the fleet's and exists wherever the guard is installed
+        try:
+            if os.path.getsize(path) > LOG_LIMIT:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S%z")
+        line = f"{stamp}\t{outcome}\t{word}\t{str(folder).replace(chr(10), ' ').replace(chr(9), ' ')}\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
 
 
 def read_exemptions():
@@ -283,8 +312,18 @@ def check_segment(tokens, current_cwd, exemptions):
         return None
 
     if is_exempt(current_cwd, exemptions):
+        if base_cmd in WATCHED_WORDS:
+            log_decision(base_cmd, "exempt", current_cwd)
         return None
 
+    reason = decide(base_cmd, args, lowered, tokens, i)
+    if base_cmd in WATCHED_WORDS:
+        log_decision(base_cmd, "refused" if reason else "allowed", current_cwd)
+    return reason
+
+
+def decide(base_cmd, args, lowered, tokens, i):
+    """The rules for one command word outside docker and outside an exempt folder. Returns a refusal reason or None."""
     flag_only = bool(lowered) and all(a in ALLOWED_FLAG_ONLY for a in lowered)
 
     if base_cmd in ("npm", "pnpm", "yarn", "bun"):
