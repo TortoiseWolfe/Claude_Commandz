@@ -1684,9 +1684,39 @@ def _command_word_groups(command):
     goes to the receiver as input or as code (`bash <<< "grep -r x /dir"`, `xargs grep x /dir <<< "-r"`, the same with a heredoc), and the reader
     drops it from the command it feeds."""
     cmds = _shell_commands(command)
-    if cmds is None or "(" in command or "`" in command or "<<" in command:
+    if cmds is None or _has_unquoted_paren(command) or "`" in command or "<<" in command:
         return [_words(command)] + _split_groups(cmds)
     return _split_groups(cmds) or [_words(command)]
+
+
+def _has_unquoted_paren(command):
+    """True when a `(` or `)` sits outside quotes and is not backslash-escaped, or when a quote is left open (issue 150). The reader ends a
+    command at such a parenthesis (a subshell, `$(`, an array), so it cannot say which command a flag belongs to and the whole text is read
+    as one group. A parenthesis inside quotes is text (`sed -i "s/(a)/(b)/"`): the reader keeps it in its word, and it must not force the
+    whole-text reading. A comment also gives True, the stricter answer. The scan follows the reader (_shell_commands): a
+    backslash takes the next character, single quotes end at the next single quote, double quotes at the next unescaped double quote."""
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return True
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                j += 2 if command[j] == "\\" else 1
+            if j >= n:
+                return True
+            i = j + 1
+        elif c in "()" or (c == "#" and (i == 0 or command[i - 1] in " \t\n;&|")):
+            return True  # (a comment: the reader skips its text, this scan would read its quotes, so the stricter answer)
+        else:
+            i += 1
+    return False
 
 
 def _split_groups(cmds):
@@ -1696,12 +1726,21 @@ def _split_groups(cmds):
     groups = []
     for cmd in cmds:
         g = []
+        text_flags = any(os.path.basename(w) in _TEXT_VALUE_PROGRAMS for w, q in cmd if not q)
+        prev = ""
         for w, q in cmd:
             g.append(w)
-            if any(ch.isspace() for ch in w):
+            # a title or message handed to gh or git is text, never a program: `gh issue create --title "a grep before gh -R"` has no grep in it
+            as_text = text_flags and q and (prev in _TEXT_VALUE_FLAGS or w.split("=", 1)[0] in _TEXT_VALUE_FLAGS and w.startswith(("--title=", "--body=", "--message=")))
+            if any(ch.isspace() for ch in w) and not as_text:
                 g.extend(_words(w))
+            prev = w
         groups.append(g)
     return groups
+
+
+_TEXT_VALUE_PROGRAMS = ("gh", "git")  # programs whose title, body and message flags (below) only ever carry text (issue 150)
+_TEXT_VALUE_FLAGS = ("--title", "--body", "--message", "-m", "-t", "-b")
 
 
 def reads_content_recursively(words):

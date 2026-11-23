@@ -1431,6 +1431,64 @@ class WideReadingTests(Fixture):
         self.refused("echo hi > n.txt; sed -n 1p n.txt; grep $(echo -r) x %s; gh pr view 1 -R o/n" % a, self.tmp)
         self.refused("echo hi > n.txt; sed -n 1p n.txt; bash -c 'grep -r x %s'" % a, self.tmp)
 
+    # ---- issue 150: a parenthesis INSIDE quotes is text, not a subshell ----
+
+    def test_a_parenthesis_inside_quotes_does_not_force_the_whole_text_reading(self):
+        # the refusal: `cd LANE && sed -i "s/(old)/(new)/" f && gated_post.sh ... -- gh issue create -R o/n --title "a grep before a later gh -R" ...`
+        # was refused from a folder above a listed one, because the parenthesis in sed's quoted expression made the wall read the whole text as one
+        # command line, so the title's grep took gh's -R, and the `)/(` of the expression became lone slashes that sit above the list.
+        title = "a grep before a later gh -R is read as grep -R"
+        for quoted in ('"s/(old words)/(new words)/"', "'s/(old words)/(new words)/'", r"s/\(old\)/\(new\)/", '"s/(gh'"'"'s x)/(gh'"'"'s y)/"'):
+            cmd = "cd %s && sed -i %s body.md && gated_post.sh team body.md -- gh issue create -R o/n --title \"%s\" --body-file body.md" % (self.lane, quoted, title)
+            self.allowed(cmd, self.tmp)
+            self.allowed(cmd, self.lane)
+
+    def test_a_search_after_a_quoted_parenthesis_is_still_judged_on_its_own_words(self):
+        above, a = self.p("wall"), self.p("wall/clientA")
+        sed = 'sed -i "s/(old)/(new)/" body.md'
+        for cmd in ("%s && grep -rn x %s" % (sed, above), "%s && grep -R x %s | head -3; gh pr view 1 -R o/n" % (sed, a),
+                    "%s && rg x %s" % (sed, above), "%s && grep -rn x" % sed, "%s; find %s -type f -exec cat {} +" % (sed, above),
+                    "%s && git grep x %s" % (sed, a)):
+            self.refused(cmd, self.tmp)
+
+    def test_a_title_or_message_handed_to_gh_or_git_is_text(self):
+        # the title of the issue about this very flaw says "grep before a later gh -R"; a title is text, so its words are not a search
+        for cmd in ('gh issue create -R o/n --title "a grep before a later gh -R" --body-file b.md', 'gh pr create --title="a grep -R x" --body "grep -rn x"',
+                    'git commit -m "grep -r x . then gh -R"', 'gh issue comment 1 -R o/n -b "run grep -r x here"',
+                    'gated_post.sh team b.md -- gh issue create -R o/n --title "a grep before gh -R" --body-file b.md'):
+            for cwd in (self.tmp, self.lane):
+                self.allowed("echo hi > n.txt; sed -n 1p n.txt; " + cmd, cwd)
+                self.allowed(cmd, cwd)
+
+    def test_the_same_words_handed_to_a_program_that_runs_them_are_still_a_search(self):
+        above = self.p("wall")
+        for cmd in ('bash -c "grep -r x %s"' % above, 'ssh host -t "grep -r x %s"' % above, "xargs -t sh -c 'grep -r x %s'" % above,
+                    'gh issue create --title t; grep -rn x %s' % above,
+                    'git commit -m msg; bash -c "grep -r x %s"' % above, "env -S 'grep -r x %s'" % above, "watch -t 'grep -r x %s'" % above):
+            self.refused(cmd, self.tmp)
+
+    def test_a_heredoc_fed_to_a_container_stays_read_as_a_command_line(self):
+        # not changed on purpose (issue 150, refusal 3): a container can mount a folder above a listed one and its shell can search the mount, so
+        # the body of `docker run -i ... sh <<EOF` is not treated as data the way a host interpreter's body is
+        above = self.p("wall")
+        self.refused("docker run --rm -i -v %s:/r alpine sh <<'EOF'\ngrep -r x /r\nEOF" % above, self.lane)
+        self.refused("timeout 60 docker run --rm -i -v %s:/r python:3.12 python - <<'EOF'\nimport os\nos.system('grep -r x /r')\nEOF" % above, self.lane)
+
+    def test_a_parenthesis_outside_quotes_is_still_read_as_the_whole_text(self):
+        # a subshell or a substitution ends a command where the reader cannot follow it, so the old, wide reading stays for these
+        above = self.p("wall")
+        sed = 'sed -i "s/(old)/(new)/" body.md'
+        for cmd in ("%s && grep $(echo -r) x %s; gh pr view 1 -R o/n" % (sed, above), "%s && (grep -r x %s)" % (sed, above),
+                    "%s && echo $(grep -r x %s)" % (sed, above), "%s && grep `echo -r` x %s" % (sed, above),
+                    "%s && x=(1 2); grep -r x %s" % (sed, above), "%s && bash -c 'grep $(echo -r) x %s'" % (sed, above)):
+            self.refused(cmd, self.tmp)
+
+    def test_the_quote_scan_agrees_with_the_reader(self):
+        for text, expected in (("sed 's/(a)/b/' f", False), ('sed "s/(a)/b/" f', False), (r"echo \(", False), ("echo '(' \")\"", False),
+                               ("echo (a)", True), ("echo $(a)", True), ("echo `a`", False), ("(echo a)", True), ("echo 'a' (b)", True),
+                               ("echo \"a\" ; (b)", True), ("echo # (a)", True), ("echo \"unclosed (", True)):
+            self.assertEqual(w._has_unquoted_paren(text), expected, text)
+
 
 if __name__ == "__main__":
     unittest.main()
