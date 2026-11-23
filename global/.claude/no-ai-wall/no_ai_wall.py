@@ -444,7 +444,7 @@ def _heredoc_runs_it(prog):
     return prog in _HEREDOC_RUNNERS or re.fullmatch(r"python[\d.]*", prog) is not None
 
 
-def _strip_heredocs(command, runner_bodies=None):
+def _strip_heredocs(command, runner_bodies=None, receivers=None):
     """The command without the bodies of heredocs whose text no shell reads (see _heredoc_is_data). A heredoc with no terminator line, or
     one handed to a shell (`bash <<EOF`, `cat <<EOF | sh`), keeps its body: it is judged as the commands it is. The bodies of heredocs an
     interpreter runs are dropped too but added to `runner_bodies` when one is given, so the caller can still read them for the roots they name."""
@@ -469,6 +469,8 @@ def _strip_heredocs(command, runner_bodies=None):
         if receiver:
             if runner_bodies is not None and _heredoc_runs_it(receiver):
                 runner_bodies.append("\n".join(lines[i:j]))
+                if receivers is not None:
+                    receivers[receiver] = receivers.get(receiver, 0) + 1  # an interpreter that reads a heredoc this function really dropped
             i = j + 1
         else:
             out.extend(lines[i:j + 1])
@@ -681,42 +683,31 @@ _WRITERS = {"tee", "cp", "mv", "install", "ln", "dd", "curl", "wget", "tar", "un
 _INLINE_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed", "gawk", "mawk", "nawk", "lua", "tclsh", "pwsh"}
 _STDIN_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "lua", "tclsh", "pwsh"}  # (awk and sed are given their program as an operand)
 _INLINE_FLAG = re.compile(r"-[A-Za-z]*[ceErCS]")
-_OPTION_VALUE = {"python": {"-W", "-X", "-Q"}, "": {"-I", "-M", "-r", "-C", "-W", "-X", "-i"}}  # options whose next word is a value, not a program
+_SCRIPT_FILE = re.compile(r"\.(?:py|pyw|js|mjs|cjs|ts|pl|rb|php|lua|tcl|ps1)\Z")
 # a data tool is no data tool when an option or an alias hands it a program to run (git -c core.pager=..., tar --to-command, sort --compress-program)
 _CAN_RUN = {"git", "gh", "tar", "rsync", "sort", "curl", "wget", "dd", "install", "ln"}
-_RUNS_CODE_ARG = re.compile(r"^-e|^-[A-Za-z]*I$|^--(?:config|exec|ext-diff|textconv|upload-pack|receive-pack|to-command|use-compress-program|"
-                            r"compress-program|checkpoint-action|rsh|rsync-path|proxy-command|ssh-command|pager|editor)|^!|=!|^(?:alias|extension|exec)$")
+_RUNS_CODE_ARG = re.compile(r"^-e|^-[A-Za-z]*I$|^--(?:config|exec|extcmd|ext-diff|textconv|upload-pack|receive-pack|to-command|use-compress-program|"
+                            r"compress-program|checkpoint-action|info-script|new-volume-script|rsh|rsync-path|proxy-command|ssh-command|pager|editor)|^!|=!|"
+                            r"^(?:alias|extension|exec|foreach|run)$")
 _GIT_CONFIG_ARG = re.compile(r"^-c$|^-c\S*=")  # git -c name=value sets a config value that can name a program (core.pager, alias.x=!...); tar -c is just create
 
 
-def _can_run_code(p, rest):
-    return p in _CAN_RUN and (any(_RUNS_CODE_ARG.search(a) for a in rest) or (p == "git" and any(_GIT_CONFIG_ARG.search(a) for a in rest)))
+def _can_run_code(p, rest, env=False):
+    """True for a data tool that is handed a program to run: an option, subcommand or alias (see _RUNS_CODE_ARG), or a variable set just for it
+    (GIT_PAGER=..., GIT_SSH_COMMAND=..., PAGER=...)."""
+    return p in _CAN_RUN and (env or any(_RUNS_CODE_ARG.search(a) for a in rest) or (p == "git" and any(_GIT_CONFIG_ARG.search(a) for a in rest)))
 
 
-def _heredoc_receivers(text):
-    """-> {program: how many heredocs it receives} for the statements of a text (the `<<'EOF'` marker is left in the line by _strip_heredocs)."""
-    out = {}
-    for stmt, sep in _split_statements(text):
-        m = _HEREDOC.search(stmt)
-        cmds = _shell_commands(stmt[:m.start()]) if m else None
-        if cmds:
-            p = _program_of(cmds[-1])[0]
-            out[p] = out.get(p, 0) + 1
-    return out
+def _sets_a_variable_for(cmd):
+    """True when a command's words before its program include a NAME=value (`GIT_PAGER=less git log`, `env PAGER=x gh pr view`)."""
+    ws = [w for w, q in cmd]
+    return any(re.match(r"[A-Za-z_]\w*=", w) for w in ws[:_skip_wrappers(ws, scan=False)])
 
 
 def _has_own_program(prog, rest):
-    """True when an interpreter's words hold its own program: an inline flag or a script/module operand, an option's value skipped."""
-    values = _OPTION_VALUE["python"] if prog.startswith("python") else _OPTION_VALUE[""]
-    skip = False
-    for x in rest:
-        if skip:
-            skip = False
-        elif x in values:
-            skip = True
-        elif _INLINE_FLAG.fullmatch(x) or not x.startswith("-"):
-            return True
-    return False
+    """True only when an interpreter's words plainly hold its own program: an inline flag (-c, -e, -E, -m for python) or an operand that is a script
+    file by its name. An option's value, an unknown option or a bare word is none of these (fail closed: no table of every interpreter's options)."""
+    return any(_INLINE_FLAG.fullmatch(x) or (x == "-m" and prog.startswith("python")) or (not x.startswith("-") and _SCRIPT_FILE.search(x)) for x in rest)
 
 
 def _program_of(cmd):
@@ -726,7 +717,7 @@ def _program_of(cmd):
     return (os.path.basename(ws[i]), ws[i + 1:]) if i < len(ws) else (None, [])
 
 
-def _searches(text, cwd, depth=0, bodies=None):
+def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
@@ -736,12 +727,14 @@ def _searches(text, cwd, depth=0, bodies=None):
         return None
     if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
         return None  # text written to a file that could be a script may be run later in the text: the wide reading
-    progs = [_program_of(c) for c in cmds if not _is_launcher_words([w for w, q in c])]
-    if (any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) or any(p in _WRITERS for p, rest in progs)) and any(
-            p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest)) for p, rest in progs):
+    live = [c for c in cmds if not _is_launcher_words([w for w, q in c])]
+    progs = [_program_of(c) + (_sets_a_variable_for(c),) for c in live]
+    if (any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) or any(p in _WRITERS for p, rest, env in progs)) and any(
+            p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
-    heredocs = _heredoc_receivers(text)
+    if heredocs is None:
+        heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for cmd in cmds:
         ws = [w for w, q in cmd]
         if _is_launcher_words(ws):
@@ -830,7 +823,8 @@ def bash_hits(command, cwd, paths):
     calls the lane's own hook guards. When the text cannot be read with certainty the old, wider reading is used (_bash_hits_wide)."""
     cwd = cwd or os.getcwd()
     runner_bodies = []
-    info = _searches(_strip_heredocs(command, runner_bodies), cwd, bodies=runner_bodies)
+    receivers = {}
+    info = _searches(_strip_heredocs(command, runner_bodies, receivers), cwd, bodies=runner_bodies, heredocs=receivers)
     if info is None:
         segs = _segments(command)
         if any(_is_launcher(seg) for seg in segs):
