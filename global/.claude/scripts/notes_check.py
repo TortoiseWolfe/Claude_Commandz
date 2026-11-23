@@ -297,6 +297,11 @@ GROUP = {"NX-01": "NX-01", "CC": "NX-01", "NCC-74656": "NCC-74656", "MUSE": "MUS
 READER_RECORDS = {"NCC-74656": os.path.expanduser("~/repos/hub/tower/peer-notes-processed.txt")}
 READER_RECORD_REPO = os.path.expanduser("~/repos")
 STATUS_FILE = os.path.expanduser("~/.claude/state/draft-sweep-status.json")
+# Issue 143: the record of notes whose attached files have been saved. One line per note: "<draft or message id> | <date> | <where>".
+# NX-01 writes it (--files-saved) when it pulls a note's files into a release. The name must never match peer-*processed*.txt,
+# which main() reads as a processed-ids file.
+FILES_SAVED = os.path.expanduser("~/.claude/state/note-files-saved.txt")
+FILES_ID_RE = re.compile(r"[A-Za-z0-9_-]{2,64}")
 INBOUND_MIN_AGE = 2 * 3600
 OUTBOUND_MIN_AGE = 24 * 3600
 READ_RECORD_ID_RE = re.compile(r"^(?:r-?\d+|[0-9a-fA-F]{16})$")
@@ -373,6 +378,36 @@ def _read_processed(path):
         with open(path, "r", encoding="utf-8") as f:
             ids = {ln.strip() for ln in f if ln.strip()}
     return ids
+
+
+def read_files_saved(path):
+    """The ids in the files-saved record. A missing file is an empty record, which keeps every note that has files."""
+    ids = set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for ln in f:
+                s = ln.strip()
+                if not s or s.startswith("#"):
+                    continue
+                first = s.split("|", 1)[0].strip()
+                if FILES_ID_RE.fullmatch(first):
+                    ids.add(first)
+    except FileNotFoundError:
+        pass
+    return ids
+
+
+def record_files_saved(path, item_id, where, now=None):
+    """Record that a note's files are saved. Returns True when a line was added, False when the id was already there.
+    Raises ValueError for an id that is not a draft or message id (nothing is written)."""
+    if not isinstance(item_id, str) or not FILES_ID_RE.fullmatch(item_id):
+        raise ValueError("not a draft or message id: letters, digits, - and _ only (2 to 64 characters)")
+    if item_id in read_files_saved(path):
+        return False
+    place = " ".join(str(where or "").replace("|", "/").split())[:200]
+    when = time.strftime("%Y-%m-%d", time.localtime(time.time() if now is None else now))
+    append_processed(path, f"{item_id} | {when} | {place}".rstrip(" |"))
+    return True
 
 
 def _record_ids(text):
@@ -479,6 +514,51 @@ def _signed_hatch(did):
             except Exception:
                 pass
     return False
+
+
+def _draft_files(did):
+    """How many files are attached to a draft (a part with a file name or an attachment id); None if the draft is gone.
+    The metadata read cannot show attachments, so this is a separate full read."""
+    try:
+        d = gmail_api._api_retry("GET", f"/drafts/{did}", {"format": "full"})
+    except gmail_api.GmailError as e:
+        if " 404 " in str(e):
+            return None
+        raise
+    n = 0
+    stack = [(d.get("message") or {}).get("payload") or {}]
+    while stack:
+        part = stack.pop()
+        stack.extend(part.get("parts") or [])
+        if part.get("filename") or (part.get("body") or {}).get("attachmentId"):
+            n += 1
+    return n
+
+
+def _gate_files(rows, saved_path, log):
+    """Issue 143: no note that carries files is deleted until its id is in the files-saved record, whichever rule said "delete".
+    Returns (rows, waiting) where waiting lists (rec, file count). A failed or empty check keeps the note."""
+    saved, out, waiting = None, [], []
+    for row in rows:
+        r, action, label, reason = row
+        if action == "delete":
+            try:
+                n = _draft_files(r["draft_id"])
+            except gmail_api.GmailError as e:
+                log.write(f"sweep: keeping {r['draft_id']}: could not check it for attached files: {e}")
+                row = (r, "keep", label, "could not check for attached files: kept")
+            else:
+                if n is None:
+                    row = (r, "keep", label, "gone while the attached-files check ran: nothing to delete")
+                elif n:
+                    if saved is None:
+                        saved = read_files_saved(saved_path)
+                    if not ({r["draft_id"], r["message_id"]} & saved):
+                        log.write(f"sweep: keeping {r['draft_id']}: {n} attached file(s) not saved yet")
+                        row = (r, "keep", label, f"files not saved yet ({n} attached): kept until its id is in the files-saved record")
+                        waiting.append((r, n))
+        out.append(row)
+    return out, waiting
 
 
 _META = ["Subject", "From", "To", "Cc", "Bcc", "Date"]
@@ -653,15 +733,18 @@ def load_records(paths=None):
     return _published_records(READER_RECORDS if paths is None else paths)
 
 
-def write_status(path, now, recs, fleet, records, paths, sources=None):
-    """draft-sweep-status.json: what the hub digest reads. Fleet notes kept without proof, with their pair and time; no bodies."""
+def write_status(path, now, recs, fleet, records, paths, sources=None, files_waiting=None):
+    """draft-sweep-status.json: what the hub digest reads. Fleet notes kept without proof, with their pair and time; no bodies.
+    files_waiting: notes kept because their attached files are not saved yet (id, file count, age; never file names)."""
     sources = sources or {}
     unproven = []
     for r, action, label, reason in fleet:
         if action == "keep" and reason.startswith(("absorption not verified", "not handled yet")):
             p = parties(r["subject"])
             unproven.append({"id": r["draft_id"], "pair": p[0] if p else label, "t": int(r["t"]), "age_h": round((now - r["t"]) / 3600, 1)})
-    doc = {"at": int(now), "drafts": len(recs), "fleet": len(fleet), "unproven": unproven,
+    waiting = [{"id": r["draft_id"], "files": n, "t": int(r["t"]), "age_h": round((now - r["t"]) / 3600, 1)}
+               for r, n in (files_waiting or [])]
+    doc = {"at": int(now), "drafts": len(recs), "fleet": len(fleet), "unproven": unproven, "files_waiting": waiting,
            "records": {k: {"path": paths.get(k, ""), "source": sources.get(k, "unknown"), "ids": len(v)}
                        for k, v in records.items()}}
     try:
@@ -675,8 +758,9 @@ def write_status(path, now, recs, fleet, records, paths, sources=None):
 
 
 def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, owner=None, mine=None, reader_records=None,
-          status_path=None):
+          status_path=None, files_saved_path=None):
     out = out or sys.stdout
+    files_saved_path = FILES_SAVED if files_saved_path is None else files_saved_path
     # The mailbox owner is read from the account once per run, never written into this public repo. If the lookup
     # fails the GmailError ends the sweep before anything is listed or deleted.
     owner = (owner or gmail_api.api("GET", "/profile")["emailAddress"]).lower()
@@ -691,6 +775,7 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     records, record_sources = load_records(paths)
     labelled = label_absorbed(recs, processed, mine, apply)
     rows = [(r,) + decide(r, processed, now, cache, owner, mine, records) for r in recs]
+    rows, files_waiting = _gate_files(rows, files_saved_path, log)
     by_tag = {}
     for r, action, label, reason in rows:
         if action != "other":
@@ -716,7 +801,7 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     mode = "APPLIED" if apply else "DRY RUN"
     unabsorbed = sum(1 for row in fleet if row[1] == "keep" and row[2].endswith("[unabsorbed]"))
     if apply and status_path:
-        write_status(status_path, now, recs, fleet, records, paths, record_sources)
+        write_status(status_path, now, recs, fleet, records, paths, record_sources, files_waiting)
     print(f"draft sweep ({mode}): {len(recs)} drafts, {len(fleet)} fleet notes, {others} not fleet notes (never touched)", file=out)
     for label in sorted(by_tag):
         print(f"  {label}: {by_tag[label]['delete'] + by_tag[label]['keep']} (delete {by_tag[label]['delete']}, keep {by_tag[label]['keep']})", file=out)
@@ -734,10 +819,11 @@ def sweep(processed_path, log, apply=False, now=None, sweep_dir=None, out=None, 
     print(f"  not fleet notes remaining: {others}", file=out)
     print(f"  labelled absorbed this pass ({'applied' if apply else 'would label'}): {labelled}", file=out)
     print(f"  unabsorbed older than 24 h (every pair): {unabsorbed}", file=out)
+    print(f"  files waiting for NX-01 to save: {len(files_waiting)}", file=out)
     log.write(f"sweep {mode}: {len(recs)} drafts, {len(fleet)} fleet, {len(dels)} to delete, {deleted} deleted, {others} other, "
-              f"{labelled} labelled, {unabsorbed} unabsorbed over 24 h")
+              f"{labelled} labelled, {unabsorbed} unabsorbed over 24 h, {len(files_waiting)} files waiting")
     return {"drafts": len(recs), "fleet": len(fleet), "deleted": deleted, "would_delete": len(dels), "other": others,
-            "labelled": labelled, "unabsorbed_old": unabsorbed}
+            "labelled": labelled, "unabsorbed_old": unabsorbed, "files_waiting": len(files_waiting)}
 
 
 class PublishReadError(Exception):
@@ -815,7 +901,21 @@ def main(argv=None):
                              "Default: NCC-74656=~/repos/hub/tower/peer-notes-processed.txt")
     parser.add_argument("--publish-read", nargs=2, metavar=("PROCESSED_FILE", "REPO_PATH"),
                         help="Publish an IDs-only read record to the workspace repository's main branch")
+    parser.add_argument("--files-saved", metavar="ID",
+                        help="Record that the files attached to this note (its draft id or message id) are saved, so --sweep may delete it. "
+                             "NX-01 runs this after it pulls the files into a release")
+    parser.add_argument("--where", default="", help="With --files-saved: where the files went (one line, kept in the record)")
+    parser.add_argument("--files-saved-file", default=None, metavar="PATH",
+                        help="The files-saved record for --files-saved and --sweep. Default: ~/.claude/state/note-files-saved.txt")
     args = parser.parse_args(argv)
+    if args.files_saved:
+        try:
+            added = record_files_saved(os.path.expanduser(args.files_saved_file or FILES_SAVED), args.files_saved, args.where)
+        except ValueError as e:
+            print(f"files-saved: {e}", file=sys.stderr)
+            return 1
+        print(f"files-saved: {args.files_saved} {'recorded' if added else 'was already recorded'}")
+        return 0
     if args.publish_read:
         try:
             count, changed = publish_read(*args.publish_read)
@@ -845,7 +945,8 @@ def main(argv=None):
                 for item in args.reader_record:
                     party, _, path = item.partition("=")
                     rr[party] = os.path.expanduser(path)
-            sweep(args.processed, log, apply=args.apply, reader_records=rr, status_path=STATUS_FILE)
+            sweep(args.processed, log, apply=args.apply, reader_records=rr, status_path=STATUS_FILE,
+                  files_saved_path=os.path.expanduser(args.files_saved_file) if args.files_saved_file else None)
             return 0
         check_notes(args.processed[0], log, poll=args.poll)
         return 0
