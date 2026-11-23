@@ -996,5 +996,105 @@ class BypassGapTests(Fixture):
         self.assertEqual(w._quoted_text_as_text("ls > out.txt"), "ls > out.txt")  # nothing outside quotes is ever touched
 
 
+class Issue130Tests(Fixture):
+    """Issue 130: ordinary lane commands were refused as a search into a listed folder, or as a change to the wall's files. Each shape below
+    is the shape of a real refused command with the names made up. The session starts in self.tmp, a folder that holds a listed folder (the
+    real session starts in a folder above the client areas). The second half proves the wall still refuses the real thing."""
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        self.proj = self.p("work/proj")
+        os.makedirs(os.path.join(self.lane, "sweep", "pw"))
+        os.makedirs(os.path.join(self.proj, "src"))
+        os.makedirs(w.wall_dir(), exist_ok=True)  # the wall's own folder exists on a real machine; the fake home needs one too
+        self.assertTrue(os.path.isdir(self.p("wall/clientA")))
+
+    def run_bash(self, command, cwd=None):
+        return w.evaluate({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd or self.tmp}, w.load_paths())
+
+    def allowed(self, command, cwd=None):
+        r = self.run_bash(command, cwd)
+        self.assertIsNone(r, "wrongly refused: %s -> %s" % (command, r))
+
+    def refused(self, command, cwd=None):
+        r = self.run_bash(command, cwd)
+        self.assertIsNotNone(r, "wrongly allowed: %s" % command)
+
+    # ---- the refusals logged on the issue ----
+
+    def test_heredoc_prose_with_search_words_is_not_a_search(self):
+        self.allowed("cat > %s/note.md <<'EOF'\nfind them and search open and closed issues; du and tar are fine words\nEOF\nbash ~/.claude/scripts/lane.sh start %s" % (self.lane, self.lane))
+        self.allowed("cat <<'EOF' > %s/prompt.md\nsearch every folder, find the list, tree of the issues\nEOF" % self.lane)
+
+    def test_python_heredoc_with_grep_count_on_one_file(self):
+        self.allowed("python3 - <<'EOF'\nimport subprocess\nprint('find it')\nEOF\ngrep -c done %s/status.md" % self.lane)
+        self.allowed("python3 - <<'EOF'\nprint('git grep -r x')\nEOF\ngrep -c x %s/status.md" % self.lane)
+
+    def test_cp_r_out_of_a_lane_folder_into_a_project(self):
+        self.allowed("cp -r %s/sweep %s/src" % (self.lane, self.proj))
+        self.allowed("L=%s; P=%s; mkdir -p $P/src && cp -r $L/sweep/* $P/src/ && ls -R $P | head" % (self.lane, self.proj))
+
+    def test_git_show_piped_to_grep_is_not_git_grep(self):
+        self.allowed("git show origin/main:README.md | grep -n phone")
+        self.allowed("git log --oneline | grep -rn x %s/src" % self.proj)
+
+    def test_named_root_is_the_only_root_walked(self):
+        self.allowed("grep -rn pattern %s --include=*.py" % self.proj)
+        self.allowed("find %s -name '*.md' -newer %s/status.md" % (self.proj, self.lane))
+
+    def test_docker_run_with_a_lane_folder_mounted(self):
+        self.allowed("L=%s; cd $L/sweep && timeout 600 docker-heavy.sh docker run --rm -v $L/sweep/pw:/pw -w /pw img sh -c 'node sweep.mjs /pw/out'" % self.lane)
+
+    def test_phone_layout_command_after_a_variable_cd(self):
+        self.allowed("L=%s; W=%s; cd $W && mkdir -p .phone-sweep/pw && echo '.phone-sweep/' >> \"$(git rev-parse --git-path info/exclude)\" && cp $L/sweep/sweep.mjs .phone-sweep/sweep.mjs" % (self.lane, self.proj))
+
+    def test_docker_prettier_after_a_variable_cd(self):
+        self.allowed("W=%s; cd $W && docker run --rm -v $W:/app -w /app img sh -c 'npx prettier --write src/a.js'" % self.proj)
+
+    # ---- the wall still holds ----
+
+    def test_a_search_into_a_listed_folder_or_its_parent_is_still_refused(self):
+        for cmd in ("grep -r secret %s" % self.p("wall/clientA"), "grep -rn secret %s" % self.p("wall"), "find %s -name '*.md'" % self.p("wall"),
+                    "rg secret %s" % self.p("wall"), "cp -r %s %s" % (self.p("wall"), self.proj), "du -sh %s" % self.p("wall"),
+                    "cd %s && grep -r secret ." % self.p("wall"), "grep -r secret %s %s" % (self.proj, self.p("wall/clientB"))):
+            self.refused(cmd)
+
+    def test_a_search_with_no_root_from_a_folder_holding_a_listed_folder_is_still_refused(self):
+        for cmd in ("rg foo", "find -name x", "find . -name x", "grep -r foo", "grep -r foo .", "du -sh", "tree", "ls -R", "git grep foo", "rg -g '*.py' src"):
+            self.refused(cmd)
+
+    def test_the_search_words_in_a_heredoc_that_a_shell_runs_still_count(self):
+        self.refused("bash <<'EOF'\ngrep -r secret %s\nEOF" % self.p("wall"))
+        self.refused("sh -c 'find %s'" % self.p("wall"))
+        self.refused("docker run --rm img sh -c 'du -sh %s'" % self.p("wall"))
+        self.refused("eval 'grep -r x %s'" % self.p("wall"))
+
+    def test_a_listed_path_is_still_refused_when_a_variable_names_it(self):
+        self.refused("D=%s; cat $D/docs/secret.txt" % self.p("wall/clientA"))
+        self.refused("D=%s; grep -r x $D" % self.p("wall"))
+        self.refused("cat %s" % self.p("wall/clientA/docs/secret.txt"))
+
+    def test_grep_and_glob_and_read_still_refuse_a_listed_root(self):
+        self.assertIsNotNone(w.evaluate({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": self.p("wall")}, "cwd": self.tmp}, w.load_paths()))
+        self.assertIsNotNone(w.evaluate({"tool_name": "Glob", "tool_input": {"pattern": "**/*.md", "path": self.p("wall/clientA")}, "cwd": self.tmp}, w.load_paths()))
+        self.assertIsNotNone(w.evaluate({"tool_name": "Read", "tool_input": {"file_path": self.p("wall/clientA/docs/secret.txt")}, "cwd": self.tmp}, w.load_paths()))
+
+    def test_a_change_to_the_wall_the_list_or_settings_is_still_refused(self):
+        wall = w.wall_dir()
+        settings = self.p("home/.claude/settings.json")
+        for cmd in ("echo x > %s/no_ai_wall.py" % wall, "rm %s/no-ai-wall-guard.py" % wall, "echo x >> %s" % self.pfile, "sed -i s/a/b/ %s" % settings,
+                    "cp /tmp/x %s/new.py" % wall, "W=%s; cd $W; echo x > no_ai_wall.py" % wall, "W=%s; cd $W && rm no_ai_wall.sh" % wall,
+                    "W=%s; cd $W; cp /tmp/x ." % wall, "cd \"$(cat /tmp/where)\"; rm no_ai_wall.py", "cd %s && echo x > settings.json" % self.p("home/.claude"),
+                    "L=%s; cd $L && cp /tmp/x %s/no_ai_wall.py" % (self.lane, wall)):
+            self.refused(cmd)
+
+    def test_a_variable_reassigned_before_use_is_not_trusted(self):
+        wall = w.wall_dir()
+        self.refused("W=%s; W=$(cat /tmp/x); cd $W; echo x > no_ai_wall.py" % self.proj)
+        self.refused("W=%s; if true; then W=%s; fi; cd $W; echo x > no_ai_wall.py" % (self.proj, wall))
+
+
 if __name__ == "__main__":
     unittest.main()

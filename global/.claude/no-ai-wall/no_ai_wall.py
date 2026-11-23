@@ -321,6 +321,381 @@ def _is_recursive(words):
     return False
 
 
+# ---- reading a shell command as commands (issue 130) -----------------------------------------------------------------
+# The old reading took every word of the whole text (heredoc prose, quoted sentences, words on both sides of a pipe) as one command line, so
+# a word like find, du or tar anywhere made the command "a search", and a search with no root named always walked the working folder.
+# The reading below keeps the old, wider one whenever the text cannot be read with certainty (an unclosed quote).
+
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_DOC_EXTENSIONS = (".md", ".txt", ".json", ".yml", ".yaml", ".tsv", ".csv", ".log", ".html", ".diff", ".patch")  # a file with one of these is text, not a script
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+_HEREDOC_READERS = {"cat", "tee", "node", "perl", "ruby", "php", "deno", "bun", "gh", "git", "sed", "awk", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "jq", "grep"}
+_SHELL_AFTER_PIPE = re.compile(r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|eval|source|xargs|ssh|su|sudo|env|exec|python[\d.]*|node|perl|ruby|php)(?![\w.-])")
+
+
+def _shell_commands(text):
+    """-> a list of commands, each a list of (word, quoted), or None when the text cannot be read with certainty. A command ends at an unquoted
+    ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped. A quoted word is data, except the script of a shell's -c."""
+    cmds, toks = [], []
+    buf, quoted, started, skip = [], False, False, False
+    i, n = 0, len(text)
+
+    def end_word():
+        nonlocal buf, quoted, started, skip
+        if started:
+            if skip:
+                skip = False
+            else:
+                toks.append(("".join(buf), quoted))
+        buf, quoted, started = [], False, False
+
+    def end_cmd():
+        nonlocal toks, skip
+        end_word()
+        skip = False
+        if toks:
+            cmds.append(toks)
+        toks = []
+
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            if text[i + 1:i + 2] != "\n":
+                buf.append(text[i + 1:i + 2])
+                started = quoted = True
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                return None
+            buf.append(text[i + 1:j])
+            started = quoted = True
+            i = j + 1
+        elif c == '"':
+            j, piece = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 1
+                piece.append(text[j])
+                j += 1
+            if j >= n or "`" in piece or "$(" in "".join(piece):  # a substitution inside quotes runs: unsure
+                return None
+            buf.append("".join(piece))
+            started = quoted = True
+            i = j + 1
+        elif c in " \t":
+            end_word()
+            i += 1
+        elif c == "#" and not started:
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c in ";\n|`()" or (c == "&" and text[i + 1:i + 2] != ">"):
+            end_cmd()
+            i += 1
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            end_cmd()
+            i += 2
+        elif c in "<>" or (c == "&" and text[i + 1:i + 2] == ">"):
+            if started and not quoted and "".join(buf).isdigit():
+                buf, started = [], False  # the fd number of `2>&1`
+            end_word()
+            while i < n and text[i] in "<>&|":
+                i += 1
+            skip = True
+        else:
+            buf.append(c)
+            started = True
+            i += 1
+    end_cmd()
+    return cmds
+
+
+def _heredoc_is_data(before, after):
+    """True when the body of a heredoc is text that no shell reads: the receiver (the command before `<<`) is a program that only reads it
+    (cat, tee, git, gh, sed ...), it is not piped on into a shell or interpreter, and it is not written to a file that could be a script."""
+    cmds = _shell_commands(before)
+    if not cmds or _SHELL_AFTER_PIPE.search(after):
+        return False
+    words = [w for w, q in cmds[-1]]
+    i = _skip_wrappers(words, scan=False)
+    while i < len(words) and (words[i].startswith("-") or words[i].isdigit()):
+        i += 1
+    if i >= len(words):
+        return False
+    prog = os.path.basename(words[i])
+    if not (prog in _HEREDOC_READERS or re.fullmatch(r"python[\d.]*", prog)):
+        return False
+    targets = [m.group(1).strip("'\"") for m in _REDIRECT.finditer(before)]
+    if prog == "tee":
+        targets += [w for w in words[i + 1:] if not w.startswith("-")]
+    return all(t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.startswith("&") for t in targets)
+
+
+def _strip_heredocs(command):
+    """The command without the bodies of heredocs whose text no shell reads (see _heredoc_is_data). A heredoc with no terminator line, or
+    one handed to a shell (`bash <<EOF`, `cat <<EOF | sh`), keeps its body: it is judged as the commands it is."""
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _HEREDOC.search(line)
+        if not m:
+            continue
+        end = next(g for g in m.groups()[1:] if g is not None)
+        j = i
+        while j < len(lines) and (lines[j].lstrip("\t") if m.group(1) else lines[j]) != end:
+            j += 1
+        if j >= len(lines):
+            continue
+        if _heredoc_is_data(line[:m.start()], line[m.end():]):
+            i = j + 1
+        else:
+            out.extend(lines[i:j + 1])
+            i = j + 1
+    return "\n".join(out)
+
+
+def _split_statements(text):
+    """-> [(statement text, separator)] split at an unquoted ; newline && || | & outside parentheses (quotes and backslashes respected)."""
+    out, start, depth, i, n = [], 0, 0, 0, len(text)
+    sq = dq = False
+    while i < n:
+        c = text[i]
+        if c == "\\" and not sq:
+            i += 2
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        elif not sq and not dq:
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth = max(0, depth - 1)
+            elif depth == 0 and c in ";\n|&":
+                if c == "&" and (text[i - 1:i] in (">", "<") or text[i + 1:i + 2] == ">"):
+                    i += 1
+                    continue
+                sep = c
+                if c in "|&" and text[i + 1:i + 2] == c:
+                    sep = c * 2
+                out.append((text[start:i], sep))
+                i += len(sep)
+                start = i
+                continue
+        i += 1
+    out.append((text[start:], ""))
+    return out
+
+
+_ASSIGN = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=((?:[A-Za-z0-9_./:@%+=,~-]|\$HOME|\$\{HOME\})*)[ \t]*\Z")
+_BLOCK_START = re.compile(r"[ \t]*(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|!|\{|\})(?![\w-])")
+_REBINDERS = r"(?:read|for|select|local|declare|typeset|export|readonly|unset|mapfile|readarray|getopts|let|eval|source|printf)"
+
+
+def _subst(text, known):
+    """`$NAME` and `${NAME}` replaced by their known value, outside single quotes."""
+    if not known or "$" not in text:
+        return text
+    out, i, n, sq, dq = [], 0, len(text), False, False
+    while i < n:
+        c = text[i]
+        if c == "\\" and not sq:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        elif c == "$" and not sq:
+            m = re.match(r"\$(?:\{(\w+)\}|(\w+))", text[i:])
+            name = (m.group(1) or m.group(2)) if m else None
+            if name in known:
+                out.append(known[name])
+                i += m.end()
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _resolve_vars(command):
+    """The command with `$NAME` written out for every plain assignment (`W=/abs/dir; cd $W`) that runs unconditionally before the use: the
+    statements up to the first one that sits behind && || | & or inside a block, subshell or heredoc. The text a later check reads then names
+    the folder the shell will really use. A name that is reassigned later in any other way, or set from anything but plain text, is dropped
+    (it stays as `$NAME`, which the write check still fails closed on)."""
+    if "$" not in command or "=" not in command:
+        return command
+    known, out, collecting = {}, [], True
+    heredoc = _HEREDOC.search(command)
+    cut = command.rfind("\n", 0, heredoc.start()) + 1 if heredoc else len(command)  # no statement from the heredoc's line on is a plain assignment
+    head, tail = command[:cut], command[cut:]
+    for text, sep in _split_statements(head):
+        s = _subst(text, known)
+        m = _ASSIGN.match(s) if collecting and _ASSIGN.match(text) else None
+        if m:
+            known[m.group(1)] = m.group(2)
+        else:
+            for name in list(known):
+                if re.search(r"(?<![\w$])%s=" % name, text) or re.search(r"\b%s\b[^;&|\n]*\b%s\b" % (_REBINDERS, name), text):
+                    del known[name]
+        if sep in ("&&", "||", "|", "&") or _BLOCK_START.match(text) or re.search(r"[(){}`]", text):
+            collecting = False
+        out.append(s + sep)
+    out.append(_subst(tail, known))
+    return "".join(out)
+
+
+# options that take a value, so the word after one is not an operand (a search root or a pattern)
+_VALUE_SHORT = {"grep": "ABCmefdD", "rg": "gtTABCmjMEfedr", "fd": "eEtdSczjxXo", "tree": "LPIo", "du": "dBtX", "ls": "IwT"}
+_VALUE_LONG = {
+    "grep": {"--after-context", "--before-context", "--context", "--max-count", "--regexp", "--file", "--directories", "--devices", "--include", "--exclude",
+             "--exclude-dir", "--include-dir", "--label", "--binary-files"},
+    "rg": {"--glob", "--iglob", "--type", "--type-not", "--type-add", "--after-context", "--before-context", "--context", "--max-count", "--threads",
+           "--max-columns", "--encoding", "--file", "--regexp", "--max-depth", "--maxdepth", "--max-filesize", "--sort", "--sortr", "--pre", "--pre-glob",
+           "--replace", "--colors", "--path-separator", "--context-separator", "--ignore-file", "--engine"},
+    "fd": {"--extension", "--exclude", "--type", "--max-depth", "--min-depth", "--exact-depth", "--size", "--color", "--threads", "--owner", "--changed-within",
+           "--changed-before", "--ignore-file", "--format", "--max-results", "--batch-size", "--path-separator"},
+    "tree": {"--charset", "--filelimit", "--sort", "--timefmt"},
+    "du": {"--max-depth", "--block-size", "--threshold", "--exclude-from", "--exclude", "--files0-from", "--time-style"},
+    "ls": {"--ignore", "--width", "--tabsize", "--sort", "--time", "--format", "--color", "--block-size"},
+}
+_PATTERN_OPTIONS = ("-e", "-f", "--regexp", "--file", "--files", "-g")  # a pattern given by option: every operand is then a path
+_SEARCH_KEY = {"grep": "grep", "egrep": "grep", "fgrep": "grep", "zgrep": "grep", "rg": "rg", "ag": "rg", "ack": "rg", "fd": "fd", "fdfind": "fd"}
+_ROOTS_ONLY = {"rsync", "tar", "zip", "locate", "mlocate", "plocate", "scp"}  # name their own folders; with none named they walk nothing
+
+
+def _operands(key, rest):
+    """The non-option words of a command line, past each option's value."""
+    out, i = [], 0
+    while i < len(rest):
+        w = rest[i]
+        i += 1
+        if w == "--":
+            out.extend(rest[i:])
+            break
+        if w.startswith("--"):
+            if "=" not in w and w in _VALUE_LONG.get(key, ()):
+                i += 1
+        elif w.startswith("-") and len(w) > 1:
+            if w[-1] in _VALUE_SHORT.get(key, ""):
+                i += 1
+        else:
+            out.append(w)
+    return out
+
+
+def _names_a_root(words, cur):
+    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists."""
+    for w in words:
+        if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
+            return True
+    return False
+
+
+def _search_of(prog, rest, cur, xargs):
+    """-> (recursive, walks_working_folder) for one program with its words."""
+    if prog in _ROOTS_ONLY:
+        return True, False
+    if prog in ("cp", "mv"):
+        return any(x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x or "a" in x) for x in rest), False
+    if prog == "find":
+        roots = []
+        for x in rest:
+            if x in ("-H", "-L", "-P") or x.startswith(("-O", "-D")):
+                continue
+            if x.startswith(("-", "(", "!", ",")):
+                break
+            roots.append(x)
+        return True, not (xargs or _names_a_root(roots, cur))
+    if prog in ("tree", "du") or (prog == "ls" and any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest)):
+        return True, not (xargs or _names_a_root(_operands(prog, rest), cur))
+    key = _SEARCH_KEY.get(prog)
+    if key == "grep" and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
+        return False, False
+    if key is None and not (prog == "git" and "grep" in rest[:3]):
+        return False, False
+    if prog == "git":
+        rest = rest[rest.index("grep") + 1:]
+        key = "grep"
+    ops = _operands(key, rest)
+    if key == "fd" and any(x in ("--search-path", "--base-directory") or x.startswith(("--search-path=", "--base-directory=")) for x in rest):
+        return True, False
+    if not any(x.startswith(_PATTERN_OPTIONS) for x in rest):
+        ops = ops[1:]  # the first operand is the pattern
+    return True, not (xargs or _names_a_root(ops, cur))
+
+
+def _is_launcher_words(words):
+    i = _skip_wrappers(words, scan=False)
+    if i < len(words) and os.path.basename(words[i]) in ("bash", "sh"):
+        i += 1
+        if i < len(words) and words[i].startswith("-"):
+            return False
+    return i < len(words) and os.path.basename(words[i]) == "lane.sh"
+
+
+_RUNS_A_STRING = ("env", "ssh", "su", "watch", "script", "parallel", "flock", "runuser", "sg")
+
+
+def _searches(text, cwd, depth=0):
+    """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
+    or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
+    words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
+    cmds = _shell_commands(text)
+    if cmds is None or depth > 4:
+        return None
+    recursive, folders, words, cur = False, [], [], cwd
+    for cmd in cmds:
+        ws = [w for w, q in cmd]
+        if _is_launcher_words(ws):
+            continue
+        words.extend(ws)
+        if ws[0] == "cd" and not cmd[0][1]:
+            arg = next((a for a in ws[1:] if not a.startswith("-")), None)
+            cur = cwd if arg is None or "$" in arg or "`" in arg else expand(arg, cur)
+            continue
+        if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
+            continue
+        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd if not q)
+        for i, (w, q) in enumerate(cmd):
+            if q:
+                # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell
+                if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
+                    sub = _searches(w, cur, depth + 1)
+                    if sub is None:
+                        return None
+                    recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
+                continue
+            prog = os.path.basename(w)
+            rest = ws[i + 1:]
+            script = None
+            if prog in _SHELLS:
+                for k, x in enumerate(rest):
+                    if x.startswith("-") and not x.startswith("--") and "c" in x:
+                        script = rest[k + 1] if k + 1 < len(rest) else None
+                        break
+            elif prog == "eval":
+                script = " ".join(rest)
+            if script is not None:
+                sub = _searches(script, cur, depth + 1)
+                if sub is None:
+                    return None
+                recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
+                continue
+            rec, walks = _search_of(prog, rest, cur, xargs)
+            recursive = recursive or rec
+            if walks:
+                folders.append(cur)
+    return recursive, folders, words
+
+
 def _expand_globs(path, limit=20000):
     """What a wildcard path matches on disk. The cap is far above any real folder: a short cap could cut a guarded file off the list."""
     if not any(ch in GLOB_CHARS for ch in path):
@@ -341,20 +716,52 @@ def bash_hits(command, cwd, paths):
     walk into; kind is "path" or "root". None when clean. Best effort on text: a path built at run time is out of reach, which is why
     the folder the session starts in is checked too.
 
-    A segment that only starts a lane (lane.sh) is not a search (issue 233): its folder argument is a working folder, which the launcher
-    itself refuses when it is listed and whose tool calls the lane's own hook guards. Such a segment still counts for listed paths, but
-    it neither makes the command a search nor has its operands walked as search roots."""
+    Every listed path the full text names is refused, prose and heredoc bodies included. Whether the command SEARCHES is read from its
+    commands (issue 130): heredoc text no shell reads and quoted words are data, each command is judged by itself, and a search that names a
+    root walks only that root; the working folder is walked only by a search that names none. A segment that only starts a lane (lane.sh) is
+    not a search (issue 233): its folder argument is a working folder, which the launcher itself refuses when it is listed and whose tool
+    calls the lane's own hook guards. When the text cannot be read with certainty the old, wider reading is used (_bash_hits_wide)."""
     cwd = cwd or os.getcwd()
-    segs = _segments(command)
-    if any(_is_launcher(seg) for seg in segs):
-        r = _bash_hits(command, cwd, paths, searching=False)
-        if r:
-            return r
-        command = " ; ".join(seg for seg in segs if not _is_launcher(seg))
-    return _bash_hits(command, cwd, paths)
+    info = _searches(_strip_heredocs(command), cwd)
+    if info is None:
+        segs = _segments(command)
+        if any(_is_launcher(seg) for seg in segs):
+            r = _bash_hits_wide(command, cwd, paths, searching=False)
+            if r:
+                return r
+            command = " ; ".join(seg for seg in segs if not _is_launcher(seg))
+        return _bash_hits_wide(command, cwd, paths)
+    r = _bash_hits_wide(command, cwd, paths, searching=False)
+    if r:
+        return r
+    recursive, folders, words = info
+    if not recursive:
+        return None
+    cur = cwd
+    for i, w in enumerate(words):
+        for base in {cur, cwd}:
+            for piece in [w] + [p for p in re.split(r"[=:,]", w) if p and p != w]:
+                if not piece or (piece.startswith("-") and "/" not in piece and "~" not in piece):
+                    continue
+                full = expand(piece, base)
+                for cand in [full] + _expand_globs(full):
+                    hit = paths.contains(cand, base)
+                    if hit:
+                        return hit, "root"
+        if w == "cd" and i + 1 < len(words):
+            cur = expand(words[i + 1], cur)
+    for folder in folders:  # a search with no folder named walks the working folder
+        hit = paths.contains(folder, folder)
+        if hit:
+            return hit, "root"
+    for tok in text_paths(" ".join(words)):
+        hit = paths.contains(expand(tok, cwd), cwd)
+        if hit:
+            return hit, "root"
+    return None
 
 
-def _bash_hits(command, cwd, paths, searching=True):
+def _bash_hits_wide(command, cwd, paths, searching=True):
     words = _words(command)
     recursive = searching and _is_recursive(words)
     seen = []
@@ -1211,7 +1618,7 @@ def evaluate(payload, paths=None):
                     return r
         return None
     if tool == "Bash":
-        command = str(ti.get("command") or "")
+        command = _resolve_vars(str(ti.get("command") or ""))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed
         r = bash_hits(command, cwd, paths)
         if r:
             return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
