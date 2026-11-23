@@ -1284,5 +1284,72 @@ class Issue130Tests(Fixture):
         self.refused("cat > %s/no_ai_wall.py <<'EOF'\n%s\nEOF" % (wall, body))  # the same text, written into the wall itself, is still refused
 
 
+class Issue146Tests(Fixture):
+    """Issue 146: a lane's read-back check was refused as "a search that would read the no-AI list". The cause: the last check read the whole
+    text as ONE word list, so `-R` (gh's --repo) in `gh pr view -R owner/name` counted as `grep -R` (recursive) from a `grep` earlier in the
+    text, and the quoted pattern given to that grep named a folder above the list file. Each command is now read on its own. The list file sits
+    in its own folder (tmp/cfg) so only the list-file check can refuse here, as on a real machine, where the list is in a folder of its own."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(self.p("cfg"))
+        self.pfile = self.p("cfg/paths.txt")
+        os.environ["NO_AI_PATHS_FILE"] = self.pfile
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        os.makedirs(self.lane)
+        os.makedirs(w.wall_dir(), exist_ok=True)
+
+    def test_the_exact_command_that_was_refused_is_allowed(self):
+        # the refused call, with the names made up: the pattern's start (a folder above the list file) is the tmp folder, as /home was
+        cmd = ("cd %s && head -1 report.md | cut -c1-80; sed -n '/^## Proof/,/^$/p' report.md | grep -oE \"%s/[^ ,;)]+\" | sort -u | "
+               "while read p; do [ -e \"$p\" ] && echo \"exists $p\" || echo \"MISSING $p\"; done; "
+               "gh api \"repos/owner/name/contents/hub/a.txt?ref=main\" --jq '.content|@base64d' | grep -c r-92081; "
+               "gh pr view 144 -R owner/name --json state,mergeCommit --jq '.state+\" \"+.mergeCommit.oid[:7]'") % (self.lane, self.tmp)
+        self.allowed(cmd, self.lane)
+        self.allowed(cmd, self.tmp)
+
+    def test_a_grep_without_r_and_a_gh_repo_flag_in_the_same_text_is_allowed(self):
+        for cmd in ("grep -oE \"%s/[^ ,;)]+\" report.md; gh pr view 144 -R owner/name" % self.tmp,
+                    "grep -c x report.md && gh pr list --repo owner/name -R owner/name",
+                    "grep -n x report.md | head -3\ngh pr checks 144 -R owner/name",
+                    "gh pr view 144 -R owner/name && grep -c x report.md",
+                    "echo %s/ ; grep x report.md ; gh issue view 5 -R owner/name" % self.tmp):
+            self.allowed(cmd, self.lane)
+
+    # ---- the wall still holds: a recursive read of the list's folder, or one above it, is refused however the command is built ----
+
+    def test_a_recursive_read_of_the_list_folder_is_still_refused(self):
+        cfg, t = self.p("cfg"), self.tmp
+        for cmd in ("grep -r secret %s" % cfg, "grep -rn x %s" % t, "grep -R x %s" % cfg, "grep -ri x %s" % cfg, "grep --recursive x %s" % cfg,
+                    "rg secret %s" % cfg, "tar cf - %s" % cfg, "cp -r %s /tmp/x" % cfg, "find %s -type f -exec cat {} +" % cfg, "git grep x %s" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_in_any_command_of_a_longer_text_is_still_refused(self):
+        cfg = self.p("cfg")
+        for cmd in ("echo hi; grep -r x %s" % cfg, "grep -c x report.md; grep -r x %s" % cfg, "grep -c x report.md && grep -R x %s" % cfg,
+                    "gh pr view 144 -R owner/name; grep -r x %s" % cfg, "grep -oE y report.md | sort\ngrep -rn x %s" % cfg,
+                    "gh pr view 144 -R owner/name | grep -r x %s" % cfg, "echo %s | xargs grep -r x" % cfg, "ls %s | xargs grep -rl x" % cfg,
+                    "grep \\\n  -r x %s" % cfg, "(grep -r x %s)" % cfg, "x=$(grep -r x %s)" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_inside_a_quoted_script_is_still_refused(self):
+        cfg = self.p("cfg")
+        for cmd in ("bash -c 'grep -r x %s'" % cfg, "sh -c \"cd /tmp; grep -R x %s\"" % cfg, "gh pr view 144 -R owner/name; bash -c 'grep -r x %s'" % cfg,
+                    "docker run --rm img sh -c 'grep -r x %s'" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_in_a_text_that_cannot_be_read_is_still_refused(self):
+        cfg = self.p("cfg")
+        self.refused("echo 'unclosed; grep -r x %s" % cfg, self.lane)  # the wide reading, as before
+
+    def test_the_refusal_is_the_list_file_one(self):
+        r = self.run_bash("grep -r secret %s" % self.p("cfg"), self.lane)
+        self.assertIsNotNone(r)
+        self.assertIn("no-AI list is private config", r[2])
+
+
 if __name__ == "__main__":
     unittest.main()

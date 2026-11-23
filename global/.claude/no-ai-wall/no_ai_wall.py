@@ -1672,6 +1672,25 @@ def _path_shaped(text):
     return bool(text) and len(text) < 4096 and "\n" not in text and ("/" in text or text.startswith((".", "~", "$HOME", "${HOME}")))
 
 
+def _command_word_groups(command):
+    """The words of a shell text, one group for each command in it (issue 146). reads_content_recursively looks for a program word and then an
+    option after it; over the whole text's words, `grep -oE x file; gh pr view -R owner/name` read gh's -R (its --repo) as grep's -R (recursive)
+    and refused an ordinary read. A quoted word that holds a space is also split into its own words (`bash -c 'grep -r x /dir'` stays a search),
+    and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before."""
+    cmds = _shell_commands(command)
+    if cmds is None:
+        return [_words(command)]
+    groups = []
+    for cmd in cmds:
+        g = []
+        for w, q in cmd:
+            g.append(w)
+            if any(ch.isspace() for ch in w):
+                g.extend(_words(w))
+        groups.append(g)
+    return groups or [_words(command)]
+
+
 def reads_content_recursively(words):
     """True for a shell command that reads or copies the CONTENT of every file under the folders it is given (a name-only listing such
     as `find -name`, `tree` or `du` is not one)."""
@@ -1798,8 +1817,7 @@ def evaluate(payload, paths=None):
             return deny_protected()
         if bash_writes_guarded(command, cwd):
             return deny_protected()
-        words = _words(command)
-        if reads_content_recursively(words):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
+        if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
             roots = _command_tokens(command, cwd) or [cwd]
             if any(reads_list(t) for t in roots):
                 return deny_list_search()
