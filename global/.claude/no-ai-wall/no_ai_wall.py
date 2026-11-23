@@ -935,7 +935,9 @@ def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
     """walk_cwd=False leaves out the guess that a search naming no root walks the working folder (used for the body of an interpreter's
     heredoc, where a word like `find` is as likely prose or code as a search); the roots a body names are checked either way."""
     words = _words(command)
-    recursive = searching and _is_recursive(words)
+    # Each command is judged on its own words (issue 146's reading): over the whole text, `grep -c x f; gh pr view -R owner/name` read gh's -R
+    # (its --repo) as grep's -R. A text that cannot be read with certainty is still one group of all its words, as before.
+    recursive = searching and any(_is_recursive(g) for g in _command_word_groups(command))
     seen = []
 
     def check(tok, base):
@@ -1678,9 +1680,11 @@ def _command_word_groups(command):
     and refused an ordinary read. A quoted word that holds a space is also split into its own words (`bash -c 'grep -r x /dir'` stays a search),
     and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before. A text with a substitution
     or a subshell (`$(`, a backtick, any parenthesis) is also read whole: the reader ends a command there, so `grep $(echo -r) x /dir` would
-    otherwise put the flag in another group than its grep."""
+    otherwise put the flag in another group than its grep. So is a text with a here-string or a heredoc (`<<`, which also covers `<<<`): its text
+    goes to the receiver as input or as code (`bash <<< "grep -r x /dir"`, `xargs grep x /dir <<< "-r"`, the same with a heredoc), and the reader
+    drops it from the command it feeds."""
     cmds = _shell_commands(command)
-    if cmds is None or "(" in command or "`" in command:
+    if cmds is None or "(" in command or "`" in command or "<<" in command:
         return [_words(command)] + _split_groups(cmds)
     return _split_groups(cmds) or [_words(command)]
 

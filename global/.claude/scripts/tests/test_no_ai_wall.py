@@ -1360,5 +1360,77 @@ class Issue146Tests(Fixture):
         self.assertIn("no-AI list is private config", r[2])
 
 
+class WideReadingTests(Fixture):
+    """A lane's read-back of a saved CI log was refused as "a search that would walk into a folder on the no-AI list", after the 146 fix was
+    installed. A text that writes a file and also runs a program the wall cannot vouch for (sed, or the `run` in `gh run view`) is read the
+    old, wide way, and the wide reading took every word of the whole text as one command line: `grep ...; gh pr checks 1 -R owner/name` made
+    gh's -R (its --repo) grep's -R, so the grep "walked" the session folder, which sits above a listed folder. Each command is now read on its
+    own there too. The session starts in self.tmp, a folder that holds the listed folders, as the real one starts above the client areas."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        os.makedirs(self.lane)
+        os.makedirs(w.wall_dir(), exist_ok=True)
+
+    def test_the_exact_command_that_was_refused_is_allowed(self):
+        cmd = ("gh run view 123 -R owner/name --log > ci.log; grep -n -E 'summary|skipped' ci.log | sed 's/^.*Z //'; "
+               "gh pr checks 149 -R owner/name --jq '.[].name'")
+        self.allowed(cmd, self.tmp)
+        self.allowed(cmd, self.lane)
+        self.allowed("cd %s && %s" % (self.lane, cmd), self.tmp)
+        self.allowed("gh run view 123 -R owner/name --log > %s/ci.log; grep -n skipped %s/ci.log | sed 's/a/b/'; gh pr checks 149 -R owner/name" % (self.lane, self.lane), self.tmp)
+
+    def test_each_way_into_the_wide_reading_with_a_later_gh_flag_is_allowed(self):
+        for cmd in ("gh pr checks 149 -R o/n > ci.log; grep -c x ci.log; sed -n 1p ci.log; gh pr view 149 -R o/n",  # a write and sed
+                    "gh run view 1 -R o/n --log > ci.log; grep -c x ci.log; gh pr view 149 -R o/n",  # a write and `gh run`
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -c x n.txt; gh pr view 149 -R o/n"):
+            self.allowed(cmd, self.tmp)
+
+    # ---- the wall still holds: the wide reading still finds a real recursive search ----
+
+    def test_a_recursive_search_of_a_listed_folder_in_such_a_text_is_still_refused(self):
+        a = self.p("wall/clientA")
+        for cmd in ("gh run view 1 -R o/n --log > ci.log; grep -rn x %s | sed -n 1p; gh pr view 1 -R o/n" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -R secret %s; gh pr checks 1 -R o/n" % a,
+                    "gh pr checks 1 -R o/n > ci.log; sed -n 1p ci.log; rg secret %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; grep --recursive x %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; git grep x %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; find %s -type f" % a):
+            self.refused(cmd, self.tmp)
+
+    def test_a_recursive_search_with_no_folder_named_still_walks_the_session_folder(self):
+        for cmd in ("echo hi > n.txt; sed -n 1p n.txt; grep -rn secret", "gh run view 1 -R o/n --log > ci.log; sed -n 1p ci.log; grep -rn x . ; gh pr view 1 -R o/n",
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -rn x"):
+            self.refused(cmd, self.tmp)
+
+    def test_a_here_string_that_hands_a_search_to_a_shell_or_a_flag_to_a_command_is_still_refused(self):
+        # the automated review of the first version: a here-string's text is the receiver's input or code, and the per-command reading dropped
+        # it, so `bash <<< "grep -r x DIR"` over a folder ABOVE a listed one was allowed. A folder above the list is the case where only the
+        # recursion decides (naming a listed folder itself is refused either way).
+        above = self.p("wall")
+        write = "echo hi > n.txt; sed -n 1p n.txt; "
+        for pre in ("", write):
+            for cmd in ('bash <<< "grep -r x %s"' % above, "sh <<< 'grep -R x %s'" % above,
+                        'bash <<< "rg x %s"' % above, 'sh <<< "find %s -type f -exec cat {} +"' % above, 'zsh <<< "cd /tmp; grep -rn x %s"' % above):
+                self.refused(pre + cmd, self.tmp)
+        # a flag handed to a search by a here-string: refused in the wide reading, which the first version of this change had loosened. (With no
+        # write in the text the same shape was already allowed before this change; that older gap is not covered here.)
+        self.refused(write + 'xargs grep x %s <<< "-r"' % above, self.tmp)
+        # the same flag in a heredoc body (the second review of this change)
+        self.refused(write + "xargs grep x %s <<EOF\n-r\nEOF" % above, self.tmp)
+        self.refused(write + "xargs grep x %s <<'EOF'\n-r\nEOF" % above, self.tmp)
+        self.refused(write + "xargs grep x %s <<-EOF\n\t-r\n\tEOF" % above, self.tmp)
+
+    def test_a_text_that_cannot_be_read_is_still_read_as_one_group(self):
+        a = self.p("wall/clientA")
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; echo 'unclosed; grep -r x %s" % a, self.tmp)
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; grep $(echo -r) x %s; gh pr view 1 -R o/n" % a, self.tmp)
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; bash -c 'grep -r x %s'" % a, self.tmp)
+
+
 if __name__ == "__main__":
     unittest.main()
