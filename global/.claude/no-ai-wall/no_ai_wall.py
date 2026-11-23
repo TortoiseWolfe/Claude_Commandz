@@ -1726,17 +1726,30 @@ def _split_groups(cmds):
     groups = []
     for cmd in cmds:
         g = []
-        text_flags = any(os.path.basename(w) in _TEXT_VALUE_PROGRAMS for w, q in cmd if not q)
-        prev = ""
-        for w, q in cmd:
+        start = _text_program_at(cmd)
+        for k, (w, q) in enumerate(cmd):
             g.append(w)
-            # a title or message handed to gh or git is text, never a program: `gh issue create --title "a grep before gh -R"` has no grep in it
-            as_text = text_flags and q and (prev in _TEXT_VALUE_FLAGS or w.split("=", 1)[0] in _TEXT_VALUE_FLAGS and w.startswith(("--title=", "--body=", "--message=")))
+            # a title or message handed to gh or git is text, never a program: `gh issue create --title "a grep before gh -R"` has no grep in it.
+            # Only the command's own program counts (see _text_program_at) and only the value right after its flag, so a gh elsewhere in the
+            # text, or another program's -t, never hides a quoted word.
+            as_text = start is not None and k > start + 1 and q and (cmd[k - 1][0] in _TEXT_VALUE_FLAGS or w.startswith(("--title=", "--body=", "--message=")))
             if any(ch.isspace() for ch in w) and not as_text:
                 g.extend(_words(w))
-            prev = w
         groups.append(g)
     return groups
+
+
+def _text_program_at(cmd):
+    """The index of gh or git when it is the program of this command (its first word, or the first word after the `--` of gated_post.sh),
+    else None. A wrapper in front (timeout, env, xargs, sudo) gives None: the stricter answer, the quoted words are split as before."""
+    s = 0
+    if cmd and os.path.basename(cmd[0][0]) == "gated_post.sh":
+        s = next((k + 1 for k, (w, q) in enumerate(cmd) if w == "--" and not q), None)
+        if s is None:
+            return None
+    if s < len(cmd) and not cmd[s][1] and cmd[s][0] in _TEXT_VALUE_PROGRAMS:
+        return s
+    return None
 
 
 _TEXT_VALUE_PROGRAMS = ("gh", "git")  # programs whose title, body and message flags (below) only ever carry text (issue 150)

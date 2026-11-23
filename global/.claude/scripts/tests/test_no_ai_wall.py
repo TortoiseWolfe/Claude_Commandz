@@ -1467,6 +1467,26 @@ class WideReadingTests(Fixture):
                     'git commit -m msg; bash -c "grep -r x %s"' % above, "env -S 'grep -r x %s'" % above, "watch -t 'grep -r x %s'" % above):
             self.refused(cmd, self.tmp)
 
+    def test_a_gh_or_git_elsewhere_in_the_text_does_not_hide_another_program_s_flag(self):
+        # the automated review of this change: the title exemption must belong to the command whose program is gh or git, not to any command
+        # of the text that happens to hold one of those words, and not to a wrapper's or another program's -t, -b or -m
+        above = self.p("wall")
+        for cmd in ('gh --version; ssh host -t "grep -r x %s"' % above, 'git status && xargs -t sh -c "grep -r x %s"' % above,
+                    'gh pr view 1 -R o/n; env -S -m "grep -r x %s"' % above,
+                    'echo gh; watch -b "grep -r x %s"' % above, 'git log | xargs -t sh -c "grep -r x %s"' % above,
+                    'gated_post.sh team b.md -- ssh host -t "grep -r x %s"' % above, 'gated_post.sh team b.md -- gh pr view 1; ssh host -t "grep -r x %s"' % above):
+            self.refused(cmd, self.tmp)
+            self.refused("echo hi > n.txt; sed -n 1p n.txt; " + cmd, self.tmp)
+
+    def test_eval_and_a_run_string_still_make_a_search_in_the_per_command_reading(self):
+        above = self.p("wall")
+        write = "echo hi > n.txt; sed -n 1p n.txt; "
+        for cmd in ("eval grep -r x %s" % above, 'eval "grep -r x %s"' % above, "eval 'gr'ep -r x %s" % above, 'sh -c "grep -r x %s"' % above,
+                    "env -S 'grep -r x %s'" % above, "ssh host 'grep -r x %s'" % above, "echo 'grep -r x %s' | sh" % above,
+                    "echo 'grep -r x %s' | xargs -I{} sh -c {}" % above):
+            self.refused(cmd, self.tmp)
+            self.refused(write + cmd, self.tmp)
+
     def test_a_heredoc_fed_to_a_container_stays_read_as_a_command_line(self):
         # not changed on purpose (issue 150, refusal 3): a container can mount a folder above a listed one and its shell can search the mount, so
         # the body of `docker run -i ... sh <<EOF` is not treated as data the way a host interpreter's body is
