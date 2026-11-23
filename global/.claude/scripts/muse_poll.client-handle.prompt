@@ -9,7 +9,8 @@ NEW <message id>[ ALERT] | <sender address> | <From> | <Subject> | <Date>
 2. kind mail: group the message IDs by client and run, once per client:
    {{HOME}}/.claude/scripts/muse_poll_record.sh client-mail "Client mail" "<client>" "<id> <id> ..."
 3. kind alerts: a routine alert is one whose subject is an admin login, a password recovery, a lockout, a blocked address or a scan finding ("Problems found"). Routine ones are not queued: run
-   {{HOME}}/.claude/scripts/muse_poll_record.sh client-seen "<their ids>"
+   {{HOME}}/.claude/scripts/muse_poll_record.sh client-seen "<their ids>" --fyi
+   (A seen tick must say what covers it: --fyi for a routine alert that needs nothing, --reply <draft id> or --card <Deck number or issue URL> for anything a person owes an answer to. A bare tick is refused.)
    Any other alert is queued, once per client:
    {{HOME}}/.claude/scripts/muse_poll_record.sh client-mail "Client alert" "<client>" "<ids>"
 4. kind payment (Gusto): open each message with get_message (this kind only; never open other mail). If it says the row's client paid Jonathan (a contractor payment or direct deposit), run once per message:
