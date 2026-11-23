@@ -1406,6 +1406,35 @@ class Issue154Tests(Fixture):
         for cmd in ("echo -R | xargs ls", "echo hi | xargs find -type f", "echo hi | xargs du", "echo hi | xargs tree", "ls | xargs rg x"):
             self.refused(cmd, self.tmp)
 
+    # ---- round 2 of the blind review of pull request 155: three more ways round the reading ----
+
+    def test_a_process_id_before_a_quote_is_not_an_ansi_c_string(self):
+        """`$$` is the process number, so `$$'` is that number then a plain quote. Read as `$'..'`, the escaped quote hid the rest of the line and
+        the `#` hid the last quote, so the reader saw one quoted word while the shell ran the search."""
+        a = self.above
+        for cmd in ("echo $$'\\' ; grep -rn x %s #'" % a, "echo $$'\\' ; find %s -name x #'" % a, "echo $$'\\' ; rg x %s #'" % a,
+                    "echo $$'\\' && grep -rn x %s #'" % a, "x=$$'\\' ; grep -rn x %s #'" % a, "echo $$'\\'; ls -R %s #'" % a):
+            self.refused(cmd, self.tmp)
+        # a real $'..' string and a plain process number stay what they are
+        self.allowed("echo $$ ; grep x %s" % a, self.tmp)
+        self.allowed("echo $'it\\'s' ; grep x %s" % a, self.tmp)
+        self.refused("echo $'it\\'s' ; grep -r x %s" % a, self.tmp)
+
+    def test_an_xargs_that_is_quoted_or_escaped_is_still_xargs(self):
+        a = self.above
+        for cmd in ("echo -r | \\xargs grep x %s" % a, "echo -r | x'a'rgs grep x %s" % a, "echo -r | 'xargs' grep x %s" % a,
+                    'echo -r | "xargs" grep x %s' % a, "echo -r | xar\\gs grep x %s" % a, "echo -r | nice \\xargs grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
+    def test_a_substitution_that_splits_xargs_from_its_program_reads_wide(self):
+        a = self.above
+        for cmd in ("echo -r | xargs $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a, "echo -r | xargs $(echo) grep x %s" % a,
+                    "echo -r | xargs -n1 $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a,
+                    "echo -r | xargs ${EMPTY} grep x %s" % a, "echo -r | xargs $(true) ls %s" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
     def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
         a = self.above
         for cmd in ("echo hi | xargs grep x %s" % a, "echo hi there | xargs grep -n x %s" % a, "printf '%%s\\n' a b | xargs grep x %s" % a,

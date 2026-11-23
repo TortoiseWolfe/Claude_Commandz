@@ -338,6 +338,14 @@ _ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n"
 _ANSI_C_NUMBERED = re.compile(r"x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.")
 
 
+def _pid_then_quote(text, i):
+    """True when text[i:i+2] is `$$`, the shell's process number, which the readers step over as one unit before they look for `$'`. Bash pairs
+    the dollar signs from the left, so `$$'` is the number then a plain quote and `$$$'x'` is the number then the string `$'x'`. A `$$(` is left
+    to the readers' own `$(` rule. (Round 2 of the review of pull request 155: reading the second `$` of `$$'` as the start of `$'..'` let
+    `echo $$'\\' ; grep -rn x DIR #'` look like one quoted word.)"""
+    return text[i:i + 2] == "$$" and text[i + 2:i + 3] != "("
+
+
 def _ansi_c_end(text, i):
     """For `$'` at text[i:i + 2]: the index of the closing single quote, or -1 when the string is left open. In the shell's `$'...'` a
     backslash takes the next character, so `\'` does not end the string (issue 154)."""
@@ -460,6 +468,10 @@ def _shell_commands(text, written=None, meta=None):
             end_cmd()
             lead += "$("
             i += 2
+        elif _pid_then_quote(text, i):
+            buf.append("$$")  # the process number, then a plain quote that the next turn of the loop reads
+            started = True
+            i += 2
         elif c == "$" and text[i + 1:i + 2] == "'":
             j = _ansi_c_end(text, i)
             if j < 0:
@@ -567,6 +579,9 @@ def _split_statements(text):
         if c == "\\" and not sq:
             i += 2
             continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
+            continue
         if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
             j = _ansi_c_end(text, i)
             i = n if j < 0 else j + 1  # `$'..'` ends at the first quote no backslash takes (an open one runs to the end)
@@ -635,6 +650,10 @@ def _subst(text, known):
         c = text[i]
         if c == "\\" and not sq:
             out.append(text[i:i + 2])
+            i += 2
+            continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            out.append("$$")
             i += 2
             continue
         if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
@@ -891,7 +910,13 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             continue
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
-        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd if not q)
+        # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
+        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
+        # the reader ends a command at `$(` and a backtick, so in `xargs $(true) grep x DIR` the grep stands in a command of its own with no
+        # xargs word. With a substitution anywhere in the text, every command after an xargs is read as one that xargs may run (the wide reading).
+        if not xargs and any("$(" in lead or "`" in lead for lead, reads in meta) and any(
+                os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
+            xargs = True
         flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)
         prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
@@ -1818,6 +1843,8 @@ def _has_unquoted_paren(command):
         c = command[i]
         if c == "\\":
             i += 2
+        elif _pid_then_quote(command, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
         elif c == "$" and command[i + 1:i + 2] == "'":
             j = _ansi_c_end(command, i)  # `$'..'`: a backslash takes the next character, as in the reader
             if j < 0:
