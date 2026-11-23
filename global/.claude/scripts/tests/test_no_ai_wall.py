@@ -1188,6 +1188,28 @@ class Issue130Tests(Fixture):
         self.allowed("echo 'find them' | tee notes.md; cat notes.md", cwd=self.proj)
         self.allowed("cat > notes.md <<'EOF'\nfind them\nEOF\ngit add notes.md && git status", cwd=self.proj)
 
+    # fourth automated review: the heredoc exemption was one `<<` anywhere in the text, and an interpreter's option value counted as its program
+    def test_an_interpreter_fed_by_a_pipe_or_here_string_is_not_exempted_by_a_heredoc_elsewhere(self):
+        parent = self.p("wall")
+        code = "printf 'import os; os.system(\"grep -r x %s\")' | " % parent
+        for cmd in (code + "python3 -W ignore", code + "python3 -X dev", code + "python3 -W ignore -", "python3 <<< 'import os; os.system(\"find %s\")'" % parent,
+                    "cat <<'EOF' >/dev/null\nhi\nEOF\n" + code + "python3", "echo 'system(\"find %s\");' | perl -I /tmp" % parent,
+                    "echo 'system(\"find %s\");' | perl -M strict" % parent):
+            self.refused(cmd)
+        self.allowed("python3 -I %s/src/tool.py" % self.proj, cwd=self.proj)
+        self.allowed("python3 - <<'EOF'\nprint('find them')\nEOF", cwd=self.proj)
+
+    # ... and git, gh, tar, sort, rsync can run a program through an option or an alias, so they are data tools only without one
+    def test_a_tool_that_can_run_code_is_no_data_tool_when_given_an_option_that_runs_it(self):
+        parent = self.p("wall")
+        write = "printf 'find %s' > a.md; " % parent
+        for cmd in ("git -c 'core.pager=sh a.md' log", "git -c 'alias.x=!sh a.md' x", "git --config-env=alias.x=A x", "gh alias set x '!sh a.md'",
+                    "tar -xf a.tar --to-command='sh a.md'", "tar -cf a.tar --checkpoint=1 --checkpoint-action=exec='sh a.md' a.md", "sort --compress-program=sh a.md",
+                    "rsync -e 'sh a.md' a.md host:/x"):
+            self.refused(write + cmd)
+        self.allowed("printf 'find them' > notes.md; git add notes.md && git status", cwd=self.proj)
+        self.allowed("printf 'find them' > notes.md; tar -czf out.tgz notes.md; sort notes.md > out.md", cwd=self.proj)
+
     def test_data_that_a_shell_is_fed_is_not_dropped_as_a_message(self):
         for cmd in ("echo find . | sh", "echo 'find .' | bash", "printf 'grep -r x .\\n' | sh -s", "echo find . | xargs -I{} sh -c '{}'",
                     "echo 'find .' > a.sh; sh a.sh", "echo 'find .' > a.sh; ./a.sh", "printf 'rg x\\n' > /tmp/a; source /tmp/a", "echo 'find .' > /tmp/a; . /tmp/a",
