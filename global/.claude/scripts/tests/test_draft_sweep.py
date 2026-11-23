@@ -37,11 +37,13 @@ class FakeFolder:
         self.labelled = []
         self.calls = []
         self.fail_raw = False
+        self.fail_full = False  # the full read of a draft (the one that shows attachments) fails
         self.page_size = None  # set to page /drafts like Gmail does
 
-    def add(self, did, subject, age_h, to="", labels=None, body="", mid=None):
+    def add(self, did, subject, age_h, to="", labels=None, body="", mid=None, attachments=None):
+        # attachments: a list of file names, or of (filename, attachmentId) pairs; "" as a name means an id-only part
         self.drafts[did] = dict(subject=subject, age_h=age_h, to=to, labels=labels or ["DRAFT"], body=body,
-                                mid=mid or "m-" + did)
+                                mid=mid or "m-" + did, attachments=attachments or [])
 
     def _msg(self, d, mid, fmt):
         headers = [{"name": "Subject", "value": d["subject"]}, {"name": "From", "value": d.get("sender", "Owner <owner@example.com>")}, {"name": "Date", "value": "Mon, 26 Oct 2026 10:00:00 -0400"}]
@@ -51,6 +53,16 @@ class FakeFolder:
              "payload": {"headers": headers}}
         if fmt == "full":
             m["payload"] = {"headers": headers, "mimeType": "text/plain", "body": {"data": b64(d.get("body", ""))}}
+            if d.get("attachments"):
+                files = []
+                for a in d["attachments"]:
+                    name, aid = a if isinstance(a, tuple) else (a, "att-" + a)
+                    files.append({"mimeType": "application/octet-stream", "filename": name,
+                                  "body": {"attachmentId": aid, "size": 1234}})
+                # Gmail nests a message's files one level down, inside a multipart/mixed
+                m["payload"] = {"headers": headers, "mimeType": "multipart/mixed", "body": {"size": 0}, "parts": [
+                    {"mimeType": "multipart/alternative", "filename": "", "body": {"size": 0}, "parts": [
+                        {"mimeType": "text/plain", "filename": "", "body": {"data": b64(d.get("body", ""))}}]}] + files}
         if fmt == "raw":
             m["raw"] = b64("Subject: " + d["subject"] + "\n\n" + d["body"])
         return m
@@ -75,6 +87,8 @@ class FakeFolder:
                 raise g.GmailError(f"Gmail API 404 on GET {path}: not found")
             d = self.drafts[did]
             if params.get("format") == "raw" and self.fail_raw:
+                raise g.GmailError("Gmail API 500 on GET: boom")
+            if params.get("format") == "full" and self.fail_full:
                 raise g.GmailError("Gmail API 500 on GET: boom")
             return {"id": did, "message": self._msg(d, d["mid"], params.get("format"))}
         if method == "POST" and path.endswith("/modify"):
@@ -102,6 +116,7 @@ class SweepBase(unittest.TestCase):
         self.processed = self.dir / "processed.txt"
         self.processed.write_text("", encoding="utf-8")
         self.sweep_dir = self.dir / "sweep"
+        self.files_saved = self.dir / "note-files-saved.txt"  # never the real record under ~/.claude/state
         self.log = nc.Logger(str(self.dir / "log.txt"))
         self.fake = FakeFolder()
         p = mock.patch.object(g, "api", self.fake)
@@ -114,7 +129,7 @@ class SweepBase(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             res = nc.sweep(str(self.processed), self.log, apply=apply, now=NOW, sweep_dir=str(self.sweep_dir), out=out,
-                           mine=self.mine)
+                           mine=self.mine, files_saved_path=str(self.files_saved))
         return res, out.getvalue()
 
     def mark(self, *ids):
@@ -708,6 +723,216 @@ class OwnerLookup(SweepBase):
     def test_no_address_is_written_into_the_source(self):
         src = (HERE.parent / "notes_check.py").read_text()
         self.assertNotRegex(src, r"[\w.+-]+@(?!example\.)[\w-]+\.(com|net|org|digital)")
+
+
+class FilesGate(SweepBase):
+    """Issue 143: a note that carries files is kept until its id is in the files-saved record, however it came to be
+    "handled". The tower reads notes through a connector that cannot see attachments, so its read record says nothing
+    about whether anyone saved the files."""
+
+    def save(self, *ids):
+        self.files_saved.write_text("".join(f"{i} | 2026-11-23 | saved to a release\n" for i in ids), encoding="utf-8")
+
+    def test_a_handled_old_note_with_a_file_is_kept(self):
+        self.fake.add("r-1", "[MUSE>CC] six lines, files attached", 5, attachments=["bass.glb"])
+        self.mark("r-1")
+        res, out = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(res["deleted"], 0)
+        self.assertFalse(self.sweep_dir.exists(), "nothing is archived or deleted for a kept note")
+        self.assertIn("keep r-1", out)
+        self.assertIn("files not saved", out)
+
+    def test_the_same_note_goes_once_its_draft_id_is_in_the_record(self):
+        self.fake.add("r-1", "[MUSE>CC] six lines, files attached", 5, attachments=["bass.glb"])
+        self.mark("r-1")
+        self.save("r-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["r-1"])
+
+    def test_the_message_id_in_the_record_also_counts(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, mid="mm1", attachments=["a.glb"])
+        self.mark("r-1")
+        self.save("mm1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["r-1"])
+
+    def test_a_record_for_another_note_does_not_release_it(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["a.glb"])
+        self.mark("r-1")
+        self.save("r-2", "r-10")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_blank_and_comment_lines_and_extra_columns_in_the_record_are_fine(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["a.glb"])
+        self.mark("r-1")
+        self.files_saved.write_text("# written by NX-01\n\n   \nr-1 | 2026-11-23 | the release | more\n", encoding="utf-8")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["r-1"])
+
+    def test_a_missing_record_file_means_nothing_is_saved(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["a.glb"])
+        self.mark("r-1")
+        self.assertFalse(self.files_saved.exists())
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_note_without_files_goes_as_before(self):
+        self.fake.add("r-1", "[MUSE>CC] just words", 5, body="no files here")
+        self.mark("r-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, ["r-1"])
+
+    def test_a_file_with_no_name_but_an_attachment_id_counts(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=[("", "ANGjdJ-id")])
+        self.mark("r-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_file_with_a_name_but_no_attachment_id_counts(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=[("drums.glb", "")])
+        self.mark("r-1")
+        self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_a_failed_read_keeps_the_note(self):
+        self.fake.add("r-1", "[MUSE>CC] words", 5)
+        self.mark("r-1")
+        self.fake.fail_full = True
+        res, out = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+        self.assertIn("could not check", out)
+
+    def test_a_note_that_vanishes_before_the_check_is_skipped_not_crashed(self):
+        self.fake.add("r-1", "[MUSE>CC] words", 5)
+        self.mark("r-1")
+        orig = self.fake.__call__
+
+        def vanish(method, path, params=None, body=None):
+            if method == "GET" and path == "/drafts/r-1" and (params or {}).get("format") == "full":
+                raise g.GmailError("Gmail API 404 on GET /drafts/r-1: gone")
+            return orig(method, path, params, body)
+
+        with mock.patch.object(g, "api", vanish):
+            res, out = self.run_sweep(apply=True)
+        self.assertEqual(self.fake.deleted, [])
+
+    def test_the_gate_covers_every_delete_path_not_only_the_inbound_one(self):
+        # outbound note with the absorbed label, over 24 hours
+        self.fake.add("o-1", "[CC>MUSE] reply with files", 30, labels=["DRAFT", "Label_32"], attachments=["a.glb"])
+        # relay note the tower's read record names
+        self.fake.add("t-1", "[MUSE>NCC-74656] Switch's six lines, files attached", 30, attachments=["a.glb"])
+        rec = self.dir / "tower-record.txt"
+        rec.write_text("t-1\n", encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            res = nc.sweep(str(self.processed), self.log, apply=True, now=NOW, sweep_dir=str(self.sweep_dir), out=out,
+                           mine=self.mine, reader_records={"NCC-74656": str(rec)}, files_saved_path=str(self.files_saved))
+        self.assertEqual(self.fake.deleted, [])
+        self.assertEqual(res["deleted"], 0)
+        self.assertEqual(res["files_waiting"], 2)
+
+    def test_a_dry_run_says_keep_not_would_delete(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["a.glb"])
+        self.mark("r-1")
+        res, out = self.run_sweep(apply=False)
+        self.assertEqual(res["would_delete"], 0)
+        self.assertIn("keep r-1", out)
+        self.assertNotIn("would delete r-1", out)
+
+    def test_the_summary_counts_files_waiting_and_names_no_file(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["secret-name.glb", "b.glb"])
+        self.mark("r-1")
+        res, out = self.run_sweep(apply=True)
+        self.assertEqual(res["files_waiting"], 1)
+        self.assertIn("files waiting for NX-01 to save: 1", out)
+        self.assertNotIn("secret-name", out)
+        self.assertNotIn("secret-name", (self.dir / "log.txt").read_text())
+
+    def test_the_status_file_lists_the_waiting_note_without_file_names_and_it_is_not_counted_unproven(self):
+        self.fake.add("r-1", "[MUSE>CC] files", 5, attachments=["secret-name.glb"])
+        self.mark("r-1")
+        status = self.dir / "status.json"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            nc.sweep(str(self.processed), self.log, apply=True, now=NOW, sweep_dir=str(self.sweep_dir), out=out,
+                     mine=self.mine, status_path=str(status), reader_records={}, files_saved_path=str(self.files_saved))
+        doc = json.loads(status.read_text())
+        self.assertEqual([w["id"] for w in doc["files_waiting"]], ["r-1"])
+        self.assertEqual(doc["files_waiting"][0]["files"], 1)
+        self.assertNotIn("secret-name", status.read_text())
+        self.assertEqual(doc["unproven"], [])
+
+    def test_a_note_under_two_hours_old_is_not_read_at_all(self):
+        self.fake.add("r-1", "[MUSE>CC] fresh", 1.5, attachments=["a.glb"])
+        self.mark("r-1")
+        self.run_sweep(apply=True)
+        # only notes the sweep was about to delete get the extra full read: here just the one metadata read
+        self.assertEqual(self.fake.calls.count(("GET", "/drafts/r-1")), 1)
+
+
+class FilesSavedRecord(unittest.TestCase):
+    """The writer NX-01 runs when it pulls a note's files into a release."""
+
+    def setUp(self):
+        self.dir = Path(fresh_dir(self))
+        self.path = str(self.dir / "note-files-saved.txt")
+
+    def test_it_appends_id_date_and_place(self):
+        nc.record_files_saved(self.path, "r-123", "release v2 bass", now=NOW)
+        line = Path(self.path).read_text().splitlines()[0]
+        self.assertTrue(line.startswith("r-123 | 2027-01-15 | release v2 bass"), line)
+
+    def test_the_record_is_read_back_as_ids(self):
+        nc.record_files_saved(self.path, "r-123", "x", now=NOW)
+        nc.record_files_saved(self.path, "r-456", "y", now=NOW)
+        self.assertEqual(nc.read_files_saved(self.path), {"r-123", "r-456"})
+
+    def test_writing_the_same_id_twice_adds_one_line(self):
+        nc.record_files_saved(self.path, "r-123", "x", now=NOW)
+        self.assertFalse(nc.record_files_saved(self.path, "r-123", "again", now=NOW))
+        self.assertEqual(len(Path(self.path).read_text().splitlines()), 1)
+
+    def test_a_bad_id_is_refused_and_nothing_is_written(self):
+        for bad in ("", "two words", "r-1;rm -rf", "r-1\nr-2", "a" * 80, "r-1 | x", "# r-1"):
+            with self.assertRaises(ValueError):
+                nc.record_files_saved(self.path, bad, "x", now=NOW)
+        self.assertFalse(Path(self.path).exists())
+
+    def test_the_place_cannot_break_the_line_format(self):
+        nc.record_files_saved(self.path, "r-123", "a | b\nr-999 | forged", now=NOW)
+        self.assertEqual(nc.read_files_saved(self.path), {"r-123"})
+        self.assertEqual(len(Path(self.path).read_text().splitlines()), 1)
+
+    def test_a_record_missing_its_last_newline_still_takes_the_next_line(self):
+        Path(self.path).write_text("r-1 | d | w", encoding="utf-8")
+        nc.record_files_saved(self.path, "r-2", "x", now=NOW)
+        self.assertEqual(nc.read_files_saved(self.path), {"r-1", "r-2"})
+
+    def test_reading_a_missing_file_gives_an_empty_set(self):
+        self.assertEqual(nc.read_files_saved(self.path), set())
+
+    def test_the_command_line_writes_one_line(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = nc.main(["--files-saved", "r-77", "--where", "release v3", "--files-saved-file", self.path])
+        self.assertEqual(code, 0)
+        self.assertEqual(nc.read_files_saved(self.path), {"r-77"})
+        self.assertIn("r-77", out.getvalue())
+
+    def test_the_command_line_refuses_a_bad_id_with_a_message_and_exit_1(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            code = nc.main(["--files-saved", "bad id", "--files-saved-file", self.path])
+        self.assertEqual(code, 1)
+        self.assertFalse(Path(self.path).exists())
+
+    def test_the_default_record_is_not_a_processed_file(self):
+        # main() adds every peer-*processed*.txt in the state folder to the processed list; the files record must not match
+        import fnmatch
+        self.assertFalse(fnmatch.fnmatch(Path(nc.FILES_SAVED).name, "peer-*processed*.txt"))
+        self.assertNotEqual(Path(nc.FILES_SAVED).name, "agent-notes-processed.txt")
 
 
 class Wiring(unittest.TestCase):
