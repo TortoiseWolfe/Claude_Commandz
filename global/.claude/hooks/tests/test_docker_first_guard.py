@@ -628,5 +628,187 @@ class QuotedTextIsNeverACommand(Base):
         self.refused("echo 'a\nb'\nyarn lint")
 
 
+class NodeOnTheHostRefused(Base):
+    """Issue 140: bare node runs project tests and scripts on the host, so it is refused like npm."""
+
+    def test_node_test_runner_refused(self):
+        for command in (
+            "node --test tests/a.test.js",
+            "node --test",
+            "node --import ./tests/register-alias.mjs --test tests/phoneLayout.test.js",
+            "node --run test",
+            "node --watch server.js",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_node_running_a_file_refused(self):
+        for command in (
+            "node tests/a.js",
+            "node tests/a.mjs",
+            "node tests/a.cjs",
+            "node tests/a.ts",
+            "node ./tools/x.js",
+            "node ../x.js",
+            "node server",
+            "node --check src/a.js",
+            "node -",
+            "node",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_node_loaders_refused(self):
+        for command in (
+            "node -r ./x.js y.js",
+            "node --require ./x.js",
+            "node --require=./x.js y.js",
+            "node --import ./x.mjs y.mjs",
+            "node --loader ./l.mjs y.mjs",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_node_eval_that_loads_a_project_file_refused(self):
+        for command in (
+            "node -e \"require('./src/a.js')\"",
+            "node -p \"require('./package.json').name\"",
+            "node -e \"import('./a.mjs')\"",
+            "node --eval \"require('fs').readFileSync('x')\"",
+            "node -e \"require('child_process').execSync('ls')\"",
+            "node -e \"console.log(1)\" tests/a.js",
+            "node -e \"console.log(1)\" --test",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_node_behind_wrappers_and_shells_refused(self):
+        for command in (
+            "nice -n 5 node --test",
+            "env -u X node --test",
+            "timeout 10 node tests/a.js",
+            "time node --test",
+            "VAR=1 node --test",
+            "sudo node tests/a.js",
+            "/usr/bin/node tests/a.js",
+            "node.exe tests/a.js",
+            "nodejs tests/a.js",
+            "cd x && node --test",
+            "bash -c 'node --test'",
+            "echo hi | node tests/a.js",
+            "$(node tests/a.js)",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_node_script_in_the_project_is_refused_even_under_a_look_alike_path(self):
+        for command in (
+            "node ~/.claude/scripts/../../x.js",
+            "node ~/repos/proj/.claude/scripts/x.js",
+            "node --test ~/.claude/scripts/x.js",
+            "node ./.claude/scripts/x.js",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+
+class NodeReviewHoles(Base):
+    """Automated review of the first push: a regex cannot judge JavaScript, an environment setting can
+    load code under --version, and a link can lead out of ~/.claude/scripts."""
+
+    def test_only_fixed_harmless_expressions_run_under_eval(self):
+        for command in (
+            "node -p \"process['main'+'Module'].require('fs')\"",
+            "node -e \"globalThis.process.binding('fs')\"",
+            "node -e \"eval(String.fromCharCode(114))\"",
+            "node -e \"new Function('return 1')()\"",
+            "node -p \"process.mainModule\"",
+            "node -e \"process.dlopen(1)\"",
+            "node -e 'while(1){}'",
+            "node -p \"Atomics.wait\"",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_environment_that_loads_code_is_refused_even_for_version(self):
+        for command in (
+            'NODE_OPTIONS="--require ./x.js" node --version',
+            "NODE_OPTIONS=--import=./x.mjs node -v",
+            "env NODE_OPTIONS=--require=./x.js node -v",
+            "env -u HOME NODE_OPTIONS=--require=./x.js node --help",
+            "NODE_PATH=./lib node ~/.claude/scripts/gh_sudo.js",
+            "FOO=1 NODE_OPTIONS=--require=./x.js node -p process.version",
+            "sudo NODE_OPTIONS=--require=./x.js node -v",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_a_link_inside_the_hub_scripts_folder_that_leaves_it_is_refused(self):
+        scripts = self.home / ".claude" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        outside = self.non_exempt_dir / "x.js"
+        outside.write_text("1\n")
+        link = scripts / "link.js"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(outside)
+        real = scripts / "real.js"
+        real.write_text("1\n")
+        self.refused("node ~/.claude/scripts/link.js")
+        self.refused(f"node {link}")
+        self.allowed("node ~/.claude/scripts/real.js")
+
+
+class NodeAllowed(Base):
+    def test_node_read_only_and_plain_eval_allowed(self):
+        for command in (
+            "node --version",
+            "node -v",
+            "node --help",
+            "node -h",
+            'node -e "console.log(1+1)"',
+            "node -p process.version",
+            "node --print 'process.arch'",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_node_inside_docker_allowed(self):
+        for command in (
+            "docker run --rm node:22 node --test",
+            "docker exec c node tests/a.js",
+            "docker compose run app node --test",
+            "docker compose exec app node --import ./tests/register-alias.mjs --test tests/a.test.js",
+            "timeout 60 docker run --rm node:22 node tests/a.js",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_a_mention_of_node_is_not_a_run(self):
+        for command in (
+            "echo 'run node --test later'",
+            "git commit -m 'node --test notes'",
+            "grep node file",
+            "grep -n 'node tests/a.js' README.md",
+            "cat <<'EOF'\nnode --test comes after the build\nEOF",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_the_hubs_own_scripts_run_under_node(self):
+        for command in (
+            "node ~/.claude/scripts/gh_sudo.js https://example.com/x",
+            "node $HOME/.claude/scripts/usage_calibrate.js",
+            f"node {self.home}/.claude/scripts/gh_sudo.js https://example.com/x",
+            "nice node ~/.claude/scripts/usage_calibrate.js --once",
+        ):
+            with self.subTest(command=command):
+                self.allowed(command)
+
+    def test_exempt_folder_may_run_node(self):
+        self.allowed("node --test tests/a.test.js", cwd=self.exempt_dir)
+        self.allowed("node tests/a.js", cwd=self.exempt_dir / "src")
+
+
 if __name__ == "__main__":
     unittest.main()
