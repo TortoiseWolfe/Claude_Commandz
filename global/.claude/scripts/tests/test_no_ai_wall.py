@@ -1157,6 +1157,37 @@ class Issue130Tests(Fixture):
             self.refused(cmd)
         self.allowed("echo 'find them' > notes.md; cat notes.md", cwd=self.proj)
 
+    # third automated review of the fix: the rebinding forms that name the variable only in a glued or indirect way
+    def test_a_variable_is_not_trusted_past_a_glued_quoted_or_indirect_rebind(self):
+        home_claude = self.p("home/.claude")
+        for hidden in ("printf -vW %s /tmp/w", "printf -v\"W\" %s /tmp/w", "builtin printf -vW %s /tmp/w", "'printf' -vW %s /tmp/w", "N=W; \\read $N < /tmp/w",
+                       "N=W; 'read' $N < /tmp/w", "N=W; \"eval\" \"$N=/tmp\"", "N=W; builtin read $N < /tmp/w", "N=W; \\mapfile $N < /tmp/w",
+                       "N=W; 'declare' -n R=$N"):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, hidden))
+
+    # ... a search written in the code an interpreter runs from a string, a pipe, a redirect or a file it was handed
+    def test_a_search_run_by_an_interpreter_still_refuses_a_listed_parent(self):
+        parent = self.p("wall")
+        for cmd in ("python3 -c 'import os; os.system(\"grep -r x %s\")'", "perl -e 'system(\"find %s -name x\")'", "node -e \"require('child_process').execSync('du -sh %s')\"",
+                    "ruby -e 'system(\"rg x %s\")'", "awk 'BEGIN { system(\"grep -r x %s\") }'", "php -r 'system(\"find %s\");'",
+                    "printf 'import os; os.system(\"grep -r x %s\")' | python3", "echo 'system(\"find %s\");' | perl", "printf 'import os; os.system(\"find %s\")' | python3 -",
+                    "printf 'import os; os.system(\"grep -r x %s\")' > a.md; python3 < a.md", "printf 'system(\"find %s\");' > a.txt; perl < a.txt"):
+            self.refused(cmd % parent)
+        self.allowed("python3 -c \"import os; os.system('grep -c x %s/one.txt')\"" % self.proj, cwd=self.proj)
+        self.allowed("echo 'print(1)' | python3", cwd=self.proj)
+        self.allowed("python3 -c 'print(\"find them\")'", cwd=self.proj)
+
+    # ... a file written by something other than a redirect, then run by a program no list knows
+    def test_a_file_written_by_tee_then_run_by_any_program_is_read_widely(self):
+        parent = self.p("wall")
+        for cmd in ("printf 'import os; os.system(\"grep -r x %s\")' | tee a.md >/dev/null; python3 a.md", "printf 'os.execute(\"find %s\")' | tee a.md; lua a.md",
+                    "printf 'all:\\n\\t grep -r x %s \\n' | tee Makefile; make", "printf 'find %s\\n' | tee a.md; busybox sh a.md",
+                    "cat > a.md <<'EOF'\nos.execute(\"find %s\")\nEOF\nlua a.md", "printf 'find %s\\n' | tee a.md; pwsh a.md",
+                    "printf 'find %s\\n' | tee a.md; env sh a.md"):
+            self.refused(cmd % parent)
+        self.allowed("echo 'find them' | tee notes.md; cat notes.md", cwd=self.proj)
+        self.allowed("cat > notes.md <<'EOF'\nfind them\nEOF\ngit add notes.md && git status", cwd=self.proj)
+
     def test_data_that_a_shell_is_fed_is_not_dropped_as_a_message(self):
         for cmd in ("echo find . | sh", "echo 'find .' | bash", "printf 'grep -r x .\\n' | sh -s", "echo find . | xargs -I{} sh -c '{}'",
                     "echo 'find .' > a.sh; sh a.sh", "echo 'find .' > a.sh; ./a.sh", "printf 'rg x\\n' > /tmp/a; source /tmp/a", "echo 'find .' > /tmp/a; . /tmp/a",

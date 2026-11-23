@@ -514,8 +514,9 @@ _ASSIGN = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=((?:[A-Za-z0-9_./:@%+=,~-]
 _BLOCK_START = re.compile(r"[ \t]*(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|!|\{|\})(?![\w-])")
 # a statement that can bind a variable without naming it, or through a name held in another: `. file`, source, eval, read, mapfile, declare -n,
 # printf -v, getopts, let, a process substitution. The first one ends the trust in every value _resolve_vars knows.
-_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset|printf\s+-v)(?=[\s;&|)}`]|$)"
-                            r"|[<>]\(|\$\(\(|\(\(")
+_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])[\\'\"]*(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset)[\\'\"]*(?=[\s;&|)}`]|$)"
+                            r"|\bprintf\b[^;&|\n]*?\s['\"]?-[A-Za-z]*v|\bwait\b[^;&|\n]*?\s-[A-Za-z]*p"  # printf -v NAME and printf -vNAME, wait -p NAME
+                            r"|[<>]\(|\$\(\(|\(\(")  # (a builtin's name quoted or backslashed is still the builtin: 'read' W, \eval x)
 
 
 def _subst(text, known):
@@ -670,27 +671,26 @@ _RUNS_A_STRING = ("env", "ssh", "su", "watch", "script", "parallel", "flock", "r
 _RUNS_A_PROGRAM = ("docker", "podman", "kubectl", "nsenter", "chroot", "exec", "xargs", "sudo", "nohup", "nice", "timeout", "setsid")  # a program word follows
 
 
-_INTERPRETERS = _SHELLS | {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed", "python", "python3", "source", "."}
+# programs that only read or move the files they are given: when the text writes a file, any OTHER program in it could be running that file
+# (an interpreter, make, busybox, a path no list knows), so the text is read widely unless every program is one of these or a writer
+_DATA_TOOLS = {"cat", "head", "tail", "wc", "ls", "stat", "file", "diff", "cmp", "sort", "uniq", "cut", "tr", "rm", "mkdir", "touch", "git", "gh", "echo",
+               "printf", "cd", "true", "false", "test", "[", "grep", "egrep", "fgrep", "rg", "date", "sleep", "pwd", "basename", "dirname", "realpath",
+               "readlink", "jq", "sha256sum", "md5sum", "du", "df", "which", "tee", "cp", "mv", "install", "ln", "dd", "curl", "wget", "tar", "unzip", "rsync"}
+_WRITERS = {"tee", "cp", "mv", "install", "ln", "dd", "curl", "wget", "tar", "unzip", "rsync"}
+# what an interpreter runs from its own string, pipe or file: the roots a search inside it names count, as for a heredoc
+_INLINE_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed", "gawk", "mawk", "nawk", "lua", "tclsh", "pwsh"}
+_STDIN_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "lua", "tclsh", "pwsh"}  # (awk and sed are given their program as an operand)
+_INLINE_FLAG = re.compile(r"-[A-Za-z]*[ceErCS]")
 
 
-def _runs_a_file(cmd):
-    """True for a command that runs a file or makes one runnable: chmod, a program given by a path no list knows (`./a.md`, `/tmp/x`), or an
-    interpreter given a file to read (`python3 a.md`, `bash a.sh`) and no inline script."""
+def _program_of(cmd):
+    """-> (the program's base name or None, the words after it) of a command, wrappers skipped."""
     ws = [w for w, q in cmd]
     i = _skip_wrappers(ws, scan=False)
-    if i >= len(ws):
-        return False
-    prog = os.path.basename(ws[i])
-    if prog == "chmod" or ("/" in ws[i] and not _known_program(ws[i])):
-        return True
-    rest = ws[i + 1:]
-    if prog in _INTERPRETERS or re.fullmatch(r"python[\d.]*", prog):
-        return not any(x in ("-c", "-e", "-E", "-r") or (x.startswith("-") and not x.startswith("--") and "c" in x) for x in rest) and any(
-            not x.startswith("-") for x in rest)
-    return False
+    return (os.path.basename(ws[i]), ws[i + 1:]) if i < len(ws) else (None, [])
 
 
-def _searches(text, cwd, depth=0):
+def _searches(text, cwd, depth=0, bodies=None):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
@@ -700,8 +700,10 @@ def _searches(text, cwd, depth=0):
         return None
     if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
         return None  # text written to a file that could be a script may be run later in the text: the wide reading
-    if any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) and any(_runs_a_file(c) for c in cmds if not _is_launcher_words([w for w, q in c])):
-        return None  # a file is written and a file is run (or made runnable) in the same text, whatever the file's name ends in
+    progs = [_program_of(c) for c in cmds if not _is_launcher_words([w for w, q in c])]
+    if (any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) or any(p in _WRITERS for p, rest in progs)) and any(
+            p is not None and p not in _DATA_TOOLS for p, rest in progs):
+        return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
     for cmd in cmds:
         ws = [w for w, q in cmd]
@@ -722,7 +724,7 @@ def _searches(text, cwd, depth=0):
                 # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
                 # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
-                    sub = _searches(w, cur, depth + 1)
+                    sub = _searches(w, cur, depth + 1, bodies)
                     if sub is None:
                         return None
                     recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
@@ -741,8 +743,16 @@ def _searches(text, cwd, depth=0):
             if runs_here and (prog in _SHELLS and (script is None or xargs) or prog in ("source", ".") or (prog == "tee" and any(
                     not (a.startswith("-") or a.endswith(_DOC_EXTENSIONS) or a == "/dev/null") for a in rest))):
                 return None  # a shell fed a file or a pipe, or a file a later command could run: what it reads is out of sight, so the wide reading
+            if runs_here and (prog in _INLINE_RUNNERS or re.fullmatch(r"python[\d.]*", prog)):
+                # an interpreter runs its string, pipe or file, and that code can start a search: every quoted word it was given is read for the roots
+                # it names; one with no program of its own (fed by a pipe or a redirect, which is out of sight) takes the wide reading
+                if bodies is not None:
+                    bodies.extend(x for x, xq in cmd[i + 1:] if xq)
+                if (prog in _STDIN_RUNNERS or prog.startswith("python")) and "<<" not in text and not any(
+                        _INLINE_FLAG.fullmatch(x) or not x.startswith("-") for x in rest):
+                    return None
             if script is not None:
-                sub = _searches(script, cur, depth + 1)
+                sub = _searches(script, cur, depth + 1, bodies)
                 if sub is None:
                     return None
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
@@ -781,7 +791,7 @@ def bash_hits(command, cwd, paths):
     calls the lane's own hook guards. When the text cannot be read with certainty the old, wider reading is used (_bash_hits_wide)."""
     cwd = cwd or os.getcwd()
     runner_bodies = []
-    info = _searches(_strip_heredocs(command, runner_bodies), cwd)
+    info = _searches(_strip_heredocs(command, runner_bodies), cwd, bodies=runner_bodies)
     if info is None:
         segs = _segments(command)
         if any(_is_launcher(seg) for seg in segs):
