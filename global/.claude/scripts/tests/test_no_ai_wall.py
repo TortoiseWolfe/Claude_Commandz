@@ -996,5 +996,293 @@ class BypassGapTests(Fixture):
         self.assertEqual(w._quoted_text_as_text("ls > out.txt"), "ls > out.txt")  # nothing outside quotes is ever touched
 
 
+class Issue130Tests(Fixture):
+    """Issue 130: ordinary lane commands were refused as a search into a listed folder, or as a change to the wall's files. Each shape below
+    is the shape of a real refused command with the names made up. The session starts in self.tmp, a folder that holds a listed folder (the
+    real session starts in a folder above the client areas). The second half proves the wall still refuses the real thing."""
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        self.proj = self.p("work/proj")
+        os.makedirs(os.path.join(self.lane, "sweep", "pw"))
+        os.makedirs(os.path.join(self.proj, "src"))
+        os.makedirs(w.wall_dir(), exist_ok=True)  # the wall's own folder exists on a real machine; the fake home needs one too
+        self.assertTrue(os.path.isdir(self.p("wall/clientA")))
+
+    def run_bash(self, command, cwd=None):
+        return w.evaluate({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd or self.tmp}, w.load_paths())
+
+    def allowed(self, command, cwd=None):
+        r = self.run_bash(command, cwd)
+        self.assertIsNone(r, "wrongly refused: %s -> %s" % (command, r))
+
+    def refused(self, command, cwd=None):
+        r = self.run_bash(command, cwd)
+        self.assertIsNotNone(r, "wrongly allowed: %s" % command)
+
+    # ---- the refusals logged on the issue ----
+
+    def test_heredoc_prose_with_search_words_is_not_a_search(self):
+        self.allowed("cat > %s/note.md <<'EOF'\nfind them and search open and closed issues; du and tar are fine words\nEOF\nbash ~/.claude/scripts/lane.sh start %s" % (self.lane, self.lane))
+        self.allowed("cat <<'EOF' > %s/prompt.md\nsearch every folder, find the list, tree of the issues\nEOF" % self.lane)
+
+    def test_python_heredoc_with_grep_count_on_one_file(self):
+        self.allowed("python3 - <<'EOF'\nimport subprocess\nprint('find it')\nEOF\ngrep -c done %s/status.md" % self.lane)
+        self.allowed("python3 - <<'EOF'\nprint('git grep -r x')\nEOF\ngrep -c x %s/status.md" % self.lane)
+
+    def test_cp_r_out_of_a_lane_folder_into_a_project(self):
+        self.allowed("cp -r %s/sweep %s/src" % (self.lane, self.proj))
+        self.allowed("L=%s; P=%s; mkdir -p $P/src && cp -r $L/sweep/* $P/src/ && ls -R $P | head" % (self.lane, self.proj))
+
+    def test_git_show_piped_to_grep_is_not_git_grep(self):
+        self.allowed("git show origin/main:README.md | grep -n phone")
+        self.allowed("git log --oneline | grep -rn x %s/src" % self.proj)
+
+    def test_named_root_is_the_only_root_walked(self):
+        self.allowed("grep -rn pattern %s --include=*.py" % self.proj)
+        self.allowed("find %s -name '*.md' -newer %s/status.md" % (self.proj, self.lane))
+
+    def test_docker_run_with_a_lane_folder_mounted(self):
+        self.allowed("L=%s; cd $L/sweep && timeout 600 docker-heavy.sh docker run --rm -v $L/sweep/pw:/pw -w /pw img sh -c 'node sweep.mjs /pw/out'" % self.lane)
+
+    def test_phone_layout_command_after_a_variable_cd(self):
+        self.allowed("L=%s; W=%s; cd $W && mkdir -p .phone-sweep/pw && echo '.phone-sweep/' >> \"$(git rev-parse --git-path info/exclude)\" && cp $L/sweep/sweep.mjs .phone-sweep/sweep.mjs" % (self.lane, self.proj))
+
+    def test_docker_prettier_after_a_variable_cd(self):
+        self.allowed("W=%s; cd $W && docker run --rm -v $W:/app -w /app img sh -c 'npx prettier --write src/a.js'" % self.proj)
+
+    # ---- the wall still holds ----
+
+    def test_a_search_into_a_listed_folder_or_its_parent_is_still_refused(self):
+        for cmd in ("grep -r secret %s" % self.p("wall/clientA"), "grep -rn secret %s" % self.p("wall"), "find %s -name '*.md'" % self.p("wall"),
+                    "rg secret %s" % self.p("wall"), "cp -r %s %s" % (self.p("wall"), self.proj), "du -sh %s" % self.p("wall"),
+                    "cd %s && grep -r secret ." % self.p("wall"), "grep -r secret %s %s" % (self.proj, self.p("wall/clientB"))):
+            self.refused(cmd)
+
+    def test_a_search_with_no_root_from_a_folder_holding_a_listed_folder_is_still_refused(self):
+        for cmd in ("rg foo", "find -name x", "find . -name x", "grep -r foo", "grep -r foo .", "du -sh", "tree", "ls -R", "git grep foo", "rg -g '*.py' src"):
+            self.refused(cmd)
+
+    def test_the_search_words_in_a_heredoc_that_a_shell_runs_still_count(self):
+        self.refused("bash <<'EOF'\ngrep -r secret %s\nEOF" % self.p("wall"))
+        self.refused("sh -c 'find %s'" % self.p("wall"))
+        self.refused("docker run --rm img sh -c 'du -sh %s'" % self.p("wall"))
+        self.refused("eval 'grep -r x %s'" % self.p("wall"))
+
+    def test_a_listed_path_is_still_refused_when_a_variable_names_it(self):
+        self.refused("D=%s; cat $D/docs/secret.txt" % self.p("wall/clientA"))
+        self.refused("D=%s; grep -r x $D" % self.p("wall"))
+        self.refused("cat %s" % self.p("wall/clientA/docs/secret.txt"))
+
+    def test_grep_and_glob_and_read_still_refuse_a_listed_root(self):
+        self.assertIsNotNone(w.evaluate({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": self.p("wall")}, "cwd": self.tmp}, w.load_paths()))
+        self.assertIsNotNone(w.evaluate({"tool_name": "Glob", "tool_input": {"pattern": "**/*.md", "path": self.p("wall/clientA")}, "cwd": self.tmp}, w.load_paths()))
+        self.assertIsNotNone(w.evaluate({"tool_name": "Read", "tool_input": {"file_path": self.p("wall/clientA/docs/secret.txt")}, "cwd": self.tmp}, w.load_paths()))
+
+    def test_a_change_to_the_wall_the_list_or_settings_is_still_refused(self):
+        wall = w.wall_dir()
+        settings = self.p("home/.claude/settings.json")
+        for cmd in ("echo x > %s/no_ai_wall.py" % wall, "rm %s/no-ai-wall-guard.py" % wall, "echo x >> %s" % self.pfile, "sed -i s/a/b/ %s" % settings,
+                    "cp /tmp/x %s/new.py" % wall, "W=%s; cd $W; echo x > no_ai_wall.py" % wall, "W=%s; cd $W && rm no_ai_wall.sh" % wall,
+                    "W=%s; cd $W; cp /tmp/x ." % wall, "cd \"$(cat /tmp/where)\"; rm no_ai_wall.py", "cd %s && echo x > settings.json" % self.p("home/.claude"),
+                    "L=%s; cd $L && cp /tmp/x %s/no_ai_wall.py" % (self.lane, wall)):
+            self.refused(cmd)
+
+    def test_a_variable_reassigned_before_use_is_not_trusted(self):
+        wall = w.wall_dir()
+        self.refused("W=%s; W=$(cat /tmp/x); cd $W; echo x > no_ai_wall.py" % self.proj)
+        self.refused("W=%s; if true; then W=%s; fi; cd $W; echo x > no_ai_wall.py" % (self.proj, wall))
+
+    def test_a_variable_changed_by_any_other_form_is_not_trusted(self):
+        # the working folder is the wall's own folder after the second statement, whatever form changed the variable
+        home_claude = self.p("home/.claude")
+        for change in ("W+=/no-ai-wall", "W[0]=%s" % w.wall_dir(), "((W=1)); W=%s" % w.wall_dir(), "W+=x; W=%s" % w.wall_dir(),
+                       "declare -n R=W; R=%s" % w.wall_dir(), "W=${W:+%s}" % w.wall_dir(), "export W=%s" % w.wall_dir(), "read W <<< %s" % w.wall_dir()):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, change))
+        self.refused("W=%s; : ${W:=%s}; W+=/no-ai-wall; cd $W; cp /tmp/x ." % (home_claude, home_claude))
+
+    # senior review 1, blocking 1: a statement that can change a variable without naming it must end the trust in every known value
+    def test_a_variable_is_not_trusted_past_a_statement_that_can_rebind_it_unseen(self):
+        home_claude = self.p("home/.claude")
+        for hidden in (". /tmp/set.sh", "source /tmp/set.sh", "source <(echo Vz= | base64 -d)", ". <(cat /tmp/set.sh)", "eval \"$(cat /tmp/set.sh)\"",
+                       "eval $X", "read W < /tmp/w", "mapfile W < /tmp/w", "printf -v W %s /tmp/w", "getopts a W", "let W=1", "declare -n R=W"):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, hidden))
+            self.refused("W=%s; %s; cd $W; cp /tmp/x ." % (home_claude, hidden))
+        self.allowed("W=%s; cd $W && cp /tmp/x ." % self.proj)  # the plain shape the lanes use is still allowed
+
+    # senior review 1, blocking 2: an interpreter runs its heredoc, so a search written inside it still names its roots
+    def test_a_search_inside_an_interpreter_heredoc_still_refuses_a_listed_root_or_its_parent(self):
+        parent, wall = self.p("wall"), self.p("wall/clientA")
+        bodies = {"perl": 'system("grep -r x %s");', "python3": "import os\nos.system('grep -r x %s')", "node": "require('child_process').execSync('find %s -name x')",
+                  "ruby": 'system("rg x %s")', "php": "<?php system('du -sh %s');", "awk": 'BEGIN { system("grep -r x %s") }', "sed": "1e find %s"}
+        for prog, body in bodies.items():
+            for root in (parent, wall):
+                self.refused("%s <<'EOF'\n%s\nEOF" % (prog, body % root))
+                self.refused("%s - <<'EOF' | head -3\n%s\nEOF" % (prog, body % root))
+        # ... while the same words with no root named, or a root that is no listed folder, are still just text
+        self.allowed("python3 <<'EOF'\nimport os\nos.system('grep -c x /tmp/one.txt')  # find them, search open issues\nEOF", cwd=self.proj)
+        self.allowed("perl <<'EOF'\nsystem(\"grep -r x %s\");\nEOF" % self.proj)
+
+    # senior review 1, missing tests: the wall's own files reached by the roads the issue 130 tests never took
+    def test_a_guarded_file_is_refused_by_every_road_to_it(self):
+        wall, settings = w.wall_dir(), self.p("home/.claude/settings.json")
+        link = self.p("work/wall-link")
+        os.symlink(wall, link)
+        slink = self.p("work/settings-link")
+        os.symlink(settings, slink)
+        for cmd in ("echo x > %s/no_ai_wall.py" % link, "echo x | tee %s/no_ai_wall.py" % wall, "echo x | tee -a %s" % slink, "mv /tmp/x %s/no_ai_wall.py" % wall,
+                    "mv /tmp/x %s" % settings, "python3 -c \"open('%s/no_ai_wall.py','w').write('x')\"" % wall,
+                    "python3 -c \"open('%s','w').write('x')\"" % settings, "echo x > $HOME/.claude/settings.json", "echo x > ~/.claude/no-ai-wall/no_ai_wall.py",
+                    "echo x > ${HOME}/.claude/no-ai-wall/no_ai_wall.sh", "cp /tmp/x %s" % slink, "sed -i s/a/b/ %s/no_ai_wall.py" % link,
+                    "ln -sf /tmp/x %s/no_ai_wall.py" % wall, "chmod 000 %s/no-ai-wall-guard.py" % wall, "truncate -s 0 %s" % settings):
+            self.refused(cmd)
+
+    def test_a_quoted_or_escaped_program_word_is_still_read_as_the_program(self):
+        for cmd in ("'find' . -name x", '"find" . -name x', "\\find . -name x", "fi'nd' . -name x", "env 'grep' -r x", "sudo \"rg\" x",
+                    "timeout 5 'find' ."):
+            self.refused(cmd)
+        self.allowed("grep 'find' src/a.txt", cwd=self.proj)
+        self.allowed("echo 'find' | cat", cwd=self.proj)
+
+    def test_a_quoted_program_after_wrapper_options_is_still_the_program(self):
+        for cmd in ("sudo -u root 'find' . -name x", "env -i FOO=1 'grep' -r x", "timeout -k 2 5 'rg' x", "nice -n 5 \"find\" .", "stdbuf -oL 'find' ."):
+            self.refused(cmd)
+        self.allowed("sudo -u root ls 'find' ", cwd=self.proj)
+
+    def test_a_file_written_then_run_is_read_widely_whatever_its_name_ends_in(self):
+        for cmd in ("echo 'find .' > a.md; chmod +x a.md; ./a.md", "echo 'find .' > a.txt; python3 a.txt", "echo 'grep -r x .' > /tmp/a.json; bash /tmp/a.json",
+                    "echo 'find .' > /tmp/a.md; /tmp/a.md", "printf 'rg x\\n' > a.log; ash a.log", "echo 'find .' | bash"):
+            self.refused(cmd)
+        self.allowed("echo 'find them' > notes.md; cat notes.md", cwd=self.proj)
+
+    # third automated review of the fix: the rebinding forms that name the variable only in a glued or indirect way
+    def test_a_variable_is_not_trusted_past_a_glued_quoted_or_indirect_rebind(self):
+        home_claude = self.p("home/.claude")
+        for hidden in ("printf -vW %s /tmp/w", "printf -v\"W\" %s /tmp/w", "builtin printf -vW %s /tmp/w", "'printf' -vW %s /tmp/w", "N=W; \\read $N < /tmp/w",
+                       "N=W; 'read' $N < /tmp/w", "N=W; \"eval\" \"$N=/tmp\"", "N=W; builtin read $N < /tmp/w", "N=W; \\mapfile $N < /tmp/w",
+                       "N=W; 'declare' -n R=$N"):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, hidden))
+
+    # ... a search written in the code an interpreter runs from a string, a pipe, a redirect or a file it was handed
+    def test_a_search_run_by_an_interpreter_still_refuses_a_listed_parent(self):
+        parent = self.p("wall")
+        for cmd in ("python3 -c 'import os; os.system(\"grep -r x %s\")'", "perl -e 'system(\"find %s -name x\")'", "node -e \"require('child_process').execSync('du -sh %s')\"",
+                    "ruby -e 'system(\"rg x %s\")'", "awk 'BEGIN { system(\"grep -r x %s\") }'", "php -r 'system(\"find %s\");'",
+                    "printf 'import os; os.system(\"grep -r x %s\")' | python3", "echo 'system(\"find %s\");' | perl", "printf 'import os; os.system(\"find %s\")' | python3 -",
+                    "printf 'import os; os.system(\"grep -r x %s\")' > a.md; python3 < a.md", "printf 'system(\"find %s\");' > a.txt; perl < a.txt"):
+            self.refused(cmd % parent)
+        self.allowed("python3 -c \"import os; os.system('grep -c x %s/one.txt')\"" % self.proj, cwd=self.proj)
+        self.allowed("echo 'print(1)' | python3", cwd=self.proj)
+        self.allowed("python3 -c 'print(\"find them\")'", cwd=self.proj)
+
+    # ... a file written by something other than a redirect, then run by a program no list knows
+    def test_a_file_written_by_tee_then_run_by_any_program_is_read_widely(self):
+        parent = self.p("wall")
+        for cmd in ("printf 'import os; os.system(\"grep -r x %s\")' | tee a.md >/dev/null; python3 a.md", "printf 'os.execute(\"find %s\")' | tee a.md; lua a.md",
+                    "printf 'all:\\n\\t grep -r x %s \\n' | tee Makefile; make", "printf 'find %s\\n' | tee a.md; busybox sh a.md",
+                    "cat > a.md <<'EOF'\nos.execute(\"find %s\")\nEOF\nlua a.md", "printf 'find %s\\n' | tee a.md; pwsh a.md",
+                    "printf 'find %s\\n' | tee a.md; env sh a.md"):
+            self.refused(cmd % parent)
+        self.allowed("echo 'find them' | tee notes.md; cat notes.md", cwd=self.proj)
+        self.allowed("cat > notes.md <<'EOF'\nfind them\nEOF\ngit add notes.md && git status", cwd=self.proj)
+
+    # fourth automated review: the heredoc exemption was one `<<` anywhere in the text, and an interpreter's option value counted as its program
+    def test_an_interpreter_fed_by_a_pipe_or_here_string_is_not_exempted_by_a_heredoc_elsewhere(self):
+        parent = self.p("wall")
+        code = "printf 'import os; os.system(\"grep -r x %s\")' | " % parent
+        for cmd in (code + "python3 -W ignore", code + "python3 -X dev", code + "python3 -W ignore -", "python3 <<< 'import os; os.system(\"find %s\")'" % parent,
+                    "cat <<'EOF' >/dev/null\nhi\nEOF\n" + code + "python3", "echo 'system(\"find %s\");' | perl -I /tmp" % parent,
+                    "echo 'system(\"find %s\");' | perl -M strict" % parent):
+            self.refused(cmd)
+        # a heredoc the guard did not recognise (no terminator line) excuses nothing; an unknown option's value is no program either
+        for cmd in (code + "python3 - <<'EOF'\nprint(1)", code + "python3 -W ignore -X dev", code + "python3 --check-hash-based-pycs never",
+                    "echo 'system(\"find %s\");' | node --max-old-space-size 64" % parent):
+            self.refused(cmd)
+        # a heredoc's credit belongs to the command holding the marker, and only when that command has no program of its own: a python that runs
+        # a.py and gets a heredoc as its stdin data gives no credit to a later pipe-fed python
+        for cmd in ("python3 a.py <<'EOF'\nx\nEOF\n" + code + "python3", "python3 -c 'print(1)' <<'EOF'\nx\nEOF\n" + code + "python3"):
+            self.refused(cmd)
+        self.allowed("python3 -I %s/src/tool.py" % self.proj, cwd=self.proj)
+        self.allowed("python3 - <<'EOF'\nprint('find them')\nEOF", cwd=self.proj)
+        self.allowed("echo '{}' | python3 -m json.tool", cwd=self.proj)
+
+    # ... and git, gh, tar, sort, rsync can run a program through an option or an alias, so they are data tools only without one
+    def test_a_tool_that_can_run_code_is_no_data_tool_when_given_an_option_that_runs_it(self):
+        parent = self.p("wall")
+        write = "printf 'find %s' > a.md; " % parent
+        for cmd in ("git -c 'core.pager=sh a.md' log", "git -c 'alias.x=!sh a.md' x", "git --config-env=alias.x=A x", "gh alias set x '!sh a.md'",
+                    "tar -xf a.tar --to-command='sh a.md'", "tar -cf a.tar --checkpoint=1 --checkpoint-action=exec='sh a.md' a.md", "sort --compress-program=sh a.md",
+                    "rsync -e 'sh a.md' a.md host:/x", "GIT_PAGER='sh a.md' git log", "env GIT_SSH_COMMAND='sh a.md' git fetch", "PAGER='sh a.md' gh pr view 1",
+                    "git bisect run sh a.md", "git submodule foreach 'sh a.md'", "tar -cf a.tar --new-volume-script=a.md a.md", "tar -cf a.tar --info-script=a.md a.md",
+                    "git difftool --extcmd='sh a.md'", "git -c 'filter.x.clean=sh a.md' add a.md",
+                    "git config core.pager 'sh a.md' && git log", "git config core.sshCommand 'sh a.md'", "git -C . config core.editor 'sh a.md'"):
+            self.refused(write + cmd)
+        self.allowed("printf 'find them' > notes.md; git add notes.md && git status", cwd=self.proj)
+        self.allowed("printf 'find them' > notes.md; tar -czf out.tgz notes.md; sort notes.md > out.md", cwd=self.proj)
+
+    def test_data_that_a_shell_is_fed_is_not_dropped_as_a_message(self):
+        for cmd in ("echo find . | sh", "echo 'find .' | bash", "printf 'grep -r x .\\n' | sh -s", "echo find . | xargs -I{} sh -c '{}'",
+                    "echo 'find .' > a.sh; sh a.sh", "echo 'find .' > a.sh; ./a.sh", "printf 'rg x\\n' > /tmp/a; source /tmp/a", "echo 'find .' > /tmp/a; . /tmp/a",
+                    "echo 'find .' | tee /tmp/a.sh; bash /tmp/a.sh", "cat <<'EOF' > a.sh\nfind .\nEOF\nbash a.sh"):
+            self.refused(cmd)
+        self.allowed("echo 'find them' | head -1", cwd=self.proj)
+
+    # ---- senior review 2 (these refusals are stronger than main's: main allows some of them) ----
+
+    # blocking 1: a trap or an alias runs before the variable expands, so a value written ahead of it is not what the shell uses
+    def test_a_variable_is_not_trusted_past_a_trap_alias_or_shell_option_statement(self):
+        wall = w.wall_dir()
+        for hidden in ("trap 'W=%s' DEBUG" % wall, "alias go='W=%s'; go" % wall, "shopt -s extdebug", "enable -f /tmp/x.so xx", "trap 'W=%s' DEBUG; true" % wall):
+            self.refused("%s; W=/tmp; cd $W; echo x > no_ai_wall.py" % hidden)
+            self.refused("W=/tmp; %s; cd $W; echo x > no_ai_wall.py" % hidden)
+        # fail-closed: a statement that is no plain assignment, cd or data tool ends the collecting, whatever it is
+        self.refused("W=/tmp; somecmd --flag; cd $W; echo x > no_ai_wall.py", cwd=wall)
+        self.refused("f() { W=%s; }; W=/tmp; f; cd $W; echo x > no_ai_wall.py" % wall, cwd=wall)
+        self.allowed("W=%s; cd $W && cp /tmp/x ." % self.proj)
+
+    # blocking 2: a heredoc's child shell never sees an unexported variable, so its `cd $W` is not the cd the check read
+    def test_a_heredoc_child_shell_does_not_see_the_variable_the_parent_set(self):
+        self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=w.wall_dir())
+        self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
+        self.refused("W=/tmp\nsh <<EOF\ncd $W\ncp /tmp/x no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
+
+    # blocking 3: run from a folder above a listed one, a string of code that runs a recursive search walks every listed folder below it
+    def test_code_text_that_runs_a_recursive_search_walks_the_working_folder_too(self):
+        for cmd in ("python3 -c \"import os; os.system('grep -r secret .')\"", "python3 -c 'import os; os.system(\"grep -r secret\")'",
+                    "perl -e 'system(\"grep -r secret .\")'", "python3 <<'EOF'\nimport os\nos.system('grep -r secret .')\nEOF",
+                    "perl <<'EOF'\nsystem(\"find . -name x\");\nEOF", "node -e \"require('child_process').execSync('rg secret')\"",
+                    "python3 -c \"import subprocess; subprocess.run(['grep', '-r', 'secret'])\"",
+                    "python3 <<'EOF'\nimport subprocess\nsubprocess.check_output(['rg', 'secret'])\nEOF"):
+            self.refused(cmd)  # the session starts in self.tmp, which holds the listed folders
+            self.allowed(cmd, cwd=self.proj)  # the same code in a folder with no listed folder below it is not a search into the wall
+        self.allowed("python3 -c \"print('grep -c x a.txt; find them')\"", cwd=self.proj)  # a string that goes to print is prose, not a search
+
+    # senior review 2, missing test (d): code that names the wall's folder as text beside a copy that goes elsewhere
+    def test_code_that_only_names_the_wall_folder_as_text_beside_a_copy_elsewhere(self):
+        wall = w.wall_dir()
+        self.allowed("python3 -c \"print('the guard lives in %s'); import shutil; shutil.copy('/tmp/a', '%s/out.txt')\"" % (wall, self.proj))
+        self.refused("python3 -c \"import shutil; shutil.copy('/tmp/a', '%s/no_ai_wall.py')\"" % wall)
+        self.refused("python3 -c \"import shutil; shutil.copy('%s/no_ai_wall.py', '/tmp/b'); print(1)\"" % wall)
+
+    # senior review 2, missing test: a guarded file reached through the home folder written out as /home/<user> (and not as ~ or $HOME)
+    def test_a_guarded_file_is_refused_through_a_written_out_home_path(self):
+        written_out = self.p("home/.claude")  # the fake home, spelled in full: the road ~ and $HOME take, without either of them
+        for cmd in ("echo x > %s/settings.json" % written_out, "echo x > %s/no-ai-wall/no_ai_wall.py" % written_out, "rm %s/no-ai-wall/no_ai_wall.sh" % written_out,
+                    "cd %s/no-ai-wall && echo x > no-ai-wall-guard.py" % written_out, "python3 -c \"open('%s/settings.json','w').write('x')\"" % written_out):
+            self.refused(cmd)
+        self.allowed("echo x > %s/state/lanes/2026-01-01-demo/note.md" % written_out)
+
+    # the hub's refusal: a heredoc that only NAMES the wall's folder and the settings files, written into a lane folder, is an ordinary write
+    def test_a_heredoc_that_names_the_wall_and_settings_but_writes_a_lane_file_is_allowed(self):
+        wall, settings = w.wall_dir(), self.p("home/.claude/settings.json")
+        body = "the no-AI list, %s and %s cannot be changed from a session" % (wall, settings)
+        self.allowed("cat > %s/review-2.md <<'EOF'\n%s\nEOF" % (self.lane, body))
+        self.allowed("cat <<'EOF' > %s/review-2.md\n# review\n%s\nEOF" % (self.lane, body))
+        self.allowed("python3 - <<'EOF'\nopen('%s/review-2.md','w').write('%s')\nEOF" % (self.lane, body))
+        self.refused("cat > %s/no_ai_wall.py <<'EOF'\n%s\nEOF" % (wall, body))  # the same text, written into the wall itself, is still refused
+
+
 if __name__ == "__main__":
     unittest.main()
