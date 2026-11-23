@@ -139,8 +139,10 @@ being read. It backs up every file it replaces and writes an `undo.sh` beside th
 git -C ~/repos/Claude_Commandz fetch -q origin main && python3 -I <(git -C ~/repos/Claude_Commandz show origin/main:global/.claude/scripts/install_scripts.py) --no-fetch
 ```
 
-Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--repo`, `--home`, `--ref`. Last line is
-`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--strict`, `--repo`, `--home`, `--ref`. Last line is
+`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Exit codes: 0 for `INSTALL OK` even when a drifted file was left alone
+(the last line still says `drift N`, so a `set -e` script that runs the wall installer next reaches it; issue 148), 1 when a file was held back
+until the wall is installed (or, with `--strict`, when a file drifted), 2 could not run, 3 not confirmed. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
 
 ### Turning the Docker-first guard on or off (a person runs this, never a session)
 
