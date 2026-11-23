@@ -1095,6 +1095,28 @@ class Issue130Tests(Fixture):
         self.refused("W=%s; W=$(cat /tmp/x); cd $W; echo x > no_ai_wall.py" % self.proj)
         self.refused("W=%s; if true; then W=%s; fi; cd $W; echo x > no_ai_wall.py" % (self.proj, wall))
 
+    def test_a_variable_changed_by_any_other_form_is_not_trusted(self):
+        # the working folder is the wall's own folder after the second statement, whatever form changed the variable
+        home_claude = self.p("home/.claude")
+        for change in ("W+=/no-ai-wall", "W[0]=%s" % w.wall_dir(), "((W=1)); W=%s" % w.wall_dir(), "W+=x; W=%s" % w.wall_dir(),
+                       "declare -n R=W; R=%s" % w.wall_dir(), "W=${W:+%s}" % w.wall_dir(), "export W=%s" % w.wall_dir(), "read W <<< %s" % w.wall_dir()):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, change))
+        self.refused("W=%s; : ${W:=%s}; W+=/no-ai-wall; cd $W; cp /tmp/x ." % (home_claude, home_claude))
+
+    def test_a_quoted_or_escaped_program_word_is_still_read_as_the_program(self):
+        for cmd in ("'find' . -name x", '"find" . -name x', "\\find . -name x", "fi'nd' . -name x", "env 'grep' -r x", "sudo \"rg\" x",
+                    "timeout 5 'find' ."):
+            self.refused(cmd)
+        self.allowed("grep 'find' src/a.txt", cwd=self.proj)
+        self.allowed("echo 'find' | cat", cwd=self.proj)
+
+    def test_data_that_a_shell_is_fed_is_not_dropped_as_a_message(self):
+        for cmd in ("echo find . | sh", "echo 'find .' | bash", "printf 'grep -r x .\\n' | sh -s", "echo find . | xargs -I{} sh -c '{}'",
+                    "echo 'find .' > a.sh; sh a.sh", "echo 'find .' > a.sh; ./a.sh", "printf 'rg x\\n' > /tmp/a; source /tmp/a", "echo 'find .' > /tmp/a; . /tmp/a",
+                    "echo 'find .' | tee /tmp/a.sh; bash /tmp/a.sh", "cat <<'EOF' > a.sh\nfind .\nEOF\nbash a.sh"):
+            self.refused(cmd)
+        self.allowed("echo 'find them' | head -1", cwd=self.proj)
+
 
 if __name__ == "__main__":
     unittest.main()

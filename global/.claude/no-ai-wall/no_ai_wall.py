@@ -333,11 +333,12 @@ _HEREDOC_READERS = {"cat", "tee", "node", "perl", "ruby", "php", "deno", "bun", 
 _SHELL_AFTER_PIPE = re.compile(r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|eval|source|xargs|ssh|su|sudo|env|exec|python[\d.]*|node|perl|ruby|php)(?![\w.-])")
 
 
-def _shell_commands(text):
+def _shell_commands(text, written=None):
     """-> a list of commands, each a list of (word, quoted), or None when the text cannot be read with certainty. A command ends at an unquoted
-    ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped. A quoted word is data, except the script of a shell's -c."""
+    ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped (the targets of output redirects are added to the list
+    `written` when one is given). A quoted word is data, except the script of a shell's -c."""
     cmds, toks = [], []
-    buf, quoted, started, skip = [], False, False, False
+    buf, quoted, started, skip, skip_out = [], False, False, False, False
     i, n = 0, len(text)
 
     def end_word():
@@ -345,6 +346,8 @@ def _shell_commands(text):
         if started:
             if skip:
                 skip = False
+                if skip_out and written is not None:
+                    written.append("".join(buf))
             else:
                 toks.append(("".join(buf), quoted))
         buf, quoted, started = [], False, False
@@ -399,6 +402,7 @@ def _shell_commands(text):
             if started and not quoted and "".join(buf).isdigit():
                 buf, started = [], False  # the fd number of `2>&1`
             end_word()
+            skip_out = c != "<"
             while i < n and text[i] in "<>&|":
                 i += 1
             skip = True
@@ -543,7 +547,9 @@ def _resolve_vars(command):
             known[m.group(1)] = m.group(2)
         else:
             for name in list(known):
-                if re.search(r"(?<![\w$])%s=" % name, text) or re.search(r"\b%s\b[^;&|\n]*\b%s\b" % (_REBINDERS, name), text):
+                # keep a value only when every later mention of the name is a plain read ($NAME or ${NAME}); NAME+=, NAME[0]=, ((NAME=..)),
+                # ${NAME:=..}, declare -n, read, export and every other form leave a bare mention behind and drop it
+                if re.search(r"(?<![\w$])%s(?!\w)" % name, re.sub(r"\$\{%s\}|\$%s(?!\w)" % (name, name), " ", text)):
                     del known[name]
         if sep in ("&&", "||", "|", "&") or _BLOCK_START.match(text) or re.search(r"[(){}`]", text):
             collecting = False
@@ -642,15 +648,19 @@ def _is_launcher_words(words):
 
 
 _RUNS_A_STRING = ("env", "ssh", "su", "watch", "script", "parallel", "flock", "runuser", "sg")
+_RUNS_A_PROGRAM = ("docker", "podman", "kubectl", "nsenter", "chroot", "exec", "xargs", "sudo", "nohup", "nice", "timeout", "setsid")  # a program word follows
 
 
 def _searches(text, cwd, depth=0):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
-    cmds = _shell_commands(text)
+    written = []
+    cmds = _shell_commands(text, written)
     if cmds is None or depth > 4:
         return None
+    if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
+        return None  # text written to a file that could be a script may be run later in the text: the wide reading
     recursive, folders, words, cur = False, [], [], cwd
     for cmd in cmds:
         ws = [w for w, q in cmd]
@@ -664,9 +674,11 @@ def _searches(text, cwd, depth=0):
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
         xargs = any(os.path.basename(w) == "xargs" for w, q in cmd if not q)
+        prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
-            if q:
-                # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell
+            if q and i != prog_at and i != 0:
+                # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
+                # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
                     sub = _searches(w, cur, depth + 1)
                     if sub is None:
@@ -683,6 +695,10 @@ def _searches(text, cwd, depth=0):
                         break
             elif prog == "eval":
                 script = " ".join(rest)
+            runs_here = i == prog_at or any(os.path.basename(p) in _RUNS_A_STRING + _RUNS_A_PROGRAM for p, pq in cmd[:i] if not pq)
+            if runs_here and (prog in _SHELLS and (script is None or xargs) or prog in ("source", ".") or (prog == "tee" and any(
+                    not (a.startswith("-") or a.endswith(_DOC_EXTENSIONS) or a == "/dev/null") for a in rest))):
+                return None  # a shell fed a file or a pipe, or a file a later command could run: what it reads is out of sight, so the wide reading
             if script is not None:
                 sub = _searches(script, cur, depth + 1)
                 if sub is None:
