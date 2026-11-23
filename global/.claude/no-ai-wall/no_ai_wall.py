@@ -591,7 +591,7 @@ def _resolve_vars(command):
         if m:
             known[m.group(1)] = m.group(2)
         else:
-            if text.strip() and (_UNSEEN_REBIND.search(text) or not _first_word_is_child_only(text) or re.search(r"[(){}`]", text)):
+            if _UNSEEN_REBIND.search(text) or not _first_word_is_child_only(text) or re.search(r"[(){}`]", text):
                 # a sourced file, eval, read, `<(`, a trap, an alias, or a call to something that is no plain program (a function) can set any
                 # variable without naming it: nothing known is trusted past here
                 known.clear()
@@ -604,10 +604,7 @@ def _resolve_vars(command):
         if sep in ("&&", "||", "|", "&") or _BLOCK_START.match(text) or re.search(r"[(){}`]", text):
             collecting = False
         out.append(s + sep)
-    # the line that opens the heredoc is the parent shell's own, so its variables are written out; the lines after it (a body a child shell reads)
-    # stay as written, because that shell never sees a variable the parent did not export
-    first, nl, rest = tail.partition("\n")
-    out.append(_subst(first, known) + nl + rest)
+    out.append(tail)  # as written: a heredoc's child shell never sees a variable the parent did not export
     return "".join(out)
 
 

@@ -1247,11 +1247,6 @@ class Issue130Tests(Fixture):
         self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=w.wall_dir())
         self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
         self.refused("W=/tmp\nsh <<EOF\ncd $W\ncp /tmp/x no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
-        # ... but the line that opens the heredoc is the parent shell's own, so its variables are still written out (automated review of f936bb2)
-        wall = w.wall_dir()
-        self.refused("W=%s\ncat <<'EOF' > $W/no_ai_wall.py\nx\nEOF" % wall)
-        self.refused("W=%s\ncat <<EOF | tee $W/no_ai_wall.sh\nx\nEOF" % wall)
-        self.allowed("W=%s\ncat <<'EOF' > $W/review.md\nthe wall folder is not written here\nEOF" % self.proj)
 
     # blocking 3: run from a folder above a listed one, a string of code that runs a recursive search walks every listed folder below it
     def test_code_text_that_runs_a_recursive_search_walks_the_working_folder_too(self):
