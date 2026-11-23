@@ -935,7 +935,9 @@ def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
     """walk_cwd=False leaves out the guess that a search naming no root walks the working folder (used for the body of an interpreter's
     heredoc, where a word like `find` is as likely prose or code as a search); the roots a body names are checked either way."""
     words = _words(command)
-    recursive = searching and _is_recursive(words)
+    # Each command is judged on its own words (issue 146's reading): over the whole text, `grep -c x f; gh pr view -R owner/name` read gh's -R
+    # (its --repo) as grep's -R. A text that cannot be read with certainty is still one group of all its words, as before.
+    recursive = searching and any(_is_recursive(g) for g in _command_word_groups(command))
     seen = []
 
     def check(tok, base):
@@ -1678,11 +1680,43 @@ def _command_word_groups(command):
     and refused an ordinary read. A quoted word that holds a space is also split into its own words (`bash -c 'grep -r x /dir'` stays a search),
     and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before. A text with a substitution
     or a subshell (`$(`, a backtick, any parenthesis) is also read whole: the reader ends a command there, so `grep $(echo -r) x /dir` would
-    otherwise put the flag in another group than its grep."""
+    otherwise put the flag in another group than its grep. So is a text with a here-string or a heredoc (`<<`, which also covers `<<<`): its text
+    goes to the receiver as input or as code (`bash <<< "grep -r x /dir"`, `xargs grep x /dir <<< "-r"`, the same with a heredoc), and the reader
+    drops it from the command it feeds."""
     cmds = _shell_commands(command)
-    if cmds is None or "(" in command or "`" in command:
+    if cmds is None or _has_unquoted_paren(command) or "`" in command or "<<" in command:
         return [_words(command)] + _split_groups(cmds)
     return _split_groups(cmds) or [_words(command)]
+
+
+def _has_unquoted_paren(command):
+    """True when a `(` or `)` sits outside quotes and is not backslash-escaped, or when a quote is left open (issue 150). The reader ends a
+    command at such a parenthesis (a subshell, `$(`, an array), so it cannot say which command a flag belongs to and the whole text is read
+    as one group. A parenthesis inside quotes is text (`sed -i "s/(a)/(b)/"`): the reader keeps it in its word, and it must not force the
+    whole-text reading. A comment also gives True, the stricter answer. The scan follows the reader (_shell_commands): a
+    backslash takes the next character, single quotes end at the next single quote, double quotes at the next unescaped double quote."""
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return True
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                j += 2 if command[j] == "\\" else 1
+            if j >= n:
+                return True
+            i = j + 1
+        elif c in "()" or (c == "#" and (i == 0 or command[i - 1] in " \t\n;&|")):
+            return True  # (a comment: the reader skips its text, this scan would read its quotes, so the stricter answer)
+        else:
+            i += 1
+    return False
 
 
 def _split_groups(cmds):
@@ -1692,12 +1726,34 @@ def _split_groups(cmds):
     groups = []
     for cmd in cmds:
         g = []
-        for w, q in cmd:
+        start = _text_program_at(cmd)
+        for k, (w, q) in enumerate(cmd):
             g.append(w)
-            if any(ch.isspace() for ch in w):
+            # a title or message handed to gh or git is text, never a program: `gh issue create --title "a grep before gh -R"` has no grep in it.
+            # Only the command's own program counts (see _text_program_at) and only the value right after its flag, so a gh elsewhere in the
+            # text, or another program's -t, never hides a quoted word.
+            as_text = start is not None and k > start + 1 and q and (cmd[k - 1][0] in _TEXT_VALUE_FLAGS or w.startswith(("--title=", "--body=", "--message=")))
+            if any(ch.isspace() for ch in w) and not as_text:
                 g.extend(_words(w))
         groups.append(g)
     return groups
+
+
+def _text_program_at(cmd):
+    """The index of gh or git when it is the program of this command (its first word, or the first word after the `--` of gated_post.sh),
+    else None. A wrapper in front (timeout, env, xargs, sudo) gives None: the stricter answer, the quoted words are split as before."""
+    s = 0
+    if cmd and os.path.basename(cmd[0][0]) == "gated_post.sh":
+        s = next((k + 1 for k, (w, q) in enumerate(cmd) if w == "--" and not q), None)
+        if s is None:
+            return None
+    if s < len(cmd) and not cmd[s][1] and cmd[s][0] in _TEXT_VALUE_PROGRAMS:
+        return s
+    return None
+
+
+_TEXT_VALUE_PROGRAMS = ("gh", "git")  # programs whose title, body and message flags (below) only ever carry text (issue 150)
+_TEXT_VALUE_FLAGS = ("--title", "--body", "--message", "-m", "-t", "-b")
 
 
 def reads_content_recursively(words):
