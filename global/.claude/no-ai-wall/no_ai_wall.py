@@ -353,7 +353,9 @@ def _ansi_c_end(text, i):
 
 
 def _ansi_c_value(body):
-    """The text the shell makes of the inside of `$'...'`: backslash escapes read, an unknown one left as written."""
+    """The text the shell makes of the inside of `$'...'`: backslash escapes read, an unknown one left as written. The shell cuts the string at
+    the first NUL (`$'a\\0b'` is `a`), so this does too. None when a numbered escape gives a character past ASCII (the shell builds bytes from
+    `\\xHH`, so `\\xc3\\xa9` is one letter): the reader is unsure and the caller takes the wide reading."""
     out, i, n = [], 0, len(body)
     while i < n:
         c = body[i]
@@ -372,11 +374,14 @@ def _ansi_c_value(body):
             continue
         code = m.group()
         try:
-            out.append(chr(ord(code[1]) & 0x1f) if code[0] == "c" else chr(int(code[1:], 16)) if code[0] in "xuU" else chr(int(code, 8) & 0xff))
+            ch = chr(ord(code[1]) & 0x1f) if code[0] == "c" else chr(int(code[1:], 16)) if code[0] in "xuU" else chr(int(code, 8) & 0xff)
         except (ValueError, OverflowError):
-            out.append(m.group(0))
+            return None  # a code point no string holds: unsure
+        if ord(ch) > 127:
+            return None
+        out.append(ch)
         i = m.end()
-    return "".join(out)
+    return "".join(out).split("\x00")[0]
 
 
 def _shell_commands(text, written=None, meta=None):
@@ -459,7 +464,10 @@ def _shell_commands(text, written=None, meta=None):
             j = _ansi_c_end(text, i)
             if j < 0:
                 return None
-            buf.append(_ansi_c_value(text[i + 2:j]))
+            value = _ansi_c_value(text[i + 2:j])
+            if value is None:
+                return None
+            buf.append(value)
             started = quoted = True
             i = j + 1
         elif c == "$" and text[i + 1:i + 2] == '"':
@@ -732,7 +740,7 @@ def _names_a_root(words, cur):
     return False
 
 
-_XARGS_FLAGFREE_WORD = re.compile(r"(?:^|\s|\\n)-")  # a word of an echo or printf that starts an option of its own, or a line that does
+_XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
 
 
 def _xargs_input_is_flagfree(cmds, meta, k):
@@ -743,19 +751,17 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
         return False
     xargs_words = [w for w, q in cmds[k]]
-    if any(x == "-a" or x.startswith("--arg-file") or (x.startswith("-") and not x.startswith("--") and "a" in x) for x in xargs_words):
+    # -a reads a file; -d and --delimiter cut the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`)
+    if any(x.startswith(("--arg-file", "--delim")) or (x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x)) for x in xargs_words):
         return False
     prev = cmds[k - 1]
     if prev[0][1] or prev[0][0] not in ("echo", "printf"):
         return False
-    for x, q in prev[1:]:
-        x = x.replace("\\n", " ")  # a printf's own line break: the next word can start with a dash
-        if x.startswith("-") or _XARGS_FLAGFREE_WORD.search(x) or "\\" in x or any(ch in x for ch in "$`{~") or any(ch in GLOB_CHARS for ch in x):
-            return False
-    return True
+    # only plain words: no dash anywhere (a delimiter could expose it), no escape, quote, variable, wildcard or brace
+    return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
 
 
-def _search_of(prog, rest, cur, xargs, flag_in=False):
+def _search_of(prog, rest, cur, flag_in=False):
     """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
     flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
     if prog in _ROOTS_ONLY:
@@ -770,9 +776,9 @@ def _search_of(prog, rest, cur, xargs, flag_in=False):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, not (xargs or _names_a_root(roots, cur))
+        return True, not _names_a_root(roots, cur)
     if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
-        return True, not (xargs or _names_a_root(_operands(prog, rest), cur))
+        return True, not _names_a_root(_operands(prog, rest), cur)
     key = _SEARCH_KEY.get(prog)
     if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
@@ -920,7 +926,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                     return None
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
-            rec, walks = _search_of(prog, rest, cur, xargs, flag_in)
+            rec, walks = _search_of(prog, rest, cur, flag_in)
             recursive = recursive or rec
             if walks:
                 folders.append(cur)

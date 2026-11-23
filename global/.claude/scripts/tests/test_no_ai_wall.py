@@ -1388,6 +1388,13 @@ class Issue154Tests(Fixture):
         self.refused("echo -r | xargs grep x", self.tmp)  # no root named: it walks the session folder, which holds a listed one
         self.refused("ls | xargs grep x", self.tmp)
         self.refused("xargs grep -r x", self.tmp)  # the flag is typed here, but xargs still runs it with no root
+        # a delimiter cuts the input where the caller says, so a dash inside a plain word can become a flag (review of the first version)
+        for cmd in ("echo a-r | xargs -d a grep x %s" % a, "echo a-r | xargs --delimiter=a grep x %s" % a, "echo foo-bar | xargs grep x %s" % a,
+                    "echo hi | xargs -a flags.txt grep x %s" % a, "echo hi | xargs --arg-file=flags.txt grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        # the same rule for the other programs xargs can run: with no root named they walk the session folder, as typed
+        for cmd in ("echo -R | xargs ls", "echo hi | xargs find -type f", "echo hi | xargs du", "echo hi | xargs tree", "ls | xargs rg x"):
+            self.refused(cmd, self.tmp)
 
     def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
         a = self.above
@@ -1431,6 +1438,15 @@ class Issue154Tests(Fixture):
         self.assertEqual(words("echo $\"a b\" x"), [[("echo", False), ("a b", True), ("x", False)]])
         self.assertIsNone(words("echo $'unclosed"))
         self.assertIsNone(words("echo $'a\\'"))  # the escaped quote leaves the string open
+        self.assertEqual(words("echo $'a\\0b' x"), [[("echo", False), ("a", True), ("x", False)]])  # the shell cuts the string at a NUL
+        self.assertEqual(words("echo $'\\x41\\101\\u0042'"), [[("echo", False), ("AAB", True)]])
+        self.assertIsNone(words("echo $'\\xc3\\xa9'"))  # bytes past ASCII: unsure, so the wide reading
+        self.assertIsNone(words("echo $'\\u00e9'"))
+
+    def test_a_folder_changed_to_through_a_string_cut_at_a_nul_is_the_folder_the_shell_uses(self):
+        # the shell's cd goes to the text before the NUL, which here is the folder above the listed ones
+        self.refused("cd $'%s\\0/work'; grep -rn x" % self.above, self.p("work"))
+        self.allowed("cd $'%s\\0/wall'; grep -n x f.txt" % self.p("work"), self.tmp)
 
     def test_the_other_quote_scans_agree_on_the_dollar_single_quote_string(self):
         text = "echo $'it\\'s (x)'; echo b"
