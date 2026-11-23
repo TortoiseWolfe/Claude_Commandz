@@ -1392,6 +1392,16 @@ class Issue154Tests(Fixture):
         for cmd in ("echo a-r | xargs -d a grep x %s" % a, "echo a-r | xargs --delimiter=a grep x %s" % a, "echo foo-bar | xargs grep x %s" % a,
                     "echo hi | xargs -a flags.txt grep x %s" % a, "echo hi | xargs --arg-file=flags.txt grep x %s" % a):
             self.refused(cmd, self.tmp)
+        # review of the second version (senior review of pull request 155), blocking item 1: -I and -i put the input inside a word of the command,
+        # so a plain letter becomes a flag (`echo r | xargs -I@ grep -@ x DIR` runs `grep -r x DIR`)
+        for cmd in ("echo r | xargs -I@ grep -@ x %s" % a, "echo r | xargs -i grep -{} x %s" % a, "echo r | xargs -I {} grep -{} x %s" % a,
+                    "echo r | xargs --replace=@ grep -@ x %s" % a, "echo r | xargs -tI@ grep -@ x %s" % a, "echo R | xargs -I@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
+        # blocking item 2: GNU xargs takes any unique prefix of a long option, so a shortened one reads the flag from a file or cuts the input
+        for cmd in ("echo hi | xargs --a=flags.txt grep x %s" % a, "echo hi | xargs --arg=flags.txt grep x %s" % a,
+                    "echo hi | xargs --arg-f=flags.txt grep x %s" % a, "echo a-r | xargs --d=a grep x %s" % a, "echo a-r | xargs --deli=a grep x %s" % a,
+                    "echo r | xargs --repl=@ grep -@ x %s" % a, "echo r | xargs --rep=@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
         # the same rule for the other programs xargs can run: with no root named they walk the session folder, as typed
         for cmd in ("echo -R | xargs ls", "echo hi | xargs find -type f", "echo hi | xargs du", "echo hi | xargs tree", "ls | xargs rg x"):
             self.refused(cmd, self.tmp)
@@ -1399,7 +1409,8 @@ class Issue154Tests(Fixture):
     def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
         a = self.above
         for cmd in ("echo hi | xargs grep x %s" % a, "echo hi there | xargs grep -n x %s" % a, "printf '%%s\\n' a b | xargs grep x %s" % a,
-                    "echo hi | xargs ls %s" % a, "echo hi | xargs cp %s /tmp/out" % a):
+                    "echo hi | xargs ls %s" % a, "echo hi | xargs cp %s /tmp/out" % a,
+                    "echo hi | xargs --no-run-if-empty grep x %s" % a, "echo hi | xargs --max-args=1 grep x %s" % a, "echo hi | xargs --null grep x %s" % a):
             self.allowed(cmd, self.tmp)
         # a flag-free input read in a folder that holds no listed folder is ordinary
         self.allowed("ls | xargs grep x", self.p("work"))

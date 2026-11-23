@@ -743,6 +743,10 @@ def _names_a_root(words, cur):
 _XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
 
 
+_XARGS_SAFE_LONG = frozenset({"--null", "--no-run-if-empty", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--verbose", "--exit",
+                              "--open-tty", "--interactive", "--show-limits", "--process-slot-var"})
+
+
 def _xargs_input_is_flagfree(cmds, meta, k):
     """True when command k (an xargs) reads only the plain words of the echo or printf piped straight into it, none of which can start an
     option (issue 154): `echo hi | xargs grep x DIR`. Anything else (another producer, a file, a here-string, `-a FILE`, a variable, a wildcard or an
@@ -751,8 +755,13 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
         return False
     xargs_words = [w for w, q in cmds[k]]
-    # -a reads a file; -d and --delimiter cut the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`)
-    if any(x.startswith(("--arg-file", "--delim")) or (x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x)) for x in xargs_words):
+    # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
+    # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
+    if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
+        return False
+    # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
+    # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
+    if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
         return False
     prev = cmds[k - 1]
     if prev[0][1] or prev[0][0] not in ("echo", "printf"):
