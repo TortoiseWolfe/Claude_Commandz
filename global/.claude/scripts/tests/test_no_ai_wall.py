@@ -1345,6 +1345,15 @@ class Issue146Tests(Fixture):
         cfg = self.p("cfg")
         self.refused("echo 'unclosed; grep -r x %s" % cfg, self.lane)  # the wide reading, as before
 
+    def test_a_recursive_flag_that_a_substitution_supplies_is_still_refused(self):
+        # `$(echo -r)`, a backtick and `<(...)` end a command in the reader, so the flag lands in another group than its grep; a text that
+        # holds one is also read as a whole, so the flag still follows its program
+        cfg = self.p("cfg")
+        for cmd in ("grep $(echo -r) x %s" % cfg, "grep `echo -r` x %s" % cfg, "grep $(echo -r) x %s; gh pr view 1 -R owner/name" % cfg,
+                    "grep -c $(echo y) report.md; grep $(echo -r) x %s" % cfg, "rg $(echo --hidden) x %s" % cfg,
+                    "grep $(printf %%s -r) x %s" % cfg, "cp $(echo -r) %s /tmp/x" % cfg):
+            self.refused(cmd, self.lane)
+
     def test_the_refusal_is_the_list_file_one(self):
         r = self.run_bash("grep -r secret %s" % self.p("cfg"), self.lane)
         self.assertIsNotNone(r)

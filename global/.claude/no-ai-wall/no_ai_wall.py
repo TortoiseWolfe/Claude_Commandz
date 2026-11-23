@@ -1676,10 +1676,19 @@ def _command_word_groups(command):
     """The words of a shell text, one group for each command in it (issue 146). reads_content_recursively looks for a program word and then an
     option after it; over the whole text's words, `grep -oE x file; gh pr view -R owner/name` read gh's -R (its --repo) as grep's -R (recursive)
     and refused an ordinary read. A quoted word that holds a space is also split into its own words (`bash -c 'grep -r x /dir'` stays a search),
-    and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before."""
+    and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before. A text with a substitution
+    or a subshell (`$(`, a backtick, any parenthesis) is also read whole: the reader ends a command there, so `grep $(echo -r) x /dir` would
+    otherwise put the flag in another group than its grep."""
     cmds = _shell_commands(command)
-    if cmds is None:
-        return [_words(command)]
+    if cmds is None or "(" in command or "`" in command:
+        return [_words(command)] + _split_groups(cmds)
+    return _split_groups(cmds) or [_words(command)]
+
+
+def _split_groups(cmds):
+    """The per-command word groups of a read text (see _command_word_groups); an empty list when there is no text."""
+    if not cmds:
+        return []
     groups = []
     for cmd in cmds:
         g = []
@@ -1688,7 +1697,7 @@ def _command_word_groups(command):
             if any(ch.isspace() for ch in w):
                 g.extend(_words(w))
         groups.append(g)
-    return groups or [_words(command)]
+    return groups
 
 
 def reads_content_recursively(words):
