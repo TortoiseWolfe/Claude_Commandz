@@ -1103,12 +1103,59 @@ class Issue130Tests(Fixture):
             self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, change))
         self.refused("W=%s; : ${W:=%s}; W+=/no-ai-wall; cd $W; cp /tmp/x ." % (home_claude, home_claude))
 
+    # senior review 1, blocking 1: a statement that can change a variable without naming it must end the trust in every known value
+    def test_a_variable_is_not_trusted_past_a_statement_that_can_rebind_it_unseen(self):
+        home_claude = self.p("home/.claude")
+        for hidden in (". /tmp/set.sh", "source /tmp/set.sh", "source <(echo Vz= | base64 -d)", ". <(cat /tmp/set.sh)", "eval \"$(cat /tmp/set.sh)\"",
+                       "eval $X", "read W < /tmp/w", "mapfile W < /tmp/w", "printf -v W %s /tmp/w", "getopts a W", "let W=1", "declare -n R=W"):
+            self.refused("W=%s; %s; cd $W; echo x > no_ai_wall.py" % (home_claude, hidden))
+            self.refused("W=%s; %s; cd $W; cp /tmp/x ." % (home_claude, hidden))
+        self.allowed("W=%s; cd $W && cp /tmp/x ." % self.proj)  # the plain shape the lanes use is still allowed
+
+    # senior review 1, blocking 2: an interpreter runs its heredoc, so a search written inside it still names its roots
+    def test_a_search_inside_an_interpreter_heredoc_still_refuses_a_listed_root_or_its_parent(self):
+        parent, wall = self.p("wall"), self.p("wall/clientA")
+        bodies = {"perl": 'system("grep -r x %s");', "python3": "import os\nos.system('grep -r x %s')", "node": "require('child_process').execSync('find %s -name x')",
+                  "ruby": 'system("rg x %s")', "php": "<?php system('du -sh %s');", "awk": 'BEGIN { system("grep -r x %s") }', "sed": "1e find %s"}
+        for prog, body in bodies.items():
+            for root in (parent, wall):
+                self.refused("%s <<'EOF'\n%s\nEOF" % (prog, body % root))
+                self.refused("%s - <<'EOF' | head -3\n%s\nEOF" % (prog, body % root))
+        # ... while the same words with no root named, or a root that is no listed folder, are still just text
+        self.allowed("python3 <<'EOF'\nimport os\nos.system('grep -c x /tmp/one.txt')  # find them, search open issues\nEOF", cwd=self.proj)
+        self.allowed("perl <<'EOF'\nsystem(\"grep -r x %s\");\nEOF" % self.proj)
+
+    # senior review 1, missing tests: the wall's own files reached by the roads the issue 130 tests never took
+    def test_a_guarded_file_is_refused_by_every_road_to_it(self):
+        wall, settings = w.wall_dir(), self.p("home/.claude/settings.json")
+        link = self.p("work/wall-link")
+        os.symlink(wall, link)
+        slink = self.p("work/settings-link")
+        os.symlink(settings, slink)
+        for cmd in ("echo x > %s/no_ai_wall.py" % link, "echo x | tee %s/no_ai_wall.py" % wall, "echo x | tee -a %s" % slink, "mv /tmp/x %s/no_ai_wall.py" % wall,
+                    "mv /tmp/x %s" % settings, "python3 -c \"open('%s/no_ai_wall.py','w').write('x')\"" % wall,
+                    "python3 -c \"open('%s','w').write('x')\"" % settings, "echo x > $HOME/.claude/settings.json", "echo x > ~/.claude/no-ai-wall/no_ai_wall.py",
+                    "echo x > ${HOME}/.claude/no-ai-wall/no_ai_wall.sh", "cp /tmp/x %s" % slink, "sed -i s/a/b/ %s/no_ai_wall.py" % link,
+                    "ln -sf /tmp/x %s/no_ai_wall.py" % wall, "chmod 000 %s/no-ai-wall-guard.py" % wall, "truncate -s 0 %s" % settings):
+            self.refused(cmd)
+
     def test_a_quoted_or_escaped_program_word_is_still_read_as_the_program(self):
         for cmd in ("'find' . -name x", '"find" . -name x', "\\find . -name x", "fi'nd' . -name x", "env 'grep' -r x", "sudo \"rg\" x",
                     "timeout 5 'find' ."):
             self.refused(cmd)
         self.allowed("grep 'find' src/a.txt", cwd=self.proj)
         self.allowed("echo 'find' | cat", cwd=self.proj)
+
+    def test_a_quoted_program_after_wrapper_options_is_still_the_program(self):
+        for cmd in ("sudo -u root 'find' . -name x", "env -i FOO=1 'grep' -r x", "timeout -k 2 5 'rg' x", "nice -n 5 \"find\" .", "stdbuf -oL 'find' ."):
+            self.refused(cmd)
+        self.allowed("sudo -u root ls 'find' ", cwd=self.proj)
+
+    def test_a_file_written_then_run_is_read_widely_whatever_its_name_ends_in(self):
+        for cmd in ("echo 'find .' > a.md; chmod +x a.md; ./a.md", "echo 'find .' > a.txt; python3 a.txt", "echo 'grep -r x .' > /tmp/a.json; bash /tmp/a.json",
+                    "echo 'find .' > /tmp/a.md; /tmp/a.md", "printf 'rg x\\n' > a.log; ash a.log", "echo 'find .' | bash"):
+            self.refused(cmd)
+        self.allowed("echo 'find them' > notes.md; cat notes.md", cwd=self.proj)
 
     def test_data_that_a_shell_is_fed_is_not_dropped_as_a_message(self):
         for cmd in ("echo find . | sh", "echo 'find .' | bash", "printf 'grep -r x .\\n' | sh -s", "echo find . | xargs -I{} sh -c '{}'",

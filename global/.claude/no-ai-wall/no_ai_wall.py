@@ -326,10 +326,11 @@ def _is_recursive(words):
 # a word like find, du or tar anywhere made the command "a search", and a search with no root named always walked the working folder.
 # The reading below keeps the old, wider one whenever the text cannot be read with certainty (an unclosed quote).
 
-_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcsh"}
 _DOC_EXTENSIONS = (".md", ".txt", ".json", ".yml", ".yaml", ".tsv", ".csv", ".log", ".html", ".diff", ".patch")  # a file with one of these is text, not a script
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
 _HEREDOC_READERS = {"cat", "tee", "node", "perl", "ruby", "php", "deno", "bun", "gh", "git", "sed", "awk", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "jq", "grep"}
+_HEREDOC_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed"}
 _SHELL_AFTER_PIPE = re.compile(r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|eval|source|xargs|ssh|su|sudo|env|exec|python[\d.]*|node|perl|ruby|php)(?![\w.-])")
 
 
@@ -432,12 +433,21 @@ def _heredoc_is_data(before, after):
     targets = [m.group(1).strip("'\"") for m in _REDIRECT.finditer(before)]
     if prog == "tee":
         targets += [w for w in words[i + 1:] if not w.startswith("-")]
-    return all(t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.startswith("&") for t in targets)
+    if all(t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.startswith("&") for t in targets):
+        return prog
+    return None
 
 
-def _strip_heredocs(command):
+def _heredoc_runs_it(prog):
+    """True for a receiver that RUNS its heredoc (an interpreter, awk, sed): the body is data to no shell, but it can start a search, so the
+    roots it names are still checked (senior review 1 of the issue 130 fix)."""
+    return prog in _HEREDOC_RUNNERS or re.fullmatch(r"python[\d.]*", prog) is not None
+
+
+def _strip_heredocs(command, runner_bodies=None):
     """The command without the bodies of heredocs whose text no shell reads (see _heredoc_is_data). A heredoc with no terminator line, or
-    one handed to a shell (`bash <<EOF`, `cat <<EOF | sh`), keeps its body: it is judged as the commands it is."""
+    one handed to a shell (`bash <<EOF`, `cat <<EOF | sh`), keeps its body: it is judged as the commands it is. The bodies of heredocs an
+    interpreter runs are dropped too but added to `runner_bodies` when one is given, so the caller can still read them for the roots they name."""
     if "<<" not in command:
         return command
     lines = command.split("\n")
@@ -455,7 +465,10 @@ def _strip_heredocs(command):
             j += 1
         if j >= len(lines):
             continue
-        if _heredoc_is_data(line[:m.start()], line[m.end():]):
+        receiver = _heredoc_is_data(line[:m.start()], line[m.end():])
+        if receiver:
+            if runner_bodies is not None and _heredoc_runs_it(receiver):
+                runner_bodies.append("\n".join(lines[i:j]))
             i = j + 1
         else:
             out.extend(lines[i:j + 1])
@@ -499,7 +512,10 @@ def _split_statements(text):
 
 _ASSIGN = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=((?:[A-Za-z0-9_./:@%+=,~-]|\$HOME|\$\{HOME\})*)[ \t]*\Z")
 _BLOCK_START = re.compile(r"[ \t]*(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|!|\{|\})(?![\w-])")
-_REBINDERS = r"(?:read|for|select|local|declare|typeset|export|readonly|unset|mapfile|readarray|getopts|let|eval|source|printf)"
+# a statement that can bind a variable without naming it, or through a name held in another: `. file`, source, eval, read, mapfile, declare -n,
+# printf -v, getopts, let, a process substitution. The first one ends the trust in every value _resolve_vars knows.
+_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset|printf\s+-v)(?=[\s;&|)}`]|$)"
+                            r"|[<>]\(|\$\(\(|\(\(")
 
 
 def _subst(text, known):
@@ -546,6 +562,9 @@ def _resolve_vars(command):
         if m:
             known[m.group(1)] = m.group(2)
         else:
+            if _UNSEEN_REBIND.search(text):
+                known.clear()  # a sourced file, eval, read or `<(` can set any variable without naming it: nothing known is trusted past here
+                collecting = False
             for name in list(known):
                 # keep a value only when every later mention of the name is a plain read ($NAME or ${NAME}); NAME+=, NAME[0]=, ((NAME=..)),
                 # ${NAME:=..}, declare -n, read, export and every other form leave a bare mention behind and drop it
@@ -651,6 +670,26 @@ _RUNS_A_STRING = ("env", "ssh", "su", "watch", "script", "parallel", "flock", "r
 _RUNS_A_PROGRAM = ("docker", "podman", "kubectl", "nsenter", "chroot", "exec", "xargs", "sudo", "nohup", "nice", "timeout", "setsid")  # a program word follows
 
 
+_INTERPRETERS = _SHELLS | {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed", "python", "python3", "source", "."}
+
+
+def _runs_a_file(cmd):
+    """True for a command that runs a file or makes one runnable: chmod, a program given by a path no list knows (`./a.md`, `/tmp/x`), or an
+    interpreter given a file to read (`python3 a.md`, `bash a.sh`) and no inline script."""
+    ws = [w for w, q in cmd]
+    i = _skip_wrappers(ws, scan=False)
+    if i >= len(ws):
+        return False
+    prog = os.path.basename(ws[i])
+    if prog == "chmod" or ("/" in ws[i] and not _known_program(ws[i])):
+        return True
+    rest = ws[i + 1:]
+    if prog in _INTERPRETERS or re.fullmatch(r"python[\d.]*", prog):
+        return not any(x in ("-c", "-e", "-E", "-r") or (x.startswith("-") and not x.startswith("--") and "c" in x) for x in rest) and any(
+            not x.startswith("-") for x in rest)
+    return False
+
+
 def _searches(text, cwd, depth=0):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
@@ -661,6 +700,8 @@ def _searches(text, cwd, depth=0):
         return None
     if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
         return None  # text written to a file that could be a script may be run later in the text: the wide reading
+    if any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) and any(_runs_a_file(c) for c in cmds if not _is_launcher_words([w for w, q in c])):
+        return None  # a file is written and a file is run (or made runnable) in the same text, whatever the file's name ends in
     recursive, folders, words, cur = False, [], [], cwd
     for cmd in cmds:
         ws = [w for w, q in cmd]
@@ -676,7 +717,8 @@ def _searches(text, cwd, depth=0):
         xargs = any(os.path.basename(w) == "xargs" for w, q in cmd if not q)
         prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
-            if q and i != prog_at and i != 0:
+            behind_wrapper = not re.search(r"\s", w) and _known_program(w) and any(os.path.basename(p) in _WRAPPERS for p, pq in cmd[:i] if not pq)
+            if q and i != prog_at and i != 0 and not behind_wrapper:
                 # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
                 # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
@@ -695,7 +737,7 @@ def _searches(text, cwd, depth=0):
                         break
             elif prog == "eval":
                 script = " ".join(rest)
-            runs_here = i == prog_at or any(os.path.basename(p) in _RUNS_A_STRING + _RUNS_A_PROGRAM for p, pq in cmd[:i] if not pq)
+            runs_here = i == prog_at or any(os.path.basename(p) in _RUNS_A_STRING + _RUNS_A_PROGRAM + _WRAPPERS for p, pq in cmd[:i] if not pq)
             if runs_here and (prog in _SHELLS and (script is None or xargs) or prog in ("source", ".") or (prog == "tee" and any(
                     not (a.startswith("-") or a.endswith(_DOC_EXTENSIONS) or a == "/dev/null") for a in rest))):
                 return None  # a shell fed a file or a pipe, or a file a later command could run: what it reads is out of sight, so the wide reading
@@ -738,7 +780,8 @@ def bash_hits(command, cwd, paths):
     not a search (issue 233): its folder argument is a working folder, which the launcher itself refuses when it is listed and whose tool
     calls the lane's own hook guards. When the text cannot be read with certainty the old, wider reading is used (_bash_hits_wide)."""
     cwd = cwd or os.getcwd()
-    info = _searches(_strip_heredocs(command), cwd)
+    runner_bodies = []
+    info = _searches(_strip_heredocs(command, runner_bodies), cwd)
     if info is None:
         segs = _segments(command)
         if any(_is_launcher(seg) for seg in segs):
@@ -750,6 +793,10 @@ def bash_hits(command, cwd, paths):
     r = _bash_hits_wide(command, cwd, paths, searching=False)
     if r:
         return r
+    for body in runner_bodies:  # what an interpreter runs from its heredoc can search: the roots it names count (not the working-folder guess)
+        r = _bash_hits_wide(body, cwd, paths, walk_cwd=False)
+        if r:
+            return r
     recursive, folders, words = info
     if not recursive:
         return None
@@ -777,7 +824,9 @@ def bash_hits(command, cwd, paths):
     return None
 
 
-def _bash_hits_wide(command, cwd, paths, searching=True):
+def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
+    """walk_cwd=False leaves out the guess that a search naming no root walks the working folder (used for the body of an interpreter's
+    heredoc, where a word like `find` is as likely prose or code as a search); the roots a body names are checked either way."""
     words = _words(command)
     recursive = searching and _is_recursive(words)
     seen = []
@@ -811,7 +860,7 @@ def _bash_hits_wide(command, cwd, paths, searching=True):
             nxt = expand(words[i + 1], cur)
             cur = nxt
         i += 1
-    if recursive:  # a search with no folder named walks the working folder
+    if recursive and walk_cwd:  # a search with no folder named walks the working folder
         hit = paths.contains(cwd, cwd)
         if hit:
             return hit, "root"
