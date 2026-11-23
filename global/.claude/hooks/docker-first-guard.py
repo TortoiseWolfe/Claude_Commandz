@@ -11,6 +11,10 @@ Refuses a command that runs a package manager or dev server on the host:
     any subcommand outside a short read-only list is refused, and a bare yarn (it installs) too;
   - vite, next (dev, start, build, preview, or bare), expo start; also when called by path
     (./node_modules/.bin/vite);
+  - node (and nodejs) running project code: --test, a script file, --import, --require, -r, --loader,
+    --run, --watch, bare node (it reads stdin), and -e / -p code that loads a file, a module or fs.
+    Still allowed on the host: node --version / -v / --help, a short -e / -p expression that loads
+    nothing, and a script of the hub's own under ~/.claude/scripts/ (not project work);
 when the command is not docker run, docker exec or docker compose (docker-compose).
 
 Heredoc bodies (cat <<'EOF' ... EOF) are text, not commands: their lines are never split into commands,
@@ -71,6 +75,12 @@ VALUE_FLAGS = frozenset({"--prefix", "-C", "--cwd", "-w", "--workspace", "--filt
 
 STANDALONE_REFUSE = frozenset({"vite", "next"})
 ALLOWED_FLAG_ONLY = frozenset({"--version", "-v", "--help", "-h"})
+# node -e / -p with a short expression is allowed unless the code loads something (a require, an import,
+# a file path, fs, child_process); the project's own code is what must stay in the container.
+NODE_EVAL_FLAGS = frozenset({"-e", "-p", "--eval", "--print", "-pe", "-ep"})
+NODE_PROJECT_LOAD = re.compile(
+    r"require|import|child_process|\bfs\b|readFile|\./|\.\./|/\w+\.\w+|\.(mjs|cjs|js|ts|tsx|json|node)\b"
+)
 
 # Words that start a command without being the command. For a wrapper, the set holds the flags that
 # take a separate value, so `nice -n 5 npm ci` finds npm.
@@ -205,6 +215,39 @@ def shell_inner_command(args):
     return None
 
 
+def node_is_harmless(args, flag_only):
+    """True for the few host node runs that touch no project: --version and the like, a short -e / -p
+    expression that loads nothing, and a script of the hub's own under ~/.claude/scripts/. Everything
+    else (--test, a file, a loader, bare node reading stdin) runs project code and is refused."""
+    if flag_only:
+        return True
+    if not args:
+        return False
+    first = args[0]
+    if first in NODE_EVAL_FLAGS or first.startswith(("--eval=", "--print=")):
+        if "=" in first:
+            code = first.split("=", 1)[1]
+            return len(args) == 1 and not NODE_PROJECT_LOAD.search(code)
+        return len(args) == 2 and not NODE_PROJECT_LOAD.search(args[1])
+    if first.startswith("-"):
+        return False
+    return is_hub_script(first)
+
+
+def is_hub_script(path):
+    """True if path names a file under ~/.claude/scripts/ (written ~, $HOME, ${HOME} or in full, with
+    no .. in it)."""
+    if ".." in path.split("/"):
+        return False
+    home = os.path.expanduser("~")
+    for prefix in ("$HOME", "${HOME}"):
+        if path.startswith(prefix + "/"):
+            path = home + path[len(prefix):]
+            break
+    path = os.path.expanduser(path)
+    return path.startswith(os.path.join(home, ".claude", "scripts") + os.sep)
+
+
 def check_segment(tokens, current_cwd, exemptions):
     """Check one command segment. Returns a refusal reason or None."""
     if not tokens:
@@ -257,6 +300,9 @@ def check_segment(tokens, current_cwd, exemptions):
             elif subcmd not in READONLY_SUBCOMMANDS:
                 return REFUSAL_MESSAGE
         return None
+
+    if base_cmd in ("node", "nodejs"):
+        return None if node_is_harmless(args, flag_only) else REFUSAL_MESSAGE
 
     if base_cmd in ("npx", "pnpx", "bunx"):
         return None if flag_only else REFUSAL_MESSAGE
