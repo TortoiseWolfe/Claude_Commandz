@@ -12,9 +12,10 @@ Refuses a command that runs a package manager or dev server on the host:
   - vite, next (dev, start, build, preview, or bare), expo start; also when called by path
     (./node_modules/.bin/vite);
   - node (and nodejs) running project code: --test, a script file, --import, --require, -r, --loader,
-    --run, --watch, bare node (it reads stdin), and -e / -p code that loads a file, a module or fs.
-    Still allowed on the host: node --version / -v / --help, a short -e / -p expression that loads
-    nothing, and a script of the hub's own under ~/.claude/scripts/ (not project work);
+    --run, --watch, bare node (it reads stdin), any -e / -p code but a few fixed harmless expressions,
+    and a NODE_OPTIONS or NODE_PATH setting in front of node.
+    Still allowed on the host: node --version / -v / --help, -e / -p with a number sum or
+    process.version, and a script of the hub's own under ~/.claude/scripts/ (not project work);
 when the command is not docker run, docker exec or docker compose (docker-compose).
 
 Heredoc bodies (cat <<'EOF' ... EOF) are text, not commands: their lines are never split into commands,
@@ -75,12 +76,15 @@ VALUE_FLAGS = frozenset({"--prefix", "-C", "--cwd", "-w", "--workspace", "--filt
 
 STANDALONE_REFUSE = frozenset({"vite", "next"})
 ALLOWED_FLAG_ONLY = frozenset({"--version", "-v", "--help", "-h"})
-# node -e / -p with a short expression is allowed unless the code loads something (a require, an import,
-# a file path, fs, child_process); the project's own code is what must stay in the container.
+# node -e / -p is allowed only for a fixed few harmless expressions: a number sum (console.log(1+1)) or
+# process.version, process.arch, process.platform. A pattern cannot judge arbitrary JavaScript, so
+# anything else is refused.
 NODE_EVAL_FLAGS = frozenset({"-e", "-p", "--eval", "--print", "-pe", "-ep"})
-NODE_PROJECT_LOAD = re.compile(
-    r"require|import|child_process|\bfs\b|readFile|\./|\.\./|/\w+\.\w+|\.(mjs|cjs|js|ts|tsx|json|node)\b"
+NODE_SAFE_EXPR = re.compile(
+    r"(?:console\.log\()?[ ]*(?:process\.(?:version|versions\.node|arch|platform)|[0-9][0-9+\-*/%(). ]*)[ ]*\)?"
 )
+# An environment setting in front of node that makes it load code (NODE_OPTIONS="--require ./x.js").
+NODE_ENV_LOADER = re.compile(r"\bNODE_[A-Z_]+=")
 
 # Words that start a command without being the command. For a wrapper, the set holds the flags that
 # take a separate value, so `nice -n 5 npm ci` finds npm.
@@ -216,8 +220,8 @@ def shell_inner_command(args):
 
 
 def node_is_harmless(args, flag_only):
-    """True for the few host node runs that touch no project: --version and the like, a short -e / -p
-    expression that loads nothing, and a script of the hub's own under ~/.claude/scripts/. Everything
+    """True for the few host node runs that touch no project: --version and the like, one of a fixed few
+    -e / -p expressions (a number sum, process.version), and a script of the hub's own under ~/.claude/scripts/. Everything
     else (--test, a file, a loader, bare node reading stdin) runs project code and is refused."""
     if flag_only:
         return True
@@ -227,8 +231,8 @@ def node_is_harmless(args, flag_only):
     if first in NODE_EVAL_FLAGS or first.startswith(("--eval=", "--print=")):
         if "=" in first:
             code = first.split("=", 1)[1]
-            return len(args) == 1 and not NODE_PROJECT_LOAD.search(code)
-        return len(args) == 2 and not NODE_PROJECT_LOAD.search(args[1])
+            return len(args) == 1 and bool(NODE_SAFE_EXPR.fullmatch(code))
+        return len(args) == 2 and bool(NODE_SAFE_EXPR.fullmatch(args[1]))
     if first.startswith("-"):
         return False
     return is_hub_script(first)
@@ -245,7 +249,10 @@ def is_hub_script(path):
             path = home + path[len(prefix):]
             break
     path = os.path.expanduser(path)
-    return path.startswith(os.path.join(home, ".claude", "scripts") + os.sep)
+    # The real path, links followed, must still be inside the real scripts folder: a link in there
+    # that points into a project is project code.
+    folder = os.path.realpath(os.path.join(home, ".claude", "scripts"))
+    return os.path.realpath(path).startswith(folder + os.sep)
 
 
 def check_segment(tokens, current_cwd, exemptions):
@@ -302,6 +309,8 @@ def check_segment(tokens, current_cwd, exemptions):
         return None
 
     if base_cmd in ("node", "nodejs"):
+        if any(NODE_ENV_LOADER.search(t) for t in tokens[:i]):
+            return REFUSAL_MESSAGE
         return None if node_is_harmless(args, flag_only) else REFUSAL_MESSAGE
 
     if base_cmd in ("npx", "pnpx", "bunx"):

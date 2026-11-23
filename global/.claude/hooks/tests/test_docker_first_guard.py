@@ -712,6 +712,53 @@ class NodeOnTheHostRefused(Base):
                 self.refused(command)
 
 
+class NodeReviewHoles(Base):
+    """Automated review of the first push: a regex cannot judge JavaScript, an environment setting can
+    load code under --version, and a link can lead out of ~/.claude/scripts."""
+
+    def test_only_fixed_harmless_expressions_run_under_eval(self):
+        for command in (
+            "node -p \"process['main'+'Module'].require('fs')\"",
+            "node -e \"globalThis.process.binding('fs')\"",
+            "node -e \"eval(String.fromCharCode(114))\"",
+            "node -e \"new Function('return 1')()\"",
+            "node -p \"process.mainModule\"",
+            "node -e \"process.dlopen(1)\"",
+            "node -e 'while(1){}'",
+            "node -p \"Atomics.wait\"",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_environment_that_loads_code_is_refused_even_for_version(self):
+        for command in (
+            'NODE_OPTIONS="--require ./x.js" node --version',
+            "NODE_OPTIONS=--import=./x.mjs node -v",
+            "env NODE_OPTIONS=--require=./x.js node -v",
+            "env -u HOME NODE_OPTIONS=--require=./x.js node --help",
+            "NODE_PATH=./lib node ~/.claude/scripts/gh_sudo.js",
+            "FOO=1 NODE_OPTIONS=--require=./x.js node -p process.version",
+            "sudo NODE_OPTIONS=--require=./x.js node -v",
+        ):
+            with self.subTest(command=command):
+                self.refused(command)
+
+    def test_a_link_inside_the_hub_scripts_folder_that_leaves_it_is_refused(self):
+        scripts = self.home / ".claude" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        outside = self.non_exempt_dir / "x.js"
+        outside.write_text("1\n")
+        link = scripts / "link.js"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(outside)
+        real = scripts / "real.js"
+        real.write_text("1\n")
+        self.refused("node ~/.claude/scripts/link.js")
+        self.refused(f"node {link}")
+        self.allowed("node ~/.claude/scripts/real.js")
+
+
 class NodeAllowed(Base):
     def test_node_read_only_and_plain_eval_allowed(self):
         for command in (
