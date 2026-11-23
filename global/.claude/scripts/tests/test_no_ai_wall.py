@@ -1229,6 +1229,60 @@ class Issue130Tests(Fixture):
             self.refused(cmd)
         self.allowed("echo 'find them' | head -1", cwd=self.proj)
 
+    # ---- senior review 2 (main refuses each of these; the branch must too) ----
+
+    # blocking 1: a trap or an alias runs before the variable expands, so a value written ahead of it is not what the shell uses
+    def test_a_variable_is_not_trusted_past_a_trap_alias_or_shell_option_statement(self):
+        wall = w.wall_dir()
+        for hidden in ("trap 'W=%s' DEBUG" % wall, "alias go='W=%s'; go" % wall, "shopt -s extdebug", "enable -f /tmp/x.so xx", "trap 'W=%s' DEBUG; true" % wall):
+            self.refused("%s; W=/tmp; cd $W; echo x > no_ai_wall.py" % hidden)
+            self.refused("W=/tmp; %s; cd $W; echo x > no_ai_wall.py" % hidden)
+        # fail-closed: a statement that is no plain assignment, cd or data tool ends the collecting, whatever it is
+        self.refused("W=/tmp; somecmd --flag; cd $W; echo x > no_ai_wall.py", cwd=wall)
+        self.refused("f() { W=%s; }; W=/tmp; f; cd $W; echo x > no_ai_wall.py" % wall, cwd=wall)
+        self.allowed("W=%s; cd $W && cp /tmp/x ." % self.proj)
+
+    # blocking 2: a heredoc's child shell never sees an unexported variable, so its `cd $W` is not the cd the check read
+    def test_a_heredoc_child_shell_does_not_see_the_variable_the_parent_set(self):
+        self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=w.wall_dir())
+        self.refused("W=/tmp\nbash <<'EOF'\ncd $W\necho x > no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
+        self.refused("W=/tmp\nsh <<EOF\ncd $W\ncp /tmp/x no_ai_wall.py\nEOF", cwd=self.p("home/.claude"))
+
+    # blocking 3: run from a folder above a listed one, a string of code that runs a recursive search walks every listed folder below it
+    def test_code_text_that_runs_a_recursive_search_walks_the_working_folder_too(self):
+        for cmd in ("python3 -c \"import os; os.system('grep -r secret .')\"", "python3 -c 'import os; os.system(\"grep -r secret\")'",
+                    "perl -e 'system(\"grep -r secret .\")'", "python3 <<'EOF'\nimport os\nos.system('grep -r secret .')\nEOF",
+                    "perl <<'EOF'\nsystem(\"find . -name x\");\nEOF", "node -e \"require('child_process').execSync('rg secret')\"",
+                    "python3 -c \"import subprocess; subprocess.run(['grep', '-r', 'secret'])\"",
+                    "python3 <<'EOF'\nimport subprocess\nsubprocess.check_output(['rg', 'secret'])\nEOF"):
+            self.refused(cmd)  # the session starts in self.tmp, which holds the listed folders
+            self.allowed(cmd, cwd=self.proj)  # the same code in a folder with no listed folder below it is not a search into the wall
+        self.allowed("python3 -c \"print('grep -c x a.txt; find them')\"", cwd=self.proj)  # a string that goes to print is prose, not a search
+
+    # senior review 2, missing test (d): code that names the wall's folder as text beside a copy that goes elsewhere
+    def test_code_that_only_names_the_wall_folder_as_text_beside_a_copy_elsewhere(self):
+        wall = w.wall_dir()
+        self.allowed("python3 -c \"print('the guard lives in %s'); import shutil; shutil.copy('/tmp/a', '%s/out.txt')\"" % (wall, self.proj))
+        self.refused("python3 -c \"import shutil; shutil.copy('/tmp/a', '%s/no_ai_wall.py')\"" % wall)
+        self.refused("python3 -c \"import shutil; shutil.copy('%s/no_ai_wall.py', '/tmp/b'); print(1)\"" % wall)
+
+    # senior review 2, missing test: a guarded file reached through the home folder written out as /home/<user> (and not as ~ or $HOME)
+    def test_a_guarded_file_is_refused_through_a_written_out_home_path(self):
+        written_out = self.p("home/.claude")  # the fake home, spelled in full: the road ~ and $HOME take, without either of them
+        for cmd in ("echo x > %s/settings.json" % written_out, "echo x > %s/no-ai-wall/no_ai_wall.py" % written_out, "rm %s/no-ai-wall/no_ai_wall.sh" % written_out,
+                    "cd %s/no-ai-wall && echo x > no-ai-wall-guard.py" % written_out, "python3 -c \"open('%s/settings.json','w').write('x')\"" % written_out):
+            self.refused(cmd)
+        self.allowed("echo x > %s/state/lanes/2026-01-01-demo/note.md" % written_out)
+
+    # the hub's refusal: a heredoc that only NAMES the wall's folder and the settings files, written into a lane folder, is an ordinary write
+    def test_a_heredoc_that_names_the_wall_and_settings_but_writes_a_lane_file_is_allowed(self):
+        wall, settings = w.wall_dir(), self.p("home/.claude/settings.json")
+        body = "the no-AI list, %s and %s cannot be changed from a session" % (wall, settings)
+        self.allowed("cat > %s/review-2.md <<'EOF'\n%s\nEOF" % (self.lane, body))
+        self.allowed("cat <<'EOF' > %s/review-2.md\n# review\n%s\nEOF" % (self.lane, body))
+        self.allowed("python3 - <<'EOF'\nopen('%s/review-2.md','w').write('%s')\nEOF" % (self.lane, body))
+        self.refused("cat > %s/no_ai_wall.py <<'EOF'\n%s\nEOF" % (wall, body))  # the same text, written into the wall itself, is still refused
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -521,9 +521,30 @@ _ASSIGN = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=((?:[A-Za-z0-9_./:@%+=,~-]
 _BLOCK_START = re.compile(r"[ \t]*(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|!|\{|\})(?![\w-])")
 # a statement that can bind a variable without naming it, or through a name held in another: `. file`, source, eval, read, mapfile, declare -n,
 # printf -v, getopts, let, a process substitution. The first one ends the trust in every value _resolve_vars knows.
-_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])[\\'\"]*(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset)[\\'\"]*(?=[\s;&|)}`]|$)"
+_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])[\\'\"]*(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset"
+                            r"|trap|alias|shopt|enable|function)[\\'\"]*(?=[\s;&|)}`]|$)"
                             r"|\bprintf\b[^;&|\n]*?\s['\"]?-[A-Za-z]*v|\bwait\b[^;&|\n]*?\s-[A-Za-z]*p"  # printf -v NAME and printf -vNAME, wait -p NAME
                             r"|[<>]\(|\$\(\(|\(\(")  # (a builtin's name quoted or backslashed is still the builtin: 'read' W, \eval x)
+
+
+# Programs that are plain files on disk: a child process can never change the parent shell's variables. Any other first word of a statement may be a
+# function, an alias or a builtin that runs a trap, and so can rebind a variable that no assignment names, so it ends the trust (issue 130, review 2).
+_CHILD_ONLY = {"cd", "pushd", "popd", "echo", "printf", "cat", "ls", "pwd", "true", "false", ":", "head", "tail", "wc", "sort", "uniq", "grep", "egrep",
+               "fgrep", "rg", "find", "fd", "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln", "tee", "sed", "awk", "diff", "stat", "du",
+               "tar", "zip", "unzip", "gzip", "rsync", "curl", "wget", "git", "gh", "docker", "node", "bash", "sh", "timeout", "sleep", "date", "jq", "tr",
+               "cut", "basename", "dirname", "readlink", "realpath", "mktemp", "perl", "ruby", "php", "xargs", "env", "sudo", "gitleaks"}
+_LEADING_ASSIGN = re.compile(r"[ \t]*[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+")
+
+
+def _first_word_is_child_only(text):
+    t = text
+    while _LEADING_ASSIGN.match(t):
+        t = t[_LEADING_ASSIGN.match(t).end():]
+    m = re.match(r"[ \t]*[\\'\"]*([^\s;&|()<>\\'\"]+)", t)
+    if not m:
+        return False
+    word = m.group(1).rsplit("/", 1)[-1]
+    return word in _CHILD_ONLY or re.fullmatch(r"python[\d.]*", word) is not None
 
 
 def _subst(text, known):
@@ -570,8 +591,10 @@ def _resolve_vars(command):
         if m:
             known[m.group(1)] = m.group(2)
         else:
-            if _UNSEEN_REBIND.search(text):
-                known.clear()  # a sourced file, eval, read or `<(` can set any variable without naming it: nothing known is trusted past here
+            if _UNSEEN_REBIND.search(text) or not _first_word_is_child_only(text) or re.search(r"[(){}`]", text):
+                # a sourced file, eval, read, `<(`, a trap, an alias, or a call to something that is no plain program (a function) can set any
+                # variable without naming it: nothing known is trusted past here
+                known.clear()
                 collecting = False
             for name in list(known):
                 # keep a value only when every later mention of the name is a plain read ($NAME or ${NAME}); NAME+=, NAME[0]=, ((NAME=..)),
@@ -581,7 +604,7 @@ def _resolve_vars(command):
         if sep in ("&&", "||", "|", "&") or _BLOCK_START.match(text) or re.search(r"[(){}`]", text):
             collecting = False
         out.append(s + sep)
-    out.append(_subst(tail, known))
+    out.append(tail)  # as written: a heredoc's child shell never sees a variable the parent did not export
     return "".join(out)
 
 
@@ -845,6 +868,42 @@ def bash_hits(command, cwd, paths):
         r = _bash_hits_wide(body, cwd, paths, walk_cwd=False)
         if r:
             return r
+        # ... and a string of its code that runs a recursive search with no root walks the working folder, as the shell's own command would
+        for lit in _code_commands(body):
+            if not _SEARCH_WORD.search(lit):
+                continue
+            sub = _searches(lit, cwd)
+            r = _info_hit(sub, cwd, paths) if sub is not None else _bash_hits_wide(lit, cwd, paths)
+            if r:
+                return r
+    return _info_hit(info, cwd, paths)
+
+
+_SEARCH_WORD = re.compile(r"\b(?:grep|egrep|fgrep|zgrep|rg|ag|ack|fd|fdfind|find|tree|du|ls|locate|plocate|mlocate)\b")
+
+
+_LIT = r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*\""""
+_RUNS_A_SHELL = re.compile(r"\b(?:system|popen|exec\w*|spawn\w*|run|call|check_output|check_call|Popen|shell_exec|passthru|proc_open|qx)\s*\(\s*"
+                           r"(?:\[((?:\s*(?:%s)\s*,?)*)\]|(%s))|`([^`]*)`" % (_LIT, _LIT))
+
+
+def _code_commands(code):
+    """The command lines a piece of interpreter code hands to a call that runs a shell or a program (system("..."), os.system('...'),
+    subprocess.run(['grep', ...]), execSync('...'), `...`), each as one string. A quoted word that goes anywhere else is prose or data: it is not read as
+    a search, which is what keeps `print('find it')` an ordinary line of code."""
+    out = []
+    for m in _RUNS_A_SHELL.finditer(code):
+        if m.group(1) is not None:
+            out.append(" ".join(x[1:-1] for x in re.findall(_LIT, m.group(1))))
+        elif m.group(2) is not None:
+            out.append(m.group(2)[1:-1])
+        else:
+            out.append(m.group(3))
+    return out
+
+
+def _info_hit(info, cwd, paths):
+    """The listed path or folder a parsed search (_searches' answer) walks into, as (entry, "root"), or None."""
     recursive, folders, words = info
     if not recursive:
         return None
