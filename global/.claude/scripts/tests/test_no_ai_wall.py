@@ -1229,7 +1229,7 @@ class Issue130Tests(Fixture):
             self.refused(cmd)
         self.allowed("echo 'find them' | head -1", cwd=self.proj)
 
-    # ---- senior review 2 (main refuses each of these; the branch must too) ----
+    # ---- senior review 2 (these refusals are stronger than main's: main allows some of them) ----
 
     # blocking 1: a trap or an alias runs before the variable expands, so a value written ahead of it is not what the shell uses
     def test_a_variable_is_not_trusted_past_a_trap_alias_or_shell_option_statement(self):
