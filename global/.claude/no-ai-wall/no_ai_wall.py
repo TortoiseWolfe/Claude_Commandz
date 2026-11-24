@@ -912,9 +912,10 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             continue
         # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
         xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
-        # the reader ends a command at `$(` and a backtick, so in `xargs $(true) grep x DIR` the grep stands in a command of its own with no
-        # xargs word. With a substitution anywhere in the text, every command after an xargs is read as one that xargs may run (the wide reading).
-        if not xargs and any("$(" in lead or "`" in lead for lead, reads in meta) and any(
+        # the reader ends a command at `$(`, a backtick and a plain parenthesis (so a process substitution `<(..)` too), so in
+        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. With any of them anywhere in the text, every
+        # command after an xargs is read as one that xargs may run (the wide reading).
+        if not xargs and any("(" in lead or ")" in lead or "`" in lead for lead, reads in meta) and any(
                 os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
             xargs = True
         flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)

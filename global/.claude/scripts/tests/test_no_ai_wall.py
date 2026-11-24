@@ -1433,6 +1433,10 @@ class Issue154Tests(Fixture):
                     "echo -r | xargs -n1 $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a,
                     "echo -r | xargs ${EMPTY} grep x %s" % a, "echo -r | xargs $(true) ls %s" % a):
             self.refused(cmd, self.tmp)
+        # a process substitution splits them the same way: the reader ends a command at a plain parenthesis (round 3 of the review)
+        for cmd in ("echo -r | xargs -E <(true) grep x %s" % a, "xargs -a <(echo -r) grep x %s" % a, "echo -r | xargs -E >(true) grep x %s" % a,
+                    "echo -r | xargs -n1 <(true) find %s -name x" % a):
+            self.refused(cmd, self.tmp)
         self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
 
     def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
@@ -1494,6 +1498,17 @@ class Issue154Tests(Fixture):
         self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $'it\\'s (x)'", " echo b"])
         self.assertEqual(w._subst("echo $'$X \\' $X' $X", {"X": "v"}), "echo $'$X \\' $X' v")
         self.assertTrue(w._has_unquoted_paren("echo $'a\\'; (b)"))  # the quote is still open at the parenthesis: the stricter answer
+
+    def test_the_other_quote_scans_agree_on_a_process_number_before_a_quote(self):
+        # `$$'` is the process number then a plain quote, so the quote opens a string and the parenthesis and the `$X` inside it are text
+        text = "echo $$'(x) $X' ; echo b"
+        self.assertFalse(w._has_unquoted_paren(text))
+        self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $$'(x) $X' ", " echo b"])
+        self.assertEqual(w._subst("echo $$'$X' $X", {"X": "v"}), "echo $$'$X' v")
+        # read as `$'..'` the escaped quote would keep the string open past the parenthesis: the scanners must not do that
+        text = "echo $$'\\' ; (b) #'"
+        self.assertTrue(w._has_unquoted_paren(text))
+        self.assertEqual(w._subst("echo $$'\\' $X #'", {"X": "v"}), "echo $$'\\' v #'")  # the `$X` is outside every quote, so it is replaced
 
 
 class WideReadingTests(Fixture):
