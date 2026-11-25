@@ -47,6 +47,13 @@ timeout 30 python3 "$here/hub_inbox_archive.py" >/dev/null 2>&1 || echo "opencla
 # The tools catalog (~/.claude/scripts/TOOLS.md) follows the scripts and hooks on this machine; lane starts and the hub graph read it. No model, about a third of a second.
 timeout 60 python3 "$here/tools_catalog.py" build >/dev/null 2>&1 || echo "openclaw_status_refresh: tools catalog failed" >&2
 
+# Once a day (issue 31): which installed scripts and hooks differ from main in the repo. Read-only; the hub page shows the answer.
+# The file is touched only by this run, so its age says when the check last ran; a failure leaves the old answer to go stale on the page.
+drift_file="$HOME/.claude/state/script-drift.json"
+if [[ ! -s "$drift_file" || -n "$(find "$drift_file" -mmin +1380 2>/dev/null)" ]]; then
+  timeout 60 python3 "$here/script_drift.py" --write "$drift_file" >/dev/null 2>&1 || echo "openclaw_status_refresh: script drift check failed" >&2
+fi
+
 # One machine switch (28 Oct 2026, fleet review finding 3): NX-01 owns the OpenClaw gateway, the Gmail sweeps, the CI runners and the hours
 # jobs, so it runs everything below. Any other machine (the tower, NCC-74656) is a keeper only: the steps above, plus its own hub digest, and
 # stops here. The name comes from ~/.config/afa/machine; a missing file counts as another machine, because doing less is the safe mistake.

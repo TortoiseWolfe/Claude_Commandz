@@ -616,6 +616,27 @@ def gh_review_since(repos, since, run=subprocess.run):
     return False
 
 
+DRIFT_STATE = HOME / ".claude/state/script-drift.json"   # script_drift.py --write, run daily by openclaw_status_refresh.sh
+DRIFT_STALE_HOURS = 36
+
+
+def drift_line(now_ts, state_file=None):
+    """One page line: how many installed scripts and hooks differ from main (issue 31). Empty when no check has ever run or nothing differs
+    and the check is fresh; says so plainly when the daily check has gone quiet."""
+    try:
+        data = json.loads(Path(state_file or DRIFT_STATE).read_text())
+        at, differs = int(data["at"]), list(data["differs"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if now_ts - at > DRIFT_STALE_HOURS * 3600:
+        return f"Script drift check has not run for {int((now_ts - at) // 3600)} hours: python3 ~/.claude/scripts/script_drift.py --write ~/.claude/state/script-drift.json"
+    if not differs:
+        return ""
+    shown = ", ".join(differs[:5]) + (f" and {len(differs) - 5} more" if len(differs) > 5 else "")
+    return (f"Installed scripts that differ from main ({len(differs)}): {shown}. The next install would overwrite them: "
+            "save any work in them into the repo first (script_drift.py lists all)")
+
+
 PEER_REVIEW_STATE = HOME / ".claude/state/peer-review-check.json"   # this week's answer, so the 15-minute digest does not call gh each time
 PEER_REVIEW_RECHECK_SECS = 3600
 
@@ -1460,7 +1481,7 @@ def main(argv=None):
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
                           coop_cards=coop_cards,
-                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
+                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), drift_line(time.time()), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page)
