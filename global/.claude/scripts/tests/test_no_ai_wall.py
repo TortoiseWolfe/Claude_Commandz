@@ -1360,6 +1360,157 @@ class Issue146Tests(Fixture):
         self.assertIn("no-AI list is private config", r[2])
 
 
+class Issue154Tests(Fixture):
+    """Issue 154, two gaps in how the reader reads a command. Gap 1: a search that gets its recursive flag through xargs (`echo -r | xargs
+    grep x DIR`) was allowed over a folder above a listed one, while the same search typed directly is refused. Gap 2: `$'...'` is a string
+    where a backslash can escape a quote, and the reader ended it at the escaped quote. The real searches stay refused; the controls with no
+    flag, and the strings that are only text, stay allowed."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.above = self.p("wall")  # a folder above the listed ones: only the recursion decides
+
+    # ---- gap 1: the flag arrives on the input of xargs ----
+
+    def test_a_search_given_its_flag_by_xargs_is_refused_like_the_same_search_typed(self):
+        a = self.above
+        self.refused("grep -rn x %s" % a, self.tmp)  # the typed search, the reference
+        for cmd in ("echo -r | xargs grep x %s" % a, "echo -R | xargs grep x %s" % a, "printf '%%s\\n' -r | xargs grep x %s" % a,
+                    "printf -- '-r\\n' | xargs grep x %s" % a, "printf 'a\\n-r\\n' | xargs grep x %s" % a, "echo '-r' | xargs grep -n x %s" % a,
+                    "echo -r | xargs -I{} grep {} x %s" % a, "echo -r | xargs egrep x %s" % a, "echo -r | xargs fgrep x %s" % a,
+                    "cat flags.txt | xargs grep x %s" % a, "ls | xargs grep x %s" % a, "xargs grep x %s < flags.txt" % a,
+                    "xargs grep x %s <<< '-r'" % a, "xargs grep x %s <<< \"$FLAG\"" % a, "echo $FLAG | xargs grep x %s" % a,
+                    "echo -r | xargs ls %s" % a, "echo -R | xargs ls %s" % a, "echo -r | xargs cp %s /tmp/out" % a, "echo -r | xargs cp -a %s /tmp/out" % a):
+            self.refused(cmd, self.tmp)
+        self.refused("echo -r | xargs grep x", self.tmp)  # no root named: it walks the session folder, which holds a listed one
+        self.refused("ls | xargs grep x", self.tmp)
+        self.refused("xargs grep -r x", self.tmp)  # the flag is typed here, but xargs still runs it with no root
+        # a delimiter cuts the input where the caller says, so a dash inside a plain word can become a flag (review of the first version)
+        for cmd in ("echo a-r | xargs -d a grep x %s" % a, "echo a-r | xargs --delimiter=a grep x %s" % a, "echo foo-bar | xargs grep x %s" % a,
+                    "echo hi | xargs -a flags.txt grep x %s" % a, "echo hi | xargs --arg-file=flags.txt grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        # review of the second version (senior review of pull request 155), blocking item 1: -I and -i put the input inside a word of the command,
+        # so a plain letter becomes a flag (`echo r | xargs -I@ grep -@ x DIR` runs `grep -r x DIR`)
+        for cmd in ("echo r | xargs -I@ grep -@ x %s" % a, "echo r | xargs -i grep -{} x %s" % a, "echo r | xargs -I {} grep -{} x %s" % a,
+                    "echo r | xargs --replace=@ grep -@ x %s" % a, "echo r | xargs -tI@ grep -@ x %s" % a, "echo R | xargs -I@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
+        # blocking item 2: GNU xargs takes any unique prefix of a long option, so a shortened one reads the flag from a file or cuts the input
+        for cmd in ("echo hi | xargs --a=flags.txt grep x %s" % a, "echo hi | xargs --arg=flags.txt grep x %s" % a,
+                    "echo hi | xargs --arg-f=flags.txt grep x %s" % a, "echo a-r | xargs --d=a grep x %s" % a, "echo a-r | xargs --deli=a grep x %s" % a,
+                    "echo r | xargs --repl=@ grep -@ x %s" % a, "echo r | xargs --rep=@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
+        # the same rule for the other programs xargs can run: with no root named they walk the session folder, as typed
+        for cmd in ("echo -R | xargs ls", "echo hi | xargs find -type f", "echo hi | xargs du", "echo hi | xargs tree", "ls | xargs rg x"):
+            self.refused(cmd, self.tmp)
+
+    # ---- round 2 of the blind review of pull request 155: three more ways round the reading ----
+
+    def test_a_process_id_before_a_quote_is_not_an_ansi_c_string(self):
+        """`$$` is the process number, so `$$'` is that number then a plain quote. Read as `$'..'`, the escaped quote hid the rest of the line and
+        the `#` hid the last quote, so the reader saw one quoted word while the shell ran the search."""
+        a = self.above
+        for cmd in ("echo $$'\\' ; grep -rn x %s #'" % a, "echo $$'\\' ; find %s -name x #'" % a, "echo $$'\\' ; rg x %s #'" % a,
+                    "echo $$'\\' && grep -rn x %s #'" % a, "x=$$'\\' ; grep -rn x %s #'" % a, "echo $$'\\'; ls -R %s #'" % a):
+            self.refused(cmd, self.tmp)
+        # a real $'..' string and a plain process number stay what they are
+        self.allowed("echo $$ ; grep x %s" % a, self.tmp)
+        self.allowed("echo $'it\\'s' ; grep x %s" % a, self.tmp)
+        self.refused("echo $'it\\'s' ; grep -r x %s" % a, self.tmp)
+
+    def test_an_xargs_that_is_quoted_or_escaped_is_still_xargs(self):
+        a = self.above
+        for cmd in ("echo -r | \\xargs grep x %s" % a, "echo -r | x'a'rgs grep x %s" % a, "echo -r | 'xargs' grep x %s" % a,
+                    'echo -r | "xargs" grep x %s' % a, "echo -r | xar\\gs grep x %s" % a, "echo -r | nice \\xargs grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
+    def test_a_substitution_that_splits_xargs_from_its_program_reads_wide(self):
+        a = self.above
+        for cmd in ("echo -r | xargs $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a, "echo -r | xargs $(echo) grep x %s" % a,
+                    "echo -r | xargs -n1 $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a,
+                    "echo -r | xargs ${EMPTY} grep x %s" % a, "echo -r | xargs $(true) ls %s" % a):
+            self.refused(cmd, self.tmp)
+        # a process substitution splits them the same way: the reader ends a command at a plain parenthesis (round 3 of the review)
+        for cmd in ("echo -r | xargs -E <(true) grep x %s" % a, "xargs -a <(echo -r) grep x %s" % a, "echo -r | xargs -E >(true) grep x %s" % a,
+                    "echo -r | xargs -n1 <(true) find %s -name x" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
+    def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
+        a = self.above
+        for cmd in ("echo hi | xargs grep x %s" % a, "echo hi there | xargs grep -n x %s" % a, "printf '%%s\\n' a b | xargs grep x %s" % a,
+                    "echo hi | xargs ls %s" % a, "echo hi | xargs cp %s /tmp/out" % a,
+                    "echo hi | xargs --no-run-if-empty grep x %s" % a, "echo hi | xargs --max-args=1 grep x %s" % a, "echo hi | xargs --null grep x %s" % a):
+            self.allowed(cmd, self.tmp)
+        # a flag-free input read in a folder that holds no listed folder is ordinary
+        self.allowed("ls | xargs grep x", self.p("work"))
+        self.allowed("git ls-files | xargs grep -n x", self.p("work"))
+        self.allowed("echo -r | xargs grep x", self.p("work"))
+        # a search that names its roots outside every listed folder
+        self.allowed("echo -r | xargs grep x %s" % self.p("work"), self.tmp)
+        self.allowed("echo -r | xargs grep x %s" % self.p("wall/open"), self.tmp)
+
+    def test_a_search_that_names_a_listed_folder_through_xargs_is_still_refused(self):
+        for cmd in ("echo hi | xargs grep -r x %s" % self.p("wall/clientA"), "echo -r | xargs grep x %s" % self.p("wall/clientA/docs"),
+                    "ls | xargs grep -rl x %s" % self.p("wall/clientB")):
+            self.refused(cmd, self.tmp)
+
+    # ---- gap 2: $'...' and $"..." ----
+
+    def test_a_dollar_single_quoted_string_with_an_escaped_quote_is_text(self):
+        for cmd in ("gh issue create --title $'a grep -rn x \\' b' --body-file f.md", "gh issue create --title $'it\\'s grep -r x' --body-file f.md",
+                    "gh issue create --title $'a \\\\' --body-file f.md", "gh issue create --title $'grep -rn x' --body-file f.md",
+                    "gh issue create --title $'a\\nb' --body-file f.md", "gh issue create --title $\"a grep -rn x\" --body-file f.md",
+                    "git commit -m $'fix grep -r x\\' now'", "echo $'a \\' b; grep -r x'"):
+            self.allowed(cmd, self.tmp)
+
+    def test_a_search_after_a_dollar_single_quoted_string_is_still_judged_on_its_own_words(self):
+        a = self.above
+        for cmd in ("echo $'it\\'s'; grep -rn x %s" % a, "gh issue create --title $'a \\' b' --body-file f.md; grep -rn x %s" % a,
+                    "echo $'a\\\\'; grep -rn x %s" % a, "echo $\"a\"; grep -rn x %s" % a, "echo $'a' | grep -rn x %s" % a,
+                    "grep -rn $'x\\'y' %s" % a, "grep -rn $\"x\" %s" % a):
+            self.refused(cmd, self.tmp)
+
+    def test_the_dollar_single_quote_words_are_the_shells_words(self):
+        words = lambda text: w._shell_commands(text)  # noqa: E731
+        self.assertEqual(words("echo $'it\\'s' x"), [[("echo", False), ("it's", True), ("x", False)]])
+        self.assertEqual(words("echo $'a\\\\' x"), [[("echo", False), ("a\\", True), ("x", False)]])
+        self.assertEqual(words("echo $'a\\nb'"), [[("echo", False), ("a\nb", True)]])
+        self.assertEqual(words("echo $\"a b\" x"), [[("echo", False), ("a b", True), ("x", False)]])
+        self.assertIsNone(words("echo $'unclosed"))
+        self.assertIsNone(words("echo $'a\\'"))  # the escaped quote leaves the string open
+        self.assertEqual(words("echo $'a\\0b' x"), [[("echo", False), ("a", True), ("x", False)]])  # the shell cuts the string at a NUL
+        self.assertEqual(words("echo $'\\x41\\101\\u0042'"), [[("echo", False), ("AAB", True)]])
+        self.assertIsNone(words("echo $'\\xc3\\xa9'"))  # bytes past ASCII: unsure, so the wide reading
+        self.assertIsNone(words("echo $'\\u00e9'"))
+
+    def test_a_folder_changed_to_through_a_string_cut_at_a_nul_is_the_folder_the_shell_uses(self):
+        # the shell's cd goes to the text before the NUL, which here is the folder above the listed ones
+        self.refused("cd $'%s\\0/work'; grep -rn x" % self.above, self.p("work"))
+        self.allowed("cd $'%s\\0/wall'; grep -n x f.txt" % self.p("work"), self.tmp)
+
+    def test_the_other_quote_scans_agree_on_the_dollar_single_quote_string(self):
+        text = "echo $'it\\'s (x)'; echo b"
+        self.assertFalse(w._has_unquoted_paren(text))
+        self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $'it\\'s (x)'", " echo b"])
+        self.assertEqual(w._subst("echo $'$X \\' $X' $X", {"X": "v"}), "echo $'$X \\' $X' v")
+        self.assertTrue(w._has_unquoted_paren("echo $'a\\'; (b)"))  # the quote is still open at the parenthesis: the stricter answer
+
+    def test_the_other_quote_scans_agree_on_a_process_number_before_a_quote(self):
+        # `$$'` is the process number then a plain quote, so the quote opens a string and the parenthesis and the `$X` inside it are text
+        text = "echo $$'(x) $X' ; echo b"
+        self.assertFalse(w._has_unquoted_paren(text))
+        self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $$'(x) $X' ", " echo b"])
+        self.assertEqual(w._subst("echo $$'$X' $X", {"X": "v"}), "echo $$'$X' v")
+        # read as `$'..'` the escaped quote would keep the string open past the parenthesis: the scanners must not do that
+        text = "echo $$'\\' ; (b) #'"
+        self.assertTrue(w._has_unquoted_paren(text))
+        self.assertEqual(w._subst("echo $$'\\' $X #'", {"X": "v"}), "echo $$'\\' v #'")  # the `$X` is outside every quote, so it is replaced
+
+
 class WideReadingTests(Fixture):
     """A lane's read-back of a saved CI log was refused as "a search that would walk into a folder on the no-AI list", after the 146 fix was
     installed. A text that writes a file and also runs a program the wall cannot vouch for (sed, or the `run` in `gh run view`) is read the

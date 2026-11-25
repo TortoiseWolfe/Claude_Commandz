@@ -334,31 +334,98 @@ _HEREDOC_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed"}
 _SHELL_AFTER_PIPE = re.compile(r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|eval|source|xargs|ssh|su|sudo|env|exec|python[\d.]*|node|perl|ruby|php)(?![\w.-])")
 
 
-def _shell_commands(text, written=None):
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_C_NUMBERED = re.compile(r"x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.")
+
+
+def _pid_then_quote(text, i):
+    """True when text[i:i+2] is `$$`, the shell's process number, which the readers step over as one unit before they look for `$'`. Bash pairs
+    the dollar signs from the left, so `$$'` is the number then a plain quote and `$$$'x'` is the number then the string `$'x'`. A `$$(` is left
+    to the readers' own `$(` rule. (Round 2 of the review of pull request 155: reading the second `$` of `$$'` as the start of `$'..'` let
+    `echo $$'\\' ; grep -rn x DIR #'` look like one quoted word.)"""
+    return text[i:i + 2] == "$$" and text[i + 2:i + 3] != "("
+
+
+def _ansi_c_end(text, i):
+    """For `$'` at text[i:i + 2]: the index of the closing single quote, or -1 when the string is left open. In the shell's `$'...'` a
+    backslash takes the next character, so `\'` does not end the string (issue 154)."""
+    j, n = i + 2, len(text)
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+        elif text[j] == "'":
+            return j
+        else:
+            j += 1
+    return -1
+
+
+def _ansi_c_value(body):
+    """The text the shell makes of the inside of `$'...'`: backslash escapes read, an unknown one left as written. The shell cuts the string at
+    the first NUL (`$'a\\0b'` is `a`), so this does too. None when a numbered escape gives a character past ASCII (the shell builds bytes from
+    `\\xHH`, so `\\xc3\\xa9` is one letter): the reader is unsure and the caller takes the wide reading."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        if body[i + 1] in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[body[i + 1]])
+            i += 2
+            continue
+        m = _ANSI_C_NUMBERED.match(body, i + 1)
+        if not m:
+            out.append(c)
+            i += 1
+            continue
+        code = m.group()
+        try:
+            ch = chr(ord(code[1]) & 0x1f) if code[0] == "c" else chr(int(code[1:], 16)) if code[0] in "xuU" else chr(int(code, 8) & 0xff)
+        except (ValueError, OverflowError):
+            return None  # a code point no string holds: unsure
+        if ord(ch) > 127:
+            return None
+        out.append(ch)
+        i = m.end()
+    return "".join(out).split("\x00")[0]
+
+
+def _shell_commands(text, written=None, meta=None):
     """-> a list of commands, each a list of (word, quoted), or None when the text cannot be read with certainty. A command ends at an unquoted
     ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped (the targets of output redirects are added to the list
-    `written` when one is given). A quoted word is data, except the script of a shell's -c."""
+    `written` when one is given). A quoted word is data, except the script of a shell's -c. `$'..'` is read by the shell's own rules (a
+    backslash escapes, issue 154). When `meta` is given, one (lead, reads) pair is added for each command: lead is the separator characters
+    that came just before it (`|` for a pipe, `||`, `;`, `&&`...), reads is True when the command has an input redirect or here-string."""
     cmds, toks = [], []
     buf, quoted, started, skip, skip_out = [], False, False, False, False
+    lead, cmd_lead, reads = "", "", False
     i, n = 0, len(text)
 
     def end_word():
-        nonlocal buf, quoted, started, skip
+        nonlocal buf, quoted, started, skip, cmd_lead
         if started:
             if skip:
                 skip = False
                 if skip_out and written is not None:
                     written.append("".join(buf))
             else:
+                if not toks:
+                    cmd_lead = lead
                 toks.append(("".join(buf), quoted))
         buf, quoted, started = [], False, False
 
     def end_cmd():
-        nonlocal toks, skip
+        nonlocal toks, skip, lead, reads
         end_word()
         skip = False
         if toks:
             cmds.append(toks)
+            if meta is not None:
+                meta.append((cmd_lead, reads))
+            lead = ""
+            reads = False
         toks = []
 
     while i < n:
@@ -395,11 +462,31 @@ def _shell_commands(text, written=None):
             i = n if j < 0 else j
         elif c in ";\n|`()" or (c == "&" and text[i + 1:i + 2] != ">"):
             end_cmd()
+            lead += c
             i += 1
         elif c == "$" and text[i + 1:i + 2] == "(":
             end_cmd()
+            lead += "$("
             i += 2
+        elif _pid_then_quote(text, i):
+            buf.append("$$")  # the process number, then a plain quote that the next turn of the loop reads
+            started = True
+            i += 2
+        elif c == "$" and text[i + 1:i + 2] == "'":
+            j = _ansi_c_end(text, i)
+            if j < 0:
+                return None
+            value = _ansi_c_value(text[i + 2:j])
+            if value is None:
+                return None
+            buf.append(value)
+            started = quoted = True
+            i = j + 1
+        elif c == "$" and text[i + 1:i + 2] == '"':
+            i += 1  # `$"..."` is a double-quoted string (translated, which a command line never is): the quote after it reads it
         elif c in "<>" or (c == "&" and text[i + 1:i + 2] == ">"):
+            if c == "<":
+                reads = True
             if started and not quoted and "".join(buf).isdigit():
                 buf, started = [], False  # the fd number of `2>&1`
             end_word()
@@ -492,6 +579,13 @@ def _split_statements(text):
         if c == "\\" and not sq:
             i += 2
             continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
+            j = _ansi_c_end(text, i)
+            i = n if j < 0 else j + 1  # `$'..'` ends at the first quote no backslash takes (an open one runs to the end)
+            continue
         if c == "'" and not dq:
             sq = not sq
         elif c == '"' and not sq:
@@ -557,6 +651,16 @@ def _subst(text, known):
         if c == "\\" and not sq:
             out.append(text[i:i + 2])
             i += 2
+            continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            out.append("$$")
+            i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
+            j = _ansi_c_end(text, i)
+            j = n - 1 if j < 0 else j  # no name is replaced inside `$'..'`
+            out.append(text[i:j + 1])
+            i = j + 1
             continue
         if c == "'" and not dq:
             sq = not sq
@@ -655,12 +759,43 @@ def _names_a_root(words, cur):
     return False
 
 
-def _search_of(prog, rest, cur, xargs):
-    """-> (recursive, walks_working_folder) for one program with its words."""
+_XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
+
+
+_XARGS_SAFE_LONG = frozenset({"--null", "--no-run-if-empty", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--verbose", "--exit",
+                              "--open-tty", "--interactive", "--show-limits", "--process-slot-var"})
+
+
+def _xargs_input_is_flagfree(cmds, meta, k):
+    """True when command k (an xargs) reads only the plain words of the echo or printf piped straight into it, none of which can start an
+    option (issue 154): `echo hi | xargs grep x DIR`. Anything else (another producer, a file, a here-string, `-a FILE`, a variable, a wildcard or an
+    escape in the words) can hand the search the flag `-r` on its input, so the search is read as possibly recursive."""
+    lead, reads = meta[k]
+    if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
+        return False
+    xargs_words = [w for w, q in cmds[k]]
+    # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
+    # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
+    if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
+        return False
+    # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
+    # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
+    if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
+        return False
+    prev = cmds[k - 1]
+    if prev[0][1] or prev[0][0] not in ("echo", "printf"):
+        return False
+    # only plain words: no dash anywhere (a delimiter could expose it), no escape, quote, variable, wildcard or brace
+    return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
+
+
+def _search_of(prog, rest, cur, flag_in=False):
+    """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
+    flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
     if prog in _ROOTS_ONLY:
         return True, False
     if prog in ("cp", "mv"):
-        return any(x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x or "a" in x) for x in rest), False
+        return flag_in or any(x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x or "a" in x) for x in rest), False
     if prog == "find":
         roots = []
         for x in rest:
@@ -669,11 +804,11 @@ def _search_of(prog, rest, cur, xargs):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, not (xargs or _names_a_root(roots, cur))
-    if prog in ("tree", "du") or (prog == "ls" and any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest)):
-        return True, not (xargs or _names_a_root(_operands(prog, rest), cur))
+        return True, not _names_a_root(roots, cur)
+    if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
+        return True, not _names_a_root(_operands(prog, rest), cur)
     key = _SEARCH_KEY.get(prog)
-    if key == "grep" and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
+    if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
     if key is None and not (prog == "git" and "grep" in rest[:3]):
         return False, False
@@ -685,7 +820,7 @@ def _search_of(prog, rest, cur, xargs):
         return True, False
     if not any(x.startswith(_PATTERN_OPTIONS) for x in rest):
         ops = ops[1:]  # the first operand is the pattern
-    return True, not (xargs or _names_a_root(ops, cur))
+    return True, not _names_a_root(ops, cur)  # fed by xargs or typed, a search that names no root walks its working folder (issue 154)
 
 
 def _is_launcher_words(words):
@@ -750,7 +885,8 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
     written = []
-    cmds = _shell_commands(text, written)
+    meta = []
+    cmds = _shell_commands(text, written, meta)
     if cmds is None or depth > 4:
         return None
     if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
@@ -763,7 +899,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
     recursive, folders, words, cur = False, [], [], cwd
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
-    for cmd in cmds:
+    for k, cmd in enumerate(cmds):
         ws = [w for w, q in cmd]
         if _is_launcher_words(ws):
             continue
@@ -774,7 +910,15 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             continue
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
-        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd if not q)
+        # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
+        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
+        # the reader ends a command at `$(`, a backtick and a plain parenthesis (so a process substitution `<(..)` too), so in
+        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. With any of them anywhere in the text, every
+        # command after an xargs is read as one that xargs may run (the wide reading).
+        if not xargs and any("(" in lead or ")" in lead or "`" in lead for lead, reads in meta) and any(
+                os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
+            xargs = True
+        flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)
         prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
             behind_wrapper = not re.search(r"\s", w) and _known_program(w) and any(os.path.basename(p) in _WRAPPERS for p, pq in cmd[:i] if not pq)
@@ -817,7 +961,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                     return None
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
-            rec, walks = _search_of(prog, rest, cur, xargs)
+            rec, walks = _search_of(prog, rest, cur, flag_in)
             recursive = recursive or rec
             if walks:
                 folders.append(cur)
@@ -1700,6 +1844,13 @@ def _has_unquoted_paren(command):
         c = command[i]
         if c == "\\":
             i += 2
+        elif _pid_then_quote(command, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
+        elif c == "$" and command[i + 1:i + 2] == "'":
+            j = _ansi_c_end(command, i)  # `$'..'`: a backslash takes the next character, as in the reader
+            if j < 0:
+                return True
+            i = j + 1
         elif c == "'":
             j = command.find("'", i + 1)
             if j < 0:
