@@ -43,8 +43,11 @@ class WeekReset(unittest.TestCase):
                 self.assertLessEqual(start, now)
                 self.assertGreater(start + 7 * 86400, now)
 
-    def test_equal_to_the_dispatchers_copy(self):
+    def test_the_dispatcher_uses_this_module_and_gets_the_same_figures(self):
         import openclaw_dispatch as d
+        self.assertIs(d.wr, wr)  # issue 32: one owner, no copy
+        self.assertIs(d._et, wr.eastern)
+        self.assertIs(d._next_reset, wr.next_reset)
         self.assertEqual((wr.WEEK_TZ, wr.WEEK_RESET_UTC), (d.WEEK_TZ, d.WEEK_RESET_UTC))
         for day in range(1, 29):
             for hour in (0, 11, 12, 17, 23):

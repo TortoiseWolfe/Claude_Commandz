@@ -82,6 +82,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
 import engine_blocks as eb  # noqa: E402  the one file of engine usage blocks, shared with lane.sh
+import week_reset as wr  # noqa: E402  the one owner of the weekly reset (issue 32)
 
 HOME = Path(os.path.expanduser("~"))
 STATE = HOME / ".claude/state"
@@ -97,8 +98,8 @@ CLAIM_WINDOW = 10 * 60  # claim accepts only a lane `start` began for that ask t
 TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and probes: their starts never count toward the day
 # The week's three phases (Jonathan, 19 Oct: use all the allotted tokens, so lift what is left from Monday morning, completely from
 # Tuesday morning). Every boundary and limit lives here and nowhere else; the week itself starts at the reset the quality report names.
-WEEK_TZ = "America/New_York"
-WEEK_RESET_UTC = (2, 16, 0)  # weekday (Mon=0), hour, minute in UTC: the real reset is one fixed instant, Wednesday 16:00 UTC (12:00 PM in summer time, 11:00 AM in winter); used only when the report gives no reset
+WEEK_TZ = wr.WEEK_TZ  # the weekly reset itself (Wednesday 16:00 UTC, 12:00 PM Eastern in summer time, 11:00 AM in winter) is owned by week_reset.py
+WEEK_RESET_UTC = wr.WEEK_RESET_UTC
 STALE_CALIBRATION_SECONDS = 30 * 3600  # a claude.ai reading older than this, or from another week, counts as unknown
 PHASE2_START = (0, 6, 0)   # Monday 6:00 AM ET
 PHASE3_START = (1, 6, 0)   # Tuesday 6:00 AM ET
@@ -3996,9 +3997,7 @@ def step_down(budget, engine, model, task, now):
     return ("sonnet" if model == "opus" else model), " (Sonnet only: %s)" % over
 
 
-def _et(ts):
-    from zoneinfo import ZoneInfo
-    return datetime.datetime.fromtimestamp(ts, ZoneInfo(WEEK_TZ))
+_et = wr.eastern
 
 
 def _et_clock(t):
@@ -4026,25 +4025,13 @@ def week_phase(now, reset=None):
     return 3, None, _et_clock(r)
 
 
-def _next_reset(t):
-    """The next Wednesday 16:00 UTC after the Eastern datetime `t`, as an Eastern datetime."""
-    u = t.astimezone(datetime.timezone.utc)
-    d = u.date() + datetime.timedelta(days=(WEEK_RESET_UTC[0] - u.weekday()) % 7)
-    r = datetime.datetime(d.year, d.month, d.day, WEEK_RESET_UTC[1], WEEK_RESET_UTC[2], tzinfo=datetime.timezone.utc)
-    if r <= u:
-        r += datetime.timedelta(days=7)
-    return r.astimezone(t.tzinfo)
+_next_reset = wr.next_reset
 
 
 def _week_edges(now, reset=None):
     """-> (now, phase 2 start, phase 3 start, reset), all Eastern datetimes of the week `now` is in."""
     t = _et(now)
-    r = _et(reset) if isinstance(reset, (int, float)) and reset > now else None
-    if r is None:
-        r = _next_reset(t)
-        start = (r.astimezone(datetime.timezone.utc) - datetime.timedelta(days=7)).astimezone(r.tzinfo)  # the same fixed UTC instant a week earlier
-    else:
-        start = r - datetime.timedelta(days=7)  # wall-clock: both are Eastern datetimes of the same zone
+    start, r = wr.week_bounds(now, reset)
     phase2 = _at(start + datetime.timedelta(days=1), PHASE2_START)
     phase3 = _at(phase2 + datetime.timedelta(days=1), PHASE3_START)
     return t, phase2, phase3, r

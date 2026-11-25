@@ -4,7 +4,7 @@ Use when: a script needs the weekly reset or the start of the token week without
 
 The real reset is one fixed instant, Wednesday 16:00 UTC (12:00 PM Eastern in summer time, 11:00 AM in winter). When the
 quality report names its own reset, that one wins. tests/test_week_reset.py also checks that these figures still equal the
-dispatcher's, which keeps its own copy for now (issue 32: one owner for the weekly reset).
+dispatcher's, which imports this module (issue 32: one owner for the weekly reset).
 
   week_reset.py [--now EPOCH] [--reset EPOCH]      prints the week's start and reset as Eastern 12-hour times
 """
