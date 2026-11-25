@@ -1114,9 +1114,19 @@ rm -f "$LD/.recycle-stop-sh-lane"
 
 # f. a recycle held three times by running subagents sets the stop too
 helper_try() {  # helper_try <id>: one recycle that the lane's running subagent holds up
-  reset_fake; usage_rec 130000 >"$PROJ/old-sess.jsonl"; add_row q-lane subscription old-sess; basepane
-  agent_start "$1" "$ts_now" >>"$PROJ/old-sess.jsonl"
-  FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_HELPER_TRIES=3 LANE_RECYCLE_WAIT_SECS=3 lane --recycle q-lane
+  # The window is short (LANE_RECYCLE_WAIT_SECS) so the test is quick, and lane.sh looks every 2 s. On a loaded machine the window can end
+  # before the hand-off and the idle screen are both seen: the run then fails with "no new handoff in Ns", which exits 1 like the real
+  # hold but counts nothing, and the counter checks after it came out wrong (issue 96; 1 run in 8 with four copies of this test running
+  # together). A run that counted nothing is repeated, up to three times, so each call here is exactly one counted hold.
+  local before after att
+  before="$(cat "$HFAILF" 2>/dev/null || echo 0)"
+  for att in 1 2 3; do
+    reset_fake; usage_rec 130000 >"$PROJ/old-sess.jsonl"; add_row q-lane subscription old-sess; basepane
+    agent_start "$1" "$ts_now" >>"$PROJ/old-sess.jsonl"
+    FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_HELPER_TRIES=3 LANE_RECYCLE_WAIT_SECS=5 lane --recycle q-lane
+    after="$(cat "$HFAILF" 2>/dev/null || echo 0)"
+    [ "$after" != "$before" ] && break
+  done
 }
 stp_reset
 helper_try f01; assert_exit 1 "$LAST_RC" 'subagent hold, try 1 fails'
