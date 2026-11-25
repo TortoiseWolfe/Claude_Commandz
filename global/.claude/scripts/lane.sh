@@ -124,7 +124,7 @@
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
 #                                       Claude lanes also get ~/.claude/state, Claude's temp folder, ~/repos/.worktrees and (in a worktree) the repo's main checkout as --add-dir,
 #                                       computed at each start and resume, never recorded (see shared_read_flags).
-#   lane.sh --rules <list> ...          at start: which rule parts the lane loads: auto (default, the keyword picking), all, none (core only) or part names
+#   lane.sh --rules <list> ...          at start: which rule parts the lane loads: core (default: core.md only, plus mail when connectors are on; the keywords only warn), auto (the keyword picking, with the routes sections), all, none or part names
 #                                       from mail, browser, streams, coop, fleet, comma-separated (core always loads); an unknown name is refused before anything starts
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
@@ -164,8 +164,8 @@
 #   - --disallowedTools LANE_TOOLS_OFF (the Artifact tools: their schema is about a quarter of a lane's start);
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
 #     the rules, composed per lane by lane_rules_compose.py from the parts in LANE_RULES_DIR (default ~/repos/hub/lane-rules/):
-#     core.md always, plus mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
-#     setting might match; a start command that names --rules <list> loads exactly core plus that list, and the keywords only add a warning line
+#     core.md always (C18: the default is core alone, plus mail when connectors are on); --rules auto adds mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
+#     setting might match, and the routes sections; a start command that names --rules <list> loads exactly core plus that list, and the keywords only add a warning line
 #     to the head comment for each part they would have loaded (the hub knows what the job needs). (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
 #     ~/repos/hub/lane-rules.md) is now a short pointer that prompts saying "Read lane-rules.md first" still read cheaply;
 #     both happen only when that file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
@@ -297,7 +297,7 @@ usage() {
   local cb; cb="$(codex_back_phrase)"; [ -z "$cb" ] || cb=" $cb"
   cat <<'USAGE' | sed "s| @CODEX_BACK@|${cb//&/\\&}|g"
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--rules <auto|all|none|part[,part]>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--rules <core|auto|all|none|part[,part]>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>

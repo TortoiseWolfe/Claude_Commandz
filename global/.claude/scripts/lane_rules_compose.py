@@ -9,7 +9,8 @@ connectors setting. A trigger is a plain word list below. Core's own table point
 opens it.
 
   lane_rules_compose.py --name N --dir D --connectors on|off --prompt FILE --out FILE [--model M] [--rules-dir DIR]
-  lane_rules_compose.py ... --rules LIST      auto (default: the keyword picking), all, none (core only) or part names, e.g. mail,coop
+  lane_rules_compose.py ... --rules LIST      core (default: core only; the keywords only warn), auto (the keyword picking and the routes
+                                              sections), all, none (same as core) or part names, e.g. mail,coop
   lane_rules_compose.py --all --out FILE      every part (a lane whose composing failed still gets all the rules)
   lane_rules_compose.py --stats FILE...       which parts each prompt file would get, and the characters sent
 
@@ -181,7 +182,7 @@ def main():
     ap.add_argument("--prompt", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--rules-dir", default=str(DEFAULT_DIR))
-    ap.add_argument("--rules", default="auto")
+    ap.add_argument("--rules", default="core")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--stats", nargs="*")
     a = ap.parse_args()
@@ -210,6 +211,8 @@ def main():
         parts = ORDER
     elif wanted is not None:
         parts = wanted
+        if a.rules.strip().lower() == "core" and a.connectors == "on" and "mail" not in parts:
+            parts = ["core", "mail"] + [p for p in parts if p not in ("core", "mail")]  # a lane given Gmail needs the mail rules
         if pf is not None and pf.is_file():
             hits = pick_hits(a.name, a.dir, a.connectors, pf.read_text(errors="replace"))
             warn = {p: w for p, w in hits.items() if p not in parts}
@@ -218,7 +221,9 @@ def main():
     if not read_part(rules_dir, "core").strip():
         sys.exit("lane_rules_compose: %s/core.md is missing or empty" % rules_dir)
     text = compose(parts, rules_dir, warn)
-    if pf is not None and pf.is_file() and not a.all:
+    # The routes sections ride along only when the hub asked for the keyword picking (auto) or everything (all): C18, a lane no
+    # longer starts with up to 15K tokens of other sites' notes it did not ask for.
+    if pf is not None and pf.is_file() and not a.all and (wanted is None or set(wanted) == set(ORDER)):
         extra = routes_for(a.name, a.dir, pf.read_text(errors="replace"))
         if extra:
             text = text.rstrip("\n") + "\n\n" + extra
