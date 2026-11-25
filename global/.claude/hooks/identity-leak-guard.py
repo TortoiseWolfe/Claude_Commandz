@@ -53,15 +53,13 @@ LOG = "~/.claude/state/identity-guard.log"
 APPROVED_HOSTS = "~/.config/afa/identity-guard-hosts.txt"
 HOST_NAME = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
 APPROVED_URL = re.compile(r"https://([a-z0-9.-]+)(?::\d+)?(?:[/?#]\S*)?", re.I)  # no login in front of the host, no other scheme
+# The only curl options an approved send may use (an allow list: any other option, long or short, refuses the whole command). Body options
+# carry the address; value options carry a word of their own that must not hold it. A long option written with `=` is refused.
 BODY_OPTIONS = {"-d", "-F", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--form", "--form-string", "--json"}
-# Options that carry a value of their own, so the word after one is not a web address; others are read as flags.
-VALUE_OPTIONS = BODY_OPTIONS | {"--request", "--output", "--max-time", "--connect-timeout", "--write-out", "--retry", "--header", "--user-agent",
-                                "--referer", "--cookie", "--user", "--limit-rate"}
-VALUE_SHORT = set("XomwHAebu")
-# A redirect, a proxy, a name override, a config file, an upload and a second request each can send the body somewhere not on the list.
-REFUSED_OPTIONS = {"--location", "--location-trusted", "--proxy", "--preproxy", "--socks5", "--resolve", "--connect-to", "--config", "--next",
-                   "--upload-file", "--url", "--unix-socket", "--proxy-header", "--ftp-port", "--interface"}
-REFUSED_SHORT = set("LxKTz:")
+FLAG_OPTIONS = {"-s", "-S", "-f", "-i", "--silent", "--show-error", "--fail", "--include", "--http1.1", "--http2"}
+_HEADER_VALUE = r"(Content-Type|Accept): [\w/+.;= -]{1,80}"
+VALUE_OPTIONS = {"-X": r"(GET|POST|PUT|PATCH)", "--request": r"(GET|POST|PUT|PATCH)", "-m": r"\d{1,4}", "--max-time": r"\d{1,4}",
+                 "--connect-timeout": r"\d{1,4}", "-H": _HEADER_VALUE, "--header": _HEADER_VALUE}
 DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 SCRIPTS_DIR = "~/.claude/scripts"
@@ -351,9 +349,12 @@ def body_only_to_approved_host(cmd, addrs, hosts):
     substitution, a host not on the list, a word this reading can't place) gives False and the guard refuses as before."""
     if not hosts:
         return False
+    if "#" in cmd or "\\" in cmd:
+        return False  # shlex and the shell disagree on where a comment starts, and on what a backslash does inside a word
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
+        lex.commenters = ""
         toks = list(lex)
     except ValueError:
         return False
@@ -363,30 +364,24 @@ def body_only_to_approved_host(cmd, addrs, hosts):
         return False  # a second command, a pipe, a redirect, or a word made at run time
     urls, pend = [], None  # pend: the option whose value is the next word
     for t in toks[1:]:
-        if has_address(t, addrs):
-            # only the value of a body option may hold the address; a header, the URL, a login, a cookie or a referer never
-            if pend in BODY_OPTIONS or re.match(r"-[dF][^-]", t):
-                pend = None
-                continue
-            return False
-        if pend:
+        if pend is not None:
+            if pend not in BODY_OPTIONS and (has_address(t, addrs) or not re.fullmatch(VALUE_OPTIONS[pend], t)):
+                return False  # only a body option's value may hold the address; a header, a login, a cookie or a referer never
             pend = None
-        elif t.startswith("--"):
-            name = t.split("=", 1)[0]
-            if name in REFUSED_OPTIONS:
-                return False
-            pend = t if t in VALUE_OPTIONS else None
-        elif t.startswith("-") and len(t) > 1:
-            if t in ("-d", "-F"):
-                pend = t
-            elif re.match(r"-[dF]", t):
-                pass  # the value is attached
-            elif any(c in REFUSED_SHORT for c in t[1:]):
-                return False
-            else:
-                pend = t if t[-1] in VALUE_SHORT else None
+            continue
+        attached = len(t) > 2 and t[:2] in ("-d", "-F") and t[2] != "-"  # the value is stuck to the option: -dfield=value
+        if has_address(t, addrs) and not attached:
+            return False  # the address in a web address, or as an option's own word
+        if t in BODY_OPTIONS or t in VALUE_OPTIONS:
+            pend = t
+        elif t in FLAG_OPTIONS or attached or re.fullmatch(r"-[sSfi]{2,}", t):
+            continue
+        elif t.startswith("-"):
+            return False  # an option this reading does not know: a redirect, a proxy, -G, a name override, a settings file, an upload
         else:
             urls.append(t)
+    if pend is not None:
+        return False
     if not urls:
         return False
     for u in urls:

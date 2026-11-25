@@ -577,6 +577,31 @@ class ApprovedHosts(unittest.TestCase):
                     "python3 -c \"import requests; requests.post('https://%s/f', data='%s')\"" % (h, ME), "wget --post-data 'e=%s' https://%s/f" % (ME, h)):
             self.refused(cmd)
 
+    def test_a_curl_option_this_reading_does_not_know_refuses_the_whole_command(self):
+        # the reading is an allow list: an option it was not told about (a body moved to the web address, a redirect, a name override, an
+        # insecure connection, a settings file) refuses, and so does a word the shell and shlex read differently (a hash, a backslash)
+        h, o = self.HOST, self.OTHER
+        for cmd in ("curl -G -d 'email=%s' https://%s/f" % (ME, h), "curl --get -d 'email=%s' https://%s/f" % (ME, h),
+                    "curl -sG -d 'email=%s' https://%s/f" % (ME, h), "curl -k -d 'email=%s' https://%s/f" % (ME, h),
+                    "curl --insecure -d 'email=%s' https://%s/f" % (ME, h), "curl --path-as-is -d 'email=%s' https://%s/f" % (ME, h),
+                    "curl --dns-servers 1.2.3.4 -d 'email=%s' https://%s/f" % (ME, h), "curl --doh-url https://%s/q -d 'email=%s' https://%s/f" % (o, ME, h),
+                    "curl --noproxy x -d 'email=%s' https://%s/f" % (ME, h), "curl -d 'email=%s' --url https://%s/f" % (ME, h),
+                    "curl --header=X:1 -d 'email=%s' https://%s/f" % (ME, h), "curl -o /tmp/x -d 'email=%s' https://%s/f" % (ME, h),
+                    "curl -d 'email=%s' https://%s/f #https://%s/g" % (ME, h, o), "curl -d a#b https://%s/ -d 'email=%s' https://%s/f" % (o, ME, h),
+                    "curl -d 'email=%s' https://%s/f \\\n https://%s/g" % (ME, h, o),
+                    # the attached form takes the value of a body option only, so it cannot be a header's or a user agent's value
+                    "curl -A -dX https://%s/f -d 'email=%s'" % (o, ME), "curl -H -d'%s' https://%s/f" % (ME, h), "curl -X %s https://%s/f" % (ME, h),
+                    "curl -H 'Host: %s' -d 'email=%s' https://%s/f" % (o, ME, h), "curl -H 'Accept: x\\ny' -d 'email=%s' https://%s/f" % (ME, h)):
+            self.refused(cmd)
+        self.allowed("curl -sS -d 'email=%s' https://%s/f" % (ME, h))
+        self.allowed("curl -s -X POST -m 20 --connect-timeout 5 -H 'Content-Type: application/json' --json '{\"e\": \"%s\"}' https://%s/f" % (ME, h))
+
+    def test_the_approved_hosts_file_cannot_be_changed_by_a_session(self):
+        # a session that could add a host to the list would approve itself, so the guard that protects the two merge lists protects this file too
+        lg = os.path.join(os.path.dirname(os.path.abspath(g.__file__)), "list-file-guard.py")
+        with open(lg) as f:
+            self.assertIn("identity-guard-hosts.txt", f.read())
+
     def test_a_missing_loose_or_badly_written_file_lists_nothing(self):
         cmd = "curl -d 'email=%s' https://%s/f" % (ME, self.HOST)
         self.allowed(cmd)
