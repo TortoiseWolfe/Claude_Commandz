@@ -967,6 +967,59 @@ class Cli(unittest.TestCase):
             self.assertFalse((d / "state" / "hub-digest.md.tmp").exists())
 
 
+class UnansweredClientMail(unittest.TestCase):
+    """The section next to "Open client lines": client rows older than 2 days with no reply and no card, by client (made-up data only).
+    23 Nov 2026: five of a client's asks sat unanswered while their messages were ticked seen."""
+
+    def write(self, rows):
+        d = fresh_dir(self)
+        path = Path(d) / "mail-index.tsv"
+        head = "id\tthread\tdate\tclass\twho\taddress\tsubject\thandled\treply\tswept\n"
+        lines = []
+        for i, (cls, who, days_ago, handled, reply) in enumerate(rows):
+            when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append("\t".join([f"{i + 1:016x}", f"t{i}", when, cls, who, f"a{i}@example.com", f"Subject {i}", handled, reply, ""]))
+        path.write_text(head + "\n".join(lines) + "\n")
+        return path
+
+    def test_an_old_unstamped_client_row_is_listed_by_client_with_its_subject(self):
+        path = self.write([("client", "Example Co-op", 4, "", ""), ("client", "Example Shop", 5, "", "")])
+        text = "\n".join(hd.unanswered_client_lines(path))
+        self.assertIn("Example Co-op: 1 waiting", text)
+        self.assertIn("Example Shop: 1 waiting", text)
+        self.assertIn('"Subject 0"', text)
+
+    def test_a_row_drops_out_once_stamped_with_a_reply_or_a_card(self):
+        stamped = "2026-11-20T12:00:00Z"
+        path = self.write([("client", "Example Co-op", 4, stamped, "reply:r-123456"), ("client", "Example Co-op", 4, stamped, "card:77"),
+                           ("client", "Example Co-op", 4, stamped, "fyi")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_fresh_rows_and_ancient_rows_and_other_classes_are_not_listed(self):
+        path = self.write([("client", "Example Co-op", 1, "", ""), ("client", "Example Co-op", 90, "", ""), ("person", "who", 4, "", ""),
+                           ("bulk", "who", 4, "", "")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_a_long_list_is_capped_per_client_with_and_n_more(self):
+        path = self.write([("client", "Example Co-op", 3 + i, "", "") for i in range(hd.UNANSWERED_PER_CLIENT + 2)])
+        lines = hd.unanswered_client_lines(path)
+        self.assertEqual(len([l for l in lines if l.startswith("  - Nov") or re.match(r"  - \w{3} \d", l)]), hd.UNANSWERED_PER_CLIENT + 1)
+        self.assertIn("and 2 more", lines[-1])
+
+    def test_a_missing_index_gives_no_section(self):
+        self.assertIsNone(hd.unanswered_client_lines(Path(fresh_dir(self)) / "nope.tsv"))
+
+    def test_the_section_sits_after_open_client_lines_and_survives_the_size_cap(self):
+        lines = ["- Example Co-op: 1 waiting, oldest Nov 19", '  - Nov 19 00000001 | a0@example.com | "Subject 0"']
+        secs = hd.build_sections(roadmap_body="", lane_status="", lanes_dir="/nonexistent", inbox_text="", git_log="", tidy_text="",
+                                 budget=None, now=NOW, unanswered=lines)
+        titles = [t for t, _ in secs]
+        i = next(k for k, t in enumerate(titles) if t.startswith("Open client lines"))
+        self.assertEqual(titles[i + 1], hd.UNANSWERED_TITLE)
+        page = hd.render(secs, NOW, "NX-01", 2500)
+        self.assertIn("Subject 0", page)
+
+
 class MailIndexLines(unittest.TestCase):
     """The "Incoming mail" section: counts by class, and every unhandled person, job and client-alert row (made-up data only)."""
 

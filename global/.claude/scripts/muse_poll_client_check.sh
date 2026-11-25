@@ -13,7 +13,8 @@
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
 # Co-op list mail counts too (21 Nov 2026): a message whose subject starts with [Advisors] or [Devops] (optionally after Re:/Fwd:), or that
 # Gmail matches to the co-op list's List-Id (second query, list:list.chattanooga.digital), comes out as NEW whatever its sender address,
-# with the same DRAFT/SENT/label/seen/no-reply drops as any other line.
+# with the same DRAFT/SENT/label/seen/no-reply drops as any other line. A third query (23 Nov 2026) also takes a message whose To or Cc
+# holds an address at a co-op domain, whoever wrote it; the domains come from the private sender file at run time.
 # and nothing when there is nothing new. Senders of no-reply@ or noreply@ are skipped UNLESS they match a
 # client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
 # kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script
@@ -56,8 +57,23 @@ if lout=$("${lister[@]}" "$list_query" 2>"$errf"); then
 else
   printf '%s client check: list query failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >>"$LOG"
 fi
-# The two lists' lines are read together: a list message is one more line, deduplicated by ID.
-out=$(printf '%s\n%s\n' "$out" "${lout:-}" | grep -E '^MSG ' | awk '!seen[$2]++')
+# The third query (23 Nov 2026, Jonathan: "a lot of the coop work is still falling through cracks in the emails"): a message whose To or Cc
+# holds an address at a co-op domain counts whoever wrote it, because a member writing from a personal address and copying the co-op
+# slipped past the From-only match. The co-op's domains are read at run time from the private sender file (bare-domain rows of a client
+# whose name says co-op), so no address lives here. A failure is logged and the check goes on with the other queries.
+ccids=""; cout=""
+coopdoms=$(awk -F'\t' 'NR>1 && tolower($1) ~ /co-?op/ && $4!="" && $4 !~ /@/ {print tolower($4)}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
+if [[ -n "$coopdoms" ]]; then
+  cc_query="(to:($coopdoms) OR cc:($coopdoms)) newer_than:$WINDOW -from:me"
+  if cout=$("${lister[@]}" "$cc_query" 2>"$errf"); then
+    ccids=$(printf '%s\n' "$cout" | grep -E '^MSG [0-9a-f]{15,16} \|' | awk '{print $2}')
+  else
+    printf '%s client check: to/cc query failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >>"$LOG"
+    cout=""
+  fi
+fi
+# The queries' lines are read together: a list or Cc message is one more line, deduplicated by ID.
+out=$(printf '%s\n%s\n%s\n' "$out" "${lout:-}" "${cout:-}" | grep -E '^MSG ' | awk '!seen[$2]++')
 touch "$SEEN"
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
@@ -111,7 +127,7 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
   if [[ -z "$ok" && "$addr" != no-reply@* && "$addr" != noreply@* ]]; then
     lsubj=${rest#*|}; lsubj=${lsubj#*|}; lsubj=${lsubj%|*}; lsubj=${lsubj%|*}; lsubj=${lsubj%|*}
     lsubj=$(printf '%s' "$lsubj" | tr 'A-Z' 'a-z'); lsubj=${lsubj#"${lsubj%%[![:space:]]*}"}
-    if [[ "$lsubj" =~ ^((re|fwd?):[[:space:]]*)*\[(advisors|devops)\] ]] || grep -qxF "$id" <<<"$listids"; then ok=1; fi
+    if [[ "$lsubj" =~ ^((re|fwd?):[[:space:]]*)*\[(advisors|devops)\] ]] || grep -qxF "$id" <<<"$listids" || grep -qxF "$id" <<<"$ccids"; then ok=1; fi
   fi
   [[ -n "$ok" ]] || continue
   # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.

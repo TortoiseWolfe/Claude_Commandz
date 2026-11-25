@@ -42,11 +42,36 @@ ok 'the malformed drop is logged' 1 "$(grep -c 'client check: dropped malformed 
 ok 'the future ID drop is logged' 1 "$(grep -c "client check: dropped implausible id.*$id_future" "$ST/muse-poll.log")"
 ok 'the past ID drop is logged' 1 "$(grep -c "client check: dropped implausible id.*$id_past" "$ST/muse-poll.log")"
 
-rec() { MUSE_STATE=$ST bash "$HERE/muse_poll_record.sh" "$@"; }
+FAKE_LOG=$TMP/mail-index-calls.log; : >"$FAKE_LOG"
+rec() { MUSE_STATE=$ST MUSE_MAIL_INDEX_PY="$HERE/tests/fake_mail_index.py" FAKE_MAIL_INDEX_LOG=$FAKE_LOG bash "$HERE/muse_poll_record.sh" "$@"; }
 : >"$ST/hub-inbox.md"
-if rec client-seen "1792119952000" 2>/dev/null; then ok 'client-seen refuses a 13-digit timestamp' refused accepted; fi
-ok 'client-seen refuses a 13-digit timestamp' 0 "$(grep -c 1792119952000 "$ST/client-mail-seen.txt" 2>/dev/null || true)"
-rec client-seen "1a14c8be4df08299" && ok 'client-seen takes a 16-hex ID' 1 "$(grep -c 1a14c8be4df08299 "$ST/client-mail-seen.txt")"
+if rec client-seen "1792119952000" --fyi 2>/dev/null; then ok 'client-seen refuses a 13-digit timestamp' refused accepted; fi
+ok 'client-seen refuses a 13-digit timestamp' 0 "$(cat "$ST/client-mail-seen.txt" 2>/dev/null | grep -c 1792119952000 || true)"
+rec client-seen "1a14c8be4df08299" --fyi && ok 'client-seen takes a 16-hex ID' 1 "$(grep -c 1a14c8be4df08299 "$ST/client-mail-seen.txt")"
+
+# Seen is not handled: a bare tick is refused and writes nothing; a reply, a card or an FYI is stamped into the mail index.
+if rec client-seen "1a14c8be4df08298" 2>"$TMP/bare.err"; then ok 'a bare client-seen is refused' refused accepted; fi
+ok 'a bare client-seen says what to give' 1 "$(grep -c 'seen is not handled' "$TMP/bare.err")"
+ok 'a bare client-seen writes nothing' 0 "$(grep -c 1a14c8be4df08298 "$ST/client-mail-seen.txt")"
+ok 'a bare client-seen does not reach the mail index' 0 "$(grep -c 1a14c8be4df08298 "$FAKE_LOG")"
+if rec client-seen "1a14c8be4df08298" --reply "no good" 2>/dev/null; then ok 'a malformed --reply is refused' refused accepted; fi
+if rec client-seen "1a14c8be4df08298" --card "javascript:alert(1)" 2>/dev/null; then ok 'a malformed --card is refused' refused accepted; fi
+ok 'refused ticks write nothing' 0 "$(grep -c 1a14c8be4df08298 "$ST/client-mail-seen.txt")"
+rec client-seen "1a14c8be4df08298" --reply "r1234567890abcdef"
+ok '--reply stamps the mail index with the draft id' 1 "$(grep -c '^handled 1a14c8be4df08298 --reply r1234567890abcdef$' "$FAKE_LOG")"
+ok '--reply ticks the id as seen' 1 "$(grep -c 1a14c8be4df08298 "$ST/client-mail-seen.txt")"
+rec client-seen "1a14c8be4df08297" --card 23
+ok '--card stamps the mail index with the card' 1 "$(grep -c '^handled 1a14c8be4df08297 --card 23$' "$FAKE_LOG")"
+rec client-seen "talk:room_a:55" --fyi
+ok 'a Talk id never reaches the mail index' 0 "$(grep -c 'talk:room_a' "$FAKE_LOG")"
+ok 'a Talk id is ticked seen' 1 "$(grep -c 'talk:room_a:55' "$ST/client-mail-seen.txt")"
+# An id with no index row yet (exit 1): one update, one more try, then ticked anyway; a refusal (exit 2) ticks nothing.
+: >"$FAKE_LOG"
+FAKE_MAIL_INDEX_RC_FIRST=1 rec client-seen "1a14c8be4df08296" --fyi
+ok 'no row yet: handled, then update, then handled again' "handled|update|handled" "$(cut -d' ' -f1 "$FAKE_LOG" | paste -sd'|')"
+ok 'no row yet: the id is still ticked' 1 "$(grep -c 1a14c8be4df08296 "$ST/client-mail-seen.txt")"
+if FAKE_MAIL_INDEX_RC=2 rec client-seen "1a14c8be4df08295" --fyi 2>/dev/null; then ok 'an index refusal stops the tick' refused accepted; fi
+ok 'an index refusal ticks nothing' 0 "$(grep -c 1a14c8be4df08295 "$ST/client-mail-seen.txt")"
 
 # A no-reply sender at a client domain must come out "NEW <id> ALERT |", except a kind=payment sender (Gusto),
 # which comes out NEW untagged because its own handler step marks the invoice paid; a no-reply sender at an
@@ -185,6 +210,7 @@ MSG $id_listonly | someone@elsewhere.example.test | Rob <someone@elsewhere.examp
 MSG $id_listdraft | someone@elsewhere.example.test | Rob <someone@elsewhere.example.test> | Re: Meeting recap | Sat, 21 Nov 2026 09:00:00 | DRAFT | $id_listdraft
 OUT
 ;;
+"(to:"*) : ;;
 *) cat <<OUT
 MSG $id_member | member@personal.example.test | Sofia <member@personal.example.test> | Plain subject | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_member
 MSG $id_adv | sofia@other.example.test | Sofia <sofia@other.example.test> | [Advisors] Re: Input on slogans | Sat, 21 Nov 2026 09:00:00 | INBOX,UNREAD | $id_adv
@@ -211,6 +237,42 @@ ok 'that drop is logged' 1 "$(grep -c "dropped $id_advnolabels: no thread ID" "$
 ok 'an already-absorbed tagged message is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_advseen" || true)"
 ok 'our own SENT reply with the tag is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_advsent" || true)"
 ok 'the list query went out with the List-Id operator' 1 "$(grep -c '^messages-list list:list.chattanooga.digital newer_than:2d -from:me$' "$TMP/stub-args2" || true)"
+: >"$TMP/seen.txt"
+
+# 23 Nov 2026: a member writing from a personal address and copying the co-op slipped past the From-only match. The third query asks
+# for mail whose To or Cc holds an address at a co-op domain (domains read from the sender file's bare-domain rows of a co-op client);
+# what it returns comes out NEW like any other line, with the same DRAFT / SENT / label / seen drops. Made-up names only.
+now_ms4=$(( $(date +%s) * 1000 ))
+mk4() { printf '%016x' $(( (now_ms4 << 20) | $1 )); }
+id_cc=$(mk4 71111); id_ccdraft=$(mk4 72222); id_ccsent=$(mk4 73333); id_ccseen=$(mk4 74444)
+printf 'client\trepo_dir\tkind\tgmail_from\nCoop\t/x\tmail\tlist.example.test\nCoop\t/x\tmail\tmember@personal.example.test\nShop\t/y\tmail\tshop.example.test\n' >"$TMP/senders.tsv"
+echo "$id_ccseen" >"$TMP/seen.txt"
+rm -f "$TMP/stub-args3"
+cat >"$TMP/claude" <<MOCK
+#!/usr/bin/env bash
+echo "\$*" >>"$TMP/stub-args3"
+case "\$2" in
+"(to:"*) cat <<OUT
+MSG $id_cc | friend@elsewhere.example.test | Alex <friend@elsewhere.example.test> | Quick question for the group | Mon, 23 Nov 2026 09:00:00 | INBOX,UNREAD | $id_cc
+MSG $id_ccdraft | friend@elsewhere.example.test | Alex <friend@elsewhere.example.test> | Quick question for the group | Mon, 23 Nov 2026 09:00:00 | DRAFT | $id_ccdraft
+MSG $id_ccsent | friend@elsewhere.example.test | Alex <friend@elsewhere.example.test> | Our own reply | Mon, 23 Nov 2026 09:00:00 | SENT | $id_ccsent
+MSG $id_ccseen | friend@elsewhere.example.test | Alex <friend@elsewhere.example.test> | Already absorbed | Mon, 23 Nov 2026 09:00:00 | INBOX,UNREAD | $id_ccseen
+OUT
+;;
+*) : ;;
+esac
+MOCK
+out=$(check)
+ok 'a Cc-only co-op message comes out NEW' 1 "$(printf '%s\n' "$out" | grep -c "^NEW $id_cc | friend@elsewhere.example.test |")"
+ok 'a to/cc-query DRAFT is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_ccdraft" || true)"
+ok 'a to/cc-query SENT line is dropped' 0 "$(printf '%s\n' "$out" | grep -c "$id_ccsent" || true)"
+ok 'an already-absorbed to/cc message is not NEW' 0 "$(printf '%s\n' "$out" | grep -c "$id_ccseen" || true)"
+ok 'the to/cc query names the co-op domain and not the shop' 1 "$(grep -c '^messages-list (to:(list.example.test) OR cc:(list.example.test)) newer_than:2d -from:me$' "$TMP/stub-args3" || true)"
+# With no co-op row in the sender file there is no to/cc query at all (nothing to ask for).
+printf 'client\trepo_dir\tkind\tgmail_from\nShop\t/y\tmail\tshop.example.test\n' >"$TMP/senders.tsv"
+rm -f "$TMP/stub-args3"
+out=$(check)
+ok 'no co-op row, no to/cc query' 0 "$(grep -c '(to:(' "$TMP/stub-args3" || true)"
 : >"$TMP/seen.txt"
 
 # A failing lister (dead token, no network) is loud: nothing NEW, exit 1, the reason on stderr, never a quiet "nothing new".

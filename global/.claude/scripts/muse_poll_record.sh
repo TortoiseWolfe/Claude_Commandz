@@ -14,9 +14,12 @@
 #                                                inbox line (open or ticked), so no ID is queued twice
 #   muse_poll_record.sh client-talk "<client>" "<detail>" "<talk|deck ids>"
 #                                             -> queues one client-talk line for co-op chat, never a model pass
-#   muse_poll_record.sh client-seen "<id> [<id>...]"
+#   muse_poll_record.sh client-seen "<id> [<id>...]" --reply <draft or message id> | --card <Deck number or issue URL> | --fyi
 #                                             -> marks absorbed Gmail or Talk IDs (client-mail-seen.txt) and
-#                                                ticks open client lines whose IDs are all absorbed. Also used for routine alerts.
+#                                                ticks open client lines whose IDs are all absorbed. Seen is not handled (23 Nov 2026: five
+#                                                of Greg's asks were ticked seen and never answered), so a tick with none of the three is
+#                                                refused: a reply or draft, a card that carries it, or --fyi (it asked for nothing; routine
+#                                                alerts). Gmail ids are stamped into the mail index (handled and reply columns).
 #   muse_poll_record.sh open [<prefix>] [-v] [--full]  -> prints the open lines only (never the done history), optionally one
 #                                                kind ("Waiting on Hatch"); -v adds each open line's indented notes.
 #                                                This is how a model reads the board: never read the whole file. Items older than 10 days with no
@@ -150,10 +153,34 @@ case "${1:-}" in
     ;;
   client-seen)
     ids="${2:?ids}"
+    # Seen is not handled: say what covers the message, or nothing is ticked (the check runs before any write).
+    proof=()
+    case "${3:-}" in
+      --reply) [[ "${4:-}" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || { echo "client-seen: --reply wants a draft or message id" >&2; exit 1; }; proof=(--reply "$4") ;;
+      --card)  [[ "${4:-}" =~ ^([0-9]{1,6}|deck:[A-Za-z0-9_-]+:[0-9]{1,6}|https://[A-Za-z0-9./_#?=\&%~-]+)$ ]] || { echo "client-seen: --card wants a Deck card number or an https issue address" >&2; exit 1; }; proof=(--card "$4") ;;
+      --fyi)   proof=(--fyi) ;;
+      *) echo "client-seen: seen is not handled. Say what covers it: --reply <draft or message id>, --card <Deck number or issue URL>, or --fyi (it asked for nothing)" >&2; exit 1 ;;
+    esac
+    gids=()
+    for id in $ids; do
+      [[ "$id" =~ ^([0-9a-f]{15,16}|(talk|deck):[A-Za-z0-9_-]+:[0-9]+|deck-notif:[A-Za-z0-9_-]+)$ ]] || { echo "bad id $id" >&2; exit 1; }
+      [[ "$id" =~ ^[0-9a-f]{15,16}$ ]] && gids+=("$id")
+    done
+    # Gmail ids are stamped into the mail index first; a refusal there ticks nothing. An id with no row yet (the index updates every
+    # ten minutes) gets one update, then one more try; one still missing is a warning, never a reason to leave the tick undone.
+    if ((${#gids[@]})); then
+      MAILIDX=${MUSE_MAIL_INDEX_PY:-$HOME/repos/hub/scripts/mail_index.py}
+      [[ -f "$MAILIDX" ]] || { echo "client-seen: $MAILIDX is missing, so the mail index cannot be stamped" >&2; exit 1; }
+      rc=0; python3 -I "$MAILIDX" handled "${gids[@]}" "${proof[@]}" >/dev/null || rc=$?
+      if ((rc == 1)); then
+        timeout 200 python3 -I "$MAILIDX" update >/dev/null 2>&1 || true
+        rc=0; python3 -I "$MAILIDX" handled "${gids[@]}" "${proof[@]}" >/dev/null || rc=$?
+      fi
+      ((rc == 0)) || { ((rc == 1)) && echo "client-seen: some ids have no mail-index row yet (ticked anyway)" >&2 || exit 1; }
+    fi
     lock
     touch "$STATE/client-mail-seen.txt"
     for id in $ids; do
-      [[ "$id" =~ ^([0-9a-f]{15,16}|(talk|deck):[A-Za-z0-9_-]+:[0-9]+|deck-notif:[A-Za-z0-9_-]+)$ ]] || { echo "bad id $id" >&2; exit 1; }
       grep -qxF "$id" "$STATE/client-mail-seen.txt" || echo "$id" >>"$STATE/client-mail-seen.txt"
     done
     # tick open client lines whose IDs are all absorbed now

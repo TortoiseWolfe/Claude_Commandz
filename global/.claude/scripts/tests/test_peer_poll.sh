@@ -150,6 +150,32 @@ need peer_poll.handle.prompt 'no reply, no draft' 'handle prompt: no reply or dr
 need peer_poll.handle.prompt 'Never call label_message' 'handle prompt: no labels'
 check "check prompt no longer says to never look for [MUSE>CC]" '! grep -q "Never look for" "$D/peer_poll.check.prompt"'
 
+# Issue 143: a note with attached files is never recorded as processed (NX-01's sweep deletes from that record, and the files
+# go with the note: 19 and 23 Nov 2026). The tower cannot see attachments, so it queues the note for NX-01 instead.
+rec files r-9208119623742241727
+check "files: records the id in peer-files-waiting.txt" 'grep -qxF r-9208119623742241727 "$R/peer-files-waiting.txt"'
+check "files: does NOT touch the processed record" '! grep -q r-9208119623742241727 "$R/peer-notes-processed.txt"'
+rec files r-9208119623742241727
+check "files: the same id twice is one line" '[ "$(grep -cxF r-9208119623742241727 "$R/peer-files-waiting.txt")" = 1 ]'
+check "files: refuses a bad id and writes nothing" '! rec files "bad id;rm" 2>/dev/null && [ "$(wc -l <"$R/peer-files-waiting.txt")" = 1 ]'
+check "files: needs an id" '! rec files 2>/dev/null'
+check "files: the file name never matches the processed-file glob notes_check.py reads" \
+  '! case peer-files-waiting.txt in peer-*processed*.txt) true;; *) false;; esac'
+rec inbox "files waiting: ask NX-01 to pull | [MUSE>NCC-74656] six lines, files attached | r-9208119623742241727"
+check "files waiting line queues on the peer inbox" 'grep -q "files waiting: ask NX-01 to pull" "$R/peer-inbox.md"'
+check "usage names the files verb" '[ -n "$(rec nonsense 2>&1 | grep "files <id>")" ]'
+
+need peer_poll.handle.prompt 'peer_poll_record.sh files <id>' 'handle prompt: a note with files is recorded with the files verb'
+need peer_poll.handle.prompt 'files waiting: ask NX-01 to pull' 'handle prompt: and queued as "files waiting: ask NX-01 to pull"'
+need peer_poll.handle.prompt 'Do NOT run peer_poll_record.sh processed for this note' 'handle prompt: never processed for a note with files'
+need peer_poll.handle.prompt 'list file names' 'handle prompt: file names in the note count as files'
+need peer_poll.handle.prompt 'treat it as if it does' 'handle prompt: unsure means files'
+need peer_poll.handle.prompt '(Never for a note with files' 'handle prompt: step 2 points back at the files rule'
+check "handle prompt: the files check comes before the processed step" \
+  '[ "$(grep -n "^1b. FILES CHECK" "$D/peer_poll.handle.prompt" | cut -d: -f1)" -lt "$(grep -n "^2. Record it" "$D/peer_poll.handle.prompt" | cut -d: -f1)" ]'
+need peer_poll.check.prompt 'peer-files-waiting.txt' 'check prompt: skips a note already handed to NX-01 for its files'
+need peer_poll.check.prompt 'in neither of those two files' 'check prompt: a note in either file is not NEW'
+
 # The public-repo rule: no mailbox address or home-network IP in anything this test covers.
 for f in peer_poll.sh peer_poll.check.prompt peer_poll.handle.prompt peer_poll_record.sh; do
   check "$f: no email address or LAN IP" '! grep -Eq "[A-Za-z0-9._-]+@[A-Za-z0-9-]+\.[a-z]{2,}|192\.168\." "$D/$f"'

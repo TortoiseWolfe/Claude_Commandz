@@ -36,8 +36,10 @@ repo copy, or a live wrapper with no live guard beside it refuses (exit 2) and c
 The guard is only compared, never printed and never installed here (hooks are still copied by a person).
 
 Options: --repo DIR (default ~/repos/Claude_Commandz), --home DIR (default ~/.claude), --ref REF (default origin/main),
---no-fetch, --dry-run, --yes, --list-same. Exit codes: 0 done (or nothing to do), 1 done but some file drifted, 2 could not run
-(nothing was changed), 3 not confirmed (nothing was changed).
+--no-fetch, --dry-run, --yes, --list-same, --strict. Exit codes: 0 done (or nothing to do), drift alone included (the last line says
+"drift N" and the summary names the files; issue 148: a `set -e` install chain must reach its next step), 1 done but a file was held
+back (a script that needs the wall's folder), or with --strict also when a file drifted, 2 could not run (nothing was changed),
+3 not confirmed (nothing was changed).
 """
 import argparse
 import hashlib
@@ -386,6 +388,7 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--list-same", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="exit 1 when a file drifted (the default exits 0 for drift alone; issue 148)")
     a = ap.parse_args(argv)
     repo, home = a.repo, a.home
 
@@ -411,7 +414,10 @@ def main(argv=None):
     if plan["held"]:
         print_wall_help(sha)
     todo = plan["new"] + plan["changed"]
-    drift = len(plan["drift"]) + len(plan["held"])  # both leave something uninstalled: exit 1
+    # Issue 148: a drifted file is a local edit the installer was told to leave alone, so a run that only left drift behind is a good run
+    # (exit 0, so a `set -e` chain reaches its next step; the last line still says "drift N"). A held file is something the run was meant
+    # to install and could not until the wall is installed, so it still exits 1. --strict gives drift the old exit 1 as well.
+    drift = len(plan["held"]) + (len(plan["drift"]) if a.strict else 0)
     tail = (f"new {len(plan['new'])} changed {len(plan['changed'])} same {len(plan['same'])} "
             f"drift {len(plan['drift'])} held {len(plan['held'])}")
 

@@ -1284,5 +1284,382 @@ class Issue130Tests(Fixture):
         self.refused("cat > %s/no_ai_wall.py <<'EOF'\n%s\nEOF" % (wall, body))  # the same text, written into the wall itself, is still refused
 
 
+class Issue146Tests(Fixture):
+    """Issue 146: a lane's read-back check was refused as "a search that would read the no-AI list". The cause: the last check read the whole
+    text as ONE word list, so `-R` (gh's --repo) in `gh pr view -R owner/name` counted as `grep -R` (recursive) from a `grep` earlier in the
+    text, and the quoted pattern given to that grep named a folder above the list file. Each command is now read on its own. The list file sits
+    in its own folder (tmp/cfg) so only the list-file check can refuse here, as on a real machine, where the list is in a folder of its own."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(self.p("cfg"))
+        self.pfile = self.p("cfg/paths.txt")
+        os.environ["NO_AI_PATHS_FILE"] = self.pfile
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        os.makedirs(self.lane)
+        os.makedirs(w.wall_dir(), exist_ok=True)
+
+    def test_the_exact_command_that_was_refused_is_allowed(self):
+        # the refused call, with the names made up: the pattern's start (a folder above the list file) is the tmp folder, as /home was
+        cmd = ("cd %s && head -1 report.md | cut -c1-80; sed -n '/^## Proof/,/^$/p' report.md | grep -oE \"%s/[^ ,;)]+\" | sort -u | "
+               "while read p; do [ -e \"$p\" ] && echo \"exists $p\" || echo \"MISSING $p\"; done; "
+               "gh api \"repos/owner/name/contents/hub/a.txt?ref=main\" --jq '.content|@base64d' | grep -c r-92081; "
+               "gh pr view 144 -R owner/name --json state,mergeCommit --jq '.state+\" \"+.mergeCommit.oid[:7]'") % (self.lane, self.tmp)
+        self.allowed(cmd, self.lane)
+        self.allowed(cmd, self.tmp)
+
+    def test_a_grep_without_r_and_a_gh_repo_flag_in_the_same_text_is_allowed(self):
+        for cmd in ("grep -oE \"%s/[^ ,;)]+\" report.md; gh pr view 144 -R owner/name" % self.tmp,
+                    "grep -c x report.md && gh pr list --repo owner/name -R owner/name",
+                    "grep -n x report.md | head -3\ngh pr checks 144 -R owner/name",
+                    "gh pr view 144 -R owner/name && grep -c x report.md",
+                    "echo %s/ ; grep x report.md ; gh issue view 5 -R owner/name" % self.tmp):
+            self.allowed(cmd, self.lane)
+
+    # ---- the wall still holds: a recursive read of the list's folder, or one above it, is refused however the command is built ----
+
+    def test_a_recursive_read_of_the_list_folder_is_still_refused(self):
+        cfg, t = self.p("cfg"), self.tmp
+        for cmd in ("grep -r secret %s" % cfg, "grep -rn x %s" % t, "grep -R x %s" % cfg, "grep -ri x %s" % cfg, "grep --recursive x %s" % cfg,
+                    "rg secret %s" % cfg, "tar cf - %s" % cfg, "cp -r %s /tmp/x" % cfg, "find %s -type f -exec cat {} +" % cfg, "git grep x %s" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_in_any_command_of_a_longer_text_is_still_refused(self):
+        cfg = self.p("cfg")
+        for cmd in ("echo hi; grep -r x %s" % cfg, "grep -c x report.md; grep -r x %s" % cfg, "grep -c x report.md && grep -R x %s" % cfg,
+                    "gh pr view 144 -R owner/name; grep -r x %s" % cfg, "grep -oE y report.md | sort\ngrep -rn x %s" % cfg,
+                    "gh pr view 144 -R owner/name | grep -r x %s" % cfg, "echo %s | xargs grep -r x" % cfg, "ls %s | xargs grep -rl x" % cfg,
+                    "grep \\\n  -r x %s" % cfg, "(grep -r x %s)" % cfg, "x=$(grep -r x %s)" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_inside_a_quoted_script_is_still_refused(self):
+        cfg = self.p("cfg")
+        for cmd in ("bash -c 'grep -r x %s'" % cfg, "sh -c \"cd /tmp; grep -R x %s\"" % cfg, "gh pr view 144 -R owner/name; bash -c 'grep -r x %s'" % cfg,
+                    "docker run --rm img sh -c 'grep -r x %s'" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_a_recursive_grep_in_a_text_that_cannot_be_read_is_still_refused(self):
+        cfg = self.p("cfg")
+        self.refused("echo 'unclosed; grep -r x %s" % cfg, self.lane)  # the wide reading, as before
+
+    def test_a_recursive_flag_that_a_substitution_supplies_is_still_refused(self):
+        # `$(echo -r)`, a backtick and `<(...)` end a command in the reader, so the flag lands in another group than its grep; a text that
+        # holds one is also read as a whole, so the flag still follows its program
+        cfg = self.p("cfg")
+        for cmd in ("grep $(echo -r) x %s" % cfg, "grep `echo -r` x %s" % cfg, "grep $(echo -r) x %s; gh pr view 1 -R owner/name" % cfg,
+                    "grep -c $(echo y) report.md; grep $(echo -r) x %s" % cfg, "rg $(echo --hidden) x %s" % cfg,
+                    "grep $(printf %%s -r) x %s" % cfg, "cp $(echo -r) %s /tmp/x" % cfg):
+            self.refused(cmd, self.lane)
+
+    def test_the_refusal_is_the_list_file_one(self):
+        r = self.run_bash("grep -r secret %s" % self.p("cfg"), self.lane)
+        self.assertIsNotNone(r)
+        self.assertIn("no-AI list is private config", r[2])
+
+
+class Issue154Tests(Fixture):
+    """Issue 154, two gaps in how the reader reads a command. Gap 1: a search that gets its recursive flag through xargs (`echo -r | xargs
+    grep x DIR`) was allowed over a folder above a listed one, while the same search typed directly is refused. Gap 2: `$'...'` is a string
+    where a backslash can escape a quote, and the reader ended it at the escaped quote. The real searches stay refused; the controls with no
+    flag, and the strings that are only text, stay allowed."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.above = self.p("wall")  # a folder above the listed ones: only the recursion decides
+
+    # ---- gap 1: the flag arrives on the input of xargs ----
+
+    def test_a_search_given_its_flag_by_xargs_is_refused_like_the_same_search_typed(self):
+        a = self.above
+        self.refused("grep -rn x %s" % a, self.tmp)  # the typed search, the reference
+        for cmd in ("echo -r | xargs grep x %s" % a, "echo -R | xargs grep x %s" % a, "printf '%%s\\n' -r | xargs grep x %s" % a,
+                    "printf -- '-r\\n' | xargs grep x %s" % a, "printf 'a\\n-r\\n' | xargs grep x %s" % a, "echo '-r' | xargs grep -n x %s" % a,
+                    "echo -r | xargs -I{} grep {} x %s" % a, "echo -r | xargs egrep x %s" % a, "echo -r | xargs fgrep x %s" % a,
+                    "cat flags.txt | xargs grep x %s" % a, "ls | xargs grep x %s" % a, "xargs grep x %s < flags.txt" % a,
+                    "xargs grep x %s <<< '-r'" % a, "xargs grep x %s <<< \"$FLAG\"" % a, "echo $FLAG | xargs grep x %s" % a,
+                    "echo -r | xargs ls %s" % a, "echo -R | xargs ls %s" % a, "echo -r | xargs cp %s /tmp/out" % a, "echo -r | xargs cp -a %s /tmp/out" % a):
+            self.refused(cmd, self.tmp)
+        self.refused("echo -r | xargs grep x", self.tmp)  # no root named: it walks the session folder, which holds a listed one
+        self.refused("ls | xargs grep x", self.tmp)
+        self.refused("xargs grep -r x", self.tmp)  # the flag is typed here, but xargs still runs it with no root
+        # a delimiter cuts the input where the caller says, so a dash inside a plain word can become a flag (review of the first version)
+        for cmd in ("echo a-r | xargs -d a grep x %s" % a, "echo a-r | xargs --delimiter=a grep x %s" % a, "echo foo-bar | xargs grep x %s" % a,
+                    "echo hi | xargs -a flags.txt grep x %s" % a, "echo hi | xargs --arg-file=flags.txt grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        # review of the second version (senior review of pull request 155), blocking item 1: -I and -i put the input inside a word of the command,
+        # so a plain letter becomes a flag (`echo r | xargs -I@ grep -@ x DIR` runs `grep -r x DIR`)
+        for cmd in ("echo r | xargs -I@ grep -@ x %s" % a, "echo r | xargs -i grep -{} x %s" % a, "echo r | xargs -I {} grep -{} x %s" % a,
+                    "echo r | xargs --replace=@ grep -@ x %s" % a, "echo r | xargs -tI@ grep -@ x %s" % a, "echo R | xargs -I@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
+        # blocking item 2: GNU xargs takes any unique prefix of a long option, so a shortened one reads the flag from a file or cuts the input
+        for cmd in ("echo hi | xargs --a=flags.txt grep x %s" % a, "echo hi | xargs --arg=flags.txt grep x %s" % a,
+                    "echo hi | xargs --arg-f=flags.txt grep x %s" % a, "echo a-r | xargs --d=a grep x %s" % a, "echo a-r | xargs --deli=a grep x %s" % a,
+                    "echo r | xargs --repl=@ grep -@ x %s" % a, "echo r | xargs --rep=@ grep -@ x %s" % a):
+            self.refused(cmd, self.tmp)
+        # the same rule for the other programs xargs can run: with no root named they walk the session folder, as typed
+        for cmd in ("echo -R | xargs ls", "echo hi | xargs find -type f", "echo hi | xargs du", "echo hi | xargs tree", "ls | xargs rg x"):
+            self.refused(cmd, self.tmp)
+
+    # ---- round 2 of the blind review of pull request 155: three more ways round the reading ----
+
+    def test_a_process_id_before_a_quote_is_not_an_ansi_c_string(self):
+        """`$$` is the process number, so `$$'` is that number then a plain quote. Read as `$'..'`, the escaped quote hid the rest of the line and
+        the `#` hid the last quote, so the reader saw one quoted word while the shell ran the search."""
+        a = self.above
+        for cmd in ("echo $$'\\' ; grep -rn x %s #'" % a, "echo $$'\\' ; find %s -name x #'" % a, "echo $$'\\' ; rg x %s #'" % a,
+                    "echo $$'\\' && grep -rn x %s #'" % a, "x=$$'\\' ; grep -rn x %s #'" % a, "echo $$'\\'; ls -R %s #'" % a):
+            self.refused(cmd, self.tmp)
+        # a real $'..' string and a plain process number stay what they are
+        self.allowed("echo $$ ; grep x %s" % a, self.tmp)
+        self.allowed("echo $'it\\'s' ; grep x %s" % a, self.tmp)
+        self.refused("echo $'it\\'s' ; grep -r x %s" % a, self.tmp)
+
+    def test_an_xargs_that_is_quoted_or_escaped_is_still_xargs(self):
+        a = self.above
+        for cmd in ("echo -r | \\xargs grep x %s" % a, "echo -r | x'a'rgs grep x %s" % a, "echo -r | 'xargs' grep x %s" % a,
+                    'echo -r | "xargs" grep x %s' % a, "echo -r | xar\\gs grep x %s" % a, "echo -r | nice \\xargs grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
+    def test_a_substitution_that_splits_xargs_from_its_program_reads_wide(self):
+        a = self.above
+        for cmd in ("echo -r | xargs $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a, "echo -r | xargs $(echo) grep x %s" % a,
+                    "echo -r | xargs -n1 $(true) grep x %s" % a, "echo -r | xargs `true` grep x %s" % a,
+                    "echo -r | xargs ${EMPTY} grep x %s" % a, "echo -r | xargs $(true) ls %s" % a):
+            self.refused(cmd, self.tmp)
+        # a process substitution splits them the same way: the reader ends a command at a plain parenthesis (round 3 of the review)
+        for cmd in ("echo -r | xargs -E <(true) grep x %s" % a, "xargs -a <(echo -r) grep x %s" % a, "echo -r | xargs -E >(true) grep x %s" % a,
+                    "echo -r | xargs -n1 <(true) find %s -name x" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("echo hi | xargs grep x %s" % a, self.tmp)
+
+    def test_a_search_with_no_flag_arriving_over_xargs_is_still_allowed(self):
+        a = self.above
+        for cmd in ("echo hi | xargs grep x %s" % a, "echo hi there | xargs grep -n x %s" % a, "printf '%%s\\n' a b | xargs grep x %s" % a,
+                    "echo hi | xargs ls %s" % a, "echo hi | xargs cp %s /tmp/out" % a,
+                    "echo hi | xargs --no-run-if-empty grep x %s" % a, "echo hi | xargs --max-args=1 grep x %s" % a, "echo hi | xargs --null grep x %s" % a):
+            self.allowed(cmd, self.tmp)
+        # a flag-free input read in a folder that holds no listed folder is ordinary
+        self.allowed("ls | xargs grep x", self.p("work"))
+        self.allowed("git ls-files | xargs grep -n x", self.p("work"))
+        self.allowed("echo -r | xargs grep x", self.p("work"))
+        # a search that names its roots outside every listed folder
+        self.allowed("echo -r | xargs grep x %s" % self.p("work"), self.tmp)
+        self.allowed("echo -r | xargs grep x %s" % self.p("wall/open"), self.tmp)
+
+    def test_a_search_that_names_a_listed_folder_through_xargs_is_still_refused(self):
+        for cmd in ("echo hi | xargs grep -r x %s" % self.p("wall/clientA"), "echo -r | xargs grep x %s" % self.p("wall/clientA/docs"),
+                    "ls | xargs grep -rl x %s" % self.p("wall/clientB")):
+            self.refused(cmd, self.tmp)
+
+    # ---- gap 2: $'...' and $"..." ----
+
+    def test_a_dollar_single_quoted_string_with_an_escaped_quote_is_text(self):
+        for cmd in ("gh issue create --title $'a grep -rn x \\' b' --body-file f.md", "gh issue create --title $'it\\'s grep -r x' --body-file f.md",
+                    "gh issue create --title $'a \\\\' --body-file f.md", "gh issue create --title $'grep -rn x' --body-file f.md",
+                    "gh issue create --title $'a\\nb' --body-file f.md", "gh issue create --title $\"a grep -rn x\" --body-file f.md",
+                    "git commit -m $'fix grep -r x\\' now'", "echo $'a \\' b; grep -r x'"):
+            self.allowed(cmd, self.tmp)
+
+    def test_a_search_after_a_dollar_single_quoted_string_is_still_judged_on_its_own_words(self):
+        a = self.above
+        for cmd in ("echo $'it\\'s'; grep -rn x %s" % a, "gh issue create --title $'a \\' b' --body-file f.md; grep -rn x %s" % a,
+                    "echo $'a\\\\'; grep -rn x %s" % a, "echo $\"a\"; grep -rn x %s" % a, "echo $'a' | grep -rn x %s" % a,
+                    "grep -rn $'x\\'y' %s" % a, "grep -rn $\"x\" %s" % a):
+            self.refused(cmd, self.tmp)
+
+    def test_the_dollar_single_quote_words_are_the_shells_words(self):
+        words = lambda text: w._shell_commands(text)  # noqa: E731
+        self.assertEqual(words("echo $'it\\'s' x"), [[("echo", False), ("it's", True), ("x", False)]])
+        self.assertEqual(words("echo $'a\\\\' x"), [[("echo", False), ("a\\", True), ("x", False)]])
+        self.assertEqual(words("echo $'a\\nb'"), [[("echo", False), ("a\nb", True)]])
+        self.assertEqual(words("echo $\"a b\" x"), [[("echo", False), ("a b", True), ("x", False)]])
+        self.assertIsNone(words("echo $'unclosed"))
+        self.assertIsNone(words("echo $'a\\'"))  # the escaped quote leaves the string open
+        self.assertEqual(words("echo $'a\\0b' x"), [[("echo", False), ("a", True), ("x", False)]])  # the shell cuts the string at a NUL
+        self.assertEqual(words("echo $'\\x41\\101\\u0042'"), [[("echo", False), ("AAB", True)]])
+        self.assertIsNone(words("echo $'\\xc3\\xa9'"))  # bytes past ASCII: unsure, so the wide reading
+        self.assertIsNone(words("echo $'\\u00e9'"))
+
+    def test_a_folder_changed_to_through_a_string_cut_at_a_nul_is_the_folder_the_shell_uses(self):
+        # the shell's cd goes to the text before the NUL, which here is the folder above the listed ones
+        self.refused("cd $'%s\\0/work'; grep -rn x" % self.above, self.p("work"))
+        self.allowed("cd $'%s\\0/wall'; grep -n x f.txt" % self.p("work"), self.tmp)
+
+    def test_the_other_quote_scans_agree_on_the_dollar_single_quote_string(self):
+        text = "echo $'it\\'s (x)'; echo b"
+        self.assertFalse(w._has_unquoted_paren(text))
+        self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $'it\\'s (x)'", " echo b"])
+        self.assertEqual(w._subst("echo $'$X \\' $X' $X", {"X": "v"}), "echo $'$X \\' $X' v")
+        self.assertTrue(w._has_unquoted_paren("echo $'a\\'; (b)"))  # the quote is still open at the parenthesis: the stricter answer
+
+    def test_the_other_quote_scans_agree_on_a_process_number_before_a_quote(self):
+        # `$$'` is the process number then a plain quote, so the quote opens a string and the parenthesis and the `$X` inside it are text
+        text = "echo $$'(x) $X' ; echo b"
+        self.assertFalse(w._has_unquoted_paren(text))
+        self.assertEqual([s for s, sep in w._split_statements(text)], ["echo $$'(x) $X' ", " echo b"])
+        self.assertEqual(w._subst("echo $$'$X' $X", {"X": "v"}), "echo $$'$X' v")
+        # read as `$'..'` the escaped quote would keep the string open past the parenthesis: the scanners must not do that
+        text = "echo $$'\\' ; (b) #'"
+        self.assertTrue(w._has_unquoted_paren(text))
+        self.assertEqual(w._subst("echo $$'\\' $X #'", {"X": "v"}), "echo $$'\\' v #'")  # the `$X` is outside every quote, so it is replaced
+
+
+class WideReadingTests(Fixture):
+    """A lane's read-back of a saved CI log was refused as "a search that would walk into a folder on the no-AI list", after the 146 fix was
+    installed. A text that writes a file and also runs a program the wall cannot vouch for (sed, or the `run` in `gh run view`) is read the
+    old, wide way, and the wide reading took every word of the whole text as one command line: `grep ...; gh pr checks 1 -R owner/name` made
+    gh's -R (its --repo) grep's -R, so the grep "walked" the session folder, which sits above a listed folder. Each command is now read on its
+    own there too. The session starts in self.tmp, a folder that holds the listed folders, as the real one starts above the client areas."""
+
+    run_bash, allowed, refused = Issue130Tests.run_bash, Issue130Tests.allowed, Issue130Tests.refused
+
+    def setUp(self):
+        super().setUp()
+        self.paths(self.p("wall/clientA"), self.p("wall/clientB"))
+        self.lane = self.p("home/.claude/state/lanes/2026-01-01-demo")
+        os.makedirs(self.lane)
+        os.makedirs(w.wall_dir(), exist_ok=True)
+
+    def test_the_exact_command_that_was_refused_is_allowed(self):
+        cmd = ("gh run view 123 -R owner/name --log > ci.log; grep -n -E 'summary|skipped' ci.log | sed 's/^.*Z //'; "
+               "gh pr checks 149 -R owner/name --jq '.[].name'")
+        self.allowed(cmd, self.tmp)
+        self.allowed(cmd, self.lane)
+        self.allowed("cd %s && %s" % (self.lane, cmd), self.tmp)
+        self.allowed("gh run view 123 -R owner/name --log > %s/ci.log; grep -n skipped %s/ci.log | sed 's/a/b/'; gh pr checks 149 -R owner/name" % (self.lane, self.lane), self.tmp)
+
+    def test_each_way_into_the_wide_reading_with_a_later_gh_flag_is_allowed(self):
+        for cmd in ("gh pr checks 149 -R o/n > ci.log; grep -c x ci.log; sed -n 1p ci.log; gh pr view 149 -R o/n",  # a write and sed
+                    "gh run view 1 -R o/n --log > ci.log; grep -c x ci.log; gh pr view 149 -R o/n",  # a write and `gh run`
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -c x n.txt; gh pr view 149 -R o/n"):
+            self.allowed(cmd, self.tmp)
+
+    # ---- the wall still holds: the wide reading still finds a real recursive search ----
+
+    def test_a_recursive_search_of_a_listed_folder_in_such_a_text_is_still_refused(self):
+        a = self.p("wall/clientA")
+        for cmd in ("gh run view 1 -R o/n --log > ci.log; grep -rn x %s | sed -n 1p; gh pr view 1 -R o/n" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -R secret %s; gh pr checks 1 -R o/n" % a,
+                    "gh pr checks 1 -R o/n > ci.log; sed -n 1p ci.log; rg secret %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; grep --recursive x %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; git grep x %s" % a,
+                    "echo hi > n.txt; sed -n 1p n.txt; find %s -type f" % a):
+            self.refused(cmd, self.tmp)
+
+    def test_a_recursive_search_with_no_folder_named_still_walks_the_session_folder(self):
+        for cmd in ("echo hi > n.txt; sed -n 1p n.txt; grep -rn secret", "gh run view 1 -R o/n --log > ci.log; sed -n 1p ci.log; grep -rn x . ; gh pr view 1 -R o/n",
+                    "echo hi > n.txt; sed -n 1p n.txt; grep -rn x"):
+            self.refused(cmd, self.tmp)
+
+    def test_a_here_string_that_hands_a_search_to_a_shell_or_a_flag_to_a_command_is_still_refused(self):
+        # the automated review of the first version: a here-string's text is the receiver's input or code, and the per-command reading dropped
+        # it, so `bash <<< "grep -r x DIR"` over a folder ABOVE a listed one was allowed. A folder above the list is the case where only the
+        # recursion decides (naming a listed folder itself is refused either way).
+        above = self.p("wall")
+        write = "echo hi > n.txt; sed -n 1p n.txt; "
+        for pre in ("", write):
+            for cmd in ('bash <<< "grep -r x %s"' % above, "sh <<< 'grep -R x %s'" % above,
+                        'bash <<< "rg x %s"' % above, 'sh <<< "find %s -type f -exec cat {} +"' % above, 'zsh <<< "cd /tmp; grep -rn x %s"' % above):
+                self.refused(pre + cmd, self.tmp)
+        # a flag handed to a search by a here-string: refused in the wide reading, which the first version of this change had loosened. (With no
+        # write in the text the same shape was already allowed before this change; that older gap is not covered here.)
+        self.refused(write + 'xargs grep x %s <<< "-r"' % above, self.tmp)
+        # the same flag in a heredoc body (the second review of this change)
+        self.refused(write + "xargs grep x %s <<EOF\n-r\nEOF" % above, self.tmp)
+        self.refused(write + "xargs grep x %s <<'EOF'\n-r\nEOF" % above, self.tmp)
+        self.refused(write + "xargs grep x %s <<-EOF\n\t-r\n\tEOF" % above, self.tmp)
+
+    def test_a_text_that_cannot_be_read_is_still_read_as_one_group(self):
+        a = self.p("wall/clientA")
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; echo 'unclosed; grep -r x %s" % a, self.tmp)
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; grep $(echo -r) x %s; gh pr view 1 -R o/n" % a, self.tmp)
+        self.refused("echo hi > n.txt; sed -n 1p n.txt; bash -c 'grep -r x %s'" % a, self.tmp)
+
+    # ---- issue 150: a parenthesis INSIDE quotes is text, not a subshell ----
+
+    def test_a_parenthesis_inside_quotes_does_not_force_the_whole_text_reading(self):
+        # the refusal: `cd LANE && sed -i "s/(old)/(new)/" f && gated_post.sh ... -- gh issue create -R o/n --title "a grep before a later gh -R" ...`
+        # was refused from a folder above a listed one, because the parenthesis in sed's quoted expression made the wall read the whole text as one
+        # command line, so the title's grep took gh's -R, and the `)/(` of the expression became lone slashes that sit above the list.
+        title = "a grep before a later gh -R is read as grep -R"
+        for quoted in ('"s/(old words)/(new words)/"', "'s/(old words)/(new words)/'", r"s/\(old\)/\(new\)/", '"s/(gh'"'"'s x)/(gh'"'"'s y)/"'):
+            cmd = "cd %s && sed -i %s body.md && gated_post.sh team body.md -- gh issue create -R o/n --title \"%s\" --body-file body.md" % (self.lane, quoted, title)
+            self.allowed(cmd, self.tmp)
+            self.allowed(cmd, self.lane)
+
+    def test_a_search_after_a_quoted_parenthesis_is_still_judged_on_its_own_words(self):
+        above, a = self.p("wall"), self.p("wall/clientA")
+        sed = 'sed -i "s/(old)/(new)/" body.md'
+        for cmd in ("%s && grep -rn x %s" % (sed, above), "%s && grep -R x %s | head -3; gh pr view 1 -R o/n" % (sed, a),
+                    "%s && rg x %s" % (sed, above), "%s && grep -rn x" % sed, "%s; find %s -type f -exec cat {} +" % (sed, above),
+                    "%s && git grep x %s" % (sed, a)):
+            self.refused(cmd, self.tmp)
+
+    def test_a_title_or_message_handed_to_gh_or_git_is_text(self):
+        # the title of the issue about this very flaw says "grep before a later gh -R"; a title is text, so its words are not a search
+        for cmd in ('gh issue create -R o/n --title "a grep before a later gh -R" --body-file b.md', 'gh pr create --title="a grep -R x" --body "grep -rn x"',
+                    'git commit -m "grep -r x . then gh -R"', 'gh issue comment 1 -R o/n -b "run grep -r x here"',
+                    'gated_post.sh team b.md -- gh issue create -R o/n --title "a grep before gh -R" --body-file b.md'):
+            for cwd in (self.tmp, self.lane):
+                self.allowed("echo hi > n.txt; sed -n 1p n.txt; " + cmd, cwd)
+                self.allowed(cmd, cwd)
+
+    def test_the_same_words_handed_to_a_program_that_runs_them_are_still_a_search(self):
+        above = self.p("wall")
+        for cmd in ('bash -c "grep -r x %s"' % above, 'ssh host -t "grep -r x %s"' % above, "xargs -t sh -c 'grep -r x %s'" % above,
+                    'gh issue create --title t; grep -rn x %s' % above,
+                    'git commit -m msg; bash -c "grep -r x %s"' % above, "env -S 'grep -r x %s'" % above, "watch -t 'grep -r x %s'" % above):
+            self.refused(cmd, self.tmp)
+
+    def test_a_gh_or_git_elsewhere_in_the_text_does_not_hide_another_program_s_flag(self):
+        # the automated review of this change: the title exemption must belong to the command whose program is gh or git, not to any command
+        # of the text that happens to hold one of those words, and not to a wrapper's or another program's -t, -b or -m
+        above = self.p("wall")
+        for cmd in ('gh --version; ssh host -t "grep -r x %s"' % above, 'git status && xargs -t sh -c "grep -r x %s"' % above,
+                    'gh pr view 1 -R o/n; env -S -m "grep -r x %s"' % above,
+                    'echo gh; watch -b "grep -r x %s"' % above, 'git log | xargs -t sh -c "grep -r x %s"' % above,
+                    'gated_post.sh team b.md -- ssh host -t "grep -r x %s"' % above, 'gated_post.sh team b.md -- gh pr view 1; ssh host -t "grep -r x %s"' % above):
+            self.refused(cmd, self.tmp)
+            self.refused("echo hi > n.txt; sed -n 1p n.txt; " + cmd, self.tmp)
+
+    def test_eval_and_a_run_string_still_make_a_search_in_the_per_command_reading(self):
+        above = self.p("wall")
+        write = "echo hi > n.txt; sed -n 1p n.txt; "
+        for cmd in ("eval grep -r x %s" % above, 'eval "grep -r x %s"' % above, "eval 'gr'ep -r x %s" % above, 'sh -c "grep -r x %s"' % above,
+                    "env -S 'grep -r x %s'" % above, "ssh host 'grep -r x %s'" % above, "echo 'grep -r x %s' | sh" % above,
+                    "echo 'grep -r x %s' | xargs -I{} sh -c {}" % above):
+            self.refused(cmd, self.tmp)
+            self.refused(write + cmd, self.tmp)
+
+    def test_a_heredoc_fed_to_a_container_stays_read_as_a_command_line(self):
+        # not changed on purpose (issue 150, refusal 3): a container can mount a folder above a listed one and its shell can search the mount, so
+        # the body of `docker run -i ... sh <<EOF` is not treated as data the way a host interpreter's body is
+        above = self.p("wall")
+        self.refused("docker run --rm -i -v %s:/r alpine sh <<'EOF'\ngrep -r x /r\nEOF" % above, self.lane)
+        self.refused("timeout 60 docker run --rm -i -v %s:/r python:3.12 python - <<'EOF'\nimport os\nos.system('grep -r x /r')\nEOF" % above, self.lane)
+
+    def test_a_parenthesis_outside_quotes_is_still_read_as_the_whole_text(self):
+        # a subshell or a substitution ends a command where the reader cannot follow it, so the old, wide reading stays for these
+        above = self.p("wall")
+        sed = 'sed -i "s/(old)/(new)/" body.md'
+        for cmd in ("%s && grep $(echo -r) x %s; gh pr view 1 -R o/n" % (sed, above), "%s && (grep -r x %s)" % (sed, above),
+                    "%s && echo $(grep -r x %s)" % (sed, above), "%s && grep `echo -r` x %s" % (sed, above),
+                    "%s && x=(1 2); grep -r x %s" % (sed, above), "%s && bash -c 'grep $(echo -r) x %s'" % (sed, above)):
+            self.refused(cmd, self.tmp)
+
+    def test_the_quote_scan_agrees_with_the_reader(self):
+        for text, expected in (("sed 's/(a)/b/' f", False), ('sed "s/(a)/b/" f', False), (r"echo \(", False), ("echo '(' \")\"", False),
+                               ("echo (a)", True), ("echo $(a)", True), ("echo `a`", False), ("(echo a)", True), ("echo 'a' (b)", True),
+                               ("echo \"a\" ; (b)", True), ("echo # (a)", True), ("echo \"unclosed (", True)):
+            self.assertEqual(w._has_unquoted_paren(text), expected, text)
+
+
 if __name__ == "__main__":
     unittest.main()
