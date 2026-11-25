@@ -24,7 +24,10 @@ class Fixture(unittest.TestCase):
         for f in ("wall/clientA/docs/secret.txt", "wall/clientB/notes.md", "wall/open/ok.txt", "work/a.txt"):
             with open(os.path.join(self.tmp, f), "w") as fh:
                 fh.write("x")
-        self._env = {k: os.environ.get(k) for k in ("HOME", "NO_AI_PATHS_FILE", "NO_AI_REFUSAL_LOG")}
+        # NO_AI_QUIET is the "already warned once in this shell" switch (issue 78): a lane's shell has it set before the tests start,
+        # so every test runs with it removed and the answer is the same in a lane, a plain terminal and CI.
+        self._env = {k: os.environ.get(k) for k in ("HOME", "NO_AI_PATHS_FILE", "NO_AI_REFUSAL_LOG", "NO_AI_QUIET")}
+        os.environ.pop("NO_AI_QUIET", None)
         os.environ["HOME"] = self.home
         self.pfile = os.path.join(self.tmp, "paths.txt")
         self.log = os.path.join(self.tmp, "refusals.log")
