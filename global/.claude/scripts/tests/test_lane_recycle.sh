@@ -139,7 +139,7 @@ ok() { checks=$((checks + 1)); }
 assert_contains() { case "$1" in *"$2"*) ok ;; *) fail "$3 (missing: $2; got: $1)" ;; esac; }
 assert_not_contains() { case "$1" in *"$2"*) fail "$3 (unexpected: $2)" ;; *) ok ;; esac; }
 assert_eq() { [ "$1" = "$2" ] || fail "$3 (expected $2, got $1)"; ok; }
-assert_exit() { [ "$2" = "$1" ] || fail "$3 (expected exit $1, got $2)"; ok; }
+assert_exit() { [ "$2" = "$1" ] || fail "$3 (expected exit $1, got $2; the last lane.sh output began: $(printf '%s' "${LAST_OUT:-}" | head -c 400 | tr '\n' ' '))"; ok; }   # the output is in the message so a failure that comes and goes shows its cause (issue 96)
 
 lane() {  # lane <args...>: run lane.sh against the fake home and window
   set +e
@@ -468,7 +468,7 @@ assert_contains "$LAST_OUT" 'line 120K' 'the recycle says the new line'
 # the new row's st is now, so an immediate second recycle goes up again, to the ceiling and no further
 reset_fake; echo "$(cut -f8 "$INDEX" | tail -1)" >"$ST/cur"; cp "$PROJ/old-sess.jsonl" "$PROJ/$(cat "$ST/cur").jsonl"
 FAKE_WRITE_HANDOFF=1 lane --recycle rk-fast
-[ "$(rk_last)" = 128 ] || fail "the line stops at 128K (0.84 x 200K - 40K), got: $(rk_last)"; ok
+[ "$(rk_last)" = 128 ] || fail "the line stops at 128K (0.84 x 200K - 40K), got: $(rk_last); the recycle exited $LAST_RC and said: $(printf '%s' "$LAST_OUT" | head -c 400 | tr '\n' ' ')"; ok
 reset_fake; echo "$(cut -f8 "$INDEX" | tail -1)" >"$ST/cur"; cp "$PROJ/old-sess.jsonl" "$PROJ/$(cat "$ST/cur").jsonl"
 FAKE_WRITE_HANDOFF=1 lane --recycle rk-fast
 [ "$(rk_last)" = 128 ] || fail "a line already at the ceiling stays there, got: $(rk_last)"; ok
