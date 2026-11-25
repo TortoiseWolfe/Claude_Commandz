@@ -12,7 +12,7 @@
 # What it does, in order. Nothing touches the network or the working tree: every file comes out of the commit with git archive.
 #   1. checks the commit has the wall's files and that they compile
 #   2. backs up every live file it is about to replace into ~/.claude/state/no-ai-wall-backups/<date>-<commit>/ and writes undo.sh beside it
-#   3. installs the wall's three files (module, bash helper, hook) into ~/.claude/no-ai-wall/, a folder that holds only those
+#   3. installs the wall's four files (module, bash helper, hook, cleanup command) into ~/.claude/no-ai-wall/, a folder that holds only those
 #   4. moves the hook entry in settings.json to the new folder (a text substitution of the path; every other byte stays)
 #   5. takes the three old copies out of ~/.claude/scripts and ~/.claude/hooks
 #   6. ONLY WITH --with-tooling: installs the other global files the repo's usual install step installs (install_global.py: lane.sh and friends), refusing any
@@ -32,7 +32,7 @@ umask 022
 REPO="${WALL_INSTALL_REPO:-${HOME:-/nonexistent}/repos/Claude_Commandz}"
 LIVE="${HOME:-/nonexistent}/.claude"
 WALL="$LIVE/no-ai-wall"
-WALL_FILES=(no_ai_wall.py no_ai_wall.sh no-ai-wall-guard.py)
+WALL_FILES=(no_ai_wall.py no_ai_wall.sh no-ai-wall-guard.py wall_cleanup.py)
 LEGACY=(hooks/no-ai-wall-guard.py scripts/no_ai_wall.py scripts/no_ai_wall.sh)
 STAGE=""
 BK=""
@@ -75,7 +75,7 @@ SRC="$STAGE/global/.claude"
 for f in "${WALL_FILES[@]}" smoke.py; do
   [ -f "$SRC/no-ai-wall/$f" ] || no_change "commit $SHORT has no no-ai-wall/$f"
 done
-for f in no_ai_wall.py no-ai-wall-guard.py smoke.py; do
+for f in no_ai_wall.py no-ai-wall-guard.py wall_cleanup.py smoke.py; do
   python3 -I -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' "$SRC/no-ai-wall/$f" 2>/dev/null || no_change "no-ai-wall/$f does not compile"
 done
 bash -n "$SRC/no-ai-wall/no_ai_wall.sh" 2>/dev/null || no_change "no-ai-wall/no_ai_wall.sh has a syntax error"
@@ -142,7 +142,7 @@ UNDO
 } >"$BK/undo.sh"
 chmod 755 "$BK/undo.sh"
 
-# 3. The wall's own folder: the module, the bash helper and the hook, and nothing else.
+# 3. The wall's own folder: the module, the bash helper, the hook and the cleanup command, and nothing else.
 mkdir -p "$WALL" || fail_after "cannot make $WALL"
 for f in "${WALL_FILES[@]}"; do
   cp -p "$SRC/no-ai-wall/$f" "$WALL/.$f.new" && mv -f "$WALL/.$f.new" "$WALL/$f" || fail_after "cannot install no-ai-wall/$f"

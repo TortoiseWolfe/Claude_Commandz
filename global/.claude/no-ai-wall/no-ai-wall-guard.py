@@ -4,7 +4,7 @@ entry of ~/.config/afa/no-ai-paths.txt: Read, Edit, Write, MultiEdit, NotebookEd
 path-looking word in a Bash command), an MCP or unknown tool by any string in its arguments, and EVERY tool when the session's working
 folder is listed. A Grep, Glob or recursive shell search whose root CONTAINS a listed folder is denied too, and so is a Grep or Glob
 rooted on the list file or a folder above it. Relative paths in any tool's arguments are joined with the session folder first.
-The list, everything in ~/.claude/no-ai-wall (this hook, no_ai_wall.py, no_ai_wall.sh: a folder that holds only the wall's own files)
+The list, everything in ~/.claude/no-ai-wall (this hook, no_ai_wall.py, no_ai_wall.sh, wall_cleanup.py: a folder that holds only the wall's own files)
 and the settings*.json files cannot be written from a session (reading and running them stays open), with the list full or empty.
 Other files in ~/.claude/scripts and ~/.claude/hooks are ordinary tooling and are not guarded. Nothing else is blocked.
 
