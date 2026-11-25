@@ -9,6 +9,10 @@ Why it exists (all three are the connector's rules, not Gmail's):
 NO SEND, EVER. The gmail.modify scope this tool holds could send mail through the API. This tool never does:
 no code path reaches a send endpoint, and tests/test_gmail_api.py fails the suite if a send endpoint
 appears in this file's source. api() also refuses any path containing "send". Drafts are for Jonathan to send.
+Why the scope stays: Google accepts only gmail.modify, gmail.compose or the full mail.google.com scope for creating,
+changing or deleting a draft, and all three can send. No send-free scope can make drafts. The token is protected by
+keeping it away from everything but this tool instead: secret-guard.py rule G refuses any read or copy of
+~/.config/afa/gmail and any command that names a Gmail send address (workspace issue 93).
 
 Stdlib only (urllib, http.server, hashlib): no pip installs on the host.
 

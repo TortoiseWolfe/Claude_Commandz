@@ -5,6 +5,7 @@ stdin: {"tool_name": ..., "tool_input": {...}}
 block: reason on stderr, exit 2.  allow: exit 0.  internal error: allow + log.
 The reason never echoes a matched secret.
 """
+import glob
 import importlib.util
 import json
 import os
@@ -236,6 +237,165 @@ def split_segments(cmd):
         i += 1
     segs.append("".join(cur))
     return segs
+
+
+# Workspace issue 93: the mail tool's token (~/.config/afa/gmail/token.json) holds gmail.modify, a scope Google lets
+# send mail with, and no Gmail scope that can still make drafts is send-free. The tool itself never sends, so the
+# token is kept from everything else. A text check can't stop a command that builds its path or address at run time, so
+# this is a backstop: the folder is an ALLOWLIST (a command that names it passes only as the mail tool, the masked
+# viewer or a plain existence check), and a send address is refused wherever it is written out.
+GMAIL_DIR = re.compile(r"(?<![\w-])afa/gmail(?![\w-])|(?<![\w-])gmail/(?:token|client|calendar-token)[\w.-]*\.json")
+GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|(?:messages|drafts)(?:/[\w-]+)?:send(?![\w-])", re.I)
+GMAIL_PLAIN = {"ls", "stat", "test", "[", "[[", "realpath", "readlink"}  # none of these reads a file's content (wc, du and file can)
+GMAIL_SCRIPTS = ("~/.claude/scripts/redact_view.py", "~/.claude/scripts/gmail_api.py")  # the only scripts that may run against the folder
+GMAIL_QUOTE_WORDS = {"grep", "rg", "git"}  # a quoted mention (a search pattern, a commit message) is not a call
+GMAIL_GIT_QUOTING = {"commit", "tag", "status"}  # git subcommands that take a message and run no pager, diff driver or alias
+GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
+GMAIL_GLOB = re.compile(r"[*?\[{]")
+GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
+GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
+
+
+def gmail_norm(text):
+    """The text as the shell would spell the path: quotes and backslashes gone, ~ and $HOME written out, ./ and x/../ folded."""
+    home = os.path.expanduser("~")
+    t = re.sub(r"[\"'\\]", "", text)
+    t = re.sub(r"\$\{?HOME\}?|(?<![\w])~(?=/|\s|$)", home, t)
+    t = re.sub(r"/{2,}", "/", t)
+    t = re.sub(r"/\./", "/", t)
+    while True:
+        folded = re.sub(r"/[^/\s]+/\.\./", "/", t, count=1)
+        if folded == t:
+            return t
+        t = folded
+
+
+def gmail_words(seg):
+    """The command's words with leading VAR=value assignments dropped; None when the segment can't be split."""
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return None
+    while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
+        words.pop(0)
+    return words
+
+
+def gmail_segment_ok(seg):
+    """A segment that names the token folder is fine only as the mail tool, the masked viewer or a plain check."""
+    if "$(" in seg or "`" in seg or "<" in seg:  # a substitution, or any input redirect, here-document or here-string
+        return False
+    if GMAIL_GLOB.search(seg) and GMAIL_AFA_GLOB.search(gmail_norm(seg)):  # a glob can reach the folder without naming it
+        return False
+    words = gmail_words(seg)
+    if not words:
+        return False
+    first = os.path.basename(words[0])
+    if first in GMAIL_PLAIN:
+        return True
+    if first in {"grep", "rg"}:
+        return bool(GREP_QUIET.search(" ".join(words[1:])))
+    if re.fullmatch(r"python[\d.]*", first):
+        try:
+            lead = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        for w in lead:  # only AFA_GMAIL_DIR may be set in front: PYTHONPATH, PYTHONSTARTUP and the like load other code
+            if not re.match(r"^[A-Za-z_]\w*=", w):
+                break
+            if not w.startswith("AFA_GMAIL_DIR="):
+                return False
+        script = None
+        for w in words[1:]:
+            if w in ("-I", "-u", "-B", "-E", "-s", "-S", "-O", "-OO"):
+                continue
+            if w.startswith("-"):  # -c, -m, - (the script on stdin) and everything else
+                return False
+            script = w
+            break
+        if script is None:
+            return False
+        real = os.path.realpath(os.path.expanduser(gmail_norm(script)))
+        return real in {os.path.realpath(os.path.expanduser(p)) for p in GMAIL_SCRIPTS}
+    return False
+
+
+def gmail_resolves_into_folder(seg):
+    """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
+    or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
+    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen."""
+    folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
+    parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))}
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return True  # a segment that can't be split can't be checked
+    cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
+
+    def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
+        real = os.path.realpath(os.path.expanduser(gmail_norm(path)))
+        return real == folder or real in parents or real.startswith(folder + os.sep)
+
+    for i, w in enumerate(words):
+        if not w:
+            continue
+        if cd and i > 0 and not w.startswith("-"):
+            if inside(w):
+                return True
+            continue
+        # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
+        after_eq = w.split("=", 1)[1] if "=" in w else ""
+        for cand in {c.lstrip("@") for c in (w, after_eq)}:
+            if cand and ("/" in cand or cand.startswith(("~", "."))):
+                if inside(cand):
+                    return True
+                if GMAIL_GLOB.search(cand):
+                    n = 0
+                    for m in glob.iglob(os.path.expanduser(gmail_norm(cand))):
+                        n += 1
+                        if n > 500 or inside(m):  # too many matches to check in the hook's time: refuse rather than guess
+                            return True
+    return False
+
+
+def gmail_credential_use(cmd):
+    """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
+    segs = split_segments(cmd)
+    whole = gmail_norm(cmd)
+    if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
+        return "folder"  # the two scripts that may hold the token must not run with variables that load other code
+    for seg in segs:
+        norm = gmail_norm(seg)
+        if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
+                or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
+            return "folder"
+    for seg in split_segments(cmd):
+        if GMAIL_SEND.search(gmail_norm(seg)):
+            words = gmail_words(seg) or []
+            quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
+            if quoted and os.path.basename(words[0]) == "git":  # git runs aliases and config: only a read-only subcommand counts, never with -c or GIT_ variables
+                quoted = len(words) > 1 and words[1] in GMAIL_GIT_QUOTING and not GMAIL_ENV_INJECT.search(seg)
+            if quoted:
+                continue
+            return "send"
+    return None
+
+
+def gmail_path_hit(path, content_search=False):
+    """A Read or Grep path inside the token folder (real path, symlinks followed), or a content search that would reach it."""
+    if not isinstance(path, str) or not path:
+        return False
+    norm = gmail_norm(path)
+    real = os.path.realpath(os.path.expanduser(norm))
+    folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
+    if real == folder or real.startswith(folder + os.sep) or GMAIL_DIR.search(norm):
+        return True
+    if content_search:
+        for up in (os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))):
+            if real == up:
+                return True
+        return bool(re.search(r"\.config/afa/?$|\.config/?$", norm))
+    return False
 
 
 def blank_quotes(seg):
@@ -471,6 +631,13 @@ def evaluate(payload):
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "
                          "Never put secrets inline in commands; read them from a file or env var "
                          "inside a script, and reference them as $VAR." % s)
+        g = gmail_credential_use(cmd)
+        if g == "send":
+            return "G", ("secret-guard: rule G, this command names a Gmail send address. The mail tool makes drafts and never "
+                         "sends; the owner sends from Gmail's own page.")
+        if g:
+            return "G", ("secret-guard: rule G, this would read or copy the mail token's folder. That token can send mail. "
+                         "Use python3 ~/.claude/scripts/gmail_api.py, or inspect a file with redact_view.py.")
         p = prints_sensitive(cmd)
         if p:
             return "B", ("secret-guard: this would print a credential-bearing file (%s). %s" % (p, HINT))
@@ -479,6 +646,9 @@ def evaluate(payload):
             if where:
                 return "E", RULE_E % (f, where)
     elif tool == "Read" and isinstance(ti.get("file_path"), str):
+        if gmail_path_hit(ti["file_path"]):
+            return "G", ("secret-guard: rule G, Read of the mail token's folder is blocked. That token can send mail. "
+                         "Inspect a file with python3 ~/.claude/scripts/redact_view.py.")
         p = sensitive_in(ti["file_path"])
         if p:
             return "C", ("secret-guard: Read of a credential-bearing file (%s) is blocked. %s" % (p, HINT))
@@ -486,6 +656,10 @@ def evaluate(payload):
         if where:
             return "E", RULE_E % (ti["file_path"], where)
     elif tool == "Grep":
+        if ti.get("output_mode") == "content" and (gmail_path_hit(ti.get("path"), content_search=True)
+                                                    or GMAIL_DIR.search(gmail_norm(str(ti.get("glob") or "")))):
+            return "G", ("secret-guard: rule G, Grep content output on the mail token's folder is blocked. That token can "
+                         "send mail. Use output_mode files_with_matches or count.")
         p = sensitive_in("%s %s" % (ti.get("path") or "", ti.get("glob") or ""))
         if p and ti.get("output_mode") == "content":
             return "D", ("secret-guard: Grep content output on a credential-bearing file (%s) is "
