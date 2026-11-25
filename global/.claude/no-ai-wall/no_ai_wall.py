@@ -291,6 +291,9 @@ def text_names_listed_path(text, paths):
     return None
 
 
+_SHLEX_BLANKS = " \t\r\n"  # what shlex.split splits a word on
+
+
 def _words(command):
     cleaned = re.sub(r"[;|&<>()`]", " ", command.replace("$(", " "))
     try:
@@ -300,8 +303,10 @@ def _words(command):
     out = []
     for w in words:  # `bash -c 'find /x'` is one quoted word: its own words count too, so a search inside it is still a search
         out.append(w)
-        if any(ch.isspace() for ch in w):
-            out.extend(_words(w))
+        if any(ch in _SHLEX_BLANKS for ch in w):  # only the characters shlex really splits on: str.isspace() also counts U+00A0, form feed and more, which made this loop forever (issue 86)
+            inner = _words(w)
+            if inner != [w]:  # a second guard: a split that gives the same single word back adds nothing and must not recurse again
+                out.extend(inner)
     return out
 
 
@@ -1925,7 +1930,7 @@ def _split_groups(cmds):
             # Only the command's own program counts (see _text_program_at) and only the value right after its flag, so a gh elsewhere in the
             # text, or another program's -t, never hides a quoted word.
             as_text = start is not None and k > start + 1 and q and (cmd[k - 1][0] in _TEXT_VALUE_FLAGS or w.startswith(("--title=", "--body=", "--message=")))
-            if any(ch.isspace() for ch in w) and not as_text:
+            if any(ch in _SHLEX_BLANKS for ch in w) and not as_text:
                 g.extend(_words(w))
         groups.append(g)
     return groups
