@@ -238,6 +238,33 @@ def split_segments(cmd):
     return segs
 
 
+# Workspace issue 93: the mail tool's token (~/.config/afa/gmail/token.json) holds gmail.modify, a scope Google lets
+# send mail with, and no Gmail scope that can still make drafts is send-free. The tool itself never sends, so the
+# token is kept from everything else: no read or copy of that folder, and no command that names a send address.
+GMAIL_DIR = re.compile(r"\.config/afa/gmail(?![\w-])")
+GMAIL_COPY = re.compile(r"(?<![\w.-])(?:cp|mv|ln|install|scp|rsync|tar|zip|curl|wget|dd|tee)(?![\w.-])")
+GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|/gmail/v1/users/[^\s'\"/]+/(?:messages|drafts)[^\s'\"]*:send",
+                        re.I)
+GMAIL_HOST = re.compile(r"gmail\.googleapis\.com", re.I)
+
+
+def gmail_credential_use(cmd):
+    """Return a reason when cmd would read or copy the mail token's folder, or name a Gmail send address; else None."""
+    if "redact_view.py" not in cmd and GMAIL_DIR.search(cmd):
+        if INTERP.search(blank_quotes(cmd)) and INTERP_EVAL.search(cmd):
+            return "folder"
+        for seg in split_segments(cmd):
+            if not GMAIL_DIR.search(seg):
+                continue
+            scan = seg if SHELL_C.search(seg) else blank_quotes(seg)
+            if (VERB.search(scan) and not (set(VERB.findall(scan)) <= {"grep", "rg"} and GREP_QUIET.search(scan))) \
+                    or GMAIL_COPY.search(scan):
+                return "folder"
+    if GMAIL_HOST.search(cmd) and GMAIL_SEND.search(cmd):
+        return "send"
+    return None
+
+
 def blank_quotes(seg):
     seg = re.sub(r"'[^']*'", lambda m: " " * len(m.group(0)), seg)
     return re.sub(r'"[^"]*"', lambda m: m.group(0) if ("$(" in m.group(0) or "`" in m.group(0))
@@ -471,6 +498,13 @@ def evaluate(payload):
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "
                          "Never put secrets inline in commands; read them from a file or env var "
                          "inside a script, and reference them as $VAR." % s)
+        g = gmail_credential_use(cmd)
+        if g == "send":
+            return "G", ("secret-guard: rule G, this command names a Gmail send address. The mail tool makes drafts and never "
+                         "sends; the owner sends from Gmail's own page.")
+        if g:
+            return "G", ("secret-guard: rule G, this would read or copy the mail token's folder. That token can send mail. "
+                         "Use python3 ~/.claude/scripts/gmail_api.py, or inspect a file with redact_view.py.")
         p = prints_sensitive(cmd)
         if p:
             return "B", ("secret-guard: this would print a credential-bearing file (%s). %s" % (p, HINT))
@@ -479,6 +513,9 @@ def evaluate(payload):
             if where:
                 return "E", RULE_E % (f, where)
     elif tool == "Read" and isinstance(ti.get("file_path"), str):
+        if GMAIL_DIR.search(ti["file_path"]):
+            return "G", ("secret-guard: rule G, Read of the mail token's folder is blocked. That token can send mail. "
+                         "Inspect a file with python3 ~/.claude/scripts/redact_view.py.")
         p = sensitive_in(ti["file_path"])
         if p:
             return "C", ("secret-guard: Read of a credential-bearing file (%s) is blocked. %s" % (p, HINT))
@@ -486,6 +523,9 @@ def evaluate(payload):
         if where:
             return "E", RULE_E % (ti["file_path"], where)
     elif tool == "Grep":
+        if ti.get("output_mode") == "content" and GMAIL_DIR.search("%s %s" % (ti.get("path") or "", ti.get("glob") or "")):
+            return "G", ("secret-guard: rule G, Grep content output on the mail token's folder is blocked. That token can "
+                         "send mail. Use output_mode files_with_matches or count.")
         p = sensitive_in("%s %s" % (ti.get("path") or "", ti.get("glob") or ""))
         if p and ti.get("output_mode") == "content":
             return "D", ("secret-guard: Grep content output on a credential-bearing file (%s) is "
