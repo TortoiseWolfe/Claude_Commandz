@@ -249,7 +249,7 @@ GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|(?:messa
 GMAIL_PLAIN = {"ls", "stat", "test", "[", "[[", "realpath", "readlink"}  # none of these reads a file's content (wc, du and file can)
 GMAIL_SCRIPTS = ("~/.claude/scripts/redact_view.py", "~/.claude/scripts/gmail_api.py")  # the only scripts that may run against the folder
 GMAIL_QUOTE_WORDS = {"grep", "rg", "git"}  # a quoted mention (a search pattern, a commit message) is not a call
-GMAIL_GIT_QUOTING = {"commit", "log", "grep", "show", "diff", "tag", "status"}  # git subcommands that take a message or a pattern and run nothing
+GMAIL_GIT_QUOTING = {"commit", "tag", "status"}  # git subcommands that take a message and run no pager, diff driver or alias
 GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
 GMAIL_GLOB = re.compile(r"[*?\[{]")
 GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
@@ -337,27 +337,32 @@ def gmail_resolves_into_folder(seg):
         return real == folder or real in parents or real.startswith(folder + os.sep)
 
     for i, w in enumerate(words):
-        if not w or w.startswith("-") and not cd:
+        if not w:
             continue
         if cd and i > 0 and not w.startswith("-"):
-            real = os.path.realpath(os.path.expanduser(gmail_norm(w)))
-            if real == folder or real in parents or real.startswith(folder + os.sep):
-                return True
-            continue
-        if "/" in w or w.startswith(("~", ".")):
             if inside(w):
                 return True
-            if GMAIL_GLOB.search(w):
-                for m in sorted(glob.glob(os.path.expanduser(gmail_norm(w))))[:200]:
-                    if inside(m):
-                        return True
+            continue
+        # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
+        after_eq = w.split("=", 1)[1] if "=" in w else ""
+        for cand in {c.lstrip("@") for c in (w, after_eq)}:
+            if cand and ("/" in cand or cand.startswith(("~", "."))):
+                if inside(cand):
+                    return True
+                if GMAIL_GLOB.search(cand):
+                    n = 0
+                    for m in glob.iglob(os.path.expanduser(gmail_norm(cand))):
+                        n += 1
+                        if n > 500 or inside(m):  # too many matches to check in the hook's time: refuse rather than guess
+                            return True
     return False
 
 
 def gmail_credential_use(cmd):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
     segs = split_segments(cmd)
-    if re.search(r"gmail_api\.py|redact_view\.py", cmd) and GMAIL_ENV_INJECT.search(cmd):
+    whole = gmail_norm(cmd)
+    if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
     for seg in segs:
         norm = gmail_norm(seg)
