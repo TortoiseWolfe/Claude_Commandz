@@ -5,7 +5,9 @@ generates. A helper that did so in a throwaway home still wrote two stray files 
 bytes, because a generated command that starts a shell with an emptied environment drops the home variable, and the shell
 then takes the real home folder from the account list. A review helper loads the guard's decision function, asks it for a
 verdict on each generated command (as the tests below do with a fake home) and counts the differences between two versions;
-a person reads the differences. The same sentence belongs in the helper brief used for guard reviews.
+a person reads the differences. A check that really must run a command runs it where the real home folder cannot be reached
+at all, such as a container (a sealed copy of a small system with no link to the home folder); a changed home setting alone is
+never called a sandbox. The same two sentences belong in the first lines of the helper brief used for guard reviews.
 """
 import io
 import os
