@@ -632,16 +632,12 @@ def is_viewer_segment(seg):
     return script == os.path.realpath(os.path.expanduser("~/.claude/scripts/redact_view.py"))
 
 
-# Shell state another segment could change so that "python" or the script is not what it seems.
-SHELL_STATE = re.compile(r"(?:^|[\s;&|(])(?:export|alias|declare|typeset|readonly|unalias|hash|eval|source|function|set|env|command|builtin|exec)(?![\w-])"
-                         r"|(?:^|[\s;&|(])[A-Za-z_]\w*\+?=|(?:^|[\s;&|])\.\s|[\w-]+\s*\(\s*\)")
-
-
 def prints_sensitive(cmd):
     all_segs = split_segments(cmd)
-    others = [seg for seg in all_segs if not is_viewer_segment(seg)]
-    # The viewer's exemption holds only when no other part of the command could change what "python" or the script is.
-    segs = others if not any(SHELL_STATE.search(o) for o in others) else all_segs
+    # The viewer's exemption holds only when EVERY part of the command is a run of the viewer: any other part (a cd, an
+    # export, an alias, a function, a changed PATH) could change what "python" or the script is, and a list of such
+    # words is never complete. Mixed with anything else, the whole command is checked as if there were no viewer.
+    segs = [] if all(is_viewer_segment(seg) for seg in all_segs) else all_segs
     rest = "\n".join(segs)  # the command with the viewer's own segments taken out
     whole = sensitive_in(rest)
     if not whole:

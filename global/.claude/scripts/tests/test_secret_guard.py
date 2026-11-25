@@ -542,8 +542,14 @@ class IssueNinetyThreeF7(Base):
                     "PATH=/tmp/x:$PATH; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
                     "export PYTHONPATH=/tmp/x; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
                     "alias python3=cat; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
-                    "python3() { cat \"$2\"; }; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem"):
+                    "python3() { cat \"$2\"; }; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "umask 0; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "true && python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "cd ~ && python3 ~/.claude/scripts/redact_view.py ~/x/server.pem | head"):
             self.blocked(cmd)
+
+    def test_viewer_runs_only_in_a_command_made_of_viewer_runs(self):
+        self.allowed("python3 ~/.claude/scripts/redact_view.py ~/x/server.pem; python3 ~/.claude/scripts/redact_view.py ~/x/api-key.txt")
 
     def test_a_long_run_of_git_options_finishes_fast(self):
         import time
