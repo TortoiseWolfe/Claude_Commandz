@@ -2,12 +2,12 @@
 import json
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import first_prompt_tokens as fp  # noqa: E402
+from tmpdirs import fresh_dir  # noqa: E402
 
 
 def write(path, rows):
@@ -21,7 +21,7 @@ def answer(inp, create, read):
 
 class FirstPrompt(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = fresh_dir(self)
 
     def test_sums_the_first_answer_only(self):
         p = Path(self.tmp) / "a.jsonl"
