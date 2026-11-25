@@ -85,5 +85,50 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(self.flagged('Bash {"command": "grep list_drafts hook.py"}'))
 
 
+class WaitingCueTests(unittest.TestCase):
+    DRAFT = "- Greg's reply draft is waiting on you."
+    PR = "- RescueDogs#436 needs your OK."
+    GH = 'Bash {"command": "gh pr view 436 -R x/y"}'
+
+    def test_waiting_draft_with_no_lookup_is_flagged(self):
+        self.assertEqual(up.scan(self.DRAFT, []), ["draft: " + self.DRAFT.strip()])
+
+    def test_waiting_draft_with_only_an_agent_notes_lookup_is_flagged(self):
+        self.assertTrue(up.scan(self.DRAFT, [NOTES_CALL]))
+
+    def test_waiting_draft_with_a_gmail_lookup_is_clear(self):
+        self.assertEqual(up.scan(self.DRAFT, [GMAIL + "list_drafts {}"]), [])
+
+    def test_waiting_pull_request_without_and_with_a_gh_call(self):
+        self.assertEqual(up.scan(self.PR, []), ["PR: " + self.PR.strip()])
+        self.assertEqual(up.scan(self.PR, [self.GH]), [])
+
+    def test_other_ways_of_saying_it_waits_on_him(self):
+        for line in [
+            "The pull request is still yours.",
+            "Pull request 12 is waiting for your review.",
+            "The email to the supplier needs your answer.",
+            "Draft reply: your call.",
+            "A reply for you to approve.",
+            "The note to the team is awaiting your word.",
+        ]:
+            with self.subTest(line=line):
+                self.assertTrue(up.scan(line, []))
+
+    def test_waiting_line_naming_neither_mail_nor_a_pull_request_is_clear(self):
+        for line in ["- The colour choice is your call.", "- The budget waits on you."]:
+            with self.subTest(line=line):
+                self.assertEqual(up.scan(line, []), [])
+
+    def test_a_line_saying_the_draft_was_sent_is_clear(self):
+        for line in ["- Greg's reply draft was sent at 2:10 PM, no longer waiting on you.",
+                     "- The email went out, so nothing is waiting on you."]:
+            with self.subTest(line=line):
+                self.assertEqual(up.scan(line, []), [])
+
+    def test_a_hatch_note_waiting_is_clear(self):
+        self.assertEqual(up.scan("Hatch's note is waiting on you? No, it waits for Hatch.", []), [])
+
+
 if __name__ == "__main__":
     unittest.main()

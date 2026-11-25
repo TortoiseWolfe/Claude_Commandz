@@ -63,7 +63,7 @@ class ContextWarnTests(unittest.TestCase):
             "AFA_HUB_DIR": str(self.hub),
             "AFA_STATE_DIR": str(self.state),
         })
-        for name in ("AFA_HANDOFF_K", "AFA_HANDOFF_START_K", "AFA_HANDOFF_FRESH_K"):
+        for name in ("AFA_HANDOFF_K", "AFA_HANDOFF_START_K", "AFA_HANDOFF_FRESH_K", "AFA_LANE"):
             env.pop(name, None)
         if not real_defaults:
             # The tier logic is tested at the old 100/250/200/330K sizes; the shipped defaults (150K line) have their own test below.
@@ -88,6 +88,12 @@ class ContextWarnTests(unittest.TestCase):
 
     def warning(self, output):
         return json.loads(output)["hookSpecificOutput"]
+
+    def test_a_lane_started_in_the_hub_folder_gets_nothing(self):
+        # Issue 75: lane.sh marks every lane with AFA_LANE; the hub's lines are not a lane's, even when its folder is the hub's.
+        self.write_transcript((340_000, 0, 0))
+        self.assertEqual(self.call_hook(extra_env={"AFA_LANE": "1"}), "")
+        self.assertNotEqual(self.call_hook(), "")
 
     def test_below_250k_shows_per_turn_line(self):
         self.write_transcript((249_000, 0, 0))

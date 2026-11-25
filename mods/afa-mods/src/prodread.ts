@@ -490,7 +490,16 @@ export function deployScript(forwarder: string, home: string): { repo: string; p
 }
 
 // SHA-256 (hex) of the UTF-8 bytes of a text; undefined for text that is not valid Unicode.
+// The last answer is kept: one command asks about the same 150 KB script several times (every classify round), and the work is the slow part.
+let lastSha: { text: string; hex: string | undefined } | undefined
 export function sha256Hex(text: string): string | undefined {
+  if (lastSha && lastSha.text === text) return lastSha.hex
+  const hex = sha256HexOf(text)
+  lastSha = { text, hex }
+  return hex
+}
+
+function sha256HexOf(text: string): string | undefined {
   let bytes: number[]
   try {
     bytes = Array.from(unescape(encodeURIComponent(text)), c => c.charCodeAt(0))
@@ -549,7 +558,7 @@ export function sha256Hex(text: string): string | undefined {
 // folder) and defines neither find_service_container nor container_exec. It gets a pin after it has a source guard and the helpers.
 export type DeployPins = Record<string, readonly string[]>
 export const DEPLOY_PINS: DeployPins = {
-  'Chattanooga-Digital': ['3224c8b19ee7e7f9e0edf30b16c789a7a45eaf71422ef20843127f5077e8f527'], // main (aed358a)
+  'Chattanooga-Digital': ['ec2a42860a33aa43d4dc851e4c4e688f85ac0eadd6fe3dbecc8d55225bcf8665'], // main (#508, 13 Nov)
 }
 
 export const deployIsPinned = (repo: string, text: string, pins: DeployPins = DEPLOY_PINS): boolean => {

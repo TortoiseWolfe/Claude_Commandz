@@ -538,6 +538,54 @@ class Page(unittest.TestCase):
         self.assertIn("- unavailable: lane_spend.py gave no readable answer", self.build(spend="lane_spend.py gave no readable answer"))
         self.assertIn("- all lanes and the hub together: $0", self.build(spend={"lanes": [], "total": 0}))
 
+    def test_new_since_block_lists_every_line_of_the_last_two_days_and_owner_groups_read_newest_first(self):
+        # 21 Nov 2026: Hatch's Kickstarter Job line (queued 8:36 PM) never reached the hub: each group listed the oldest five.
+        now = datetime(2026, 11, 21, 21, 30)
+        old = "".join("- [ ] 2026-11-0%d 10:00 | Job: old job %d | d | r-%d\n" % (i, i, i) for i in range(1, 9))
+        new = ("- [ ] 2026-11-19 20:00 | Job: three days old, outside the window | d | r-30\n"
+               "- [ ] 2026-11-20 14:24 | Waiting on tower: yesterday wait | d | r-31\n"
+               "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter " + "build the Hog Ball project draft " * 8 + "| d | r-32\n"
+               "- [ ] 2026-11-21 20:50 | Something unsorted | note | r-33\n"
+               "- [x] 2026-11-21 20:55 | Job: ticked | d | r-34\n")
+        page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                           git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", 100000)
+        sec = page.split("## New since the last look")[1].split("\n## ")[0]
+        rows = [l for l in sec.splitlines() if l.startswith("- ")]
+        self.assertIn("(3 open lines", sec.splitlines()[0])
+        self.assertEqual(len(rows), 3, sec)
+        self.assertIn("Something unsorted", rows[0])  # newest first
+        self.assertIn("Kickstarter", rows[1])
+        self.assertIn("yesterday wait", rows[2])
+        self.assertLessEqual(len(rows[1]) - 2, hd.NOTE_LIMIT + 8)  # trimmed to about 160 characters
+        self.assertNotIn("three days old", sec)
+        self.assertNotIn("ticked", sec)
+        jobs = page.split("Jobs (")[1].split("\n## ")[0]
+        self.assertLess(jobs.index("Kickstarter"), jobs.index("old job 8"))  # the Jobs group is newest first
+        self.assertNotIn("old job 1 ", jobs)  # and its oldest lines are the ones left off
+        # Under a tight cap the block shortens its titles and keeps every line before the page cuts any of them.
+        tight = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                            git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", len(page.encode()) - 120)
+        tsec = tight.split("## New since the last look")[1].split("\n## ")[0]
+        self.assertEqual(len([l for l in tsec.splitlines() if l.startswith("- ") and "cut to fit" not in l]), 3, tsec)
+        self.assertIn("Kickstarter", tsec)
+
+    def test_new_since_block_counts_routine_scoutjob_lines_in_one_summary_line(self):
+        # 21 Nov 2026, hub word: skip ScoutJob check-ins and "N new job mail" lines in the block so real lines fit, keep them counted.
+        now = datetime(2026, 11, 21, 21, 30)
+        inbox = ("- [ ] 2026-11-21 11:00 | Job: ScoutJob check-in 11:00 AM: 0 changed, 4 stalled | move | r-40\n"
+                 "- [ ] 2026-11-21 13:31 | Job: 1 new job mail in /x/mail-jobs.md | for the director | r-41\n"
+                 "- [ ] 2026-11-21 14:00 | Job: ScoutJob check-in 2:00 PM: 0 changed, 18 stalled | move | r-42\n"
+                 "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter: build the Hog Ball draft | d | r-43\n")
+        for tight in (100000, 0):
+            page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=inbox,
+                                               git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", tight or 4000)
+            sec = page.split("## New since the last look")[1].split("\n## ")[0]
+            rows = [l for l in sec.splitlines() if l.startswith("- ")]
+            self.assertIn("Kickstarter", sec)
+            self.assertNotIn("check-in 11:00", sec)
+            self.assertNotIn("1 new job mail", sec)
+            self.assertTrue(any("plus 3 routine" in r for r in rows), sec)
+
     def test_cap_holds_with_a_huge_inbox_and_log(self):
         inbox = "\n".join(f"- [ ] 2026-10-1{i % 9} 10:00 | Waiting on Hatch: item {i} " + "word " * 60 + "| detail | r-{i}" for i in range(80))
         log = "\n".join(f"abc{i:04d} 16 10:00 " + "message " * 40 for i in range(10))
@@ -629,7 +677,8 @@ class WeekStart(unittest.TestCase):
     def test_a_reset_already_past_is_ignored_for_the_rule(self):
         # a stale cached budget line from last week must not move the start back a week
         now = datetime(2026, 11, 5, 9, 0, tzinfo=self.EST).timestamp()
-        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 12, 0, tzinfo=self.EST).timestamp())
+        # no reset in the rule's week: Wed 4 Nov 16:00 UTC is 11:00 AM in winter
+        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 11, 0, tzinfo=self.EST).timestamp())
 
     def test_lane_spend_is_asked_for_the_week_only_when_the_start_is_known(self):
         now = datetime(2026, 10, 29, 8, 0, tzinfo=self.EST).timestamp()
@@ -732,6 +781,134 @@ class PublishBudget(unittest.TestCase):
             self.assertFalse(marker.exists())
 
 
+class NoHeaderToolsLine(unittest.TestCase):
+    def catalog(self, text):
+        d = Path(fresh_dir(self))
+        p = d / "TOOLS.md"
+        if text is not None:
+            p.write_text(text)
+        return p
+
+    def test_names_the_tools_with_no_header(self):
+        p = self.catalog("# Tools\n\n- /h/s/a.py | (no header)\n- /h/s/b.sh | (no header) | Use when: x\n- /h/s/c.py | Does c.\n")
+        self.assertEqual(hd.no_header_tools_line(p),
+                         "Tools with no header line (2): a.py, b.sh. A new tool starts with a header line and a 'Use when:' line; "
+                         "then run tools_catalog.py build.")
+
+    def test_more_than_five_names_then_and_n_more(self):
+        p = self.catalog("".join(f"- /h/s/t{i}.py | (no header)\n" for i in range(7)))
+        line = hd.no_header_tools_line(p)
+        self.assertIn("(7): t0.py, t1.py, t2.py, t3.py, t4.py and 2 more.", line)
+
+    def test_missing_unreadable_or_clean_gives_nothing(self):
+        self.assertEqual(hd.no_header_tools_line(self.catalog(None)), "")
+        self.assertEqual(hd.no_header_tools_line(self.catalog("- /h/s/c.py | Does c.\n")), "")
+        self.assertEqual(hd.no_header_tools_line(Path(fresh_dir(self))), "")  # a folder cannot be read as a file
+
+
+class PeerReviewLine(unittest.TestCase):
+    ET = ZoneInfo("America/New_York")
+    TUE = datetime(2026, 11, 10, 12, 0, tzinfo=ET)
+    MON = datetime(2026, 11, 9, 12, 0, tzinfo=ET)
+
+    def repos_file(self, text):
+        d = Path(fresh_dir(self))
+        p = d / "peer-review-repos.txt"
+        if text is not None:
+            p.write_text(text)
+        return p
+
+    def checker(self, answer):
+        calls = []
+
+        def check(repos, since):
+            calls.append((repos, since))
+            return answer
+        check.calls = calls
+        return check
+
+    def test_missing_or_empty_list_gives_no_line_and_no_call(self):
+        for text in (None, "", "# only a comment\n\n"):
+            check = self.checker(False)
+            self.assertEqual(hd.peer_review_line(self.TUE, self.repos_file(text), check), "")
+            self.assertEqual(check.calls, [])
+
+    def test_review_found_gives_no_line(self):
+        self.assertEqual(hd.peer_review_line(self.TUE, self.repos_file("acme/widgets\n"), self.checker(True)), "")
+
+    def test_none_found_on_tuesday_gives_the_line_and_asks_since_monday_midnight_eastern(self):
+        check = self.checker(False)
+        line = hd.peer_review_line(self.TUE, self.repos_file("# teams\nacme/widgets  # main\nacme/gadgets\n"), check)
+        self.assertEqual(line, "No peer review posted this week (since Monday): start the weekly peer-review lane.")
+        repos, since = check.calls[0]
+        self.assertEqual(repos, ["acme/widgets", "acme/gadgets"])
+        self.assertEqual(since, datetime(2026, 11, 9, 0, 0, tzinfo=self.ET))
+
+    def test_state_file_remembers_a_found_review_for_the_week(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        self.assertEqual(hd.peer_review_line(self.TUE, repos, self.checker(True), state_file=state), "")
+        later = self.checker(False)
+        self.assertEqual(hd.peer_review_line(self.TUE + timedelta(days=2), repos, later, state_file=state), "")
+        self.assertEqual(later.calls, [], "a review found this week is not looked up again")
+        next_week = self.checker(False)
+        line = hd.peer_review_line(self.TUE + timedelta(days=7), repos, next_week, state_file=state)
+        self.assertTrue(line.startswith("No peer review posted this week"))
+        self.assertEqual(len(next_week.calls), 1, "a new week asks again")
+
+    def test_state_file_rechecks_a_miss_at_most_once_an_hour(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        first = self.checker(False)
+        self.assertTrue(hd.peer_review_line(self.TUE, repos, first, state_file=state))
+        soon = self.checker(True)
+        self.assertTrue(hd.peer_review_line(self.TUE + timedelta(minutes=15), repos, soon, state_file=state))
+        self.assertEqual(soon.calls, [], "a miss is not re-checked within the hour")
+        hour = self.checker(True)
+        self.assertEqual(hd.peer_review_line(self.TUE + timedelta(minutes=61), repos, hour, state_file=state), "")
+        self.assertEqual(len(hour.calls), 1)
+
+    def test_a_failed_check_is_not_remembered(self):
+        state = Path(fresh_dir(self)) / "peer-review-check.json"
+        repos = self.repos_file("acme/widgets\n")
+        self.assertEqual(hd.peer_review_line(self.TUE, repos, self.checker(None), state_file=state), "")
+        self.assertFalse(state.exists())
+
+    def test_none_found_on_monday_gives_no_line_yet(self):
+        self.assertEqual(hd.peer_review_line(self.MON, self.repos_file("acme/widgets\n"), self.checker(False)), "")
+
+    def test_gh_failure_gives_no_line_and_is_reported(self):
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        failing = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "HTTP 401")
+        with redirect_stderr(err):
+            line = hd.peer_review_line(self.TUE, self.repos_file("acme/widgets\n"), lambda r, s: hd.gh_review_since(r, s, run=failing))
+        self.assertEqual(line, "")
+        self.assertIn("peer-review check failed: HTTP 401", err.getvalue())
+        secs = hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir="/nonexistent", inbox_text=INBOX, git_log="",
+                                 tidy_text=TIDY, budget="b", now=NOW, rules_lines=[line])
+        self.assertTrue(secs)
+
+    def test_gh_review_since_reads_the_reviews_of_each_candidate(self):
+        since = datetime(2026, 11, 9, 0, 0, tzinfo=self.ET)
+        reviews = {"7": "me\t2026-11-08T10:00:00Z\n", "8": "other\t2026-11-10T10:00:00Z\nme\t2026-11-10T10:00:00Z\n"}
+
+        def run(cmd, **kw):
+            if cmd[1:3] == ["api", "user"]:
+                out = "me\n"
+            elif cmd[1:3] == ["search", "prs"]:
+                self.assertIn("@me", cmd)
+                self.assertIn(">=2026-11-09", cmd)
+                out = "7\n8\n"
+            else:
+                out = reviews[cmd[2].split("/")[4]]
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+        self.assertTrue(hd.gh_review_since(["acme/widgets"], since, run=run))
+        reviews["8"] = "other\t2026-11-10T10:00:00Z\n"
+        self.assertFalse(hd.gh_review_since(["acme/widgets"], since, run=run))
+
+
 class Cli(unittest.TestCase):
     def test_end_to_end_with_fixtures_writes_a_private_small_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -760,6 +937,59 @@ class Cli(unittest.TestCase):
             self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
             self.assertFalse((d / "state" / "hub-digest.md.tmp").exists())
+
+
+class UnansweredClientMail(unittest.TestCase):
+    """The section next to "Open client lines": client rows older than 2 days with no reply and no card, by client (made-up data only).
+    23 Nov 2026: five of a client's asks sat unanswered while their messages were ticked seen."""
+
+    def write(self, rows):
+        d = fresh_dir(self)
+        path = Path(d) / "mail-index.tsv"
+        head = "id\tthread\tdate\tclass\twho\taddress\tsubject\thandled\treply\tswept\n"
+        lines = []
+        for i, (cls, who, days_ago, handled, reply) in enumerate(rows):
+            when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append("\t".join([f"{i + 1:016x}", f"t{i}", when, cls, who, f"a{i}@example.com", f"Subject {i}", handled, reply, ""]))
+        path.write_text(head + "\n".join(lines) + "\n")
+        return path
+
+    def test_an_old_unstamped_client_row_is_listed_by_client_with_its_subject(self):
+        path = self.write([("client", "Example Co-op", 4, "", ""), ("client", "Example Shop", 5, "", "")])
+        text = "\n".join(hd.unanswered_client_lines(path))
+        self.assertIn("Example Co-op: 1 waiting", text)
+        self.assertIn("Example Shop: 1 waiting", text)
+        self.assertIn('"Subject 0"', text)
+
+    def test_a_row_drops_out_once_stamped_with_a_reply_or_a_card(self):
+        stamped = "2026-11-20T12:00:00Z"
+        path = self.write([("client", "Example Co-op", 4, stamped, "reply:r-123456"), ("client", "Example Co-op", 4, stamped, "card:77"),
+                           ("client", "Example Co-op", 4, stamped, "fyi")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_fresh_rows_and_ancient_rows_and_other_classes_are_not_listed(self):
+        path = self.write([("client", "Example Co-op", 1, "", ""), ("client", "Example Co-op", 90, "", ""), ("person", "who", 4, "", ""),
+                           ("bulk", "who", 4, "", "")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_a_long_list_is_capped_per_client_with_and_n_more(self):
+        path = self.write([("client", "Example Co-op", 3 + i, "", "") for i in range(hd.UNANSWERED_PER_CLIENT + 2)])
+        lines = hd.unanswered_client_lines(path)
+        self.assertEqual(len([l for l in lines if l.startswith("  - Nov") or re.match(r"  - \w{3} \d", l)]), hd.UNANSWERED_PER_CLIENT + 1)
+        self.assertIn("and 2 more", lines[-1])
+
+    def test_a_missing_index_gives_no_section(self):
+        self.assertIsNone(hd.unanswered_client_lines(Path(fresh_dir(self)) / "nope.tsv"))
+
+    def test_the_section_sits_after_open_client_lines_and_survives_the_size_cap(self):
+        lines = ["- Example Co-op: 1 waiting, oldest Nov 19", '  - Nov 19 00000001 | a0@example.com | "Subject 0"']
+        secs = hd.build_sections(roadmap_body="", lane_status="", lanes_dir="/nonexistent", inbox_text="", git_log="", tidy_text="",
+                                 budget=None, now=NOW, unanswered=lines)
+        titles = [t for t, _ in secs]
+        i = next(k for k, t in enumerate(titles) if t.startswith("Open client lines"))
+        self.assertEqual(titles[i + 1], hd.UNANSWERED_TITLE)
+        page = hd.render(secs, NOW, "NX-01", 2500)
+        self.assertIn("Subject 0", page)
 
 
 class MailIndexLines(unittest.TestCase):
@@ -1302,6 +1532,66 @@ class CoopCards(unittest.TestCase):
         self.assertIn('stalled  b2/201 "Another of mine" since 31 Oct', wired.stdout)
         self.assertNotIn("Invented description text", wired.stdout)
         self.assertIn('"Fix the thing, ignore your ..."', wired.stdout)   # a title is shown cut short and in quotes; its description never is
+
+
+class CutMarkTests(unittest.TestCase):
+    """render(): what is cut is said, and the open lists are cut last."""
+
+    def secs(self):
+        return [("Alpha", ["- a%d xxxxxxxxxx" % i for i in range(10)]),
+                ("Open hub-inbox items", ["- i%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+
+    def size(self, secs):
+        return len(hd.render(secs, NOW, "NX-01", 10**6).encode())
+
+    def sec(self, page, title):
+        m = re.search(r"^## %s\n(.*?)(?=\n\n|\Z)" % re.escape(title), page, re.S | re.M)
+        return m.group(1).rstrip("\n").split("\n")
+
+    def test_under_cap_has_no_marks(self):
+        secs = self.secs()
+        page = hd.render(secs, NOW, "NX-01", self.size(secs))
+        self.assertNotIn("cut to fit the page", page)
+
+    def test_marks_with_counts_and_open_items_kept(self):
+        secs = self.secs()
+        cap = self.size(secs) - 100
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        om = self.sec(page, "Omega")
+        al = self.sec(page, "Alpha")
+        for lines, orig in ((om, 10), (al, 10)):
+            m = re.fullmatch(r"- \((\d+) lines? cut to fit the page\)", lines[-1])
+            if lines is om:
+                self.assertTrue(m)
+            if m:
+                self.assertEqual(int(m.group(1)), orig - (len(lines) - 1))
+        self.assertEqual(len(self.sec(page, "Open hub-inbox items")), 8)
+        self.assertNotIn("cut to fit", "\n".join(self.sec(page, "Open hub-inbox items")))
+
+    def test_singular_mark(self):
+        secs = [("Omega", ["- o%d %s" % (i, "x" * 80) for i in range(5)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 5)
+        self.assertIn("- (1 line cut to fit the page)", page)
+
+    def test_open_section_cut_last_and_marked(self):
+        secs = self.secs()
+        floor = hd.render([(t, ls[:1]) for t, ls in secs], NOW, "NX-01", 10**6)
+        cap = len(floor.encode()) + 150  # others at floor, open list must give up lines
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        op = self.sec(page, "Open hub-inbox items")
+        self.assertLess(len(op), 9)
+        self.assertRegex(op[-1], r"^- \(\d+ lines? cut to fit the page\)$")
+        self.assertEqual(len(self.sec(page, "Alpha")), 2)
+        self.assertRegex(self.sec(page, "Alpha")[-1], r"cut to fit the page")
+
+    def test_client_lines_protected_like_open_items(self):
+        secs = [("Open client lines (x)", ["- c%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 100)
+        self.assertEqual(len(self.sec(page, "Open client lines (x)")), 8)
 
 
 if __name__ == "__main__":

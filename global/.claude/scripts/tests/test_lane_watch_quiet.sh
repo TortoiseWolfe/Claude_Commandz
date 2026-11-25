@@ -4,7 +4,7 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/closed_room_guard.sh"
 export AFA_ENGINES_AVAILABLE="*"
-export LANE_WATCH_IDLE_REMIND_MIN=0   # these cases are about wakes the hub should not get; the idle reminder has its own cases in test_lane_watch.sh
+export LANE_WATCH_IDLE_REMIND_MIN=0   # these cases are about wakes the hub should not get; the idle reminder has its own cases in test_lane_watch_reminders.sh
 
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd -P)/lane_watch.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/lane-watch-quiet.XXXXXX")"

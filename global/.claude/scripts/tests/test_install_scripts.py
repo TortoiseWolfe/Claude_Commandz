@@ -117,7 +117,7 @@ class Drift(Base):
         self.live("a.py", "a1")
         self.live("b.py", "hand-edited")
         p = self.run_ins("--yes")
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 0, p.stdout)  # issue 148: drift alone is not a failed install
         self.assertEqual(self.live("a.py"), "a2")
         self.assertEqual(self.live("b.py"), "hand-edited")
         self.assertIn("DRIFT    b.py", p.stdout)
@@ -144,12 +144,54 @@ class Drift(Base):
         self.assertIn("DRIFT    a.py", p.stdout)
         self.assertEqual(self.live("a.py"), "local-only")
 
-    def test_nothing_to_copy_but_drift_still_exits_1(self):
+    def test_nothing_to_copy_but_drift_exits_0(self):
         self.publish({"a.py": "a1"})
         self.live("a.py", "other")
         p = self.run_ins("--yes")
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("nothing to copy", p.stdout)
+        self.assertIn("drift 1", p.stdout.strip().splitlines()[-1])  # the drift is still said on the last line
+        self.assertEqual(self.live("a.py"), "other")
+
+    def test_strict_makes_drift_exit_1_again_when_something_was_installed(self):
+        self.publish({"a.py": "a1", "b.py": "b1"})
+        self.publish({"a.py": "a2", "b.py": "b2"})
+        self.live("a.py", "a1")
+        self.live("b.py", "hand-edited")
+        p = self.run_ins("--yes", "--strict")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertEqual(self.live("a.py"), "a2")                  # the install still happened
+        self.assertEqual(self.live("b.py"), "hand-edited")
+
+    def test_strict_makes_drift_exit_1_again_when_nothing_was_copied(self):
+        self.publish({"a.py": "a1"})
+        self.live("a.py", "other")
+        self.assertEqual(self.run_ins("--yes", "--strict").returncode, 1)
+
+    def test_strict_with_no_drift_still_exits_0(self):
+        self.publish({"a.py": "a1"})
+        self.assertEqual(self.run_ins("--yes", "--strict").returncode, 0)
+
+    def test_a_dry_run_with_drift_exits_0_and_strict_dry_run_exits_1(self):
+        self.publish({"a.py": "a1", "b.py": "b1"})
+        self.publish({"a.py": "a2"})
+        self.live("a.py", "a1")
+        self.live("b.py", "hand-edited")
+        self.assertEqual(self.run_ins("--dry-run").returncode, 0)
+        self.assertEqual(self.run_ins("--dry-run", "--strict").returncode, 1)
+
+    def test_a_set_e_chain_reaches_its_next_step_after_a_drift_only_run(self):
+        # the tower's one-line install (issue 148): install_scripts.py, then the wall installer, in a script run with set -e
+        self.publish({"a.py": "a1", "b.py": "b1"})
+        self.publish({"a.py": "a2"})
+        self.live("a.py", "a1")
+        self.live("b.py", "hand-edited")
+        chain = 'set -e\n"$PY" -I "$SCRIPT" --repo "$WORK" --home "$HOME_DIR" --yes\necho NEXT-STEP-RAN\n'
+        env = dict(GIT_ENV, PY=sys.executable, SCRIPT=str(SCRIPT), WORK=str(self.work), HOME_DIR=str(self.home))
+        p = subprocess.run(["bash", "-c", chain], capture_output=True, text=True, env=env, input="")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("NEXT-STEP-RAN", p.stdout)
+        self.assertIn("drift 1", p.stdout)
 
 
 class Wall(Base):

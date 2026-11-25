@@ -11,6 +11,10 @@
 # (CATEGORY_PROMOTIONS) is dropped too: a payment row names the whole domain, which also sends marketing.
 # A message also stops being new once an inbox line (open or ticked) carries its ID: it is queued, so the
 # handler must not run again for it. client-mail-seen.txt keeps its meaning (absorbed by the hub).
+# Co-op list mail counts too (21 Nov 2026): a message whose subject starts with [Advisors] or [Devops] (optionally after Re:/Fwd:), or that
+# Gmail matches to the co-op list's List-Id (second query, list:list.chattanooga.digital), comes out as NEW whatever its sender address,
+# with the same DRAFT/SENT/label/seen/no-reply drops as any other line. A third query (23 Nov 2026) also takes a message whose To or Cc
+# holds an address at a co-op domain, whoever wrote it; the domains come from the private sender file at run time.
 # and nothing when there is nothing new. Senders of no-reply@ or noreply@ are skipped UNLESS they match a
 # client pattern: matching no-reply senders come out as "NEW <id> ALERT | ..." so the handler queues them, except
 # kind "payment" (Gusto), which come out unmarked because their handler step marks the invoice paid. Names live only in the TSV and Gmail; this script
@@ -29,7 +33,11 @@ WINDOW=${MUSE_CLIENT_WINDOW:-2d}
 [[ -r "$TSV" ]] || exit 0
 froms=$(awk -F'\t' 'NR>1 && $4!="" {print $4}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
 [[ -n "$froms" ]] || exit 0
-query="from:($froms) newer_than:$WINDOW -from:me"
+# Co-op members who write from a personal address never match a sender row (21 Nov 2026, Jonathan: "you're not scanning incoming
+# mail closely enough? ... Coop Members both with actionable tasks"). So the query also takes mail whose subject carries a
+# co-op list tag ([Advisors], [Devops]) and, in a second query below, every message that carries the co-op list's List-Id.
+query="(from:($froms) OR subject:\"[Advisors]\" OR subject:\"[Devops]\") newer_than:$WINDOW -from:me"
+list_query="list:list.chattanooga.digital newer_than:$WINDOW -from:me"
 # The message list comes straight from the Gmail API (gmail_api.py messages-list, metadata only, never a body):
 # no model copies the IDs. If the call fails, say so on stderr (muse_poll.sh logs it) and stop, so a dead token
 # can't pass for "nothing new".
@@ -40,6 +48,32 @@ if ! out=$("${lister[@]}" "$query" 2>"$errf"); then
   printf '%s client check: messages-list failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >&2
   exit 1
 fi
+# The second query: messages the Gmail API says carry the co-op list's List-Id. Their IDs are kept so the loop below can accept them
+# whatever the sender address. A failure here is logged and the check goes on with the first query only (the list mail also
+# carries its [Advisors] or [Devops] tag in most cases).
+listids=""
+if lout=$("${lister[@]}" "$list_query" 2>"$errf"); then
+  listids=$(printf '%s\n' "$lout" | grep -E '^MSG [0-9a-f]{15,16} \|' | awk '{print $2}')
+else
+  printf '%s client check: list query failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >>"$LOG"
+fi
+# The third query (23 Nov 2026, Jonathan: "a lot of the coop work is still falling through cracks in the emails"): a message whose To or Cc
+# holds an address at a co-op domain counts whoever wrote it, because a member writing from a personal address and copying the co-op
+# slipped past the From-only match. The co-op's domains are read at run time from the private sender file (bare-domain rows of a client
+# whose name says co-op), so no address lives here. A failure is logged and the check goes on with the other queries.
+ccids=""; cout=""
+coopdoms=$(awk -F'\t' 'NR>1 && tolower($1) ~ /co-?op/ && $4!="" && $4 !~ /@/ {print tolower($4)}' "$TSV" | sort -u | paste -sd' ' | sed 's/ / OR /g')
+if [[ -n "$coopdoms" ]]; then
+  cc_query="(to:($coopdoms) OR cc:($coopdoms)) newer_than:$WINDOW -from:me"
+  if cout=$("${lister[@]}" "$cc_query" 2>"$errf"); then
+    ccids=$(printf '%s\n' "$cout" | grep -E '^MSG [0-9a-f]{15,16} \|' | awk '{print $2}')
+  else
+    printf '%s client check: to/cc query failed: %s\n' "$(date '+%F %T')" "$(head -c 300 "$errf" | tr '\n' ' ')" >>"$LOG"
+    cout=""
+  fi
+fi
+# The queries' lines are read together: a list or Cc message is one more line, deduplicated by ID.
+out=$(printf '%s\n%s\n%s\n' "$out" "${lout:-}" "${cout:-}" | grep -E '^MSG ' | awk '!seen[$2]++')
 touch "$SEEN"
 # Keep only messages from a TSV sender (a thread that matched also holds Jonathan's own replies), and skip
 # no-reply bots; then drop what has been absorbed already.
@@ -88,6 +122,13 @@ printf '%s\n' "$out" | grep -E '^MSG [0-9a-f]{15,16} \|' | while IFS= read -r li
     continue
   fi
   ok=""; while IFS= read -r p; do sender_is "$addr" "$p" && { ok=1; break; }; done <<<"$pats"
+  # Not a listed sender: it still counts as co-op mail when its subject starts with a co-op list tag or Gmail matched it to the
+  # co-op list's List-Id (second query). No-reply senders are never taken this way, only by a listed pattern.
+  if [[ -z "$ok" && "$addr" != no-reply@* && "$addr" != noreply@* ]]; then
+    lsubj=${rest#*|}; lsubj=${lsubj#*|}; lsubj=${lsubj%|*}; lsubj=${lsubj%|*}; lsubj=${lsubj%|*}
+    lsubj=$(printf '%s' "$lsubj" | tr 'A-Z' 'a-z'); lsubj=${lsubj#"${lsubj%%[![:space:]]*}"}
+    if [[ "$lsubj" =~ ^((re|fwd?):[[:space:]]*)*\[(advisors|devops)\] ]] || grep -qxF "$id" <<<"$listids" || grep -qxF "$id" <<<"$ccids"; then ok=1; fi
+  fi
   [[ -n "$ok" ]] || continue
   # The tag sits right after the checked hex ID, before the first "|", so no From, Subject or Date text can fake it.
   tag=""

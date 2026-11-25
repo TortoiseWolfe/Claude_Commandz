@@ -321,6 +321,653 @@ def _is_recursive(words):
     return False
 
 
+# ---- reading a shell command as commands (issue 130) -----------------------------------------------------------------
+# The old reading took every word of the whole text (heredoc prose, quoted sentences, words on both sides of a pipe) as one command line, so
+# a word like find, du or tar anywhere made the command "a search", and a search with no root named always walked the working folder.
+# The reading below keeps the old, wider one whenever the text cannot be read with certainty (an unclosed quote).
+
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "mksh", "fish", "csh", "tcsh"}
+_DOC_EXTENSIONS = (".md", ".txt", ".json", ".yml", ".yaml", ".tsv", ".csv", ".log", ".html", ".diff", ".patch")  # a file with one of these is text, not a script
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+_HEREDOC_READERS = {"cat", "tee", "node", "perl", "ruby", "php", "deno", "bun", "gh", "git", "sed", "awk", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "jq", "grep"}
+_HEREDOC_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed"}
+_SHELL_AFTER_PIPE = re.compile(r"(?<![\w.-])(?:bash|sh|zsh|dash|ksh|eval|source|xargs|ssh|su|sudo|env|exec|python[\d.]*|node|perl|ruby|php)(?![\w.-])")
+
+
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_C_NUMBERED = re.compile(r"x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.")
+
+
+def _pid_then_quote(text, i):
+    """True when text[i:i+2] is `$$`, the shell's process number, which the readers step over as one unit before they look for `$'`. Bash pairs
+    the dollar signs from the left, so `$$'` is the number then a plain quote and `$$$'x'` is the number then the string `$'x'`. A `$$(` is left
+    to the readers' own `$(` rule. (Round 2 of the review of pull request 155: reading the second `$` of `$$'` as the start of `$'..'` let
+    `echo $$'\\' ; grep -rn x DIR #'` look like one quoted word.)"""
+    return text[i:i + 2] == "$$" and text[i + 2:i + 3] != "("
+
+
+def _ansi_c_end(text, i):
+    """For `$'` at text[i:i + 2]: the index of the closing single quote, or -1 when the string is left open. In the shell's `$'...'` a
+    backslash takes the next character, so `\'` does not end the string (issue 154)."""
+    j, n = i + 2, len(text)
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+        elif text[j] == "'":
+            return j
+        else:
+            j += 1
+    return -1
+
+
+def _ansi_c_value(body):
+    """The text the shell makes of the inside of `$'...'`: backslash escapes read, an unknown one left as written. The shell cuts the string at
+    the first NUL (`$'a\\0b'` is `a`), so this does too. None when a numbered escape gives a character past ASCII (the shell builds bytes from
+    `\\xHH`, so `\\xc3\\xa9` is one letter): the reader is unsure and the caller takes the wide reading."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        if body[i + 1] in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[body[i + 1]])
+            i += 2
+            continue
+        m = _ANSI_C_NUMBERED.match(body, i + 1)
+        if not m:
+            out.append(c)
+            i += 1
+            continue
+        code = m.group()
+        try:
+            ch = chr(ord(code[1]) & 0x1f) if code[0] == "c" else chr(int(code[1:], 16)) if code[0] in "xuU" else chr(int(code, 8) & 0xff)
+        except (ValueError, OverflowError):
+            return None  # a code point no string holds: unsure
+        if ord(ch) > 127:
+            return None
+        out.append(ch)
+        i = m.end()
+    return "".join(out).split("\x00")[0]
+
+
+def _shell_commands(text, written=None, meta=None):
+    """-> a list of commands, each a list of (word, quoted), or None when the text cannot be read with certainty. A command ends at an unquoted
+    ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped (the targets of output redirects are added to the list
+    `written` when one is given). A quoted word is data, except the script of a shell's -c. `$'..'` is read by the shell's own rules (a
+    backslash escapes, issue 154). When `meta` is given, one (lead, reads) pair is added for each command: lead is the separator characters
+    that came just before it (`|` for a pipe, `||`, `;`, `&&`...), reads is True when the command has an input redirect or here-string."""
+    cmds, toks = [], []
+    buf, quoted, started, skip, skip_out = [], False, False, False, False
+    lead, cmd_lead, reads = "", "", False
+    i, n = 0, len(text)
+
+    def end_word():
+        nonlocal buf, quoted, started, skip, cmd_lead
+        if started:
+            if skip:
+                skip = False
+                if skip_out and written is not None:
+                    written.append("".join(buf))
+            else:
+                if not toks:
+                    cmd_lead = lead
+                toks.append(("".join(buf), quoted))
+        buf, quoted, started = [], False, False
+
+    def end_cmd():
+        nonlocal toks, skip, lead, reads
+        end_word()
+        skip = False
+        if toks:
+            cmds.append(toks)
+            if meta is not None:
+                meta.append((cmd_lead, reads))
+            lead = ""
+            reads = False
+        toks = []
+
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            if text[i + 1:i + 2] != "\n":
+                buf.append(text[i + 1:i + 2])
+                started = quoted = True
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                return None
+            buf.append(text[i + 1:j])
+            started = quoted = True
+            i = j + 1
+        elif c == '"':
+            j, piece = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 1
+                piece.append(text[j])
+                j += 1
+            if j >= n or "`" in piece or "$(" in "".join(piece):  # a substitution inside quotes runs: unsure
+                return None
+            buf.append("".join(piece))
+            started = quoted = True
+            i = j + 1
+        elif c in " \t":
+            end_word()
+            i += 1
+        elif c == "#" and not started:
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c in ";\n|`()" or (c == "&" and text[i + 1:i + 2] != ">"):
+            end_cmd()
+            lead += c
+            i += 1
+        elif c == "$" and text[i + 1:i + 2] == "(":
+            end_cmd()
+            lead += "$("
+            i += 2
+        elif _pid_then_quote(text, i):
+            buf.append("$$")  # the process number, then a plain quote that the next turn of the loop reads
+            started = True
+            i += 2
+        elif c == "$" and text[i + 1:i + 2] == "'":
+            j = _ansi_c_end(text, i)
+            if j < 0:
+                return None
+            value = _ansi_c_value(text[i + 2:j])
+            if value is None:
+                return None
+            buf.append(value)
+            started = quoted = True
+            i = j + 1
+        elif c == "$" and text[i + 1:i + 2] == '"':
+            i += 1  # `$"..."` is a double-quoted string (translated, which a command line never is): the quote after it reads it
+        elif c in "<>" or (c == "&" and text[i + 1:i + 2] == ">"):
+            if c == "<":
+                reads = True
+            if started and not quoted and "".join(buf).isdigit():
+                buf, started = [], False  # the fd number of `2>&1`
+            end_word()
+            skip_out = c != "<"
+            while i < n and text[i] in "<>&|":
+                i += 1
+            skip = True
+        else:
+            buf.append(c)
+            started = True
+            i += 1
+    end_cmd()
+    return cmds
+
+
+def _heredoc_is_data(before, after):
+    """True when the body of a heredoc is text that no shell reads: the receiver (the command before `<<`) is a program that only reads it
+    (cat, tee, git, gh, sed ...), it is not piped on into a shell or interpreter, and it is not written to a file that could be a script."""
+    cmds = _shell_commands(before)
+    if not cmds or _SHELL_AFTER_PIPE.search(after):
+        return False
+    words = [w for w, q in cmds[-1]]
+    i = _skip_wrappers(words, scan=False)
+    while i < len(words) and (words[i].startswith("-") or words[i].isdigit()):
+        i += 1
+    if i >= len(words):
+        return False
+    prog = os.path.basename(words[i])
+    if not (prog in _HEREDOC_READERS or re.fullmatch(r"python[\d.]*", prog)):
+        return False
+    targets = [m.group(1).strip("'\"") for m in _REDIRECT.finditer(before)]
+    if prog == "tee":
+        targets += [w for w in words[i + 1:] if not w.startswith("-")]
+    if all(t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.startswith("&") for t in targets):
+        return prog
+    return None
+
+
+def _heredoc_runs_it(prog):
+    """True for a receiver that RUNS its heredoc (an interpreter, awk, sed): the body is data to no shell, but it can start a search, so the
+    roots it names are still checked (senior review 1 of the issue 130 fix)."""
+    return prog in _HEREDOC_RUNNERS or re.fullmatch(r"python[\d.]*", prog) is not None
+
+
+def _strip_heredocs(command, runner_bodies=None, receivers=None):
+    """The command without the bodies of heredocs whose text no shell reads (see _heredoc_is_data). A heredoc with no terminator line, or
+    one handed to a shell (`bash <<EOF`, `cat <<EOF | sh`), keeps its body: it is judged as the commands it is. The bodies of heredocs an
+    interpreter runs are dropped too but added to `runner_bodies` when one is given, so the caller can still read them for the roots they name."""
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _HEREDOC.search(line)
+        if not m:
+            continue
+        end = next(g for g in m.groups()[1:] if g is not None)
+        j = i
+        while j < len(lines) and (lines[j].lstrip("\t") if m.group(1) else lines[j]) != end:
+            j += 1
+        if j >= len(lines):
+            continue
+        receiver = _heredoc_is_data(line[:m.start()], line[m.end():])
+        if receiver:
+            if runner_bodies is not None and _heredoc_runs_it(receiver):
+                runner_bodies.append("\n".join(lines[i:j]))
+                if receivers is not None:
+                    holder = _shell_commands(line[:m.start()]) or [[]]
+                    prog, rest = _program_of(holder[-1])
+                    if prog == receiver and not _has_own_program(prog, rest):
+                        # credit only an interpreter that really reads this heredoc as its program (a `python3 a.py <<EOF` runs a.py, so a later
+                        # pipe-fed python gets none of it)
+                        receivers[receiver] = receivers.get(receiver, 0) + 1
+            i = j + 1
+        else:
+            out.extend(lines[i:j + 1])
+            i = j + 1
+    return "\n".join(out)
+
+
+def _split_statements(text):
+    """-> [(statement text, separator)] split at an unquoted ; newline && || | & outside parentheses (quotes and backslashes respected)."""
+    out, start, depth, i, n = [], 0, 0, 0, len(text)
+    sq = dq = False
+    while i < n:
+        c = text[i]
+        if c == "\\" and not sq:
+            i += 2
+            continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
+            j = _ansi_c_end(text, i)
+            i = n if j < 0 else j + 1  # `$'..'` ends at the first quote no backslash takes (an open one runs to the end)
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        elif not sq and not dq:
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth = max(0, depth - 1)
+            elif depth == 0 and c in ";\n|&":
+                if c == "&" and (text[i - 1:i] in (">", "<") or text[i + 1:i + 2] == ">"):
+                    i += 1
+                    continue
+                sep = c
+                if c in "|&" and text[i + 1:i + 2] == c:
+                    sep = c * 2
+                out.append((text[start:i], sep))
+                i += len(sep)
+                start = i
+                continue
+        i += 1
+    out.append((text[start:], ""))
+    return out
+
+
+_ASSIGN = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=((?:[A-Za-z0-9_./:@%+=,~-]|\$HOME|\$\{HOME\})*)[ \t]*\Z")
+_BLOCK_START = re.compile(r"[ \t]*(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|!|\{|\})(?![\w-])")
+# a statement that can bind a variable without naming it, or through a name held in another: `. file`, source, eval, read, mapfile, declare -n,
+# printf -v, getopts, let, a process substitution. The first one ends the trust in every value _resolve_vars knows.
+_UNSEEN_REBIND = re.compile(r"(?:^|[\s;&|({`])[\\'\"]*(?:\.|source|eval|read|mapfile|readarray|getopts|let|declare|typeset|local|export|readonly|unset"
+                            r"|trap|alias|shopt|enable|function)[\\'\"]*(?=[\s;&|)}`]|$)"
+                            r"|\bprintf\b[^;&|\n]*?\s['\"]?-[A-Za-z]*v|\bwait\b[^;&|\n]*?\s-[A-Za-z]*p"  # printf -v NAME and printf -vNAME, wait -p NAME
+                            r"|[<>]\(|\$\(\(|\(\(")  # (a builtin's name quoted or backslashed is still the builtin: 'read' W, \eval x)
+
+
+# Programs that are plain files on disk: a child process can never change the parent shell's variables. Any other first word of a statement may be a
+# function, an alias or a builtin that runs a trap, and so can rebind a variable that no assignment names, so it ends the trust (issue 130, review 2).
+_CHILD_ONLY = {"cd", "pushd", "popd", "echo", "printf", "cat", "ls", "pwd", "true", "false", ":", "head", "tail", "wc", "sort", "uniq", "grep", "egrep",
+               "fgrep", "rg", "find", "fd", "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown", "ln", "tee", "sed", "awk", "diff", "stat", "du",
+               "tar", "zip", "unzip", "gzip", "rsync", "curl", "wget", "git", "gh", "docker", "node", "bash", "sh", "timeout", "sleep", "date", "jq", "tr",
+               "cut", "basename", "dirname", "readlink", "realpath", "mktemp", "perl", "ruby", "php", "xargs", "env", "sudo", "gitleaks"}
+_LEADING_ASSIGN = re.compile(r"[ \t]*[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+")
+
+
+def _first_word_is_child_only(text):
+    t = text
+    while _LEADING_ASSIGN.match(t):
+        t = t[_LEADING_ASSIGN.match(t).end():]
+    m = re.match(r"[ \t]*[\\'\"]*([^\s;&|()<>\\'\"]+)", t)
+    if not m:
+        return False
+    word = m.group(1).rsplit("/", 1)[-1]
+    return word in _CHILD_ONLY or re.fullmatch(r"python[\d.]*", word) is not None
+
+
+def _subst(text, known):
+    """`$NAME` and `${NAME}` replaced by their known value, outside single quotes."""
+    if not known or "$" not in text:
+        return text
+    out, i, n, sq, dq = [], 0, len(text), False, False
+    while i < n:
+        c = text[i]
+        if c == "\\" and not sq:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if not sq and not dq and _pid_then_quote(text, i):
+            out.append("$$")
+            i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'" and not sq and not dq:
+            j = _ansi_c_end(text, i)
+            j = n - 1 if j < 0 else j  # no name is replaced inside `$'..'`
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if c == "'" and not dq:
+            sq = not sq
+        elif c == '"' and not sq:
+            dq = not dq
+        elif c == "$" and not sq:
+            m = re.match(r"\$(?:\{(\w+)\}|(\w+))", text[i:])
+            name = (m.group(1) or m.group(2)) if m else None
+            if name in known:
+                out.append(known[name])
+                i += m.end()
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _resolve_vars(command):
+    """The command with `$NAME` written out for every plain assignment (`W=/abs/dir; cd $W`) that runs unconditionally before the use: the
+    statements up to the first one that sits behind && || | & or inside a block, subshell or heredoc. The text a later check reads then names
+    the folder the shell will really use. A name that is reassigned later in any other way, or set from anything but plain text, is dropped
+    (it stays as `$NAME`, which the write check still fails closed on)."""
+    if "$" not in command or "=" not in command:
+        return command
+    known, out, collecting = {}, [], True
+    heredoc = _HEREDOC.search(command)
+    cut = command.rfind("\n", 0, heredoc.start()) + 1 if heredoc else len(command)  # no statement from the heredoc's line on is a plain assignment
+    head, tail = command[:cut], command[cut:]
+    for text, sep in _split_statements(head):
+        s = _subst(text, known)
+        m = _ASSIGN.match(s) if collecting and _ASSIGN.match(text) else None
+        if m:
+            known[m.group(1)] = m.group(2)
+        else:
+            if _UNSEEN_REBIND.search(text) or not _first_word_is_child_only(text) or re.search(r"[(){}`]", text):
+                # a sourced file, eval, read, `<(`, a trap, an alias, or a call to something that is no plain program (a function) can set any
+                # variable without naming it: nothing known is trusted past here
+                known.clear()
+                collecting = False
+            for name in list(known):
+                # keep a value only when every later mention of the name is a plain read ($NAME or ${NAME}); NAME+=, NAME[0]=, ((NAME=..)),
+                # ${NAME:=..}, declare -n, read, export and every other form leave a bare mention behind and drop it
+                if re.search(r"(?<![\w$])%s(?!\w)" % name, re.sub(r"\$\{%s\}|\$%s(?!\w)" % (name, name), " ", text)):
+                    del known[name]
+        if sep in ("&&", "||", "|", "&") or _BLOCK_START.match(text) or re.search(r"[(){}`]", text):
+            collecting = False
+        out.append(s + sep)
+    out.append(tail)  # as written: a heredoc's child shell never sees a variable the parent did not export
+    return "".join(out)
+
+
+# options that take a value, so the word after one is not an operand (a search root or a pattern)
+_VALUE_SHORT = {"grep": "ABCmefdD", "rg": "gtTABCmjMEfedr", "fd": "eEtdSczjxXo", "tree": "LPIo", "du": "dBtX", "ls": "IwT"}
+_VALUE_LONG = {
+    "grep": {"--after-context", "--before-context", "--context", "--max-count", "--regexp", "--file", "--directories", "--devices", "--include", "--exclude",
+             "--exclude-dir", "--include-dir", "--label", "--binary-files"},
+    "rg": {"--glob", "--iglob", "--type", "--type-not", "--type-add", "--after-context", "--before-context", "--context", "--max-count", "--threads",
+           "--max-columns", "--encoding", "--file", "--regexp", "--max-depth", "--maxdepth", "--max-filesize", "--sort", "--sortr", "--pre", "--pre-glob",
+           "--replace", "--colors", "--path-separator", "--context-separator", "--ignore-file", "--engine"},
+    "fd": {"--extension", "--exclude", "--type", "--max-depth", "--min-depth", "--exact-depth", "--size", "--color", "--threads", "--owner", "--changed-within",
+           "--changed-before", "--ignore-file", "--format", "--max-results", "--batch-size", "--path-separator"},
+    "tree": {"--charset", "--filelimit", "--sort", "--timefmt"},
+    "du": {"--max-depth", "--block-size", "--threshold", "--exclude-from", "--exclude", "--files0-from", "--time-style"},
+    "ls": {"--ignore", "--width", "--tabsize", "--sort", "--time", "--format", "--color", "--block-size"},
+}
+_PATTERN_OPTIONS = ("-e", "-f", "--regexp", "--file", "--files", "-g")  # a pattern given by option: every operand is then a path
+_SEARCH_KEY = {"grep": "grep", "egrep": "grep", "fgrep": "grep", "zgrep": "grep", "rg": "rg", "ag": "rg", "ack": "rg", "fd": "fd", "fdfind": "fd"}
+_ROOTS_ONLY = {"rsync", "tar", "zip", "locate", "mlocate", "plocate", "scp"}  # name their own folders; with none named they walk nothing
+
+
+def _operands(key, rest):
+    """The non-option words of a command line, past each option's value."""
+    out, i = [], 0
+    while i < len(rest):
+        w = rest[i]
+        i += 1
+        if w == "--":
+            out.extend(rest[i:])
+            break
+        if w.startswith("--"):
+            if "=" not in w and w in _VALUE_LONG.get(key, ()):
+                i += 1
+        elif w.startswith("-") and len(w) > 1:
+            if w[-1] in _VALUE_SHORT.get(key, ""):
+                i += 1
+        else:
+            out.append(w)
+    return out
+
+
+def _names_a_root(words, cur):
+    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists."""
+    for w in words:
+        if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
+            return True
+    return False
+
+
+_XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
+
+
+_XARGS_SAFE_LONG = frozenset({"--null", "--no-run-if-empty", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--verbose", "--exit",
+                              "--open-tty", "--interactive", "--show-limits", "--process-slot-var"})
+
+
+def _xargs_input_is_flagfree(cmds, meta, k):
+    """True when command k (an xargs) reads only the plain words of the echo or printf piped straight into it, none of which can start an
+    option (issue 154): `echo hi | xargs grep x DIR`. Anything else (another producer, a file, a here-string, `-a FILE`, a variable, a wildcard or an
+    escape in the words) can hand the search the flag `-r` on its input, so the search is read as possibly recursive."""
+    lead, reads = meta[k]
+    if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
+        return False
+    xargs_words = [w for w, q in cmds[k]]
+    # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
+    # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
+    if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
+        return False
+    # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
+    # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
+    if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
+        return False
+    prev = cmds[k - 1]
+    if prev[0][1] or prev[0][0] not in ("echo", "printf"):
+        return False
+    # only plain words: no dash anywhere (a delimiter could expose it), no escape, quote, variable, wildcard or brace
+    return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
+
+
+def _search_of(prog, rest, cur, flag_in=False):
+    """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
+    flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
+    if prog in _ROOTS_ONLY:
+        return True, False
+    if prog in ("cp", "mv"):
+        return flag_in or any(x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x or "a" in x) for x in rest), False
+    if prog == "find":
+        roots = []
+        for x in rest:
+            if x in ("-H", "-L", "-P") or x.startswith(("-O", "-D")):
+                continue
+            if x.startswith(("-", "(", "!", ",")):
+                break
+            roots.append(x)
+        return True, not _names_a_root(roots, cur)
+    if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
+        return True, not _names_a_root(_operands(prog, rest), cur)
+    key = _SEARCH_KEY.get(prog)
+    if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
+        return False, False
+    if key is None and not (prog == "git" and "grep" in rest[:3]):
+        return False, False
+    if prog == "git":
+        rest = rest[rest.index("grep") + 1:]
+        key = "grep"
+    ops = _operands(key, rest)
+    if key == "fd" and any(x in ("--search-path", "--base-directory") or x.startswith(("--search-path=", "--base-directory=")) for x in rest):
+        return True, False
+    if not any(x.startswith(_PATTERN_OPTIONS) for x in rest):
+        ops = ops[1:]  # the first operand is the pattern
+    return True, not _names_a_root(ops, cur)  # fed by xargs or typed, a search that names no root walks its working folder (issue 154)
+
+
+def _is_launcher_words(words):
+    i = _skip_wrappers(words, scan=False)
+    if i < len(words) and os.path.basename(words[i]) in ("bash", "sh"):
+        i += 1
+        if i < len(words) and words[i].startswith("-"):
+            return False
+    return i < len(words) and os.path.basename(words[i]) == "lane.sh"
+
+
+_RUNS_A_STRING = ("env", "ssh", "su", "watch", "script", "parallel", "flock", "runuser", "sg")
+_RUNS_A_PROGRAM = ("docker", "podman", "kubectl", "nsenter", "chroot", "exec", "xargs", "sudo", "nohup", "nice", "timeout", "setsid")  # a program word follows
+
+
+# programs that only read or move the files they are given: when the text writes a file, any OTHER program in it could be running that file
+# (an interpreter, make, busybox, a path no list knows), so the text is read widely unless every program is one of these or a writer
+_DATA_TOOLS = {"cat", "head", "tail", "wc", "ls", "stat", "file", "diff", "cmp", "sort", "uniq", "cut", "tr", "rm", "mkdir", "touch", "git", "gh", "echo",
+               "printf", "cd", "true", "false", "test", "[", "grep", "egrep", "fgrep", "rg", "date", "sleep", "pwd", "basename", "dirname", "realpath",
+               "readlink", "jq", "sha256sum", "md5sum", "du", "df", "which", "tee", "cp", "mv", "install", "ln", "dd", "curl", "wget", "tar", "unzip", "rsync"}
+_WRITERS = {"tee", "cp", "mv", "install", "ln", "dd", "curl", "wget", "tar", "unzip", "rsync"}
+# what an interpreter runs from its own string, pipe or file: the roots a search inside it names count, as for a heredoc
+_INLINE_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "awk", "sed", "gawk", "mawk", "nawk", "lua", "tclsh", "pwsh"}
+_STDIN_RUNNERS = {"node", "perl", "ruby", "php", "deno", "bun", "lua", "tclsh", "pwsh"}  # (awk and sed are given their program as an operand)
+_INLINE_FLAG = re.compile(r"-[A-Za-z]*[ceErCS]")
+_SCRIPT_FILE = re.compile(r"\.(?:py|pyw|js|mjs|cjs|ts|pl|rb|php|lua|tcl|ps1)\Z")
+# a data tool is no data tool when an option or an alias hands it a program to run (git -c core.pager=..., tar --to-command, sort --compress-program)
+_CAN_RUN = {"git", "gh", "tar", "rsync", "sort", "curl", "wget", "dd", "install", "ln"}
+_RUNS_CODE_ARG = re.compile(r"^-e|^-[A-Za-z]*I$|^--(?:config|exec|extcmd|ext-diff|textconv|upload-pack|receive-pack|to-command|use-compress-program|"
+                            r"compress-program|checkpoint-action|info-script|new-volume-script|rsh|rsync-path|proxy-command|ssh-command|pager|editor)|^!|=!|"
+                            r"^(?:alias|extension|exec|foreach|run|config)$")  # config: git config core.pager/sshCommand/editor name a program to run later
+_GIT_CONFIG_ARG = re.compile(r"^-c$|^-c\S*=")  # git -c name=value sets a config value that can name a program (core.pager, alias.x=!...); tar -c is just create
+
+
+def _can_run_code(p, rest, env=False):
+    """True for a data tool that is handed a program to run: an option, subcommand or alias (see _RUNS_CODE_ARG), or a variable set just for it
+    (GIT_PAGER=..., GIT_SSH_COMMAND=..., PAGER=...)."""
+    return p in _CAN_RUN and (env or any(_RUNS_CODE_ARG.search(a) for a in rest) or (p == "git" and any(_GIT_CONFIG_ARG.search(a) for a in rest)))
+
+
+def _sets_a_variable_for(cmd):
+    """True when a command's words before its program include a NAME=value (`GIT_PAGER=less git log`, `env PAGER=x gh pr view`)."""
+    ws = [w for w, q in cmd]
+    return any(re.match(r"[A-Za-z_]\w*=", w) for w in ws[:_skip_wrappers(ws, scan=False)])
+
+
+def _has_own_program(prog, rest):
+    """True only when an interpreter's words plainly hold its own program: an inline flag (-c, -e, -E, -m for python) or an operand that is a script
+    file by its name. An option's value, an unknown option or a bare word is none of these (fail closed: no table of every interpreter's options)."""
+    return any(_INLINE_FLAG.fullmatch(x) or (x == "-m" and prog.startswith("python")) or (not x.startswith("-") and _SCRIPT_FILE.search(x)) for x in rest)
+
+
+def _program_of(cmd):
+    """-> (the program's base name or None, the words after it) of a command, wrappers skipped."""
+    ws = [w for w, q in cmd]
+    i = _skip_wrappers(ws, scan=False)
+    return (os.path.basename(ws[i]), ws[i + 1:]) if i < len(ws) else (None, [])
+
+
+def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
+    """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
+    or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
+    words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
+    written = []
+    meta = []
+    cmds = _shell_commands(text, written, meta)
+    if cmds is None or depth > 4:
+        return None
+    if any(not (t.endswith(_DOC_EXTENSIONS) or t == "/dev/null" or t.isdigit() or t == "-") for t in written):
+        return None  # text written to a file that could be a script may be run later in the text: the wide reading
+    live = [c for c in cmds if not _is_launcher_words([w for w, q in c])]
+    progs = [_program_of(c) + (_sets_a_variable_for(c),) for c in live]
+    if (any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) or any(p in _WRITERS for p, rest, env in progs)) and any(
+            p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
+        return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
+    recursive, folders, words, cur = False, [], [], cwd
+    if heredocs is None:
+        heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
+    for k, cmd in enumerate(cmds):
+        ws = [w for w, q in cmd]
+        if _is_launcher_words(ws):
+            continue
+        words.extend(ws)
+        if ws[0] == "cd" and not cmd[0][1]:
+            arg = next((a for a in ws[1:] if not a.startswith("-")), None)
+            cur = cwd if arg is None or "$" in arg or "`" in arg else expand(arg, cur)
+            continue
+        if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
+            continue
+        # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
+        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
+        # the reader ends a command at `$(`, a backtick and a plain parenthesis (so a process substitution `<(..)` too), so in
+        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. With any of them anywhere in the text, every
+        # command after an xargs is read as one that xargs may run (the wide reading).
+        if not xargs and any("(" in lead or ")" in lead or "`" in lead for lead, reads in meta) and any(
+                os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
+            xargs = True
+        flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)
+        prog_at = _skip_wrappers(ws, scan=False)
+        for i, (w, q) in enumerate(cmd):
+            behind_wrapper = not re.search(r"\s", w) and _known_program(w) and any(os.path.basename(p) in _WRAPPERS for p, pq in cmd[:i] if not pq)
+            if q and i != prog_at and i != 0 and not behind_wrapper:
+                # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
+                # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
+                if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
+                    sub = _searches(w, cur, depth + 1, bodies)
+                    if sub is None:
+                        return None
+                    recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
+                continue
+            prog = os.path.basename(w)
+            rest = ws[i + 1:]
+            script = None
+            if prog in _SHELLS:
+                for k, x in enumerate(rest):
+                    if x.startswith("-") and not x.startswith("--") and "c" in x:
+                        script = rest[k + 1] if k + 1 < len(rest) else None
+                        break
+            elif prog == "eval":
+                script = " ".join(rest)
+            runs_here = i == prog_at or any(os.path.basename(p) in _RUNS_A_STRING + _RUNS_A_PROGRAM + _WRAPPERS for p, pq in cmd[:i] if not pq)
+            if runs_here and (prog in _SHELLS and (script is None or xargs) or prog in ("source", ".") or (prog == "tee" and any(
+                    not (a.startswith("-") or a.endswith(_DOC_EXTENSIONS) or a == "/dev/null") for a in rest))):
+                return None  # a shell fed a file or a pipe, or a file a later command could run: what it reads is out of sight, so the wide reading
+            if runs_here and (prog in _INLINE_RUNNERS or re.fullmatch(r"python[\d.]*", prog)):
+                # an interpreter runs its string, pipe or file, and that code can start a search: every quoted word it was given is read for the roots
+                # it names; one with no program of its own (fed by a pipe or a redirect, which is out of sight) takes the wide reading
+                if bodies is not None:
+                    bodies.extend(x for x, xq in cmd[i + 1:] if xq)
+                if (prog in _STDIN_RUNNERS or prog.startswith("python")) and not _has_own_program(prog, rest):
+                    if heredocs.get(prog, 0) > 0:
+                        heredocs[prog] -= 1  # this one reads its own heredoc, whose body is read through runner_bodies
+                    else:
+                        return None
+            if script is not None:
+                sub = _searches(script, cur, depth + 1, bodies)
+                if sub is None:
+                    return None
+                recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
+                continue
+            rec, walks = _search_of(prog, rest, cur, flag_in)
+            recursive = recursive or rec
+            if walks:
+                folders.append(cur)
+    return recursive, folders, words
+
+
 def _expand_globs(path, limit=20000):
     """What a wildcard path matches on disk. The cap is far above any real folder: a short cap could cut a guarded file off the list."""
     if not any(ch in GLOB_CHARS for ch in path):
@@ -341,22 +988,100 @@ def bash_hits(command, cwd, paths):
     walk into; kind is "path" or "root". None when clean. Best effort on text: a path built at run time is out of reach, which is why
     the folder the session starts in is checked too.
 
-    A segment that only starts a lane (lane.sh) is not a search (issue 233): its folder argument is a working folder, which the launcher
-    itself refuses when it is listed and whose tool calls the lane's own hook guards. Such a segment still counts for listed paths, but
-    it neither makes the command a search nor has its operands walked as search roots."""
+    Every listed path the full text names is refused, prose and heredoc bodies included. Whether the command SEARCHES is read from its
+    commands (issue 130): heredoc text no shell reads and quoted words are data, each command is judged by itself, and a search that names a
+    root walks only that root; the working folder is walked only by a search that names none. A segment that only starts a lane (lane.sh) is
+    not a search (issue 233): its folder argument is a working folder, which the launcher itself refuses when it is listed and whose tool
+    calls the lane's own hook guards. When the text cannot be read with certainty the old, wider reading is used (_bash_hits_wide)."""
     cwd = cwd or os.getcwd()
-    segs = _segments(command)
-    if any(_is_launcher(seg) for seg in segs):
-        r = _bash_hits(command, cwd, paths, searching=False)
+    runner_bodies = []
+    receivers = {}
+    info = _searches(_strip_heredocs(command, runner_bodies, receivers), cwd, bodies=runner_bodies, heredocs=receivers)
+    if info is None:
+        segs = _segments(command)
+        if any(_is_launcher(seg) for seg in segs):
+            r = _bash_hits_wide(command, cwd, paths, searching=False)
+            if r:
+                return r
+            command = " ; ".join(seg for seg in segs if not _is_launcher(seg))
+        return _bash_hits_wide(command, cwd, paths)
+    r = _bash_hits_wide(command, cwd, paths, searching=False)
+    if r:
+        return r
+    for body in runner_bodies:  # what an interpreter runs from its heredoc can search: the roots it names count (not the working-folder guess)
+        r = _bash_hits_wide(body, cwd, paths, walk_cwd=False)
         if r:
             return r
-        command = " ; ".join(seg for seg in segs if not _is_launcher(seg))
-    return _bash_hits(command, cwd, paths)
+        # ... and a string of its code that runs a recursive search with no root walks the working folder, as the shell's own command would
+        for lit in _code_commands(body):
+            if not _SEARCH_WORD.search(lit):
+                continue
+            sub = _searches(lit, cwd)
+            r = _info_hit(sub, cwd, paths) if sub is not None else _bash_hits_wide(lit, cwd, paths)
+            if r:
+                return r
+    return _info_hit(info, cwd, paths)
 
 
-def _bash_hits(command, cwd, paths, searching=True):
+_SEARCH_WORD = re.compile(r"\b(?:grep|egrep|fgrep|zgrep|rg|ag|ack|fd|fdfind|find|tree|du|ls|locate|plocate|mlocate)\b")
+
+
+_LIT = r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*\""""
+_RUNS_A_SHELL = re.compile(r"\b(?:system|popen|exec\w*|spawn\w*|run|call|check_output|check_call|Popen|shell_exec|passthru|proc_open|qx)\s*\(\s*"
+                           r"(?:\[((?:\s*(?:%s)\s*,?)*)\]|(%s))|`([^`]*)`" % (_LIT, _LIT))
+
+
+def _code_commands(code):
+    """The command lines a piece of interpreter code hands to a call that runs a shell or a program (system("..."), os.system('...'),
+    subprocess.run(['grep', ...]), execSync('...'), `...`), each as one string. A quoted word that goes anywhere else is prose or data: it is not read as
+    a search, which is what keeps `print('find it')` an ordinary line of code."""
+    out = []
+    for m in _RUNS_A_SHELL.finditer(code):
+        if m.group(1) is not None:
+            out.append(" ".join(x[1:-1] for x in re.findall(_LIT, m.group(1))))
+        elif m.group(2) is not None:
+            out.append(m.group(2)[1:-1])
+        else:
+            out.append(m.group(3))
+    return out
+
+
+def _info_hit(info, cwd, paths):
+    """The listed path or folder a parsed search (_searches' answer) walks into, as (entry, "root"), or None."""
+    recursive, folders, words = info
+    if not recursive:
+        return None
+    cur = cwd
+    for i, w in enumerate(words):
+        for base in {cur, cwd}:
+            for piece in [w] + [p for p in re.split(r"[=:,]", w) if p and p != w]:
+                if not piece or (piece.startswith("-") and "/" not in piece and "~" not in piece):
+                    continue
+                full = expand(piece, base)
+                for cand in [full] + _expand_globs(full):
+                    hit = paths.contains(cand, base)
+                    if hit:
+                        return hit, "root"
+        if w == "cd" and i + 1 < len(words):
+            cur = expand(words[i + 1], cur)
+    for folder in folders:  # a search with no folder named walks the working folder
+        hit = paths.contains(folder, folder)
+        if hit:
+            return hit, "root"
+    for tok in text_paths(" ".join(words)):
+        hit = paths.contains(expand(tok, cwd), cwd)
+        if hit:
+            return hit, "root"
+    return None
+
+
+def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
+    """walk_cwd=False leaves out the guess that a search naming no root walks the working folder (used for the body of an interpreter's
+    heredoc, where a word like `find` is as likely prose or code as a search); the roots a body names are checked either way."""
     words = _words(command)
-    recursive = searching and _is_recursive(words)
+    # Each command is judged on its own words (issue 146's reading): over the whole text, `grep -c x f; gh pr view -R owner/name` read gh's -R
+    # (its --repo) as grep's -R. A text that cannot be read with certainty is still one group of all its words, as before.
+    recursive = searching and any(_is_recursive(g) for g in _command_word_groups(command))
     seen = []
 
     def check(tok, base):
@@ -388,7 +1113,7 @@ def _bash_hits(command, cwd, paths, searching=True):
             nxt = expand(words[i + 1], cur)
             cur = nxt
         i += 1
-    if recursive:  # a search with no folder named walks the working folder
+    if recursive and walk_cwd:  # a search with no folder named walks the working folder
         hit = paths.contains(cwd, cwd)
         if hit:
             return hit, "root"
@@ -1093,6 +1818,95 @@ def _path_shaped(text):
     return bool(text) and len(text) < 4096 and "\n" not in text and ("/" in text or text.startswith((".", "~", "$HOME", "${HOME}")))
 
 
+def _command_word_groups(command):
+    """The words of a shell text, one group for each command in it (issue 146). reads_content_recursively looks for a program word and then an
+    option after it; over the whole text's words, `grep -oE x file; gh pr view -R owner/name` read gh's -R (its --repo) as grep's -R (recursive)
+    and refused an ordinary read. A quoted word that holds a space is also split into its own words (`bash -c 'grep -r x /dir'` stays a search),
+    and a text that cannot be read with certainty (an unclosed quote) is one group of all its words, as before. A text with a substitution
+    or a subshell (`$(`, a backtick, any parenthesis) is also read whole: the reader ends a command there, so `grep $(echo -r) x /dir` would
+    otherwise put the flag in another group than its grep. So is a text with a here-string or a heredoc (`<<`, which also covers `<<<`): its text
+    goes to the receiver as input or as code (`bash <<< "grep -r x /dir"`, `xargs grep x /dir <<< "-r"`, the same with a heredoc), and the reader
+    drops it from the command it feeds."""
+    cmds = _shell_commands(command)
+    if cmds is None or _has_unquoted_paren(command) or "`" in command or "<<" in command:
+        return [_words(command)] + _split_groups(cmds)
+    return _split_groups(cmds) or [_words(command)]
+
+
+def _has_unquoted_paren(command):
+    """True when a `(` or `)` sits outside quotes and is not backslash-escaped, or when a quote is left open (issue 150). The reader ends a
+    command at such a parenthesis (a subshell, `$(`, an array), so it cannot say which command a flag belongs to and the whole text is read
+    as one group. A parenthesis inside quotes is text (`sed -i "s/(a)/(b)/"`): the reader keeps it in its word, and it must not force the
+    whole-text reading. A comment also gives True, the stricter answer. The scan follows the reader (_shell_commands): a
+    backslash takes the next character, single quotes end at the next single quote, double quotes at the next unescaped double quote."""
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+        elif _pid_then_quote(command, i):
+            i += 2  # `$$` is the process number; the quote after it is read on its own
+        elif c == "$" and command[i + 1:i + 2] == "'":
+            j = _ansi_c_end(command, i)  # `$'..'`: a backslash takes the next character, as in the reader
+            if j < 0:
+                return True
+            i = j + 1
+        elif c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return True
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                j += 2 if command[j] == "\\" else 1
+            if j >= n:
+                return True
+            i = j + 1
+        elif c in "()" or (c == "#" and (i == 0 or command[i - 1] in " \t\n;&|")):
+            return True  # (a comment: the reader skips its text, this scan would read its quotes, so the stricter answer)
+        else:
+            i += 1
+    return False
+
+
+def _split_groups(cmds):
+    """The per-command word groups of a read text (see _command_word_groups); an empty list when there is no text."""
+    if not cmds:
+        return []
+    groups = []
+    for cmd in cmds:
+        g = []
+        start = _text_program_at(cmd)
+        for k, (w, q) in enumerate(cmd):
+            g.append(w)
+            # a title or message handed to gh or git is text, never a program: `gh issue create --title "a grep before gh -R"` has no grep in it.
+            # Only the command's own program counts (see _text_program_at) and only the value right after its flag, so a gh elsewhere in the
+            # text, or another program's -t, never hides a quoted word.
+            as_text = start is not None and k > start + 1 and q and (cmd[k - 1][0] in _TEXT_VALUE_FLAGS or w.startswith(("--title=", "--body=", "--message=")))
+            if any(ch.isspace() for ch in w) and not as_text:
+                g.extend(_words(w))
+        groups.append(g)
+    return groups
+
+
+def _text_program_at(cmd):
+    """The index of gh or git when it is the program of this command (its first word, or the first word after the `--` of gated_post.sh),
+    else None. A wrapper in front (timeout, env, xargs, sudo) gives None: the stricter answer, the quoted words are split as before."""
+    s = 0
+    if cmd and os.path.basename(cmd[0][0]) == "gated_post.sh":
+        s = next((k + 1 for k, (w, q) in enumerate(cmd) if w == "--" and not q), None)
+        if s is None:
+            return None
+    if s < len(cmd) and not cmd[s][1] and cmd[s][0] in _TEXT_VALUE_PROGRAMS:
+        return s
+    return None
+
+
+_TEXT_VALUE_PROGRAMS = ("gh", "git")  # programs whose title, body and message flags (below) only ever carry text (issue 150)
+_TEXT_VALUE_FLAGS = ("--title", "--body", "--message", "-m", "-t", "-b")
+
+
 def reads_content_recursively(words):
     """True for a shell command that reads or copies the CONTENT of every file under the folders it is given (a name-only listing such
     as `find -name`, `tree` or `du` is not one)."""
@@ -1211,7 +2025,7 @@ def evaluate(payload, paths=None):
                     return r
         return None
     if tool == "Bash":
-        command = str(ti.get("command") or "")
+        command = _resolve_vars(str(ti.get("command") or ""))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed
         r = bash_hits(command, cwd, paths)
         if r:
             return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
@@ -1219,8 +2033,7 @@ def evaluate(payload, paths=None):
             return deny_protected()
         if bash_writes_guarded(command, cwd):
             return deny_protected()
-        words = _words(command)
-        if reads_content_recursively(words):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
+        if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
             roots = _command_tokens(command, cwd) or [cwd]
             if any(reads_list(t) for t in roots):
                 return deny_list_search()

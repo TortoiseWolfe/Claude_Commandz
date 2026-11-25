@@ -43,6 +43,10 @@ Claude_Commandz/
 
 `list-file-guard.py` (a `PreToolUse` hook on `Bash` and the edit tools) stops a session from changing the two private lists the merge rules read, `~/.config/afa/merge-repos.txt` (repos a lane may merge in) and `~/.config/afa/own-review-repos.txt` (repos nobody here merges in), and from changing its own installed copy. A session runs as the same user as the person, so without it a session could add a repo to the first list or take one off the second. It refuses `Write`, `Edit`, `MultiEdit` and `NotebookEdit` on those files however the path is spelled, and a `Bash` command that names a list file, reaches one through a folder change, a wildcard, a brace word or a symlink, or moves, removes, links, re-permissions or unpacks into the folders that hold them. The text of a commit or pull request message is checked like any other words, so a message that names one of those folders beside a word such as `rm` or `find` goes in a file (`git commit -F`, `gh pr create --body-file`). Reading a list with the `Read` tool stays allowed, and a person edits the lists in a plain terminal. A check that runs longer than 3 seconds is refused, so padding a command does not switch the guard off. It is a tripwire for direct and careless edits, not a wall: a script file that does the edit, or a path built from pieces, is not seen, and the sturdy fix is lists the session's user cannot write. Register it with `"PreToolUse": [{"matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/list-file-guard.py", "timeout": 5}]}]`, and copy the file into place before adding that entry.
 
+`ask-card-guard.py` (a `PreToolUse` hook on `AskUserQuestion`, the question card) and `bare-reference.py` (a `Stop` hook) put three habits where they are needed instead of in a rules file a session has to remember. The card guard refuses a card that holds more than one decision, a card whose first option is not "Hold, ask me again" (a click to focus the window picks option 1), a card that names a pull request, issue or card by number without saying what it is and giving its full `https://` address, and a card about a draft, sent mail or a merge when no live lookup ran since the owner's last message. `bare-reference.py` sends a reply back once when it names such an item by number alone, or hides its address in a code block where the terminal will not make it clickable. `unverified-pending.py` (the older `Stop` hook, context only) now also flags a draft or pull request listed as waiting on the owner with no live lookup that turn. Install the three files first, then a person adds the two entries from `global/dotfiles/settings.json`. Off switches: `ASK_CARD_GUARD=off`, `BARE_REFERENCE=off`, `UNVERIFIED_PENDING=off`.
+
+`moment-lines.py` puts the rest of those habits on one table instead of one hook each. Every row of a private, tab-separated table (it names clients and repos, so it lives in the private workspace repo at `~/repos/hub/rules/moment-lines.tsv`, never here) says when it fires (the owner's message, a tool call whose name it matches, or a finished reply), whose session it is for (the hub, a lane, or all), a pattern, an optional "unless" pattern, and what to do: add its one line to the model's context once per session, refuse the call the first time, or refuse it every time the "unless" pattern is missing. A reply row sends the reply back once. At most three lines fire per event, and anything it cannot read lets the call through. Adding a habit is one table row; check it with `python3 ~/.claude/hooks/moment-lines.py --check`. A tool row naming a tool the `PreToolUse` matcher does not cover also needs the matcher widened. Install the file first, then a person adds its three entries (`UserPromptSubmit`, `PreToolUse`, `Stop`) from `global/dotfiles/settings.json`. Off switch: `MOMENT_LINES=off`.
+
 **Totals:** 73 global commands + 3 dotfiles + 90 project commands across 8 repos = **166 backed-up files**.
 
 ## Restore on a new machine
@@ -135,8 +139,32 @@ being read. It backs up every file it replaces and writes an `undo.sh` beside th
 git -C ~/repos/Claude_Commandz fetch -q origin main && python3 -I <(git -C ~/repos/Claude_Commandz show origin/main:global/.claude/scripts/install_scripts.py) --no-fetch
 ```
 
-Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--repo`, `--home`, `--ref`. Last line is
-`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--strict`, `--repo`, `--home`, `--ref`. Last line is
+`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Exit codes: 0 for `INSTALL OK` even when a drifted file was left alone
+(the last line still says `drift N`, so a `set -e` script that runs the wall installer next reaches it; issue 148), 1 when a file was held back
+until the wall is installed (or, with `--strict`, when a file drifted), 2 could not run, 3 not confirmed. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+
+### Turning the Docker-first guard on or off (a person runs this, never a session)
+
+Jonathan's rule (18 Nov 2026): "always Docker first! for all our projects". `install_docker_first_guard.py` is a small standalone
+installer for that one hook. It is on purpose not part of `install_global.py` or `install_scripts.py`: the public repo was
+scrubbed, and a repo-wide hook or script sync could arm other live guards with placeholder text. It does two things, in order: it
+copies `global/.claude/hooks/docker-first-guard.py` to `~/.claude/hooks/`, then merges one `PreToolUse` entry (matcher `Bash`) into
+the live settings file. The merge parses the JSON, adds nothing on a second run, keeps the file's own indent, and leaves a file
+that is not valid JSON alone. A backup and an `undo.sh` go to `~/.claude/state/docker-first-guard-backups/<stamp>/`. It then proves
+the result: `npm --version` must pass and `npm ci` must be refused with the quoted rule. The last line is `PASS ...` or
+`FAIL <exact reason>` (after a failure it puts both files back). No exemption file is created; that waits for Jonathan's word.
+
+```bash
+cd ~/repos/Claude_Commandz && git pull
+python3 global/.claude/scripts/install_docker_first_guard.py              # install (safe to run again)
+python3 global/.claude/scripts/install_docker_first_guard.py --uninstall  # the off switch: entry out, then the file
+python3 global/.claude/scripts/install_docker_first_guard.py --dry-run    # say what would change, change nothing
+```
+
+Flags: `--home` (default `~/.claude`), `--source`. Exit 0 = PASS, 1 = FAIL after undoing itself, 2 = could not start. The same entry
+is mirrored in `global/dotfiles/` and checked by `test_settings_hooks.py`. Tests:
+`python3 -m pytest global/.claude/scripts/tests/test_install_docker_first_guard.py`.
 
 ### Installing the no-AI wall (a person runs this, never a session)
 

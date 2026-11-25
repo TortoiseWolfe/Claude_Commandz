@@ -65,7 +65,7 @@ class ComposeTest(unittest.TestCase):
         self.assertIn("rule text of core", text)
         self.assertNotIn("rule text of mail", text)
         self.assertIn("not loaded: mail, browser, streams, coop, fleet", text.splitlines()[0])
-        self.assertLess(text.index("keep them in view"), text.index("rule text of core"))
+        self.assertNotIn("keep them in view", text)  # the key rules block is repeated by the event hook, not pasted
 
     def test_connectors_on_adds_mail(self):
         self.assertEqual(run("Fix a bug.", connectors="on")[0], ["core", "mail"])
@@ -79,8 +79,27 @@ class ComposeTest(unittest.TestCase):
             self.assertIn(part, parts, prompt)
             self.assertIn(f"rule text of {part}", text)
 
-    def test_workspace_folder_gets_fleet(self):
-        self.assertIn("fleet", run("Count the repos.", folder="/home/u/repos")[0])
+    def test_workspace_folder_does_not_add_fleet(self):
+        for folder in ("/home/u/repos", "/home/u/repos/hub"):
+            self.assertEqual(run("Count the repos.", folder=folder)[0], ["core"], folder)
+
+    def test_task_text_cuts_at_the_tools_heading(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import lane_rules_compose as m
+        text = "Fix the parser.\n\n## Tools you already have for this job\n\n- gmail_api.py: drafts in Gmail\n"
+        self.assertEqual(m.task_text(text), "Fix the parser.\n\n")
+        self.assertEqual(m.task_text("no heading here, gmail"), "no heading here, gmail")
+
+    def test_a_trigger_word_below_the_tools_heading_loads_nothing_above_it_does(self):
+        tools = "\n\n## Tools you already have for this job\n\n- gmail_api.py: drafts in Gmail\n"
+        self.assertEqual(run("Fix the parser." + tools)[0], ["core"])
+        self.assertIn("mail", run("Check the Gmail thread." + tools)[0])
+        self.assertIn("mail", run("Check the Gmail thread, no tools list.")[0])  # no heading: the whole text counts
+
+    def test_mail_words_draft_and_calendar_alone_do_not_load_mail(self):
+        for prompt in ("Write a draft of the plan.", "Add it to the calendar.", "A draft and the calendar, then a reply to Sam."):
+            self.assertEqual(run(prompt)[0], ["core"], prompt)
+        self.assertIn("mail", run("Read the gmail thread.")[0])
 
     def test_missing_prompt_gets_every_part(self):
         self.assertEqual(run("", missing_prompt=True)[0], PARTS)
@@ -100,7 +119,7 @@ class ComposeTest(unittest.TestCase):
 
     def test_the_public_trigger_lists_name_no_client_or_person(self):
         src = SCRIPT.read_text()
-        start, end = src.index("TRIGGERS = {"), src.index("WORKSPACE_DIRS")
+        start, end = src.index("TRIGGERS = {"), src.index("# Client, organisation")
         lists = src[start:end].lower()
         # Made-up names stand in for the real ones; the live private file (when this machine has one) is checked too,
         # so a real name pasted into the public lists fails here without being written into this test.
@@ -153,6 +172,76 @@ class ComposeTest(unittest.TestCase):
             r = subprocess.run([sys.executable, "-I", str(SCRIPT), "--all", "--out", str(out), "--rules-dir", str(d)],
                                capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
+
+
+def run_rules(spec, prompt="Check the browser sign-in page and the draft in the inbox, then the calendar.", name="x"):
+    """Run with --rules SPEC (None: no option). Returns (returncode, stderr, stdout parts, text or None)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = rules_dir(tmp)
+        kf = Path(tmp) / "keywords.json"
+        env = {**os.environ, "HUB_ROUTES_FILE": str(Path(tmp) / "none.md"), "LANE_RULES_KEYWORDS": str(kf)}
+        pf = Path(tmp) / "prompt.md"
+        pf.write_text(prompt)
+        out = Path(tmp) / "rules.md"
+        cmd = [sys.executable, "-I", str(SCRIPT), "--name", name, "--dir", "/home/u/repos/proj", "--prompt", str(pf),
+               "--out", str(out), "--rules-dir", str(d)]
+        if spec is not None:
+            cmd += ["--rules", spec]
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        return r.returncode, r.stderr, r.stdout.strip().split(","), (out.read_text() if out.exists() else None)
+
+
+class RulesOptionTest(unittest.TestCase):
+    def test_named_parts_load_exactly_and_warn(self):
+        rc, _, parts, text = run_rules("mail,coop", prompt="Open the browser and log in.")
+        self.assertEqual(rc, 0)
+        self.assertEqual(parts, ["core", "mail", "coop"])
+        self.assertIn("rule text of coop", text)
+        self.assertNotIn("rule text of browser", text)
+        head = text.splitlines()[0]
+        self.assertTrue(head.startswith("<!-- lane rules parts loaded: core, mail, coop; not loaded: browser, streams, fleet"), head)
+        self.assertIn("<!-- not loaded, but the prompt mentions: browser (", text)
+        self.assertIn("read hub/lane-rules/browser.md if the work needs it -->", text)
+
+    def test_none_is_core_only(self):
+        rc, _, parts, text = run_rules("none")
+        self.assertEqual((rc, parts), (0, ["core"]))
+        self.assertNotIn("rule text of mail", text)
+        self.assertIn("not loaded, but the prompt mentions: mail (", text)
+
+    def test_all_equals_all_flag(self):
+        _, _, parts, text = run_rules("all")
+        self.assertEqual(parts, PARTS)
+        self.assertNotIn("not loaded", text)
+
+    def test_auto_equals_no_option(self):
+        a = run_rules("auto")
+        b = run_rules(None)
+        self.assertEqual((a[2], a[3]), (b[2], b[3]))
+        self.assertNotIn("but the prompt mentions", a[3])
+
+    def test_unknown_part_exits_2_and_writes_nothing(self):
+        rc, err, _, text = run_rules("mail,bogus")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(text)
+        self.assertIn("bogus", err)
+        for p in PARTS[1:]:
+            self.assertIn(p, err)
+
+    def test_hit_words_lower_case_and_at_most_four(self):
+        prompt = "Gmail GMAIL inbox Draft calendar newsletter recruiter invoice outreach"
+        _, _, _, text = run_rules("none", prompt=prompt)
+        line = [x for x in text.splitlines() if "prompt mentions: mail" in x][0]
+        words = re.search(r"mail \(([^)]*)\)", line).group(1).split(", ")
+        self.assertLessEqual(len(words), 4)
+        self.assertGreaterEqual(len(words), 1)
+        self.assertEqual(words, [w.lower() for w in words])
+
+    def test_pick_keeps_its_return(self):
+        sys.path.insert(0, str(SCRIPT.parent))
+        import lane_rules_compose as m
+        self.assertEqual(m.pick("x", "", "off", "plain fix"), ["core"])
+        self.assertIn("mail", m.pick_hits("x", "", "off", "the inbox"))
 
 
 if __name__ == "__main__":

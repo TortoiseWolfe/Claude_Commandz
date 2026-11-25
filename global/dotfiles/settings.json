@@ -219,7 +219,25 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/lane-watch-guard.py",
+            "command": "python3 -I ~/.claude/hooks/lane-watch-guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/bare-reference.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
             "timeout": 10
           }
         ]
@@ -240,7 +258,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/secret-guard.py"
+            "command": "python3 -I ~/.claude/hooks/secret-guard.py"
           }
         ]
       },
@@ -249,7 +267,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/nextcloud-guard.py",
+            "command": "python3 -I ~/.claude/hooks/nextcloud-guard.py",
             "timeout": 5
           }
         ]
@@ -259,7 +277,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/identity-leak-guard.py",
+            "command": "python3 -I ~/.claude/hooks/identity-leak-guard.py",
             "timeout": 5
           }
         ]
@@ -269,7 +287,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/own-review-merge-guard.py",
+            "command": "python3 -I ~/.claude/hooks/own-review-merge-guard.py",
             "timeout": 5
           }
         ]
@@ -289,7 +307,37 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/list-file-guard.py",
+            "command": "python3 -I ~/.claude/hooks/list-file-guard.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I ~/.claude/hooks/ask-card-guard.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|Write|Edit|AskUserQuestion)$|mcp__.*(Gmail__(get_draft|list_drafts)|[Cc]alendar.*create_event)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I ~/.claude/hooks/docker-first-guard.py",
             "timeout": 5
           }
         ]
@@ -310,6 +358,15 @@
           {
             "type": "command",
             "command": "python3 ~/.claude/hooks/context-warn.py"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/moment-lines.py",
+            "timeout": 5
           }
         ]
       }

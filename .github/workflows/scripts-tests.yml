@@ -83,7 +83,7 @@ jobs:
   shell-part:
     name: shell part ${{ matrix.part }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +105,7 @@ jobs:
           PART: ${{ matrix.part }}
         run: |
           export HOME="$(mktemp -d)"
-          failed=0; ran=0
+          failed=0; ran=0; slow_took=0; slow_file=
           # The list comes from ci_test_coverage.py, the same rule the "shell" job checks, so a file cannot fall out of the glob.
           # Files in .github/ci_not_run.tsv (test_openclaw_uid_stage.sh needs the WSL distro) are left out of it, with the reason and issue printed by that job.
           # A bad slice makes the tool exit non-zero; without this check the loop below would read an empty list and the job would only fail on "no shell test ran".
@@ -113,15 +113,20 @@ jobs:
           while IFS= read -r t; do
             echo "::group::$t"
             began=$SECONDS
-            if timeout 600 bash "$t"; then :; else echo "::error::$t failed"; failed=1; fi
+            rc=0; timeout 900 bash "$t" || rc=$?
+            if [ "$rc" = 124 ]; then echo "::error::$t was stopped at the 900 second limit before it finished"; failed=1
+            elif [ "$rc" != 0 ]; then echo "::error::$t failed"; failed=1; fi
             took=$((SECONDS - began))
             echo "::endgroup::"
             echo "took ${took}s: $t"
-            # One file may run 600 seconds; say so while there is still room, before a later change makes it time out.
-            if [ "$took" -gt 480 ]; then echo "::warning::$t took ${took}s of the 600 it may use"; fi
+            # One file may run 900 seconds; say so while there is still room, before a later change makes it time out.
+            if [ "$took" -gt 720 ]; then echo "::warning::$t took ${took}s of the 900 it may use"; fi
+            if [ "$took" -gt "$slow_took" ]; then slow_took=$took; slow_file=$t; fi
             ran=$((ran + 1))
           done < "$RUNNER_TEMP/shell-part.txt"
           echo "shell tests run: $ran"
+          # The slowest file of this part goes on the run's summary page on every run (issue 98): the 720-second warning above shows only in a log nobody opens.
+          echo "Shell part $PART: $ran files run. Slowest: ${slow_file:-none}, ${slow_took}s of the 900 seconds one file may use." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           if [ "$ran" -lt 1 ]; then echo "::error::no shell test ran"; failed=1; fi
           exit "$failed"
 

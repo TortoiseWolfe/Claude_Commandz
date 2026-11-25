@@ -5,6 +5,7 @@ import {
   classify,
   countInbox,
   explain,
+  failureText,
   hasExitLine,
   ownScratchTargets,
   realPathVerdict,
@@ -14,6 +15,40 @@ import {
   unattendedRoots,
   weather,
 } from './lib'
+
+// The guard's catch-all names its cause through failureText; if that threw, the catch-all would throw and could fail open.
+describe('failureText never throws, whatever was thrown', () => {
+  const messageThrows = new Error('x')
+  Object.defineProperty(messageThrows, 'message', {
+    get: () => {
+      throw new Error('getter')
+    },
+  })
+  const cases: [string, unknown][] = [
+    ['a null-prototype object', Object.create(null)],
+    ['a toString that throws', { toString: () => { throw new Error('nope') } }],
+    ['an Error whose message getter throws', messageThrows],
+    ['a symbol', Symbol('s')],
+    ['null', null],
+    ['a number', 42],
+  ]
+  for (const [what, value] of cases) {
+    test(`${what} becomes a short line`, () => {
+      const t = failureText(value)
+      expect(typeof t).toBe('string')
+      expect(t).not.toContain('\n')
+      expect(t.length).toBeLessThanOrEqual(300)
+    })
+  }
+  test('nothing thrown (undefined) is empty, and an Error names itself and is cut to 300 characters', () => {
+    expect(failureText(undefined)).toBe('')
+    expect(failureText(new TypeError('boom'))).toContain('TypeError: boom')
+    expect(failureText(new Error('a'.repeat(900))).length).toBe(300)
+  })
+  test('the unreadable case says so', () => {
+    expect(failureText(Object.create(null))).toContain('could not be read')
+  })
+})
 
 const INBOX = [
   '- [x] 2026-10-03 done thing',

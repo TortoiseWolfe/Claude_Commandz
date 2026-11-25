@@ -48,6 +48,20 @@ export function bandText(prepRan: boolean, band: Band): string {
   return parts.length > 0 ? parts.join(' | ') : 'hub quiet'
 }
 
+// The text of whatever was thrown, on one line and cut to 300 characters, for the log and the refusal. It never throws, whatever was thrown
+// (a null-prototype object, a toString that throws, an Error whose message getter throws): the guard's catch-all relies on that.
+// It is the engine's own error text, so it can carry a path that was in the command; it is not a copy of the command.
+export function failureText(err: unknown): string {
+  try {
+    if (err === undefined) return ''
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+    const where = err instanceof Error ? (err.stack ?? '').split('\n').filter(l => /\bat\b/.test(l))[0] : undefined
+    return `${msg}${where ? ` ${where.trim()}` : ''}`.replace(/\s+/g, ' ').slice(0, 300)
+  } catch {
+    return 'something that could not be read as text was thrown'
+  }
+}
+
 export type Weather = { kind: 'clear' | 'showers' | 'storm'; text: string }
 
 // Clear under 40%, showers 40-60%, storm past 60%. The hub hands off past 60%;

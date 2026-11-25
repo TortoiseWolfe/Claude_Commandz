@@ -2,16 +2,19 @@
 # Wake the hub when a lane has something to report, so Jonathan never has to ask for progress.
 #
 #   lane_watch.sh [--max-min N] [--check 'cmd'] [<lane-name>...]
+#   lane_watch.sh --wake-counts [DAYS]  wakes per reason code over the last DAYS days (default 7), then exit
 #   lane_watch.sh --recycle-once        one silent recycle pass over every live lane, then exit (the 15-minute scheduled task)
 #
 # Exits (printing one line per event) as soon as any of these happens:
 #   - openclaw_dispatch.py open lists an unanswered receptionist question, or a new one is filed. A burst of questions wakes the
 #     hub ONCE: it waits until no new question has come for LANE_WATCH_BATCH_QUIET seconds (default 60), at most LANE_WATCH_BATCH_MAX
 #     (default 180), then prints the whole list. Each wake after the hub's cache has gone cold costs $1.2 to $1.6 against $0.05 warm.
-#   - a watched lane's report.md (newest ~/.claude/state/lanes/*-<name>/report.md) is new or changes
+#   - a watched lane's report.md (newest ~/.claude/state/lanes/<date>-<name>/report.md) is new or changes
 #   - a watched lane ends a turn without a new report (see turn_done_time), i.e. it may be asking the hub. Not a turn that only answered a
 #     Monitor progress event and asked nothing (lane.sh --turn says monitor): a lane watching a long download would wake the hub every tick.
 #   - a watched lane's report.md line 1 starts STEP-FOR-JONATHAN and has no https:// URL (step_url_check; the lane is asked to rewrite it)
+#   - a watched lane's report.md line 1 says the work is finished (DONE, QUEUE EMPTY) without "items N" and one proof line per item under
+#     "## Proof" (done_proof_check; the lane is sent for the proof). It counts lines and checks a named file exists; it does not open a link.
 #   - a watched lane's report.md line 1 starts with a status word and a time (WORKING 3:05 PM ...) that is more than 2 minutes ahead of the
 #     file's modification time (stamp_ahead_check; the lane is sent the correction). Only that fixed place counts; times deeper in the line do not.
 #   - a watched lane's tmux window is stuck on a dialog (see dialog_waiting), i.e. it is waiting on the hub. Named ONCE per dialog: a dialog
@@ -21,6 +24,8 @@
 #     Named once per death ("dead: <lane> (pane shows <cmd>); restart it fresh from its handoff.md"); the mark is cleared when the pane runs
 #     claude again. 28 Oct 2026: a lane killed its own claude with pgrep -f, sat at a bash prompt for 3 hours and nothing woke the hub.
 #   - a recycle (see below) failed
+#   - the hub asked the owner a question in the terminal and he has not answered in LANE_WATCH_UNANSWERED_MIN minutes (default 15; 0 or off
+#     disables): unanswered_check names it once, so the question can go to Hatch as one [CC>MUSE] note draft
 #   - Jonathan asks from OpenClaw (a new "Jonathan via OpenClaw:" line in hub-inbox.md)
 #   - a message of Jonathan's reached no lane and not the hub's list (openclaw_reconcile.py; it files each one with the hub as it wakes)
 #   - a post for Jonathan's chat has failed to land for 15 minutes (openclaw_dispatch.py queue check). Every poll also tries the
@@ -51,7 +56,7 @@
 # in thousand tokens: set at start with --recycle-at, else the default for its kind of work), the poll starts `lane.sh --recycle <lane>` in
 # the background, mid-turn if need be (the lane finishes the step in hand, writes handoff.md, gets /clear and a re-prime message) and logs it
 # to ~/.claude/state/lanes/recycle.log. It does not wait for the turn to end: a long turn outruns Claude Code's backstop (21 Oct: one
-# 15-minute turn went 120K to 168K and compacted). That wakes nobody; only a FAILED recycle does. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
+# 15-minute turn went 120K to 168K and compacted). That wakes nobody. What wakes the hub is a FAILED recycle, a failed update, a dead recycle lock, a lane that thrashes and the recycle stop. The check runs on every poll, whatever the lane's last turn did. A lane is tried again after
 # LANE_RECYCLE_RETRY_SECS (default 300), counted across re-armed watchers (.recycle-<lane>.tried). LANE_RECYCLE_K, when set, overrides every lane's line (tests, emergencies).
 # A lane that keeps refilling its line is not recycled forever: when it has been recycled LANE_THRASH_COUNT (default 3) times inside LANE_THRASH_SECS
 # (default 1800), the watcher stops recycling it and wakes the hub ONCE per episode with one line (lane, count, times). 25-26 Oct: pokeys-site
@@ -72,6 +77,13 @@
 # every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
 # Also left alone (line1_rests): a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
+# Every wake prints WAKE-REASON <code> as its first line (the existing lines follow unchanged) and appends one tab-separated row (ISO time from
+# date -Is, code, lane or -) to $LANE_WATCH_WAKE_LOG (default: wake.log in the lane state folder, $LANE_RECYCLE_DIR); a log that cannot be written
+# never stops the wake. The code comes from the first output line, one per kind of wake, from the table in wake_code: report, window-gone, dialog,
+# turn-ended, idle-remind, job-idle, handoff-orphan, step-no-link, done-no-proof, stamp-ahead, pane-dead, stale-lock, context-unknown, recycle-thrash,
+# recycle-failed, update-failed, tier, green-pr, spend, hub-context, unanswered, bridge, outbox, undelivered, ask-open, ask-openclaw, budget-reading,
+# client-talk, note, check-passed, heartbeat (other for a line the table does not know). A false wake is counted with
+# lane_watch.sh --wake-counts [DAYS] (default 7): the number of wakes per code in that window, most first.
 # Run it with the Bash tool's run_in_background; its exit re-invokes the hub, which reports and re-arms it.
 # A watcher parses what it reads: no child of it may send long output to a file (big_output.py reads this).
 export AFA_BIG_OUT=0
@@ -81,6 +93,87 @@ _lw_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 # Leave the folder the watcher was started from. 6 Nov 2026: the hub started it inside a lane worktree, the lane removed the worktree after
 # its merge, and the watcher died with "getcwd: cannot access parent directories". Nothing here needs the starting folder.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then cd "${HOME:-/}" 2>/dev/null || cd / || true; fi
+
+# The one table of wake reason codes: wake_code <kind> prints the code of that kind of wake.
+wake_code() {
+  case "$1" in
+    report) echo report ;;           gone) echo window-gone ;;        dialog) echo dialog ;;
+    turn) echo turn-ended ;;         idle-remind) echo idle-remind ;; job-idle) echo job-idle ;;
+    handoff) echo handoff-orphan ;;  step-url) echo step-no-link ;;   done-proof) echo done-no-proof ;;
+    stamp) echo stamp-ahead ;;       dead) echo pane-dead ;;          lock) echo stale-lock ;;
+    ctx) echo context-unknown ;;     thrash) echo recycle-thrash ;;   recycle-failed) echo recycle-failed ;;
+    update-failed) echo update-failed ;; tier) echo tier ;;           green) echo green-pr ;;
+    spend) echo spend ;;             hub-context) echo hub-context ;; unanswered) echo unanswered ;;
+    bridge) echo bridge ;;           outbox) echo outbox ;;           undelivered) echo undelivered ;;
+    ask-open) echo ask-open ;;       ask-openclaw) echo ask-openclaw ;; budget) echo budget-reading ;;
+    talk) echo client-talk ;;        note) echo note ;;               check) echo check-passed ;;
+    heartbeat) echo heartbeat ;;     *) echo other ;;
+  esac
+}
+# wake_classify <first output line>: prints "<code> <lane or ->".
+wake_classify() {
+  local l=$1 kind=other lane=- re
+  case "$l" in
+    "report: "*) kind=report; re='^report: ([^ ]+) ' ;;
+    "gone: "*) kind=gone; re='^gone: ([^ ]+)' ;;
+    "waiting on a dialog: "*) kind=dialog; re='^waiting on a dialog: ([^ ]+)' ;;
+    "idle: "*"ended a turn"*) kind=turn; re='^idle: ([^ ]+) ' ;;
+    "idle: "*"background job"*) kind=job-idle; re='^idle: ([^ ]+) ' ;;
+    "idle: "*) kind=idle-remind; re='^idle: ([^ ]+) ' ;;
+    "handoff: lane "*) kind=handoff; re='^handoff: lane ([^ ]+) ' ;;
+    "step without URL: "*) kind=step-url; re='^step without URL: ([^ ]+) ' ;;
+    "done without proof: "*) kind=done-proof; re='^done without proof: ([^ ]+) ' ;;
+    "stamp ahead: "*) kind=stamp; re='^stamp ahead: ([^ ]+) ' ;;
+    "dead: "*) kind=dead; re='^dead: ([^ ]+) ' ;;
+    "stale recycle lock: "*) kind=lock; re='^stale recycle lock: ([^ ]+) ' ;;
+    "context unknown: "*) kind=ctx; re='^context unknown: ([^ ]+) ' ;;
+    "thrash: lane "*) kind=thrash; re='^thrash: lane ([^ ]+) ' ;;
+    "recycle failed: "*) kind=recycle-failed; re='^recycle failed: ([^:]+):' ;;
+    "update failed: "*) kind=update-failed; re='^update failed: ([^:]+):' ;;
+    "tier: lane "*) kind=tier; re='^tier: lane ([^ ]+) ' ;;
+    "green: "*) kind=green; re="^green: ([^ ]+)'s " ;;
+    "spend: lane "*) kind=spend; re='^spend: lane ([^ ]+) ' ;;
+    "spend: the hub"*) kind=spend; lane=hub ;;
+    "hub context: "*) kind=hub-context ;;
+    "unanswered: "*) kind=unanswered ;;
+    "bridge: "*) kind=bridge ;;
+    "outbox: "*) kind=outbox ;;
+    "undelivered: "*) kind=undelivered ;;
+    "ask: open receptionist"*) kind=ask-open ;;
+    "ask: "*) kind=ask-openclaw ;;
+    "budget reading failed"*) kind=budget ;;
+    "client talk: "*) kind=talk ;;
+    "note: "*) kind=note ;;
+    "check passed: "*) kind=check ;;
+    "heartbeat: "*) kind=heartbeat ;;
+  esac
+  [ -z "${re:-}" ] || { [[ "$l" =~ $re ]] && lane=${BASH_REMATCH[1]}; }
+  printf '%s %s\n' "$(wake_code "$kind")" "$lane"
+}
+# --wake-counts [DAYS]: wakes per code in the window, most first. Rows are: ISO time, code, lane.
+wake_counts() {
+  local days=${1:-7} cut
+  [[ "$days" =~ ^[0-9]+$ ]] || days=7
+  cut=$(date -d "-$days days" +%Y-%m-%dT%H:%M:%S)
+  awk -F'\t' -v cut="$cut" 'substr($1, 1, 19) >= cut { n[$2]++ } END { for (c in n) printf "%d\t%s\n", n[c], c }' "$wake_log" 2>/dev/null | sort -t$'\t' -k1,1nr -k2,2
+}
+# The wake log: one row per wake in the lane state folder. Never fails the wake.
+wake_log="${LANE_WATCH_WAKE_LOG:-${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}/wake.log}"
+wake_buf=""   # set once the watch holds its output: 1 when stdout is the held copy, read back through descriptor 4
+# wake_exit: every wake path ends here. If the watch printed anything it is a wake. Print WAKE-REASON first, then what was printed, then log the row.
+wake_emit() {
+  local all first cl code lane
+  [ -n "$wake_buf" ] || return 0
+  all=$(cat <&4)
+  exec 1>&3 3>&- 4<&-
+  wake_buf=""
+  [ -n "$all" ] || return 0
+  first=${all%%$'\n'*}
+  cl=$(wake_classify "$first"); code=${cl%% *}; lane=${cl#* }
+  printf 'WAKE-REASON %s\n%s\n' "$code" "$all"
+  { mkdir -p "$(dirname "$wake_log")" && printf '%s\t%s\t%s\n' "$(date -Is)" "$code" "$lane" >> "$wake_log"; } 2>/dev/null || true
+}
+wake_exit() { wake_emit; exit 0; }
 
 # Does this pane text show a dialog that waits on the hub? Reads the pane on stdin.
 # Claude Code menus say "Enter to select"; its permission prompts say "Do you want to proceed"
@@ -117,7 +210,32 @@ lane_sh="${LANE_SH:-$HOME/.claude/scripts/lane.sh}"
 recycle_dir="${LANE_RECYCLE_DIR:-$HOME/.claude/state/lanes}"
 recycle_log="$recycle_dir/recycle.log"
 recycle_retry=${LANE_RECYCLE_RETRY_SECS:-300}
-recycle_locked() { [ -d "$recycle_dir/.recycle-$1.lock" ]; }
+# A lock older than LANE_WATCH_LOCK_MAX_MIN minutes (default 30) is dead: its recycle was killed. "Older" means the age in whole minutes (seconds / 60, fraction dropped) is more than the limit, the same rule as find's -mmin +30, so a lock is dead from its 31st minute. The 30 must stay equal to lane.sh's own
+# limit (grep "-maxdepth 0 -mmin +30" in lane.sh). A lock whose time cannot be read counts as locked, the safe side. No lock: no process started.
+lock_max_min=${LANE_WATCH_LOCK_MAX_MIN:-30}
+[[ "$lock_max_min" =~ ^[0-9]+$ ]] || lock_max_min=30
+recycle_locked() {
+  local t
+  [ -d "$recycle_dir/.recycle-$1.lock" ] || return 1
+  t=$(stat -c %Y "$recycle_dir/.recycle-$1.lock" 2>/dev/null) || return 0
+  [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  [ $(( ($(date +%s) - t) / 60 )) -le "$lock_max_min" ]
+}
+# stale_lock_check <lane> (no subshell: it sets hit and other) names a dead lock once per lock; the mark .stalelock-<lane> holds the lock's
+# modification time. The watcher never removes the lock itself.
+stale_lock_check() {
+  local l=$1 lock="$recycle_dir/.recycle-$1.lock" t age mark="$recycle_dir/.stalelock-$1"
+  # No lock folder: a mark left from an earlier dead lock has nothing to guard any more, so it goes.
+  [ -d "$lock" ] || { [ -e "$mark" ] && rm -f "$mark"; return 0; }
+  t=$(stat -c %Y "$lock" 2>/dev/null) || return 0
+  [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  age=$(( ($(date +%s) - t) / 60 ))
+  [ "$age" -gt "$lock_max_min" ] || return 0
+  [ "$(cat "$mark" 2>/dev/null)" = "$t" ] && return 0
+  printf '%s' "$t" > "$mark" 2>/dev/null
+  echo "stale recycle lock: $l (its recycle lock is $age min old, so that recycle died; the watcher checks the lane again from now; lane.sh --recycle $l clears the lock, or says why it did not)"
+  hit=1; other=1
+}
 # Seconds since the watcher (this one or an earlier one the hub re-armed) last started a recycle for the lane; big if never. Kept in a
 # file, not in memory, because the hub re-arms the watcher every few minutes and a retry timer that dies with it never spaces anything.
 recycle_tried_age() {
@@ -134,19 +252,44 @@ recycle_line() {
 }
 # recycle_due <lane>, the lane's pane on stdin: 0 when its context is at or over its line, a working lane included.
 recycle_due() {
-  local l=$1 pane c; pane=$(cat)
+  local l=$1 pane c n; pane=$(cat)
   recycle_locked "$l" && return 1
   printf '%s\n' "$pane" | dialog_waiting && return 1
   c=$("$lane_sh" --ctx "$l" 2>/dev/null)
+  # Count the readings that came back as exactly a question mark (ctx_unknown_check names the lane); a number or n/a ends the run.
+  # In files, because this runs in a pipeline's subshell. Writes nothing to standard output.
+  if [ "$c" = "?" ]; then
+    n=$(cat "$recycle_dir/.ctxunknown-$l" 2>/dev/null) || n=0
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    printf '%s' $(( 10#$n + 1 )) > "$recycle_dir/.ctxunknown-$l"
+  elif [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" = "n/a" ]; then
+    rm -f "$recycle_dir/.ctxunknown-$l" "$recycle_dir/.ctxunknown-$l.named"
+  fi
   [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge "$(recycle_line "$l")" ]
+}
+# Unreadable context. ctx_unknown_check <lane> (no subshell: it sets hit and other) names a lane whose context has read as unknown
+# LANE_WATCH_CTX_UNKNOWN (default 10) polls in a row, because recycle_due cannot test its recycle line then. 0 or "off" turns it off.
+# The mark .ctxunknown-<lane>.named stops a second naming; recycle_due clears both files when a number or n/a is read.
+ctx_unknown_check() {
+  local l=$1 lim=${LANE_WATCH_CTX_UNKNOWN:-10} n mark="$recycle_dir/.ctxunknown-$1.named"
+  [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -gt 0 ] || return 0
+  n=$(cat "$recycle_dir/.ctxunknown-$l" 2>/dev/null) || n=0
+  [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge "$lim" ] || return 0
+  [ -e "$mark" ] && return 0
+  : > "$mark"
+  echo "context unknown: $l (its context has read as unknown $n times in a row, so its recycle line cannot be checked) -- look at the lane"
+  hit=1; other=1
 }
 # Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
 # recycled thrash_count times within thrash_secs by the rows of the recycle log. The marker (.thrash-<lane>) holds the newest recycled stamp
-# of the episode it named, so the same episode is not named twice but a later one is.
+# of the episode it named, so the same episode is not named twice but a later one is. A lane whose stop marker (.recycle-stop-<lane>, written by
+# lane.sh when the third recycle in the window succeeded, or a recycle was held three times by running subagents) stands is never recycled by
+# the watcher, however old its rows are: it returns 0 at once and says nothing, because the FAILED row lane.sh wrote has told the hub already.
 thrash_count=${LANE_THRASH_COUNT:-3}
 thrash_secs=${LANE_THRASH_SECS:-1800}
 recycle_thrash() {
   local l=$1 quiet=${2:-} now ts e newest='' times='' n=0 mark
+  [ ! -e "$recycle_dir/.recycle-stop-$l" ] || return 0
   [ -f "$recycle_log" ] || return 1
   now=$(date +%s)
   while IFS= read -r ts; do
@@ -196,6 +339,34 @@ orphan_check() {
   hit=1; other=1
 }
 
+# line1_class <report line 1>: THE one table of line-1 words. Prints exactly one class word; every check that reads line 1 asks it (step_url_check,
+# line1_done_claim, line1_rests) and none keeps its own list of spellings. Precedence is the order below. LC_ALL=C is set for this function only:
+# [A-Z] means the 26 plain capitals on every machine. The first word is capitals joined by hyphens and must end at a character that is not a
+# letter, digit, underscore or hyphen, so HUBRIS, DONE-ISH and "Hub: ..." are other, and so is lowercase "queue empty".
+#   empty    QUEUE EMPTY at the start, or EMPTY alone, "EMPTY <rest>", "EMPTY:..." or "EMPTY|...". The standing rule's ending, and the end-of-queue line
+#            the lane prompts have always asked for (6 Nov 2026: six lanes wrote "EMPTY <time> | ..." and were named every 20 minutes).
+#   blocked  BLOCKED at the start (the standing rule's other ending: BLOCKED (who/what)).
+#   step     STEP-FOR-JONATHAN at the start. A step for him needs its https:// link (26 Oct 2026, Jonathan: "so you are asking me to do something
+#            with out givng me the url to do it, again"); step_url_check asks for it.
+#   waiting  a first word with HUB or JONATHAN as one hyphen-joined part (HUB-ACT, NEED-HUB, READY-FOR-HUB), other than step. The hub is woken once
+#            by the report itself; naming the lane every 20 minutes woke it for nothing (8 Nov 2026, "HUB-ACT 3:23 AM | ...").
+#   done     DONE as the whole first word, unless DONE is followed by BY, UNTIL, TILL, DEADLINE, DUE, BEFORE or ETA (stamp_ahead_check's target
+#            words): that says when the lane WILL be done, so it is other. 6 Nov 2026: two finished lanes wrote DONE and were named, one after
+#            197 minutes, and the hub had to ask each to rewrite the line as QUEUE EMPTY.
+#   other    everything else (WORKING, HOURLY, STATUS, HUBRIS, DONE-ISH, "Hub: ...", lowercase "queue empty").
+line1_class() {
+  local first=$1 w LC_ALL=C
+  case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) echo empty; return 0 ;; esac
+  case "$first" in "BLOCKED"*) echo blocked; return 0 ;; esac
+  [[ $first =~ ^STEP-FOR-JONATHAN([^A-Za-z0-9_-]|$) ]] && { echo step; return 0; }
+  if [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]]; then
+    w=${BASH_REMATCH[1]}
+    case "-$w-" in *-HUB-*|*-JONATHAN-*) echo waiting; return 0 ;; esac
+    if [ "$w" = DONE ] && [[ ! $first =~ ^DONE\ +(BY|UNTIL|TILL|DEADLINE|DUE|BEFORE|ETA)([^A-Za-z0-9_-]|$) ]]; then echo done; return 0; fi
+  fi
+  echo other
+}
+
 # A step for Jonathan with no link. step_url_check <lane> (no subshell: it sets hit and other) looks at the lane's report.md: when line 1 starts
 # with STEP-FOR-JONATHAN and holds no https:// URL, it names the lane to the hub ("step without URL: <lane>") and types a note into the lane
 # through lane.sh --send asking it to rewrite line 1 with the URL. Once per distinct line 1, so a lane that rewrites it is checked again.
@@ -205,7 +376,7 @@ step_url_check() {
   local l=$1 rep first sum mark
   rep=$(report_of "$l"); [ -n "$rep" ] || return 0
   first=$(head -n 1 "$rep" 2>/dev/null)
-  case "$first" in STEP-FOR-JONATHAN*) ;; *) return 0 ;; esac
+  [ "$(line1_class "$first")" = step ] || return 0
   case "$first" in *https://*) return 0 ;; esac
   sum=$(printf '%s' "$first" | cksum | cut -d' ' -f1)
   mark="$recycle_dir/.stepurl-$l"
@@ -213,6 +384,72 @@ step_url_check() {
   printf '%s' "$sum" > "$mark"
   echo "step without URL: $l (line 1 of $rep starts STEP-FOR-JONATHAN and has no https:// link); asked the lane to rewrite it"
   "$lane_sh" --send "$l" "Hub: line 1 of your report.md is a STEP-FOR-JONATHAN with no link. Rewrite line 1 so it carries the full https:// URL of the exact page, says which browser (the fleet Chromium and its tab title, or his own) and how he will know it is done; bring the fleet tab to the front first. He cannot act on a step without the URL." >/dev/null 2>&1 || true
+  hit=1; other=1
+}
+
+# done_proof_counts <report file>: prints "CLAIMED PROOFS". CLAIMED is the whole number after the word item or items on line 1 (case-insensitive,
+# the word not glued to a letter, digit or underscore before it, the number not followed by a digit or a colon, so "items 4:30" is no count), or
+# none. PROOFS counts the distinct lines of the first "## Proof" section (up to the next "## " line, at most 500 lines of it) that begin "- " and
+# hold an https:// link or a word that is an existing absolute path (a leading ~/ becomes $HOME by string replacement; at most 3 such words a line
+# are tried, after stripping quotes, brackets, commas, semicolons and a trailing full stop or colon). Nothing in the report is run or evaluated.
+done_proof_counts() {
+  local LC_ALL=C f=$1 line1 low claimed=none proofs=0 line w n t prev
+  local -A seen=()
+  line1=$(head -n 1 "$f" 2>/dev/null); line1=${line1%$'\r'}; low=${line1,,}
+  if [[ $low =~ (^|[^a-z0-9_])items?[\ :]+([0-9]{1,9})([^0-9:]|$) ]]; then claimed=$((10#${BASH_REMATCH[2]})); fi
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ $line == "- "* ]] || continue
+    [ -z "${seen[$line]:-}" ] || continue
+    if [[ $line =~ https://[^[:space:]] ]]; then seen[$line]=1; proofs=$((proofs + 1)); continue; fi
+    n=0
+    local -a words=()
+    read -ra words <<<"$line"
+    for w in "${words[@]}"; do
+      prev=
+      while [ "$w" != "$prev" ]; do
+        prev=$w
+        w=${w#[\`\'\"\(\)\[\],;]}; w=${w%[\`\'\"\(\)\[\],;.:]}
+      done
+      case "$w" in /*|"~/"*) ;; *) continue ;; esac
+      n=$((n + 1))
+      t=$w; case "$t" in "~/"*) t="$HOME/${t#"~/"}" ;; esac
+      if [ "${t//\//}" != "" ] && [ -e "$t" ]; then seen[$line]=1; proofs=$((proofs + 1)); break; fi
+      [ "$n" -lt 3 ] || break
+    done
+  done < <(awk 'BEGIN{s=0;n=0} s==0{ if (substr($0,1,8)=="## Proof") s=1; next } /^## /{exit} {print; if (++n>=500) exit}' "$f" 2>/dev/null)
+  printf '%s %s\n' "$claimed" "$proofs"
+}
+
+# line1_done_claim <report line 1>: true when line 1 says the work is finished: QUEUE EMPTY at the start, an EMPTY form line1_rests accepts, or
+# DONE as the whole first word. BLOCKED, WORKING, HUB and JONATHAN words, HOURLY, STATUS and the rest are false. DONE followed by one of
+# stamp_ahead_check's target words in capitals (BY, UNTIL, TILL, DEADLINE, DUE, BEFORE, ETA) says when the lane WILL be done, so it is no claim.
+line1_done_claim() {
+  case "$(line1_class "$1")" in empty|done) return 0 ;; esac
+  return 1
+}
+
+# A finished line with nothing to show for it. done_proof_check <lane> (no subshell: it sets hit and other) looks at a changed report.md: when
+# line 1 says the work is finished (line1_done_claim) it must also count its items ("items N") and the report must hold at least N proof lines
+# under "## Proof". Otherwise it names the lane to the hub ("done without proof: <lane>") and sends the lane a note through lane.sh --send.
+# Once per distinct state (line 1 plus the two counts), so a lane that adds a proof is checked again. Only a changed report is checked.
+# 11 Nov 2026: a lane wrote that all 12 of its items were done after 12 minutes when 3 were, and nothing checked the claim before the hub
+# believed it. This check counts proof lines and checks that a named file exists; it does not open a link, so it catches a bare claim, not a lie.
+done_proof_check() {
+  local l=$1 rep first counts claimed proofs reason sum mark
+  rep=$(report_of "$l"); [ -n "$rep" ] || return 0
+  first=$(head -n 1 "$rep" 2>/dev/null)
+  line1_done_claim "$first" || return 0
+  counts=$(done_proof_counts "$rep")
+  claimed=${counts%% *}; proofs=${counts##* }
+  if [[ $claimed =~ ^[0-9]+$ ]] && [ "$proofs" -ge "$claimed" ]; then return 0; fi
+  if [ "$claimed" = none ]; then reason="no item count on line 1"; else reason="line 1 counts $claimed items and the report has $proofs proof lines"; fi
+  sum=$(printf '%s %s %s' "$first" "$claimed" "$proofs" | cksum | cut -d' ' -f1)
+  mark="$recycle_dir/.doneproof-$l"
+  [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
+  printf '%s' "$sum" > "$mark"
+  echo "done without proof: $l ($reason; $rep); asked the lane for one proof line per item -- do not count it as done yet"
+  "$lane_sh" --send "$l" "Hub: line 1 of your report.md says the work is finished but does not prove it ($reason). Put the words items N on line 1, where N is how many things you finished (items 0 when there was nothing to do), and add a section headed ## Proof to report.md with one line per item, each starting with a hyphen and a space and holding an https:// link or the full path of a file that exists. Read each proof back from the live thing itself (the posted card, the merged commit, the staged draft), not from what a tool answered when you sent it. Then save report.md so it is read again." >/dev/null 2>&1 || true
   hit=1; other=1
 }
 
@@ -315,12 +552,8 @@ job_idle_check() {
 # The first word is capitals joined by hyphens and must end at a character that is not a letter, digit, underscore or hyphen, so HUBRIS,
 # DONE-ISH and "Hub: ..." are not taken. LC_ALL=C is set for this function only: [A-Z] means the 26 plain capitals on every machine.
 line1_rests() {
-  local first=$1 w low LC_ALL=C
-  case "$first" in "QUEUE EMPTY"*|"BLOCKED"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) return 0 ;; esac
-  [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]] || return 1
-  w=${BASH_REMATCH[1]}
-  case "-$w-" in *-HUB-*|*-JONATHAN-*) return 0 ;; esac
-  [ "$w" = DONE ] || return 1
+  local first=$1 low
+  case "$(line1_class "$first")" in empty|blocked|step|waiting) return 0 ;; done) ;; *) return 1 ;; esac
   low=${first,,}
   [[ ! $low =~ needs?\ (the\ )?(hub|jonathan):?\ *[1-9] ]]
 }
@@ -414,22 +647,24 @@ recycle_pass() {
   printf '%s\n' "$pane" | recycle_due "$l" || return 1
   recycle_thrash "$l" "$quiet" && return 0   # a lane recycled again and again is named to the hub instead
   date +%s > "$recycle_dir/.recycle-$l.tried"
-  setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 </dev/null &
+  setsid nohup timeout 1500 "$lane_sh" --recycle "$l" >>"$recycle_dir/recycle.out" 2>&1 </dev/null 3>&- 4<&- &
   return 0
 }
 
-# New "FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
+# New "FAILED" and "UPDATE-FAILED" rows in the recycle log since the last look (byte offset in $recycle_log_seen).
 # The offset lives in a file ($recycle_dir/.recycle-log-seen), so a FAILED row written while no watcher was armed is still reported by the next
 # one. 28 Oct 2026: a watcher started after the row and began at the log's end, and the failure was never named. No file (first run): start at the end.
 recycle_log_seen_file="$recycle_dir/.recycle-log-seen"
 recycle_log_seen=$(cat "$recycle_log_seen_file" 2>/dev/null || true)
 [[ "$recycle_log_seen" =~ ^[0-9]+$ ]] || recycle_log_seen=$(stat -c %s "$recycle_log" 2>/dev/null || echo 0)
-# Sets recycle_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
+# Sets recycle_fail_out and update_fail_out (one "lane: reason" per line); called without a subshell so the offset sticks.
 recycle_failures() {
-  local size; recycle_fail_out=''
+  local size rows; recycle_fail_out=''; update_fail_out=''
   size=$(stat -c %s "$recycle_log" 2>/dev/null) || return 0
   [ "$size" -gt "$recycle_log_seen" ] || { recycle_log_seen=$size; printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null; return 0; }
-  recycle_fail_out=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log" | command grep -a $'\tFAILED\t' | awk -F'\t' '{print $2 ": " $4}')
+  rows=$(tail -c +"$((recycle_log_seen + 1))" "$recycle_log")
+  recycle_fail_out=$(printf '%s\n' "$rows" | awk -F'\t' '$3 == "FAILED" {print $2 ": " $4}')
+  update_fail_out=$(printf '%s\n' "$rows" | awk -F'\t' '$3 == "UPDATE-FAILED" {print $2 ": " $4}')
   recycle_log_seen=$size
   printf '%s' "$size" > "$recycle_log_seen_file" 2>/dev/null
 }
@@ -511,6 +746,32 @@ high_check() {
   hit=1; other=1
 }
 
+# hub_transcript <projects dir>: prints the hub's own transcript path (nothing if there is none). A lane started in the same folder
+# writes its transcript there too, so the newest file can be a lane's. Order: AFA_HUB_SESSION_ID (an override for tests and for a
+# watcher started some other way) when <dir>/<id>.jsonl is a file; else CLAUDE_CODE_SESSION_ID (the hub's shell has it and the watcher
+# inherits it) the same way; else the newest .jsonl, as before (a watcher started by a scheduled task has no id). An id is used only
+# when it matches ^[A-Za-z0-9-]+$, because it becomes part of a path. Limit: after the hub clears its context it has a new id, and a
+# watcher armed before the clear still holds the old one until it is re-armed; the old transcript no longer grows, so a hub that
+# passes its hand-off line after the clear is missed until the watcher is re-armed (it is re-armed after every wake). One stale
+# wake is possible in that time: if the old transcript ends in a question nobody answered, the unanswered check can name it once,
+# and if the old transcript was already past the hand-off line with no stamp yet, the hand-off wake can fire once. Each is named
+# once only (by the message's uuid, by the session id). The newest-file rule this replaces could read a lane's transcript on any poll.
+hub_transcript() {
+  local dir=$1 id f m newest="" newest_mtime=0
+  for id in "${AFA_HUB_SESSION_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}"; do
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[A-Za-z0-9-]+$ ]] || continue
+    if [ -f "$dir/$id.jsonl" ]; then printf '%s\n' "$dir/$id.jsonl"; return 0; fi
+  done
+  for f in "$dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    m=$(stat -c %Y "$f" 2>/dev/null) || continue
+    if (( m > newest_mtime )); then newest_mtime=$m; newest=$f; fi
+  done
+  [ -n "$newest" ] && printf '%s\n' "$newest"
+  return 0
+}
+
 # Hub context hand-off wake. The hub's transcripts are in ~/.claude/projects/<repo-with-dashes>/*.jsonl.
 # Derive the folder from $HOME/repos the way Claude Code does (slashes to dashes). Wake once per session id
 # using a stamp file $HOME/.claude/state/hub-handoff-woke.<session-id>. Reads AFA_HANDOFF_K (default 150, at the first natural break and never mid-task; Jonathan raised it from 330K on 11 Nov; auto-compact is at 367K).
@@ -521,17 +782,8 @@ hub_handoff_check() {
   # The leading dash stays: /home/x/repos becomes -home-x-repos. AFA_HUB_PROJECTS_DIR overrides (tests).
   local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/${project_folder}}"
   [ -d "$projects_dir" ] || return 0
-  local newest=""
-  local newest_mtime=0
-  local f
-  for f in "$projects_dir"/*.jsonl; do
-    [ -f "$f" ] || continue
-    local m; m=$(stat -c %Y "$f" 2>/dev/null) || continue
-    if (( m > newest_mtime )); then
-      newest_mtime=$m
-      newest=$f
-    fi
-  done
+  local newest
+  newest=$(hub_transcript "$projects_dir")
   [ -n "$newest" ] || return 0
   local session_id="${newest##*/}"
   session_id="${session_id%.jsonl}"
@@ -547,8 +799,111 @@ hub_handoff_check() {
     mkdir -p "$(dirname "$stamp_file")" 2>/dev/null
     printf '%s\n' "$(date +%s)" > "$stamp_file"
     echo "hub context: ${tokens_k}K, past the ${handoff_k}K hand-off line. Write the hand-off, run /session-prime, ask for a fresh terminal."
-    exit 0
+    wake_exit
   fi
+}
+
+# Unanswered-question wake. The hub asked the owner something in the terminal and 15 minutes (LANE_WATCH_UNANSWERED_MIN; 0 or "off" turns
+# it off) later he has not answered: the question goes to his phone assistant as one [CC>MUSE] note draft. Reads only the last 200 lines of
+# the hub's own transcript (hub_transcript, same folder as hub_handoff_check). Fires when the last assistant text comes after the last typed user
+# message (not a tool_result, not isMeta, not a "<" wrapper), its final paragraph outside fenced code holds a "?" or "your call" /
+# "which do you want" / "do you want" / "should I", and it is old enough. A question card (AskUserQuestion) with no tool_result yet
+# counts too, timed from the card. Named once per assistant uuid (.unanswered-<uuid> in $recycle_dir).
+# Sets hit and other (call it inside the poll loop, after they are reset).
+unanswered_check() {
+  local min=${LANE_WATCH_UNANSWERED_MIN:-15}
+  [ "$min" = off ] && return 0
+  [[ "$min" =~ ^[0-9]+$ ]] && (( min > 0 )) || return 0
+  local projects_dir="${AFA_HUB_PROJECTS_DIR:-${HOME}/.claude/projects/$(printf '%s' "${HOME}/repos" | tr / -)}"
+  [ -d "$projects_dir" ] || return 0
+  local newest
+  newest=$(hub_transcript "$projects_dir")
+  [ -n "$newest" ] || return 0
+  local res uuid clock age
+  res=$(tail -n 200 "$newest" 2>/dev/null | python3 -I -c '
+import sys, json, re, datetime
+user_i = asst_i = -1
+asst = None
+card = None  # (entry, tool_use id) of a question card still waiting for its answer
+for i, line in enumerate(sys.stdin):
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(e, dict) or e.get("isSidechain"):
+        continue
+    msg = e.get("message")
+    c = msg.get("content") if isinstance(msg, dict) else None
+    if e.get("type") == "user" and card and isinstance(c, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == card[1] for b in c):
+            card = None
+    if e.get("type") == "assistant" and isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion":
+                card = (e, b.get("id"))
+    if e.get("type") == "user" and not e.get("isMeta"):
+        texts = []
+        if isinstance(c, str):
+            texts = [c]
+        elif isinstance(c, list):
+            texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"]
+        texts = [t for t in texts if isinstance(t, str) and t.strip() and not t.lstrip().startswith("<")]
+        if texts:
+            user_i = i
+    elif e.get("type") == "assistant" and isinstance(c, list):
+        texts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str) and b.get("text").strip()]
+        if texts:
+            asst_i, asst = i, (e, "\n".join(texts))
+def stamp(e):
+    try:
+        t = datetime.datetime.fromisoformat(str(e.get("timestamp")).replace("Z", "+00:00"))
+    except Exception:
+        sys.exit(0)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    age = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60)
+    uuid = re.sub(r"[^A-Za-z0-9_-]", "", str(e.get("uuid", "")))
+    if not uuid:
+        sys.exit(0)
+    lt = t.astimezone()
+    clock = "%d:%02d %s" % (lt.hour % 12 or 12, lt.minute, "AM" if lt.hour < 12 else "PM")
+    print("%s\t%d\t%s" % (uuid, age, clock))
+    sys.exit(0)
+if card is not None:
+    stamp(card[0])  # an open question card counts whatever text came before it
+if asst is None or asst_i < user_i:
+    sys.exit(0)
+e, text = asst
+blocks, cur, fenced = [], [], False
+for ln in text.splitlines():
+    if ln.lstrip().startswith("```"):
+        fenced = not fenced
+        continue
+    if fenced:
+        continue
+    if ln.strip():
+        cur.append(ln)
+    elif cur:
+        blocks.append(cur); cur = []
+if cur:
+    blocks.append(cur)
+if not blocks:
+    sys.exit(0)
+last = "\n".join(blocks[-1]).lower()
+if not ("?" in last or any(p in last for p in ("your call", "which do you want", "do you want", "should i"))):
+    sys.exit(0)
+stamp(e)
+' 2>/dev/null) || return 0
+  [ -n "$res" ] || return 0
+  IFS=$'\t' read -r uuid age clock <<<"$res"
+  [[ "$age" =~ ^[0-9]+$ ]] && [ -n "$uuid" ] || return 0
+  (( age >= min )) || return 0
+  [ -e "$recycle_dir/.unanswered-$uuid" ] && return 0
+  mkdir -p "$recycle_dir" 2>/dev/null
+  : > "$recycle_dir/.unanswered-$uuid"
+  find "$recycle_dir" -maxdepth 1 -name '.unanswered-*' -mtime +3 -delete 2>/dev/null
+  echo "unanswered: your question to the owner at $clock has had no reply for $age min; send it to Hatch as one [CC>MUSE] note draft (one question, its link, what yes and no do), then carry on with work that does not need the answer."
+  hit=1; other=1
 }
 
 # The WSL-to-Windows bridge alert (wsl_bridge_watchdog.py writes it when a heal did not bring the big free memory blocks back or the
@@ -653,7 +1008,7 @@ client_line_open() {
 # "report stale: ..." when lane.sh --status says the lane's report.md is not its last word (input arrived after it, or a background job is
 # still running), else nothing. 19 Oct: a lane was closed on "report:yes idle" while it was mid-work.
 stale_note() {
-  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
+  "$lane_sh" --status --full 2>/dev/null | awk -v n="$1" '$1 == n && $2 == "report:stale" {f = 1; next} f && /report stale:/ {sub(/^[[:space:]]+/, ""); print; exit} f && !/^[[:space:]]/ {exit}'
 }
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
@@ -663,16 +1018,28 @@ idle_max=${LANE_WATCH_IDLE_MAX_MIN:-120}
 while [ $# -gt 0 ]; do
   case "$1" in
     --recycle-once) recycle_once=1; shift ;;
-    --max-min) max=$2; shift 2 ;;
+    --wake-counts) wake_counts "${2-}"; exit 0 ;;
+    --max-min) max=${2-}; shift 2 2>/dev/null || shift $# ;;
     --check) check=$2; shift 2 ;;
     *) break ;;
   esac
 done
+# 0 stays allowed: it is the one short pass the tests (and a quick look) start with.
+[[ "$max" =~ ^[0-9]+$ ]] || { echo "lane_watch: --max-min needs a whole number of minutes, got: $max" >&2; exit 2; }
+max=$((10#$max))   # a leading zero ("08") is decimal, not octal
 lanes=("$@")
 auto=0; [ ${#lanes[@]} -eq 0 ] && auto=1
 start_ts=$(date +%s)
 declare -A seen seen_turn recycling
-report_of() { ls -t "$HOME"/.claude/state/lanes/*-"$1"/report.md 2>/dev/null | head -1; }
+# lane_dir_of <lane>: the lane's hand-off folder, newest report first. lane.sh names it <YYYY-MM-DD>-<lane> (hand=...$(date +%F)-$name),
+# so only that exact form matches: a lane "mail" must not read the folder of a lane "other-mail".
+lane_dir_of() {
+  local f
+  f=$(ls -t "$HOME"/.claude/state/lanes/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-"$1"/report.md 2>/dev/null | head -1)
+  [ -n "$f" ] && dirname "$f"
+  return 0
+}
+report_of() { local d; d=$(lane_dir_of "$1"); [ -n "$d" ] && echo "$d/report.md"; return 0; }
 stamp() { local f; f=$(report_of "$1"); [ -n "$f" ] && stat -c %Y "$f" || echo none; }
 watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last finished turn; fresh = a lane that began after the watcher
   local l=$1 f shown
@@ -687,7 +1054,7 @@ watch_lane() { # watch_lane <name> [fresh]: remember its report stamp and last f
 # The live lanes now: rows of lane.sh --status that start in column one and are not "dead", and that have a tmux window.
 live_lanes() {
   local wins; wins=$(tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null) || return 0
-  "$HOME/.claude/scripts/lane.sh" --status --full 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
+  "$lane_sh" --status --full 2>/dev/null | awk '!/^[[:space:]]/ && NF >= 2 && $2 !~ /^dead/ {print $1}' |
     while read -r n; do printf '%s\n' "$wins" | grep -qx "$n" && echo "$n"; done
 }
 refresh_watched() { # no names given: add the lanes that started since the last poll
@@ -713,6 +1080,13 @@ if [ "$recycle_once" = 1 ]; then
   done < <(live_lanes)
   hub_watcher_check "$open_n"
   exit 0
+fi
+
+# From here the watcher can wake the hub: hold its output in a file and let wake_exit print it behind a WAKE-REASON line (no trap: a watcher killed by a timeout stays as quiet as before).
+# Descriptor 3 keeps the real stdout; the background children below close it, so none holds the caller's pipe open.
+# The held copy is an unlinked temp file (nothing is left behind when a timeout kills the watcher): descriptor 1 writes it, 4 reads it back.
+if wb=$(mktemp "${TMPDIR:-/tmp}/lane-watch-wake.XXXXXX" 2>/dev/null) && exec 4<"$wb"; then
+  exec 3>&1 >"$wb"; rm -f "$wb"; wake_buf=1
 fi
 
 # A real watcher announces itself before it watches: the pid file is how a later pass (or the Stop hook) finds it without reading a
@@ -774,7 +1148,7 @@ check_open_questions() {
     fresh=$(python3 "$dispatch" open 2>/dev/null) && [ "$fresh" != none ] && questions=$fresh  # the burst's later questions too
     echo "ask: open receptionist questions:"
     printf '%s\n' "$questions"
-    exit 0
+    wake_exit
   fi
 }
 # A message of his that reached nobody: the reconciler puts it on the hub's list (so the next wake sees it as an open question, not again
@@ -785,7 +1159,7 @@ check_undelivered() {
   u=$(timeout 60 python3 "$reconcile" --file --quiet 2>/dev/null | grep -E '^(undelivered \||filed with the hub:)') || return 0
   echo "undelivered: messages of Jonathan's that reached no lane and not the hub (now on the hub's list):"
   printf '%s\n' "$u"
-  exit 0
+  wake_exit
 }
 # The outbox (everything the hub sends to his chat) is retried from here as well as from the every-minute poller, because the poller is
 # started by Windows and stops when Windows cannot reach WSL (19 Oct from 5:21 PM). The pump runs in the background: a post that is
@@ -794,21 +1168,21 @@ outbox="${OPENCLAW_OUTBOX:-$(dirname "$dispatch")/openclaw_dispatch.py}"
 check_outbox() {
   local w
   [ -f "$outbox" ] || return 0
-  setsid nohup timeout 600 python3 "$outbox" queue pump >/dev/null 2>&1 &
+  setsid nohup timeout 600 python3 "$outbox" queue pump >/dev/null 2>&1 3>&- 4<&- &
   w=$(timeout 60 python3 "$outbox" queue check 2>/dev/null | grep -E '^outbox: ') || return 0
   printf '%s\n' "$w"
-  exit 0
+  wake_exit
 }
 # The bridge watchdog runs from every poll, detached (a heal can take a minute and the watch must not stop for it; it takes its own lock
 # and heals at most once in five minutes). When it raises the alert the hub wakes.
 watchdog="${WSL_BRIDGE_WATCHDOG:-$(dirname "$(readlink -f "$0")")/wsl_bridge_watchdog.py}"
 check_bridge() {
   local w
-  [ -f "$watchdog" ] && { setsid nohup timeout 300 python3 "$watchdog" >/dev/null 2>&1 & }
+  [ -f "$watchdog" ] && { setsid nohup timeout 300 python3 "$watchdog" >/dev/null 2>&1 3>&- 4<&- & }
   w=$(bridge_alert)
   [ -n "$w" ] || return 0
   echo "bridge: $w"
-  exit 0
+  wake_exit
 }
 # The weekly budget reading failed. usage_calibrate.js writes its outcome to usage-calibrate-status.json; the Windows task that runs it hides the
 # script's exit code (conhost --headless), so a Cloudflare check or a signed-out page used to leave the budget gauge stale with nothing to say so.
@@ -830,7 +1204,7 @@ PY
   [ "$(cat "$mark" 2>/dev/null)" != "$sum" ] || return 0
   printf '%s' "$sum" > "$mark"
   echo "$line"
-  exit 0
+  wake_exit
 }
 check_bridge
 check_calibrate
@@ -861,7 +1235,9 @@ while :; do
   hub_handoff_check
   refresh_watched
   hit=0; other=0
+  unanswered_check
   for l in "${lanes[@]}"; do
+    stale_lock_check "$l"
     s=$(stamp "$l")
     if [ "$s" != "${seen[$l]}" ] && [ "$s" != none ] && routine_report "$(report_of "$l")"; then
       seen[$l]=$s; seen_stamp_write "$l" "$s"   # HOURLY / STATUS on line 1: routine, wakes nobody
@@ -871,10 +1247,11 @@ while :; do
       echo "report: $l ($(report_of "$l"))${note:+ -- $note; do not close it} -- a report does not end a lane; keep it open (it recycles itself at its own line, $(recycle_line "$l")K)"; hit=1; other=1
       step_url_check "$l"
       stamp_ahead_check "$l"
+      done_proof_check "$l"
       # a report changes what is in flight: refresh OpenClaw's status digest, detached so the exit is not held up
-      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 &
+      setsid nohup timeout 90 "$HOME/.claude/scripts/openclaw_status_refresh.sh" >>"$HOME/.claude/state/status-refresh.log" 2>&1 3>&- 4<&- &
       # and put the report itself into Jonathan's chat, after a short settle so a report still being written is posted whole
-      setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 &
+      setsid nohup bash -c 'sleep "$1"; timeout 120 python3 "$2" post-reports' _ "${LANE_WATCH_SETTLE:-12}" "$dispatch" >/dev/null 2>&1 3>&- 4<&- &
     fi
     if ! tmux list-windows -t lanes -F '#{window_name}' 2>/dev/null | grep -qx "$l"; then
       echo "gone: $l"; hit=1; other=1
@@ -895,6 +1272,7 @@ while :; do
       fi
       dead_check "$l"
       high_check "$l"
+      ctx_unknown_check "$l"
       green_pr_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then
@@ -924,6 +1302,7 @@ while :; do
     fi
   done
   recycle_failures
+  while read -r f; do [ -n "$f" ] && { echo "update failed: ${f%%: *}: ${f#*: } (the update did not finish: look at the lane's window; if the lane is still running, lane.sh --update ${f%%: *} tries again)"; hit=1; other=1; }; done <<<"$update_fail_out"
   while read -r f; do [ -n "$f" ] && { echo "recycle failed: $f (the lane keeps its context; recycle it by hand with lane.sh --recycle)"; hit=1; other=1; }; done <<<"$recycle_fail_out"
   spend_check
   if [ -n "$spend_out" ]; then
@@ -974,7 +1353,7 @@ while :; do
         echo "ask: open receptionist questions:"; printf '%s\n' "$fresh"
       fi
     fi
-    exit 0
+    wake_exit
   fi
   if [ "$(date +%s)" -ge "$end" ]; then
     # Stretch the heartbeat while the whole fleet is idle and no client line is open (31 Oct: a 45-minute wake at 9:15 AM with nothing new).
@@ -982,7 +1361,7 @@ while :; do
       stretched=1
     else
       if [ "$stretched" = 1 ]; then echo "heartbeat: nothing new in $(( ($(date +%s) - start_ts) / 60 )) min"; else echo "heartbeat: nothing new in ${max} min"; fi
-      exit 0
+      wake_exit
     fi
   fi
   sleep "${LANE_WATCH_POLL:-30}"

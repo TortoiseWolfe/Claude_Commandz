@@ -15,6 +15,10 @@ Command line:
 Tier 1 (every tool): known secret values, token shapes (GitHub, Slack, AWS, Stripe, Supabase sbp_/sb_secret_, JWT ...),
     private key blocks, the password in scheme://user:password@host, Authorization / api-key header values (not when the
     value is code: an identifier, a dotted path like req.headers.authorization, an UPPER_CASE environment name).
+    Also tier 1: a two-step (TOTP) setup secret (an otpauth:// link's secret=, a base32 secret beside a secret or key label,
+    the spaced groups of 4 under a QR code or in a recovery list, a recovery: [...] list) and the value attribute of an HTML
+    input, meta or data attribute whose name or id says key, licence, secret, token, password or otp (also type=password).
+    Space-free values only, so a button label stays.
 Tier 2 (Bash, Grep, MCP, WebFetch, WebSearch; not Read/Edit/Write/NotebookEdit): the value of a field whose name says
     password / secret / token / api key, in JSON, KEY=value, key: value text and --flag=value. The name stays, the
     value goes. Code is left alone: token = get_token(), token = await getToken(), token = cfg.token or env_token,
@@ -214,7 +218,134 @@ def _tier1(text, needles):
         return m.group("pre") + _mask("auth-header")
     text = AUTH_HDR.sub(header, text)
     text = KEY_HDR.sub(header, text)
-    return text, n
+    text, k = _tier1_otp_html(text)
+    return text, n + k
+
+
+# ---------------------------------------------------------------------------------------------- tier 1: 2-step secrets, HTML keys
+# A two-step (TOTP) setup secret and a licence or API key sitting in a page. Names are kept, values go.
+# otpauth://totp/Site:user?secret=BASE32&issuer=...   (also in an HTML attribute: ...&amp;secret=..., or url-encoded)
+OTPAUTH = re.compile(r"""(?P<pre>otpauth(?:-migration)?://[^\s"'<>]*?(?:[?&;]|%3F|%26)(?:secret|data)(?:=|%3D))
+                         (?P<val>[A-Za-z0-9%+/=_-]{6,})""", re.I | re.X)
+# A bare base32 secret beside a "secret" or "key" label:  Secret: JBSW...   <strong>Key</strong> <code>JBSW...</code>
+B32_LABEL = re.compile(r"""(?P<pre>\b(?i:secret|key|seed|totp|otp|authenticator|manual(?:ly)?)\b
+                           (?:[\s:="']|\\[nrt]|&nbsp;|<(?!redacted:)[^<>\n]{0,120}>){1,80}?)
+                          (?P<val>[A-Z2-7]{16,128}={0,6})(?![A-Za-z0-9])""", re.X)
+# The spaced form shown under a QR code or in a recovery list: groups of 4, four groups or more.
+B32_GROUPS = re.compile(r"(?<![A-Za-z0-9])[A-Z2-7]{4}(?:(?:[  ]|&nbsp;)[A-Z2-7]{4}){3,}(?![A-Za-z0-9])")
+HEX_GROUPS = re.compile(r"(?<![A-Za-z0-9])(?:[0-9a-f]{4}(?: [0-9a-f]{4}){3,}|[0-9A-F]{4}(?: [0-9A-F]{4}){3,})(?![A-Za-z0-9])")
+GROUP_LABEL = re.compile(r"secret|\bkey|seed|totp|\botp\b|2fa|two.?factor|authenticator|recover|backup", re.I)
+HEX_OFFSET = re.compile(r"[0-9a-fA-F]{6,16}:[ \t]*$")        # xxd / hexdump line start: 00000010: 7f45 4c46 ...
+# A list of recovery codes in script:  recovery: ['a1b2c3d4e5f60718', ...]
+RECOVERY_LIST = re.compile(r"""(?P<pre>(?i:recovery[_-]?(?:codes?)?|backup[_-]?codes?)\\?["']?[ \t]*[:=][ \t]*\[)
+                               (?P<list>[^\]\n]{4,4000})(?=\])""", re.X)
+RECOVERY_ITEM = re.compile(r"""(?P<q>\\?["'])(?P<val>[A-Za-z0-9 -]{8,64})(?P=q)""")
+# Tags: <input name="license" value="...">, data-api-key="...", <meta name="csrf-token" content="...">.
+HTML_TAG = re.compile(r"<(?P<tag>[A-Za-z][A-Za-z0-9]*)(?P<body>[ \t\r\n\\][^<>]{0,4000})>")
+HTML_ATTR = re.compile(r"""(?P<name>[A-Za-z_:][-\w:.]*)(?P<eq>[ \t]*=[ \t]*)(?P<q>\\?["'])(?P<val>(?:(?!(?P=q)).)*)(?P=q)""", re.S)
+KEY_WORDS = {"key", "license", "licence", "apikey", "secret", "token", "password", "passwd", "passphrase", "otp", "totp",
+             "seed", "credential", "credentials"}
+# Plugin-specific ids that say nothing about keys: Wordfence Login Security prints the 2-step secret in
+# <input id="wfls-qr-code-text" value="BASE32">; its licence is the option apiKey (the words rule above covers that).
+KEY_IDS = re.compile(r"(?:^|[-_])qr[-_]?code[-_]?text$|(?:^|[-_])(?:t?otp|2fa)[-_](?:secret|code|key)", re.I)
+MIN_HTML_SECRET = 4
+# A form listed as one "id|type|value" string per field:  'wfls-qr-code-text|text|<redacted:html-field>'
+PIPE_FIELD = re.compile(r"""(?P<pre>(?<![\w.:-])(?P<name>[A-Za-z_][-\w:.]{1,80})\|[A-Za-z]{3,12}\|)(?P<val>[^|\s'"`\\<>]{4,4000})""")
+
+
+def _keyish(name):
+    """True when an attribute name or id names a credential: apiKey, wf-license-key, data-token, csrf_token."""
+    if KEY_IDS.search(name):
+        return True
+    words = _words(name)[1]
+    return bool(words & KEY_WORDS) and not (words & NAME_SKIP_WORDS)
+
+
+def _html_value_secret(v):
+    """A value worth masking: no spaces (a button label is not a key), not a number, label, placeholder or reference."""
+    v = v.strip()
+    return len(v) >= MIN_HTML_SECRET and not re.search(r"\s", v) and literal_secret(v, False)
+
+
+def _otp_tag(m, count):
+    attrs = list(HTML_ATTR.finditer(m.group("body")))
+    if not attrs:
+        return m.group(0)
+    low = {a.group("name").lower(): a for a in attrs}
+    ident = [a.group("val") for key in ("name", "id") for a in [low.get(key)] if a]
+    typ = low.get("type")
+    tag_is_key = any(_keyish(i) for i in ident) or bool(typ and typ.group("val").lower() == "password")
+    own = ("value", "content") if m.group("tag").lower() in ("input", "meta", "textarea", "option", "param") else ("value",)
+    body, shift = m.group("body"), 0
+    for a in attrs:
+        nm = a.group("name").lower()
+        hit = ((tag_is_key and nm in own) or (nm not in ("name", "id", "class", "for", "type") and _keyish(nm)))
+        if not hit or not _html_value_secret(a.group("val")):
+            continue
+        s, e = a.start("val") + shift, a.end("val") + shift
+        body = body[:s] + _mask("html-field") + body[e:]
+        shift += len(_mask("html-field")) - (a.end("val") - a.start("val"))
+        count[0] += 1
+    return m.group(0) if body == m.group("body") else "<" + m.group("tag") + body + ">"
+
+
+def _tier1_otp_html(text):
+    n = [0]
+
+    def otpauth(m):
+        v = m.group("val")
+        if "redacted" in v.lower():
+            return m.group(0)
+        n[0] += 1
+        return m.group("pre") + _mask("totp-secret")
+    if re.search("otpauth", text, re.I):
+        text = OTPAUTH.sub(otpauth, text)
+
+    def tagged(m):
+        return _otp_tag(m, n)
+    if "<" in text and "=" in text:
+        text = HTML_TAG.sub(tagged, text)
+
+    def labelled(m):
+        v = m.group("val")
+        if not (re.search(r"[2-7]", v) or len(v) >= 26):
+            return m.group(0)       # a long upper-case word beside the word "key" is a word
+        n[0] += 1
+        return m.group("pre") + _mask("totp-secret")
+    text = B32_LABEL.sub(labelled, text)
+
+    def grouped(m):
+        span = m.group(0)
+        near = text[max(0, m.start() - 300):m.start()]
+        digit = re.search(r"[2-7]", span) if m.re is B32_GROUPS else re.search(r"\d", span)
+        if m.re is HEX_GROUPS:
+            line = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+            if HEX_OFFSET.search(line) or not (digit and GROUP_LABEL.search(near)):
+                return span         # a hex dump, or hex words with nothing about secrets or recovery near them
+        elif not (digit or GROUP_LABEL.search(near)):
+            return span             # four plain capital words
+        n[0] += 1
+        return _mask("totp-secret")
+    text = B32_GROUPS.sub(grouped, text)
+    text = HEX_GROUPS.sub(grouped, text)
+
+    def recovery(m):
+        def item(i):
+            if "redacted" in i.group("val").lower():
+                return i.group(0)
+            n[0] += 1
+            return i.group("q") + _mask("recovery-code") + i.group("q")
+        return m.group("pre") + RECOVERY_ITEM.sub(item, m.group("list"))
+    text = RECOVERY_LIST.sub(recovery, text)
+
+    def piped(m):
+        if not (_keyish(m.group("name")) and _html_value_secret(m.group("val"))):
+            return m.group(0)
+        n[0] += 1
+        return m.group("pre") + _mask("html-field")
+    if "|" in text:
+        text = PIPE_FIELD.sub(piped, text)
+    return text, n[0]
 
 
 # ---------------------------------------------------------------------------------------------- tier 2 rules

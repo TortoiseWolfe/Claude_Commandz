@@ -42,9 +42,11 @@
 # The model is passed through when it is one of agy's own (gemini-*, gpt-oss-*, claude-*-4-6*); any other
 # name (a Claude Code alias) becomes gemini-3.8-flash-high (see agy_model).
 # --engine opencode runs opencode_lane.sh (beside this script): OpenCode, headless, edit files AND run commands, on a free API key read from
-# ~/.config/gemini and ~/.config/openrouter at run time (never in the command line). Model: google/gemini-3-flash-preview, with
-# openrouter/nvidia/nemotron-3-ultra-550b-a55b:free as the fallback when the first is out of quota; any other model name (a Claude alias) becomes the
-# first. Both free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
+# ~/.config/gemini and ~/.config/openrouter at run time (never in the command line). Models, in order: google/gemini-3-flash-preview,
+# openrouter/nvidia/nemotron-3-ultra-550b-a55b:free, then opencode/big-pickle (OpenCode's own keyless free tier). lane.sh only picks the model the
+# lane starts on: the one named when it is a google/, openrouter/ or opencode/ model, else the first, and when that provider's key file is missing the
+# first of the three whose key is present. The quota fall-back itself is opencode_lane.sh's: when a run hits a quota or rate limit it stops the run and
+# the next provider takes the same prompt, until none is left. Both keyed free tiers train on the input, so besides the client guard above it refuses ~/repos itself (which holds client repos). It works
 # like Codex/Copilot: git, tests and the report are the lane's own. Order for his own-repo code lanes: agy, codex, copilot, opencode, then Claude Sonnet.
 # --engine local runs local_lane.sh (beside this script): the same OpenCode, on an Ollama server on this machine (LOCAL_LANE_URL, default
 # http://127.0.0.1:11434), so no prompt, file or key leaves the machine and there is no quota. Model: ollama/<name> (default ollama/qwen3-coder:30b);
@@ -91,14 +93,25 @@
 #                                       prompt.md, then handoff.md, then carry on; a new index row follows its new session. A lane that
 #                                       never writes handoff.md is not cleared. The request goes to the lane at once, even mid-turn (a long turn would never end first): it
 #                                       finishes the step in hand and writes handoff.md as its next action. lane_watch.sh runs this when a
-#                                       lane passes its own recycle line.
+#                                       lane passes its own recycle line. The third recycle inside LANE_THRASH_SECS (30 minutes) is the last: it
+#                                       succeeds, writes one FAILED row (the hub is told once, with the start load and the line) and sets the stop
+#                                       marker ~/.claude/state/lanes/.recycle-stop-<name>; a plain --recycle, a --send hold and the watcher then start
+#                                       nothing. A recycle held three times (LANE_RECYCLE_HELPER_TRIES) by running subagents stops the same way.
+#                                       lane.sh --recycle-at <K> --recycle <name> clears the marker and recycles; a restart clears it too.
+#                                       Issue 89: just before /clear the lane is looked at once more; a turn that started in the gap is waited for
+#                                       (LANE_RECYCLE_QUEUE_SECS, default 120) and the queue drained again, else the lane is NOT cleared. After /clear
+#                                       the new session id is waited for (up to 20s, lanes with a SessionStart record only) before the re-prime is typed.
+#                                       "recycled" is logged only when the re-prime is in the new session: a re-prime found only in the old session's
+#                                       record writes one REPRIME-OLD-SESSION row to recycle.log and is typed once more; if it still misses, the
+#                                       recycle FAILS (the lane was cleared; the message is printed to send by hand). REPRIME-RETRY rows count tries
+#                                       of a re-prime that did not land at all (3 at most per round).
 #   lane.sh [--dry-run] --update <name> restart a live, idle lane onto the installed Claude Code version (hand-off first, exact-PID stop, then --restart
 #                                       with the lane's own settings); --behind lists the live lanes still on an older version. See the --update block.
 #                                       A lane already on the installed version is skipped unless --restart is given too (lane.sh --restart --update <name>):
 #                                       it then restarts the same way, so a lane started before a lane.sh change takes up the new folders and rules.
 #   lane.sh [--dry-run] --unlock-gone   free the worktree locks lane.sh made (it locks a lane's linked worktree at start/--resume so `git worktree remove`
 #                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
-#   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, ? if unknown)
+#   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, n/a for an engine lane, ? if unknown)
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
@@ -111,6 +124,8 @@
 #                                       index column 15 so --resume, --restart and fleet-up.sh restarts keep it, and shown by --status.
 #                                       Claude lanes also get ~/.claude/state, Claude's temp folder, ~/repos/.worktrees and (in a worktree) the repo's main checkout as --add-dir,
 #                                       computed at each start and resume, never recorded (see shared_read_flags).
+#   lane.sh --rules <list> ...          at start: which rule parts the lane loads: auto (default, the keyword picking), all, none (core only) or part names
+#                                       from mail, browser, streams, coop, fleet, comma-separated (core always loads); an unknown name is refused before anything starts
 #   lane.sh --recycle-at <K> ...        at start or --resume: this lane's recycle line (40 to 150; up to 165 with connectors; default by kind and connectors: see default_recycle_k)
 #   lane.sh --pane <name>               "claude" when its pane runs Claude Code, "headless" for a lane with no pane (codex, copilot, agy, opencode, local, console
 #                                       --headless), "dead <cmd>" when the pane shows a bare shell or nothing; lane_watch.sh wakes the hub on dead
@@ -150,7 +165,8 @@
 #   - claudeMdExcludes for the workspace CLAUDE.md, replaced through --append-system-prompt-file by
 #     the rules, composed per lane by lane_rules_compose.py from the parts in LANE_RULES_DIR (default ~/repos/hub/lane-rules/):
 #     core.md always, plus mail, browser, streams, coop and fleet when the lane's name, folder, prompt text or connectors
-#     setting might match (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
+#     setting might match; a start command that names --rules <list> loads exactly core plus that list, and the keywords only add a warning line
+#     to the head comment for each part they would have loaded (the hub knows what the job needs). (the composed file is ~/.claude/state/lanes/.rules/<lane folder name>.md; a resume reuses it). LANE_RULES (default
 #     ~/repos/hub/lane-rules.md) is now a short pointer that prompts saying "Read lane-rules.md first" still read cheaply;
 #     both happen only when that file exists; a repo's own CLAUDE.md files load as usual. In the same case autoMemoryEnabled is false, so the
 #     memory index (MEMORY.md, about 4K tokens) is not loaded: the rule file carries the rules;
@@ -167,9 +183,11 @@
 # opt-in (Esc).
 set -euo pipefail
 SESSION=lanes
-# The day Codex is back (its free plan hit the usage limit 7 Nov 2026 4:13 AM). The only place this date is written; the help text and the
-# own-repo refusal read it from here. Change it here when it moves.
-CODEX_BACK="${CODEX_BACK:-6 Dec 2026 12:43 PM}"
+# When Codex is back comes from the one engine-blocks file (engine_blocks.py, next to this script; the dispatcher writes it, AFA_ENGINE_BLOCKS
+# moves it). The phrase is "until Codex returns on <date>" while Codex is blocked and empty when it is not.
+codex_back_phrase() {
+  python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/engine_blocks.py" phrase codex 2>/dev/null || true
+}
 
 # Plugins switched off in every Claude lane (set to false through --settings enabledPlugins).
 # Kept on: afa-mods (--status reads its band), security-guidance, code-review.
@@ -200,8 +218,9 @@ LANE_SKILLS_KEEP="
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
 # The standing rule every lane is told at start and at every re-prime (6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke
-# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1.
-LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs."
+# breaks"). lane_watch.sh's idle_remind_check names a lane that sits idle without QUEUE EMPTY or BLOCKED on report.md line 1,
+# and its done_proof_check names a lane whose finished line 1 has no "items N" and no proof lines under "## Proof".
+LANE_STANDING_RULE="Standing rule: when a step finishes, start the next item in your queue at once. End a turn only with QUEUE EMPTY or BLOCKED (who/what) on report.md line 1. Waiting on CI or a background job is not a reason to stop: start the next item while it runs. A line 1 that says the work is finished (DONE or QUEUE EMPTY) also says items N, and report.md then has a section headed ## Proof with one line per item, each holding an https:// link or the full path of a file that exists, read back from the live thing."
 
 INDEX="$HOME/.claude/state/lanes/index.tsv"
 
@@ -275,9 +294,10 @@ lane_docker_env() {
 }
 
 usage() {
-  cat <<'USAGE' | sed "s/@CODEX_BACK@/$CODEX_BACK/g"
+  local cb; cb="$(codex_back_phrase)"; [ -z "$cb" ] || cb=" $cb"
+  cat <<'USAGE' | sed "s| @CODEX_BACK@|${cb//&/\\&}|g"
 Usage:
-  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
+  lane.sh [--dry-run] [--restart] [--engine claude|codex|copilot|agy|opencode|local] [--effort <level>] [--connectors|--no-connectors] [--recycle-at <K>] [--rules <auto|all|none|part[,part]>] [--project-mcp <name[,name]>] [--add-dir <path>]... [--deny <rule>]... [--allow-client] [--allow-low-tier] [--allow-high-tier "<reason>"] [--claude-because "<reason>"] [--console [--headless]] [--ask <oc-id>] <name> <dir> <model> <prompt-file>
   lane.sh --status
   lane.sh --send <name> <text>
   lane.sh [--dry-run] --model <name> <model>
@@ -288,6 +308,7 @@ Usage:
   lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
   lane.sh --recycle-point <name>
+  (--recycle-at <K> --recycle <name> sets the line and lifts a stop: the third recycle in 30 minutes is the last until then)
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
 
 Claude is the default engine. Codex, Copilot, agy, opencode and local run headless and write to out.log.
@@ -310,7 +331,7 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
-his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) until Codex returns on @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
 needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
@@ -327,7 +348,7 @@ NO_AI_WALL_SH="${HOME:-/nonexistent}/.claude/no-ai-wall/no_ai_wall.sh"
 [ -r "$NO_AI_WALL_SH" ] || { echo "refusing: ~/.claude/no-ai-wall/no_ai_wall.sh is missing, so the no-AI wall cannot be checked" >&2; exit 1; }
 # shellcheck source=../no-ai-wall/no_ai_wall.sh
 . "$NO_AI_WALL_SH"
-add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; project_mcp_opt=; restart_opt=0; deny_opt=()
+add_dirs_opt=(); clean_room=; full_out=0; dry=0; console=0; headless=0; allow_client=0; engine=claude; mode=start; effort_opt=; connectors_opt=0; no_connectors=0; ask_id=; allow_low_tier=0; allow_high_reason=; claude_because=; recycle_at_opt=; recycle_at_set=0; rules_opt=; project_mcp_opt=; restart_opt=0; deny_opt=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry=1; shift ;;
@@ -345,6 +366,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--recycle-at requires a number of K tokens (40 to 150)" >&2; exit 1; }
       recycle_at_opt="$2"; recycle_at_set=1; shift 2 ;;
     --recycle-at=*) recycle_at_opt="${1#*=}"; recycle_at_set=1; shift ;;
+    --rules)
+      [ $# -ge 2 ] || { echo "--rules requires auto, all, none or a comma list of: mail, browser, streams, coop, fleet" >&2; exit 1; }
+      rules_opt="$2"; shift 2 ;;
+    --rules=*) rules_opt="${1#*=}"; shift ;;
     --add-dir)
       [ $# -ge 2 ] || { echo "--add-dir requires a folder path" >&2; exit 1; }
       add_dirs_opt+=("$2"); shift 2 ;;
@@ -442,6 +467,14 @@ case "$effort_opt" in
   *) echo "unknown effort: $effort_opt (choose low, medium, high, xhigh, or max)" >&2; exit 1 ;;
 esac
 
+if [ -n "$rules_opt" ]; then
+  case "$mode" in start) ;; *) echo "--rules only applies when starting a lane" >&2; exit 1 ;; esac
+  case "$rules_opt" in auto|all|none) ;; *)
+    for _rp in ${rules_opt//,/ }; do
+      case "$_rp" in core|mail|browser|streams|coop|fleet|none) ;;
+        *) echo "unknown rule part $_rp; valid: auto, all, none, or a comma list of mail, browser, streams, coop, fleet" >&2; exit 2 ;; esac
+    done ;; esac
+fi
 if [ "$recycle_at_set" = 1 ]; then
   # A connector lane starts near 77K, and with large tool lists far higher (27 Oct: 152K six minutes after a re-prime), so its line may
   # go to LANE_RECYCLE_MAX_CONN_K (165, just under where Claude Code compacts, about 168K); the 150 ceiling holds for the rest.
@@ -583,13 +616,35 @@ fill_ids_locked() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$d" "$n" "$dir" "$m" "$b" "$p" "$r" "${id:--}" "${st:--}" "${eff:-?}" "${conn:--}" "${rk:--}" "${ent:--}" "${pm:--}" "${ad:--}" >>"$tmp"
   done <"$INDEX"
+  # Nothing changed (the usual case for a status call): drop the copy and leave the index file alone.
+  if cmp -s "$tmp" "$INDEX"; then rm -f "$tmp"; return 0; fi
   index_commit "$tmp"
 }
 fill_ids() {
   [ -s "$INDEX" ] || return 0
+  # One lock-free read first: a row could change when it needs an id (column 8 empty or "-" with column 9 set and not "-"),
+  # when it has other than 15 columns, or when any of columns 8 to 15 is empty. If no row could, there is nothing to rewrite.
+  awk -F'\t' '
+    NF != 15 { f = 1; exit }
+    { for (i = 8; i <= 15; i++) if ($i == "") { f = 1; exit } }
+    ($8 == "-") && $9 != "" && $9 != "-" { f = 1; exit }
+    END { exit !f }' "$INDEX" || return 0
   index_locked fill_ids_locked || true
 }
 
+# A recorded folder written by an older lane.sh can be a leftover that git no longer lists (18 Nov 2026: a start copied a pruned folder forward from the index and
+# Claude Code stopped at its trust prompt). True only for a direct child of ~/repos/.worktrees named <repo>--<topic> whose repo git answers for and does not list it.
+ad_unlisted() {  # <path>
+  local root n repo listed
+  root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || return 1
+  [ "${1%/*}" = "$root/.worktrees" ] || return 1
+  n="${1##*/}"; case "$n" in *--*) ;; *) return 1 ;; esac
+  repo="${n%%--*}"; [ -d "$root/$repo" ] || return 1
+  listed="$(timeout 10 git -C "$root/$repo" worktree list --porcelain 2>/dev/null)" || return 1
+  [ -n "$listed" ] || return 1
+  case $'\n'"$listed"$'\n' in *$'\nworktree '"$1"$'\n'*) return 1 ;; esac
+  return 0
+}
 # Extra folders (--add-dir): index column 15 holds them as a colon list, "-" = none.
 ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded ones first, as a colon list or "-"
   local -a have=() all=()
@@ -600,6 +655,7 @@ ad_merge() {  # <recorded colon list or -> [new path...]: the union, recorded on
     # A recorded folder can be gone by the next start (a worktree removed after its merge); the engines refuse a missing --add-dir, so
     # drop it here and the index row is rewritten without it (1 Nov 2026: job-replies round 2 died at start on round 1's removed worktree).
     [ -d "$p" ] || { echo "lane.sh: dropping extra folder that no longer exists: $p" >&2; continue; }
+    ad_unlisted "$p" && { echo "lane.sh: dropping recorded folder that git does not list as a checkout: $p" >&2; continue; }
     dup=0; for q in "${all[@]}"; do [ "$q" = "$p" ] && dup=1; done
     [ "$dup" = 1 ] || all+=("$p")
   done
@@ -622,7 +678,8 @@ ad_flags() {  # <colon list>
 # folder, so Claude Code's "Read outside the working directories" dialog froze the lane on every file in one (sh-1414, 29 Oct 2026, three times;
 # each stop woke the hub). Each existing checkout of the lane's own repo becomes an --add-dir: no global allow and the guard stays on, and
 # another repo's checkouts stay out of reach. <repo> is the first folder under ~/repos (or, for a lane started in a checkout, the part of
-# its name before "--"). A checkout made after the lane started is not covered until the lane is restarted or resumed.
+# its name before "--"). Only a folder that git lists for that repo counts (git worktree list), not any folder with a matching name. A checkout made after the
+# lane started is not covered until the lane is restarted or resumed.
 own_checkouts() {  # <lane folder>: one existing checkout folder per line
   local root wt rel repo c
   root="$(cd "$HOME/repos" 2>/dev/null && pwd -P)" || return 0
@@ -631,10 +688,15 @@ own_checkouts() {  # <lane folder>: one existing checkout folder per line
   repo="${rel%%/*}"
   if [ "$repo" = .worktrees ]; then rel="${rel#.worktrees/}"; repo="${rel%%/*}"; repo="${repo%%--*}"; fi
   case "$repo" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  # Only checkouts git itself lists for this repo (18 Nov 2026: a folder left behind after its worktree was pruned, still holding an env file and a database
+  # snapshot, was added as a working directory; Claude Code asked to trust it and the lane never started). Git's own list answers who is registered.
+  local listed
+  listed="$(timeout 10 git -C "$root/$repo" worktree list --porcelain 2>/dev/null)" || return 0
   # Only plain folders with plain names: a symlink could point anywhere, and a colon, tab or newline in a name would split the colon list in index column 15.
   for c in "$wt/$repo"--*; do
     [ -d "$c" ] && [ ! -L "$c" ] || continue
     case "${c##*/}" in *[!A-Za-z0-9._-]*) continue ;; esac
+    case $'\n'"$listed"$'\n' in *$'\nworktree '"$c"$'\n'*) ;; *) continue ;; esac
     printf '%s\n' "$c"
   done
   return 0
@@ -1042,6 +1104,17 @@ lane_kind() {  # <prompt-file> <dir> <connectors on|off|-> -> 3d | mail | ops | 
 # 100K line left it 23K of room and it recycled every few turns. Its line is its start load plus the same 50K of working room as above.
 LANE_CONNECTOR_START_K=${LANE_CONNECTOR_START_K:-77}
 LANE_WORKING_ROOM_K=${LANE_WORKING_ROOM_K:-50}
+# The project's instruction file is read again for each working copy of the code a lane steps into (issue 83: a 20 KB file, about 5K tokens a time, and one lane
+# stepped into three). The start load is measured at the first message, when only the lane's own folder has been read, so the line gets this much more room for
+# each other working copy the lane's prompt names.
+LANE_INSTRUCTION_K=${LANE_INSTRUCTION_K:-5}
+named_copies() {  # <prompt-file> <lane folder> -> how many distinct ~/repos/.worktrees/<repo>--<topic> folders the prompt names, not counting the lane's own folder
+  local own n=0
+  [ -r "${1:-}" ] || { echo 0; return 0; }
+  case "${2:-}" in */.worktrees/*) own=".worktrees/${2##*/.worktrees/}" ;; *) own="" ;; esac
+  n="$({ head -c 200000 -- "$1" | grep -aoE '\.worktrees/[A-Za-z0-9._-]+--[A-Za-z0-9._-]+' || true; } | sort -u | { grep -vxF -- "${own:-/}" || true; } | wc -l)"
+  echo "${n// /}"
+}
 default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
   local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
@@ -1166,12 +1239,13 @@ deny_rules() {  # <lane folder> [write]
 # the file the lane started with. Under --dry-run nothing is written in the lane
 # folder; the composed text goes to ~/.claude/state/out/dry-rules-<name>.md. When composing fails the lane gets every part, then
 # the pointer file, so a lane never starts with no rules.
-lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1>
+lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt file> <reuse 0|1> [rules list]
   local f="$HOME/.claude/state/lanes/.rules/$(basename "$1").md" me; me="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_rules_compose.py"
   if [ "${6:-0}" = 1 ] && [ -s "$f" ]; then printf '%s' "$f"; return 0; fi
   [ "$dry" = 1 ] && f="$HOME/.claude/state/out/dry-rules-$2.md"
   mkdir -p -m 700 "$(dirname "$f")" 2>/dev/null || true
-  if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
+  local ra=(); [ -z "${7:-}" ] || ra=(--rules "$7")
+  if python3 -I "$me" --name "$2" --dir "$3" --connectors "$4" --prompt "${5:-}" --out "$f" ${ra[@]+"${ra[@]}"} >/dev/null 2>&1; then printf '%s' "$f"
   elif python3 -I "$me" --all --out "$f" >/dev/null 2>&1; then printf '%s' "$f"
   else printf '%s' "$LANE_RULES"; fi
 }
@@ -1231,13 +1305,12 @@ print(",".join(out))
   [ -z "$off" ] || printf -- ' --disallowedTools %q' "$off"
   if [ -f "$LANE_RULES" ]; then
     local rf="$LANE_RULES"
-    [ -z "${8:-}" ] || [ "$8" = - ] || rf="$(lane_rules_for "$8" "${3:-lane}" "${5:-.}" "$2" "${9:-}" "${10:-0}")"
+    [ -z "${8:-}" ] || [ "$8" = - ] || rf="$(lane_rules_for "$8" "${3:-lane}" "${5:-.}" "$2" "${9:-}" "${10:-0}" "${rules_opt:-}")"
     printf -- ' --append-system-prompt-file %q' "$rf"
   fi
   return 0
 }
 
-# Context size in K tokens from the last assistant usage in a lane's transcript.
 # yes / input / job / no for a lane's report: "yes" only when report.md is newer than everything the lane was told and no background job
 # is running (lane_report_state.py reads the transcript). 19 Oct: "report:yes idle" got a lane closed mid-work.
 report_word() {  # <report.md> <dir> <session-id>
@@ -1250,6 +1323,7 @@ report_word() {  # <report.md> <dir> <session-id>
   fi
   echo yes
 }
+# Context size in K tokens from the last assistant usage in a lane's transcript.
 ctx_k() {  # <dir> <session-id>
   local f
   f="$(transcript_of "$1" "$2")"
@@ -1263,7 +1337,7 @@ for line in sys.stdin:
     except ValueError:
         continue
     m = o.get("message")
-    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" else None
+    u = m.get("usage") if isinstance(m, dict) and o.get("type") == "assistant" and m.get("model") != "<synthetic>" else None
     if u:
         last = u
 if last is None:
@@ -1396,7 +1470,7 @@ if [ "$mode" = status ]; then
       row="$(index_row "$w")"
       IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"${row:-}"
       if [ -z "$row" ]; then
-        rep="$(ls -t "$HOME"/.claude/state/lanes/*-"$w"/report.md 2>/dev/null | head -1 || true)"
+        rep="$(ls -t "$HOME"/.claude/state/lanes/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-"$w"/report.md 2>/dev/null | head -1 || true)"
         dir="$(tmux display -p -t "$SESSION:$w" '#{pane_current_path}')"; m="?"; id="?"
         extra="(not in index)"
       else extra=""; fi
@@ -1468,6 +1542,8 @@ pane_is_claude() {  # <name>
 send_to() {  # <name> <text...>
   [ $# -ge 2 ] || { echo "usage: lane.sh --send <name> <text>" >&2; return 1; }
   local name="$1"; shift
+  # Every name this function sets is local (as in send_held), so a caller's own dir, id, m, rk and the rest are not overwritten by the call.
+  local text dir id row d n m b p rep st eff conn rk ent pm ad target how pane rc hits_before
   text="$*"; dir=""; id=""
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
@@ -1612,6 +1688,18 @@ PY
   echo "sent to $name: NOT IN ITS TRANSCRIPT (the input line emptied${how:+ and it was $how}, but the lane's transcript does not hold the words)"
   return 1
 }
+# Recycle count and stop marker (issue 34). recent_recycles <name> is the one count of `recycled` rows for the lane (field 2, exact match) inside
+# LANE_THRASH_SECS (1800); 0 when the log is missing. The third one in the window is the last: --recycle then writes the marker
+# ~/.claude/state/lanes/.recycle-stop-<name> (a line for a person: the time, then why) and no plain --recycle, --send hold or watcher pass starts
+# another until `lane.sh --recycle-at <K> --recycle <name>` (or a restart, or a fresh start) clears it. A recycle held LANE_RECYCLE_HELPER_TRIES
+# times by running subagents sets it too; .recycle-helper-fails-<name> counts those tries.
+recent_recycles() {
+  local rlog="$HOME/.claude/state/lanes/recycle.log"
+  [ -f "$rlog" ] || { echo 0; return 0; }
+  command grep -a $'\trecycled\t' "$rlog" | awk -F'\t' -v n="$1" -v now="$(date +%s)" -v w="${LANE_THRASH_SECS:-1800}" '$2 == n { cmd = "date -d \"" $1 "\" +%s"; cmd | getline t; close(cmd); if (now - t <= w) c++ } END { print c + 0 }'
+}
+recycle_stop_file() { printf '%s\n' "$HOME/.claude/state/lanes/.recycle-stop-$1"; }
+clear_recycle_stop() { rm -f "$HOME/.claude/state/lanes/.recycle-stop-$1" "$HOME/.claude/state/lanes/.recycle-helper-fails-$1"; }
 # send_held <name> <text...>: a lane past its recycle line, or with a recycle already under way, is not typed into. Text typed mid-turn queues
 # in Claude Code, and queued input is what --recycle must not carry into the fresh session (26 Oct: a hub message typed into scout-run-2 at
 # 163K, past its 128K line, queued and blocked the watcher's recycle, which failed safe). So the words go to hub-pending.md in the lane's
@@ -1641,12 +1729,11 @@ send_held() {
   mkdir -p "$hand"
   printf '## %s (typed with lane.sh --send while you were past your recycle line)\n%s\n\n' "$(date '+%-I:%M %p')" "$text" >>"$pend"
   rlog="$HOME/.claude/state/lanes/recycle.log"
-  cnt=0
-  if [ -f "$rlog" ]; then
-    cnt="$(command grep -a $'\trecycled\t' "$rlog" | awk -F'\t' -v n="$name" -v now="$(date +%s)" -v w="${LANE_THRASH_SECS:-1800}" '$2 == n { cmd = "date -d \"" $1 "\" +%s"; cmd | getline t; close(cmd); if (now - t <= w) c++ } END { print c + 0 }')"
-  fi
+  cnt="$(recent_recycles "$name")"
   if [ "$locked" = 1 ]; then
     echo "held for $name: a recycle is already under way, so I did not type into its box. Your text is in $pend and the re-prime message sends it there to read it."
+  elif [ -f "$(recycle_stop_file "$name")" ]; then
+    echo "held for $name: it is at ${ctxk}K, past its ${line}K line, but recycling this lane is stopped ($(cat "$(recycle_stop_file "$name")")) so I did not start one. Your text is in $pend. To start it again: lane.sh --recycle-at <K> --recycle $name"
   elif [ "$cnt" -ge "${LANE_THRASH_COUNT:-3}" ]; then
     echo "held for $name: it is at ${ctxk}K, past its ${line}K line, but it was recycled $cnt times in the last $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes so I did not start another. Your text is in $pend; it is read at the next recycle (lane.sh --recycle $name), or tell the lane to read it."
   else
@@ -1752,14 +1839,16 @@ if [ "$mode" = pane ]; then
   exit 0
 fi
 
-# --ctx <name>: the lane's context in K tokens as a bare number, or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
+# --ctx <name>: the lane's context in K tokens as a bare number, n/a for an engine lane (no reading by design), or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
 if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
-  case "${b:-subscription}" in codex|copilot|agy|opencode|local) echo "?"; exit 0 ;; esac
+  case "${b:-subscription}" in codex|copilot|agy|opencode|local)   # no context reading exists for these by design (--turn stays ?)
+    if [ "$mode" = ctx ]; then echo "n/a"; else echo "?"; fi; exit 0 ;;
+  esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(proven_session "$1" "$st")"
@@ -1787,11 +1876,16 @@ fi
 # line: the line goes up at least 20K. Both stop at raise_ceiling_k, and a recycle never lowers a line.
 #   LANE_RECYCLE_IDLE_SECS (300)  how long a dialog may hold the request back
 #   LANE_RECYCLE_WAIT_SECS (600)  how long to wait for handoff.md after asking, and for the subagents the lane started (issue 35)
+#   LANE_HANDOFF_MAX_BYTES (4096)  a handoff.md over this is sent back once to be shortened (waits up to LANE_RECYCLE_WAIT_SECS again);
+#                                 the clear goes on either way, and a hand-off still over leaves one HANDOFF-OVER row in recycle.log. 0 = no check
 #   LANE_RECYCLE_JOB_SECS (180)   how long to wait for the lane's background shell jobs once handoff.md is written
 #   LANE_RECYCLE_HELPER_QUIET_SECS (1200)  a subagent with no end logged and nothing written for this long is not waited for
 if [ "$mode" = recycle ]; then
   [ $# -eq 1 ] || { echo "usage: lane.sh [--dry-run] --recycle <name>" >&2; exit 1; }
   name="$1"
+  if [ "$recycle_at_set" != 1 ] && [ -f "$(recycle_stop_file "$name")" ]; then
+    echo "recycle $name is stopped ($(cat "$(recycle_stop_file "$name")")). To start it again: lane.sh --recycle-at <K> --recycle $name" >&2; exit 1
+  fi
   row="$(index_row "$name")"
   [ -n "$row" ] || { echo "no lane named $name in $INDEX" >&2; exit 1; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
@@ -1817,7 +1911,9 @@ if [ "$mode" = recycle ]; then
     # that starts at 100K with a 127K line is back at it in minutes however often it is cleared. The session being cleared is the measure;
     # the fresh one loads the same rules and tool lists. A line already above that stays.
     startk="$([ -n "${id:-}" ] && [ "$id" != - ] && start_k "$dir" "$id" || echo '?')"; startk="${startk%K}"
-    if [[ "$startk" =~ ^[0-9]+$ ]] && [ $(( startk + LANE_WORKING_ROOM_K )) -gt "$rk_next" ]; then rk_next=$(( startk + LANE_WORKING_ROOM_K )); fi
+    # One instruction file more for each other working copy the prompt names (issue 83, item 4).
+    copies_k=$(( $(named_copies "${p:-}" "$dir") * LANE_INSTRUCTION_K ))
+    if [[ "$startk" =~ ^[0-9]+$ ]] && [ $(( startk + LANE_WORKING_ROOM_K + copies_k )) -gt "$rk_next" ]; then rk_next=$(( startk + LANE_WORKING_ROOM_K + copies_k )); fi
     if [[ "${st:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - st )) -lt "${LANE_RECYCLE_THRASH_SECS:-1200}" ] && [ "$rk_next" -lt $(( rk_now + 20 )) ]; then
       rk_next=$(( rk_now + 20 ))
     fi
@@ -1828,7 +1924,10 @@ if [ "$mode" = recycle ]; then
   fi
   target_model="$(policy_model "${m:-}" "$name" "${p:-}" "${ent:--}")"
   rid="$(date +%s)"   # marks this recycle's request and re-prime, so a leftover copy of the request in a fresh session is recognisable
-  msg_handoff="Hub: your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
+  # A reading that is "?" is never shown as a size: the lane is told the reading is unavailable and that the recycle was started by hand.
+  if [ "$ctxk" = "?" ]; then ctx_phrase="your context reading is unavailable and I started this recycle by hand (it may not be past your recycle line of ${rk_now}K), but Claude Code compacts on its own at a high size"
+  else ctx_phrase="your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it"; fi
+  msg_handoff="Hub: $ctx_phrase. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
@@ -1841,11 +1940,15 @@ if [ "$mode" = recycle ]; then
     echo "  1b. keep the current handoff.md as handoff-prev<N>.md and delete all but the newest ${LANE_HANDOFF_PREV_KEEP:-5} handoff-prev files"
     echo "  2. send: $msg_handoff"
     echo "  3. wait for $handoff to change and the lane to go idle (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); without it the lane is not cleared"
+    echo "  3-size. if $handoff is over ${LANE_HANDOFF_MAX_BYTES:-4096} bytes (LANE_HANDOFF_MAX_BYTES, 0 = off): ask once for a shorter one and wait again (up to ${LANE_RECYCLE_WAIT_SECS:-600}s); the clear goes on either way, a hand-off still over leaves a HANDOFF-OVER row"
     echo "  3a. wait for the helpers the lane started: subagents for the rest of that time (still running at the end: the lane is not cleared), background jobs up to ${LANE_RECYCLE_JOB_SECS:-180}s (then cleared anyway, with a row in recycle.log)"
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
+    echo "  3c. look once more just before /clear: a turn that started after the hand-off is waited for (up to ${LANE_RECYCLE_QUEUE_SECS:-120}s) and the queue drained again; if the lane is still busy the lane is not cleared"
     echo "  4. send: /clear"
+    echo "  4a. wait up to 20s for the fresh session's id to be recorded (SessionStart hook) before the re-prime is typed"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime (plus, when $hand/hub-pending.md exists by then, the sentence that sends the lane to read it: words lane.sh --send held back while the lane was past its line)"
+    echo "  5b. the recycle counts as done only when the re-prime is in the new session; a re-prime found only in the old one writes a REPRIME-OLD-SESSION row, is typed once more, and fails the recycle if it misses again"
     echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
@@ -1865,6 +1968,7 @@ if [ "$mode" = recycle ]; then
   mkdir "$lockd" 2>/dev/null || { echo "$name is already being recycled ($lockd)" >&2; exit 1; }
   rlog="$HOME/.claude/state/lanes/recycle.log"
   trap 'rmdir "$lockd" 2>/dev/null || true' EXIT
+  [ "$recycle_at_set" != 1 ] || clear_recycle_stop "$name"   # --recycle-at <K> --recycle is how the stop is lifted
   rfail() { echo "recycle $name FAILED: $*" >&2; printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$*" >>"$rlog"; exit 1; }
   lane_idle() {  # no spinner and no dialog in the lane's pane
     local pane; pane="$(tmux capture-pane -p -t "$SESSION:$name" 2>/dev/null)" || return 1
@@ -2095,10 +2199,41 @@ PY
   if [ "$written" != 1 ] && handoff_new && lane_idle; then
     # The time ran out with the hand-off written and the lane idle, so it was held only by its helpers.
     helper_counts
-    [ "$h_agents" = 0 ] || rfail "$h_agents subagent(s) the lane started were still running after ${LANE_RECYCLE_WAIT_SECS:-600}s. They outlive a clear and would hand their results to a fresh session that never asked for them, so the lane was NOT cleared; its handoff.md is written and the next try waits again"
+    if [ "$h_agents" != 0 ]; then
+      # Held again and again by the same running subagents: after LANE_RECYCLE_HELPER_TRIES (3) tries the stop marker is set (one FAILED row).
+      hf="$HOME/.claude/state/lanes/.recycle-helper-fails-$name"; hfn="$(cat "$hf" 2>/dev/null || true)"; [[ "$hfn" =~ ^[0-9]+$ ]] || hfn=0
+      hfn=$(( hfn + 1 )); printf '%s\n' "$hfn" >"$hf"
+      hmsg="$h_agents subagent(s) the lane started were still running after ${LANE_RECYCLE_WAIT_SECS:-600}s. They outlive a clear and would hand their results to a fresh session that never asked for them, so the lane was NOT cleared; its handoff.md is written and the next try waits again"
+      if [ "$hfn" -ge "${LANE_RECYCLE_HELPER_TRIES:-3}" ]; then
+        printf '%s %s\n' "$(date '+%-I:%M %p')" "held by running subagents $hfn times in a row" >"$(recycle_stop_file "$name")"
+        hmsg+=" Stopped after $hfn tries: no further recycle will start. When its subagents have ended: lane.sh --recycle-at <K> --recycle $name"
+      fi
+      rfail "$hmsg"
+    fi
     sleep 2; lane_idle && written=1   # only background jobs are left, and the time for them is up
   fi
   [ "$written" = 1 ] || rfail "no new $handoff in ${LANE_RECYCLE_WAIT_SECS:-600}s; the lane was NOT cleared"
+  # A hand-off over LANE_HANDOFF_MAX_BYTES (4096; 0 turns this off) is sent back once to be shortened. Whatever the second size is, the
+  # recycle goes on: a long hand-off never blocks the clear, it only leaves one HANDOFF-OVER row.
+  h_max="${LANE_HANDOFF_MAX_BYTES:-4096}"; [[ "$h_max" =~ ^[0-9]+$ ]] || h_max=4096
+  if [ "$h_max" -gt 0 ]; then
+    h_size="$(stat -c %s "$handoff" 2>/dev/null || echo 0)"
+    if [ "$h_size" -gt "$h_max" ]; then
+      before="$(stamp)"; t0="$(date +%s)"
+      if send_to "$name" "Hub: your handoff.md is $h_size bytes and the limit is $h_max. Rewrite $handoff under $(( h_max / 1024 )) KB (one job: what is done, what is in flight, the next step, what to re-arm; move detail to status.md) and stop again." >/dev/null; then
+        end=$(( t0 + ${LANE_RECYCLE_WAIT_SECS:-600} ))
+        while [ "$(date +%s)" -lt "$end" ]; do
+          handoff_new && lane_idle && { sleep 2; lane_idle && break; }
+          sleep 2
+        done
+        h_size="$(stat -c %s "$handoff" 2>/dev/null || echo 0)"
+      fi
+      if [ "$h_size" -gt "$h_max" ]; then
+        echo "recycle $name: handoff.md is $h_size bytes after one request to shorten it (limit $h_max); clearing anyway" >&2
+        printf '%s\t%s\tHANDOFF-OVER\thandoff.md is %s bytes after one request to shorten it (limit %s)\n' "$(date -Is)" "$name" "$h_size" "$h_max" >>"$rlog"
+      fi
+    fi
+  fi
   jobs_note=""
   if [ "$h_jobs" != 0 ]; then
     echo "recycle $name: $h_jobs background job(s) the lane started were still running after ${LANE_RECYCLE_JOB_SECS:-180}s; clearing anyway, their finish notices reach the fresh session" >&2
@@ -2113,6 +2248,24 @@ PY
   # /clear starts no turn, so there is no spinner to wait for: type it, press Enter, and wait for the input line to empty.
   cpane=""
   wait_no_dialog 30 || rfail "a dialog came up before /clear was typed; the lane was NOT cleared"
+  # A turn can start in the gap between the idle look above and now (12 Nov, issue 89): /clear and the re-prime typed behind a running turn
+  # are queued, and the re-prime then reaches the old session. Look once more; if a turn is running, wait for it (LANE_RECYCLE_QUEUE_SECS),
+  # drain the queue again, and clear only an idle lane.
+  if ! lane_idle; then
+    echo "recycle $name: a turn started after the hand-off was written; waiting up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to end before /clear" >&2
+    gap_end=$(( $(date +%s) + ${LANE_RECYCLE_QUEUE_SECS:-120} ))
+    until lane_idle; do
+      [ "$(date +%s)" -lt "$gap_end" ] || break
+      sleep 1
+    done
+    lane_idle && { drain_queue || rfail "input was queued in the lane after a turn started past the hand-off, and Escape did not clear it; the lane was NOT cleared"; }
+    lane_idle || rfail "a turn started after the hand-off; the lane was NOT cleared"
+  fi
+  oldf=""; old_lines=0
+  if [ -n "${id:-}" ] && [ "$id" != - ]; then
+    oldf="$(ls "$PROJ"/*/"$id.jsonl" 2>/dev/null | head -n 1 || true)"
+    [ -z "$oldf" ] || old_lines="$(wc -l <"$oldf")"
+  fi
   clear_at="$(date +%s)"
   tmux send-keys -t "$SESSION:$name" -l -- "/clear"; sleep 0.5
   wait_no_dialog 0 || { tmux send-keys -t "$SESSION:$name" C-u; rfail "a dialog came up while /clear was typed; no Enter was sent"; }
@@ -2134,29 +2287,69 @@ PY
       echo "warning: could not set $name to $target_model after the recycle; it is still on $m" >&2
     fi
   fi
+  # Wait (up to 20s) for the fresh session to exist before the re-prime is typed: the SessionStart hook records the new id as soon as /clear
+  # has run, before any message. A lane whose process predates the hook has no record, and gets no wait.
+  if [ -s "$SESS_DIR/$name" ]; then
+    for _ in $(seq 1 20); do
+      s_new="$(proven_session "$name" "$clear_at")"
+      [ -z "$s_new" ] || [ "$s_new" = "${id:--}" ] || break
+      sleep 1
+    done
+  fi
   msg_reprime="$(build_reprime)"   # a --send that arrived while the recycle ran has left hub-pending.md by now
   # The re-prime is the one message that must land (#275: sh-backlog-3 was cleared and the message never reached it). A failed send is retried
   # twice, but only after looking in every project folder for the words: a message that did land under a worktree's folder is not typed again.
   reprime_tail="${msg_reprime##*$'\n'}"; [ -n "$reprime_tail" ] || reprime_tail="$msg_reprime"
-  for attempt in 1 2 3; do
-    if LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null; then break; fi
-    if [ -n "$(session_with_text "$dir" "$clear_at" "$reprime_tail")" ]; then break; fi
-    [ "$attempt" -lt 3 ] || rfail "the lane was cleared but the re-prime message did not reach it after 3 tries; send it by hand: $msg_reprime"
-    printf '%s\t%s\tREPRIME-RETRY\ttry %s did not land; typing it again\n' "$(date -Is)" "$name" "$attempt" >>"$rlog"
-    sleep 3
-  done
-
-  newid=""
-  for _ in $(seq 1 20); do
-    newid="$(proven_session "$name" "$t0")"
-    [ -n "$newid" ] || newid="$(session_with_text "$dir" "$t0" "$msg_reprime")"   # a lane whose process predates the hook
-    [ -n "$newid" ] && break; sleep 1
-  done
-  [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
+  send_reprime() {  # up to 3 tries; a try that is not found is typed again only after every project folder was searched for the words
+    for attempt in 1 2 3; do
+      if LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$msg_reprime" >/dev/null; then break; fi
+      if [ -n "$(session_with_text "$dir" "$clear_at" "$reprime_tail")" ]; then break; fi
+      [ "$attempt" -lt 3 ] || rfail "the lane was cleared but the re-prime message did not reach it after 3 tries; send it by hand: $msg_reprime"
+      printf '%s\t%s\tREPRIME-RETRY\ttry %s did not land; typing it again\n' "$(date -Is)" "$name" "$attempt" >>"$rlog"
+      sleep 3
+    done
+  }
+  find_newid() {
+    newid=""
+    for _ in $(seq 1 20); do
+      newid="$(proven_session "$name" "$t0")"
+      [ -n "$newid" ] || newid="$(session_with_text "$dir" "$t0" "$msg_reprime")"   # a lane whose process predates the hook
+      [ -n "$newid" ] && break; sleep 1
+    done
+    [ -n "$newid" ] || rfail "the lane was re-primed but no new transcript was found under $PROJ to record"
+  }
+  reprime_in_old() {  # true when the "new" session is the old one, or the words are only in lines the old transcript gained since /clear
+    [ -n "${id:-}" ] && [ "$id" != - ] || return 1
+    [ "$newid" != "$id" ] || return 0
+    local nf; nf="$(ls "$PROJ"/*/"$newid.jsonl" 2>/dev/null | head -n 1 || true)"
+    [ -n "$oldf" ] || return 1   # a new session with no transcript yet holds nothing, so it counts as missing the words
+    { [ -z "$nf" ] || ! grep -qF -- "$reprime_tail" "$nf" 2>/dev/null; } && tail -n +$(( old_lines + 1 )) "$oldf" 2>/dev/null | grep -qF -- "$reprime_tail"
+  }
+  send_reprime
+  find_newid
+  if reprime_in_old; then
+    printf '%s\t%s\tREPRIME-OLD-SESSION\tthe re-prime landed in the old session\n' "$(date -Is)" "$name" >>"$rlog"
+    send_reprime
+    find_newid
+    ! reprime_in_old || rfail "the lane was cleared but the re-prime reached the old session, not the new one; send it by hand: $msg_reprime"
+  fi
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"
   printf '%s\t%s\trecycled\tfrom %s (session %s) to session %s, line %sK%s\n' "$(date -Is)" "$name" "$ctxk" "${id:--}" "$newid" "$rk_next" "$start_note" >>"$rlog"
+  rm -f "$HOME/.claude/state/lanes/.recycle-helper-fails-$name"
+  stopped_now=0
+  if [ "$recycle_at_set" != 1 ]; then
+    rcount="$(recent_recycles "$name")"
+    if [ "$rcount" -ge "${LANE_THRASH_COUNT:-3}" ]; then
+      stopped_now=1
+      sload="an unknown amount"; [[ "$startk" =~ ^[0-9]+$ ]] && sload="${startk}K"
+      stopmsg="stopped after $rcount recycles in $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes: the session just cleared held $sload at its first message and the line is now ${rk_next}K. This one was cleared and re-primed, and no further recycle will start. Shrink what the lane loads at its start (prompt.md, handoff.md, files it re-reads), then: lane.sh --recycle-at <K> --recycle $name"
+      printf '%s %s\n' "$(date '+%-I:%M %p')" "$stopmsg" >"$(recycle_stop_file "$name")"
+      printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$stopmsg" >>"$rlog"
+    fi
+  fi
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K$start_note"
+  [ "$stopped_now" != 1 ] || echo "recycle $name is now stopped after $rcount recycles in $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes: no further recycle will start. To start it again: lane.sh --recycle-at <K> --recycle $name" >&2
   exit 0
 fi
 
@@ -2503,7 +2696,7 @@ if [ "$mode" = resume ]; then
   [ -z "$project_mcp_opt" ] || index_set "$name" 14 "$pm"
   # The extra folders it started with stay; any --add-dir given now is added and recorded.
   mapfile -t _own < <(own_checkouts "$dir")
-  if [ "${#add_dirs_new[@]}" -gt 0 ] || [ "${#_own[@]}" -gt 0 ]; then
+  if [ "${#add_dirs_new[@]}" -gt 0 ] || [ "${#_own[@]}" -gt 0 ] || [ "${ad:--}" != - ]; then
     _ad_old="${ad:--}"
     ad="$(ad_merge "${ad:--}" ${add_dirs_new[@]+"${add_dirs_new[@]}"} ${_own[@]+"${_own[@]}"})"
     [ "$dry" = 1 ] || [ "$ad" = "$_ad_old" ] || index_set "$name" 15 "$ad"
@@ -2554,7 +2747,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     return 0
   fi
   {
-    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy until Codex returns on $CODEX_BACK (his rule, 22 Oct 3:30 PM). Use:"
+    echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy$(cb="$(codex_back_phrase)"; [ -z "$cb" ] || printf " %s" "$cb") (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
     echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
@@ -2660,6 +2853,10 @@ fi
 if top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [ ! -d "$top/graphify-out" ] \
    && ! grep -qxF -- "$top" "$HOME/.config/afa/graphify-skip" 2>/dev/null; then
   echo "note: no graphify graph in this repo; for sprint work run /graphify-init (code-only, free) first" >&2
+  # A fresh start also tells the lane, once (the stderr note above is never seen by it); not a restart, a recycle or a dry run.
+  if [ "$dry" = 0 ] && [ "$restart_note" = 0 ] && [ "$restart_opt" != 1 ] && ! grep -qxF -- '## Graph' "$lprompt" 2>/dev/null; then
+    printf '\n## Graph\nThis repo has no graphify graph yet. If this is sustained work, run /graphify-init (code-only, free) first; repos skipped on purpose are listed in ~/.config/afa/graphify-skip.\n' >>"$lprompt" 2>/dev/null || true
+  fi
 fi
 
 if [ "$dry" = 0 ] && ! tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -2829,6 +3026,7 @@ if [ "$dry" = 0 ]; then
   elif [ "$console" = 1 ]; then lane_billing=console
   else lane_billing=subscription; fi
   lane_ent=-; [ "$engine" != claude ] || lane_ent="$(high_ent "$model" "$prompt")"
+  clear_recycle_stop "$name"   # a new session starts clean: a restart (or a fresh start of the same name) lifts the stop
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$model" \
     "$lane_billing" "$hprompt" "$report" "${sid:--}" "$start_epoch" "$eff" "$conn" "${rk:--}" "$lane_ent" "$pm_start" "$ad_start")"
 else
@@ -2840,7 +3038,7 @@ if [ -n "$ask_id" ]; then
   if [ "$dry" = 1 ]; then
     echo "# would run: openclaw_dispatch.py claim $ask_id $name"
   else
-    claim_py="${AFA_OPENCLAW_DISPATCH:-$HOME/repos/Claude_Commandz/global/.claude/scripts/openclaw_dispatch.py}"
+    claim_py="${AFA_OPENCLAW_DISPATCH:-$HOME/.claude/scripts/openclaw_dispatch.py}"
     if claim_out="$(python3 "$claim_py" claim "$ask_id" "$name" 2>&1)"; then echo "claim:  $claim_out"
     else echo "WARNING: the lane is running but claiming ask $ask_id failed: $claim_out" >&2; fi
   fi
