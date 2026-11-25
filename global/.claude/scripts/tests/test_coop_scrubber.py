@@ -140,6 +140,32 @@ class PresidioStandIn(unittest.TestCase):
         self.assertRegex(out[1], r"^\[PERSON_x[0-9a-f]{4}\] asked about Standard Nextcloud images$")
         self.assertEqual(s.counts["PERSON"], 1)
 
+    def test_the_fleets_status_words_are_never_masked(self):
+        # Presidio read BLOCKED as a person; a lane that rewrote line 1 from what it saw wrote the placeholder into its report.
+        s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
+        for line in ["BLOCKED (Jonathan): cards.md B to G", "test A: BLOCKED (Jonathan): cards.md B to G", "DONE 5:10 PM items 3",
+                     "WORKING 2:00 PM | next step", "QUEUE EMPTY items 4", "STEP-FOR-JONATHAN https://example.invalid/x",
+                     "INSTALL OK abc1234: 66 of 66", "PATCH-NIGHT ready", "STALLED-CARDS 3"]:
+            self.assertEqual(s.scrub_strings([line])[0], line, line)
+        self.assertEqual(s.counts["PERSON"], 0)
+
+    def test_a_name_beside_a_status_word_is_still_masked(self):
+        s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
+        out = s.scrub_strings(["BLOCKED (Wendell Fogbottom)", "DONE for %s" % fx.ZELDA])
+        self.assertRegex(out[0], r"^BLOCKED \(\[PERSON_x[0-9a-f]{4}\]\)$")
+        self.assertEqual(out[1], "DONE for [PERSON_1]")
+        # a roster person is replaced even when the roster name is a status word: the roster is never second-guessed
+        r = cs.Roster({"salt": "s", "people": [{"names": ["Quin Done"], "emails": [], "phones": []}]})
+        self.assertEqual(cs.Scrubber(r, use_ner=True).scrub_strings(["Quin Done wrote"])[0], "[PERSON_1] wrote")
+
+    def test_status_words_only_count_in_capitals(self):
+        s = cs.Scrubber(cs.Roster(), use_ner=True)
+        # the stand-in only guesses the capital words, so a lowercase "done" is never a guess to begin with; the helper is what is under test
+        span = (0, 4, "PERSON", None)
+        self.assertIsNone(cs.Scrubber._without_status_words("DONE", (0, 4, "PERSON", None)))
+        self.assertEqual(cs.Scrubber._without_status_words("Done", span), span)
+        self.assertEqual(cs.Scrubber._without_status_words("Ready", (0, 5, "PERSON", None)), (0, 5, "PERSON", None))
+
     def test_products_setting_adds_words_and_roster_people_are_still_replaced(self):
         s = cs.Scrubber(cs.Roster(fx.ROSTER), use_ner=True)
         self.assertRegex(s.scrub_strings(["Zephyr Lantern"])[0], r"^\[PERSON_x")
