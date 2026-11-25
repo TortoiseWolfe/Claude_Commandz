@@ -499,10 +499,22 @@ def evaluate(payload):
 
 def main():
     try:
-        res = evaluate(json.loads(sys.stdin.read()))
+        payload = json.loads(sys.stdin.read())
     except Exception as e:
         log_error("secret-guard internal error: %s: %s" % (type(e).__name__, e))
+        return 0  # nothing that names a tool arrived, so there is nothing to judge
+    if not isinstance(payload, dict) or not isinstance(payload.get("tool_input", {}), dict):
+        log_error("secret-guard internal error: unexpected payload shape")
         return 0
+    try:
+        res = evaluate(payload)
+    except Exception as e:
+        # A call the guard could not read is refused, never allowed: a command built to make the reading crash must not get past it
+        # (workspace issue 93). The cause goes to the log, never the command text.
+        log_error("secret-guard internal error: %s: %s" % (type(e).__name__, e))
+        print("secret-guard: this call could not be read safely, so it is refused. Make the command simpler, or read the file "
+              "with python3 ~/.claude/scripts/redact_view.py. The cause is in ~/.local/share/claude-hooks/secret-guard.log.", file=sys.stderr)
+        return 2
     if res:
         print(res[1], file=sys.stderr)
         return 2
