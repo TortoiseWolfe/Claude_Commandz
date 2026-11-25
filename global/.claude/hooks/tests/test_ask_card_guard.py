@@ -176,6 +176,41 @@ class Check4(Base):
         self.allowed([card(question=self.MAIL_Q)], transcript=str(Path(self.tmp.name) / "nope.jsonl"))
 
 
+GOLDEN = Path(__file__).resolve().parents[4] / "mods" / "afa-mods" / "src" / "blast-card.golden.ts"
+
+
+class BlastRadiusCards(Base):
+    """25 Nov: the Blast Radius "Run it?" dialog (mods/afa-mods) had "1 - Run it" as option 1, so this guard refused it and every
+    held production command failed with "no answer". The cards are the real ones the mod sends, one per held kind, saved by
+    mods/afa-mods/src/hooks.test.ts (which fails if the mod's card and the saved file differ)."""
+
+    @classmethod
+    def cards(cls):
+        text = GOLDEN.read_text()
+        return json.loads(text[text.index("\nexport default ") + len("\nexport default "):])
+
+    def test_the_saved_file_has_every_held_kind(self):
+        lib = (GOLDEN.parent / "lib.ts").read_text()
+        block = lib[lib.index("export const HELD_KINDS = ["):]
+        block = block[:block.index("] as const")]
+        kinds = set(__import__("re").findall(r"'([^']+)'", block))
+        self.assertEqual(kinds, set(self.cards()))
+
+    def test_every_real_card_passes_the_guard(self):
+        for kind, c in self.cards().items():
+            with self.subTest(kind=kind):
+                self.assertEqual(c["questions"][0]["options"][0]["label"], "Hold, ask me again")
+                self.assertEqual(c["questions"][0]["options"][1]["label"], "2 - Run it")
+                self.allowed(c["questions"])
+
+    def test_the_old_card_with_run_it_first_is_still_refused(self):
+        for kind, c in self.cards().items():
+            with self.subTest(kind=kind):
+                old = json.loads(json.dumps(c["questions"]))
+                old[0]["options"] = [{"label": "1 - Run it", "description": ""}, {"label": "2 - Refuse", "description": ""}]
+                self.assertIn("Option 1", self.refused(old))
+
+
 class Allowed(Base):
     def test_kill_switch(self):
         self.allowed([card(), card()], env={"ASK_CARD_GUARD": "off"})

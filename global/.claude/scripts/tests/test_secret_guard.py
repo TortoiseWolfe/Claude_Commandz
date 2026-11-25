@@ -213,6 +213,46 @@ class Process(unittest.TestCase):
             self.assertNotIn("not json", content)
 
 
+class CrashRefuses(unittest.TestCase):
+    """Workspace issue 93: a call the guard cannot read must be refused, not allowed."""
+
+    def run_main(self, payload, boom=None):
+        import contextlib
+        import io
+        from unittest import mock
+        err = io.StringIO()
+        patches = [mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload)))]
+        if boom:
+            patches.append(mock.patch.object(sg, "find_secret", side_effect=boom))
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"SECRET_GUARD_LOG": os.path.join(d, "g.log")}):
+            for p in patches:
+                p.start()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = sg.main()
+            finally:
+                for p in patches:
+                    p.stop()
+            logfile = os.path.join(d, "g.log")
+            log = ""
+            if os.path.exists(logfile):
+                with open(logfile) as fh:
+                    log = fh.read()
+        return rc, err.getvalue(), log
+
+    def test_a_crash_while_reading_a_command_refuses_it_and_logs_the_cause_not_the_command(self):
+        cmd = "echo hello-from-a-test"
+        rc, err, log = self.run_main({"tool_name": "Bash", "tool_input": {"command": cmd}}, boom=RuntimeError("boom"))
+        self.assertEqual(rc, 2)
+        self.assertIn("refused", err)
+        self.assertNotIn(cmd, err + log)
+        self.assertIn("RuntimeError", log)
+
+    def test_the_same_call_without_a_crash_is_still_allowed(self):
+        rc, err, _ = self.run_main({"tool_name": "Bash", "tool_input": {"command": "echo hello-from-a-test"}})
+        self.assertEqual((rc, err), (0, ""))
+
+
 class ProcessListings(Base):
     def test_blocks_process_command_listings_and_names_the_helper(self):
         for cmd in [

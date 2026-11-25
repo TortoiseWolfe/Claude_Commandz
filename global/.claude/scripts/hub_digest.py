@@ -630,6 +630,27 @@ def gh_review_since(repos, since, run=subprocess.run):
     return False
 
 
+DRIFT_STATE = HOME / ".claude/state/script-drift.json"   # script_drift.py --write, run daily by openclaw_status_refresh.sh
+DRIFT_STALE_HOURS = 36
+
+
+def drift_line(now_ts, state_file=None):
+    """One page line: how many installed scripts and hooks differ from main (issue 31). Empty when no check has ever run or nothing differs
+    and the check is fresh; says so plainly when the daily check has gone quiet."""
+    try:
+        data = json.loads(Path(state_file or DRIFT_STATE).read_text())
+        at, differs = int(data["at"]), list(data["differs"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if now_ts - at > DRIFT_STALE_HOURS * 3600:
+        return f"Script drift check has not run for {int((now_ts - at) // 3600)} hours: python3 ~/.claude/scripts/script_drift.py --write ~/.claude/state/script-drift.json"
+    if not differs:
+        return ""
+    shown = ", ".join(differs[:5]) + (f" and {len(differs) - 5} more" if len(differs) > 5 else "")
+    return (f"Installed scripts that differ from main ({len(differs)}): {shown}. The next install would overwrite them: "
+            "save any work in them into the repo first (script_drift.py lists all)")
+
+
 PEER_REVIEW_STATE = HOME / ".claude/state/peer-review-check.json"   # this week's answer, so the 15-minute digest does not call gh each time
 PEER_REVIEW_RECHECK_SECS = 3600
 
@@ -695,7 +716,7 @@ def weekly_reset_ts(budget):
     year, month, day, hour, minute, half = m.groups()
     try:
         from zoneinfo import ZoneInfo
-        from openclaw_dispatch import WEEK_TZ
+        from week_reset import WEEK_TZ
         return datetime(int(year), int(month), int(day), int(hour) % 12 + (12 if half == "PM" else 0), int(minute),
                         tzinfo=ZoneInfo(WEEK_TZ)).timestamp()
     except Exception:  # noqa: BLE001 - no reset figure is better than a broken digest
@@ -704,16 +725,12 @@ def weekly_reset_ts(budget):
 
 def week_start_ts(budget, now_ts):
     """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
-    report's); without one it is the dispatcher's rule, the one place the Wednesday 16:00 UTC boundary lives (the same call
-    phase_note makes). None when the dispatcher module can't be read."""
+    report's); without one it is the fixed Wednesday 16:00 UTC rule in week_reset.py (the dispatcher keeps a copy that a test holds equal).
+    None when week_reset.py can't be read."""
     try:
-        from openclaw_dispatch import _week_edges
-        named = weekly_reset_ts(budget)
-        reset = _week_edges(now_ts, named)[3]
-        if named is None:  # the rule's reset is a fixed UTC instant (Wed 16:00 UTC), so the week began exactly seven days earlier
-            return reset.timestamp() - 7 * 86400
-        return (reset - timedelta(days=7)).timestamp()  # wall-clock: a DST change in the week moves nothing
-    except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
+        from week_reset import week_start_ts as start
+        return start(now_ts, weekly_reset_ts(budget))
+    except Exception:  # noqa: BLE001 - the digest must build without it
         return None
 
 
@@ -1543,7 +1560,7 @@ def main(argv=None):
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine, unanswered=unanswered,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
                           coop_cards=coop_cards, machines=machine_lines(now),
-                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
+                          rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), drift_line(time.time()), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
         problems = live_problems(body, page, cap=a.cap)

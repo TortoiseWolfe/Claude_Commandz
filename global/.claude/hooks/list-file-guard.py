@@ -92,6 +92,7 @@ HOOKS = os.path.join(HOME, ".claude", "hooks")
 PROTECTED = (
     os.path.join(AFA, "merge-repos.txt"),
     os.path.join(AFA, "own-review-repos.txt"),
+    os.path.join(AFA, "identity-guard-hosts.txt"),  # the sites he approved his address going to (issue 167): a session never approves its own
 )
 SELF = os.path.join(HOOKS, "list-file-guard.py")
 BASE_NAMES = tuple(os.path.basename(p) for p in PROTECTED)

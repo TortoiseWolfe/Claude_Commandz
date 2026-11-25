@@ -490,6 +490,34 @@ if ! grep -q 'under the fake HOME' "$cu_log"; then echo "ok   the lane.sh under 
 else echo "FAIL the HOME lane.sh was called: $(cat "$cu_log")"; failures=$((failures + 1)); fi
 lane_sh="$cu_save_lane_sh"; recycle_dir="$cu_save_dir"
 
+# Issue 128: a lane whose fresh session already holds more than LANE_WATCH_START_K (30) at its first message is named once per session. lane.sh
+# --start-load prints "<K> <session id>" (or "?" / "n/a"); start_load_check keeps the session it named in .startload-<lane>.
+sl_dir="$TMP/sl-state"; mkdir -p "$sl_dir"; sl_ans="$TMP/sl-answer"; sl_lane_sh="$TMP/sl-lane.sh"
+cat > "$sl_lane_sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in --start-load) cat "$SL_ANS" ;; esac
+SH
+chmod +x "$sl_lane_sh"; export SL_ANS="$sl_ans"
+sl_save_lane_sh="$lane_sh"; sl_save_dir="$recycle_dir"; lane_sh="$sl_lane_sh"; recycle_dir="$sl_dir"
+sl_name() { # sl_name <answer> [limit]: one start_load_check; the line it printed is in $sl_said
+  hit=0; other=0; echo "$1" > "$sl_ans"
+  LANE_WATCH_START_K="${2:-30}" start_load_check sl-lane > "$TMP/sl-said"; sl_said=$(cat "$TMP/sl-said")
+}
+sl_expect() { # sl_expect <label> <1 if named, else 0>
+  local got=0; [ -n "$sl_said" ] && got=1
+  if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: said '$sl_said'"; failures=$((failures + 1)); fi
+}
+sl_name "29 sess-a"; sl_expect "a start load of 29K is not named" 0
+sl_name "39 sess-a"
+if [ "$sl_said" = "start load: sl-lane (its fresh session held 39K at its first message, over the 30K mark: what it reads at the start is too big; archive or shrink report.md, status.md, handoff.md and prompt.md)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   a start load of 39K names the lane, with hit and other set"
+else echo "FAIL start load naming: said '$sl_said' hit=$hit other=$other"; failures=$((failures + 1)); fi
+sl_name "39 sess-a"; sl_expect "the same session is not named twice" 0
+sl_name "41 sess-b"; sl_expect "a new session over the mark is named again" 1
+sl_name "?"; sl_expect "an unreadable start load is not named" 0
+sl_name "n/a"; sl_expect "an engine lane (n/a) is not named" 0
+for sl_off in 0 off; do rm -f "$sl_dir"/.startload-*; sl_name "99 sess-c" "$sl_off"; sl_expect "LANE_WATCH_START_K=$sl_off turns the check off" 0; done
+lane_sh="$sl_save_lane_sh"; recycle_dir="$sl_save_dir"
+
 # 18 Nov 2026 (K17): every wake prints WAKE-REASON <code> first and appends <ISO time> <code> <lane or -> to $LANE_WATCH_WAKE_LOG, so a false wake can be
 # counted. wr_case <label> <output text> <want code> <want lane>: the first line is the reason and the log's last row has the code and lane.
 export LANE_WATCH_WAKE_LOG="$TMP/wake-log.tsv"
@@ -540,7 +568,7 @@ wc_check "green: p's pull request 5 in r has" "green-pr p"; wc_check "spend: lan
 wc_check "hub context: 150K, past" "hub-context -"; wc_check "unanswered: your question" "unanswered -"; wc_check "bridge: down" "bridge -"
 wc_check "outbox: 2 posts" "outbox -"; wc_check "undelivered: messages" "undelivered -"; wc_check "ask: open receptionist questions:" "ask-open -"
 wc_check "ask: a new 'Jonathan via OpenClaw:' line" "ask-openclaw -"; wc_check "client talk: a co-op" "client-talk -"; wc_check "note: x" "note -"
-wc_check "check passed: true" "check-passed -"; wc_check "something new" "other -"
+wc_check "check passed: true" "check-passed -"; wc_check "something new" "other -"; wc_check "start load: s (its fresh session held 39K)" "start-load s"
 if [ "$wc_bad" = 0 ]; then echo "ok   $wc_n first-line kinds map to their reason code and lane"; else failures=$((failures + wc_bad)); fi
 
 # --wake-counts [DAYS]: wakes per code in the window, most first; an old row falls outside it; it exits 0 without starting a watch.

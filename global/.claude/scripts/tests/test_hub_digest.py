@@ -806,6 +806,34 @@ class NoHeaderToolsLine(unittest.TestCase):
         self.assertEqual(hd.no_header_tools_line(Path(fresh_dir(self))), "")  # a folder cannot be read as a file
 
 
+class DriftLine(unittest.TestCase):
+    NOW = 1_800_000_000
+
+    def state(self, at, differs):
+        p = Path(fresh_dir(self)) / "script-drift.json"
+        if at is not None:
+            p.write_text(json.dumps({"at": at, "differs": differs}))
+        return p
+
+    def test_no_file_gives_nothing(self):
+        self.assertEqual(hd.drift_line(self.NOW, state_file=self.state(None, [])), "")
+
+    def test_fresh_and_clean_gives_nothing(self):
+        self.assertEqual(hd.drift_line(self.NOW, state_file=self.state(self.NOW - 3600, [])), "")
+
+    def test_differs_names_the_scripts(self):
+        line = hd.drift_line(self.NOW, state_file=self.state(self.NOW - 3600, ["a.py", "b.sh"]))
+        self.assertIn("(2): a.py, b.sh", line)
+
+    def test_more_than_five_then_and_n_more(self):
+        line = hd.drift_line(self.NOW, state_file=self.state(self.NOW - 60, [f"t{i}.py" for i in range(7)]))
+        self.assertIn("(7): t0.py, t1.py, t2.py, t3.py, t4.py and 2 more", line)
+
+    def test_stale_check_says_so(self):
+        line = hd.drift_line(self.NOW, state_file=self.state(self.NOW - 40 * 3600, []))
+        self.assertIn("has not run for 40 hours", line)
+
+
 class PeerReviewLine(unittest.TestCase):
     ET = ZoneInfo("America/New_York")
     TUE = datetime(2026, 11, 10, 12, 0, tzinfo=ET)

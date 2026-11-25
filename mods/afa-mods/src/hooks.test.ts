@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { BYPASSES, DEPLOY, FORWARDERS, REXEC, SP, WRITES, prod } from './prodcases'
 import { sha256Hex } from './prodread'
+import GOLDEN_CARDS from './blast-card.golden'
 
 const HOME = '/home/t'
 const STATE = `${HOME}/.claude/state`
@@ -99,13 +100,53 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('/home/t/afa-mods-test')
     expect(asked).toContain('2 entries')
     expect(r.deny).toContain('Blast Radius')
   })
+  // 25 Nov: the real card was refused by ask-card-guard.py (option 1 was "1 - Run it"), so every held production command failed with
+  // "no answer". The card the hook builds for rm -rf is saved in blast-card.golden.json; the Python test
+  // global/.claude/hooks/tests/test_ask_card_guard.py feeds that file through the real guard. If this test fails after a wording
+  // change, copy the printed card into blast-card.golden.json and rerun the Python test.
+  const CARD_COMMANDS: Record<string, string> = {
+    'rm -rf': 'rm -rf /home/t/afa-mods-test',
+    'docker system prune': 'docker system prune -af',
+    'docker image prune': 'docker image prune -a',
+    'docker volume prune': 'docker volume prune -f',
+    'docker volume rm': 'docker volume rm somevol',
+    'docker compose down -v': 'docker compose -p x down -v',
+    'docker run without limits': 'docker run -d nginx',
+    'git push --force': 'git push --force origin main',
+    'production deploy': 'timeout 120 scripts/portainer-deploy.sh redeploy --prod',
+    'tmux shared lanes': 'tmux kill-session -t lanes',
+  }
+  const askedCard = async ($: any, on: any, command: string) => {
+    setup(on)
+    let card: any
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }] }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      card = { questions: e.questions }
+      return answer(e, 'Hold, ask me again')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    await $.tool.call({ tool: 'Bash', command })
+    return card
+  }
+  for (const [kind, command] of Object.entries(CARD_COMMANDS)) {
+    test(`the ${kind} card has Hold first and Run it second, and matches the saved card the guard test runs`, async ($, on) => {
+      const card = await askedCard($, on, command)
+      expect(card).toEqual((GOLDEN_CARDS as Record<string, unknown>)[kind])
+      if (card !== undefined) {
+        expect(card.questions).toHaveLength(1)
+        expect(card.questions[0].options.map((o: any) => o.label)).toEqual(['Hold, ask me again', '2 - Run it'])
+      }
+    })
+  }
   // 19 Oct: Jonathan refused two commands and typed why under "Type something." (the dialog's Other); the tool
   // result only said "refused at the prompt", so the session retried blind.
   const refuseWith = async ($: any, on: any, label: string) => {
@@ -131,9 +172,9 @@ describe('blast radius', () => {
     expect(r.deny).toContain(reason)
   })
   test('interactive: plain Refuse adds no reason and Run it still runs', async ($, on) => {
-    const r = await refuseWith($, on, '2 - Refuse')
+    const r = await refuseWith($, on, 'Hold, ask me again')
     expect(r.deny).toBe('Blast Radius: refused at the prompt. The command did not run.')
-    const ran = await refuseWith($, on, '1 - Run it').catch((e: unknown) => e)
+    const ran = await refuseWith($, on, '2 - Run it').catch((e: unknown) => e)
     expect((ran as any).deny).toBeUndefined()
   })
   test('non-interactive: denies git push --force, logs it', async ($, on) => {
@@ -194,7 +235,7 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('Blast Radius stopped a command before it ran')
@@ -223,7 +264,7 @@ describe('blast radius, unattended lane', () => {
     on('session.surfaces', () => ({ value: ['terminal'] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = true
-      return answer(e, '1 - Run it')
+      return answer(e, '2 - Run it')
     })
     on('fs.write', ($: any, e: any) => {
       seen.log += e.text
@@ -347,7 +388,7 @@ describe('blast radius, unattended lane', () => {
     on('fs.list', () => ({ value: [] }))
     on('tool.call', { tool: 'AskUserQuestion' }, () => {
       asked = true
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     await $.tool.call({ tool: 'Bash', command: `rm -rf ${HOME}/repos/ScriptHammer` })
     expect(asked).toBe(true)
@@ -384,7 +425,7 @@ describe('blast radius always says what it would touch', () => {
       on('fs.list', () => ({ value: [{ name: 'a' }] }))
       on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
         asked = JSON.stringify(e)
-        return answer(e, '2 - Refuse')
+        return answer(e, 'Hold, ask me again')
       })
       await $.tool.call({ tool: 'Bash', command })
       expect(asked).toContain('Blast Radius stopped a command before it ran')
@@ -454,7 +495,7 @@ describe('blast radius, rm inside docker run', () => {
     }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     on('fs.write', ($: any, e: any) => {
       seen.log += e.text
@@ -596,7 +637,7 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -712,7 +753,7 @@ describe('blast radius, lane denies what it can name the fix for', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -806,7 +847,7 @@ describe('blast radius, read-only production proofs', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -946,7 +987,7 @@ describe('blast radius, the guard never crashes on a production deploy call', ()
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
       if (opts.askThrows) throw new Error('dialog broke: no surface')
-      return answer(e, '2 - Refuse')
+      return answer(e, 'Hold, ask me again')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     return seen

@@ -23,7 +23,7 @@ Shown on the same line above the prompt.
 closes every lane window (the tmux session `lanes`), with no undo; a default-server `kill-server`
 also closes every other session and window there. Private tmux sockets and individual `kill-window`
 commands are not held. Interactively it lists what the command would
-touch and asks `1 - Run it` / `2 - Refuse`. In a non-interactive session (`claude -p`, the Console
+touch and asks `Hold, ask me again` / `2 - Run it` (Hold is first, so a click that only focuses the window or an Enter cannot run the command). In a non-interactive session (`claude -p`, the Console
 lanes) it never waits: force pushes and production deploys are denied with a reason, the rest are
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.
 If the guard itself fails (an exception, or the Run it? dialog breaking) the command is held, the refusal names the cause,
@@ -114,7 +114,7 @@ message text (`echo`, `tmux send-keys`, `git commit -m`), heredoc bodies that on
 `git commit -m "$(cat <<'EOF' ...)"`), or
 files a test runner loads (`claude plugin test` is not a deploy). A word containing `/` is a path, not a flag:
 `~/repos/.worktrees/App--prod-lock` is not `--prod`, and `--prod` must be a whole word. When Jonathan refuses and types a
-reason under "Type something.", the reason is in the refusal the session reads (only the exact `1 - Run it` label runs). `sh -c`, `ssh host "..."` and a
+reason under "Type something.", the reason is in the refusal the session reads (only the exact `2 - Run it` label runs). `sh -c`, `ssh host "..."` and a
 heredoc fed to `bash` or piped into a shell are still read. Known tradeoff, asked for by the hub: `tmux send-keys` text is treated as
 a message, so a deploy command typed into another window that way is not held here; that window's own guard judges it.
 If the guard itself throws, the command is denied. The match is best effort (a net, not a shell parser). Existing hooks and permission rules still apply.

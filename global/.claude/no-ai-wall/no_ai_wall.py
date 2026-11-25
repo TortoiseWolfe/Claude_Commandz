@@ -20,7 +20,7 @@ Command line (used by the bash helper no_ai_wall.sh):
   no_ai_wall.py check-text FILE              exit 3 when the text names a listed path
 Environment overrides (tests): NO_AI_PATHS_FILE, NO_AI_REFUSAL_LOG.
 
-Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py). The tamper
+Where it lives: ~/.claude/no-ai-wall/ holds only the wall's own files (this module, no_ai_wall.sh, no-ai-wall-guard.py, wall_cleanup.py). The tamper
 guard below covers that folder, the list, and the settings*.json files, and nothing else under ~/.claude, so ordinary tooling in
 ~/.claude/scripts and ~/.claude/hooks installs without anyone's hands. The hook loads this file by absolute path from its own folder.
 """
@@ -46,7 +46,7 @@ def paths_file():
 
 
 WALL_FOLDER = "no-ai-wall"
-_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh")
+_WALL_FILES = ("no-ai-wall-guard.py", "no_ai_wall.py", "no_ai_wall.sh", "wall_cleanup.py")
 
 
 def wall_dir():
@@ -344,6 +344,9 @@ def text_names_listed_path(text, paths):
     return None
 
 
+_SHLEX_BLANKS = " \t\r\n"  # what shlex.split splits a word on
+
+
 def _words(command):
     cleaned = re.sub(r"[;|&<>()`]", " ", command.replace("$(", " "))
     try:
@@ -353,8 +356,10 @@ def _words(command):
     out = []
     for w in words:  # `bash -c 'find /x'` is one quoted word: its own words count too, so a search inside it is still a search
         out.append(w)
-        if any(ch.isspace() for ch in w):
-            out.extend(_words(w))
+        if any(ch in _SHLEX_BLANKS for ch in w):  # only the characters shlex really splits on: str.isspace() also counts U+00A0, form feed and more, which made this loop forever (issue 86)
+            inner = _words(w)
+            if inner != [w]:  # a second guard: a split that gives the same single word back adds nothing and must not recurse again
+                out.extend(inner)
     return out
 
 
@@ -443,6 +448,11 @@ def _ansi_c_value(body):
         out.append(ch)
         i = m.end()
     return "".join(out).split("\x00")[0]
+
+
+class _Meta(list):
+    """The list _shell_commands fills with (lead, reads) pairs; `tail` is the separator text left after the last command."""
+    tail = ""
 
 
 def _shell_commands(text, written=None, meta=None):
@@ -552,6 +562,8 @@ def _shell_commands(text, written=None, meta=None):
             started = True
             i += 1
     end_cmd()
+    if meta is not None and hasattr(meta, "tail"):
+        meta.tail = lead  # the separator characters after the last command (the `)` that closes a substitution): _substitution_spans balances the depth with them
     return cmds
 
 
@@ -812,6 +824,7 @@ def _names_a_root(words, cur):
     return False
 
 
+_FEEDERS = ("xargs", "parallel")  # the programs that run a command with words taken from their input (xargs, issue 154; parallel, issue 161)
 _XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
 
 
@@ -827,19 +840,116 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
         return False
     xargs_words = [w for w, q in cmds[k]]
-    # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
-    # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
-    if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
-        return False
-    # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
-    # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
-    if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
-        return False
+    feeders = [i for i, w in enumerate(xargs_words) if os.path.basename(w) in _FEEDERS]
+    if len(feeders) > 1:
+        return False  # a feeder run by a feeder (`xargs xargs grep x DIR`): the inner one takes input of its own
+    feeder = feeders[0] if feeders else None
+    if feeder is not None and os.path.basename(xargs_words[feeder]) == "parallel":
+        # GNU parallel (issue 161) puts its input where `{}` stands, reads it from `:::` and `::::`, a file or another delimiter, and has far
+        # more options than xargs: any option before its command, and any replacement string or `:::` word, takes the wide reading. So does
+        # a PARALLEL variable, set in the environment or in front of the command, which adds options of its own.
+        # The name anywhere in the text counts (`export PARALLEL=-a f; ... | parallel`, `declare`, `printf -v`): a variable set earlier in the text
+        # reaches it. A config file under ~/.parallel is on disk, which a reader of the text cannot see.
+        if os.environ.get("PARALLEL") or any("PARALLEL" in w for c in cmds for w, q in c) or any(re.match(r"[A-Za-z_]\w*=", w) for w in xargs_words[:feeder]):
+            return False
+        after = xargs_words[feeder + 1:]
+        if after and after[0].startswith("-"):
+            return False
+        if any("{" in x or x.startswith(":::") for x in after):
+            return False
+    else:
+        # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
+        # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
+        if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
+            return False
+        # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
+        # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
+        if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
+            return False
     prev = cmds[k - 1]
     if prev[0][1] or prev[0][0] not in ("echo", "printf"):
         return False
     # only plain words: no dash anywhere (a delimiter could expose it), no escape, quote, variable, wildcard or brace
     return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
+
+
+_PWD_UNSAFE = re.compile(r"\b(?:" + "|".join(sorted(w for w in ("alias", "unalias", "function", "hash", "enable", "eval", "source", "builtin", "command", "declare", "typeset", "export", "readonly", "local", "unset", "set", "shopt", "trap", "exec", "env", "IFS", "PATH", "command_not_found_handle", "cd", "pushd", "popd", "chdir",
+                                                  "read", "printf", "mapfile", "readarray", "getopts", "let", "bash", "sh", "zsh", "dash", "ksh", "fish", "sudo", "nohup", "setsid", "time", "timeout", "nice", "stdbuf"))) + r")\b")
+# the startup and environment names that can rebind a builtin, matched anywhere in a word so a prefix or a suffix cannot hide them
+_PWD_UNSAFE_NAMES = re.compile(r"BASH_ENV|BASH_FUNC|ENV=|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT|LD_PRELOAD|--wd|--chdir|--working-directory")
+
+
+def _substitution_spans(cmds, meta, cwd="", nested=False):
+    """-> (carried, cut), two lists with one flag per command, from how the reader cut the text at substitutions (issues 160 and 164).
+
+    The reader ends a command at `$(`, a backtick and a parenthesis, so the words of one shell command can land in several of ours. Each command's
+    `lead` holds the separator characters just before it; counting the openers and closers in them gives the nesting depth of every command.
+    carried[k]: command k stands inside the statement of an earlier xargs or parallel (same pipeline or statement, at its depth or deeper), so it
+    may be the program that feeder runs: `xargs $(true) grep x DIR` reads as the commands xargs, true and `grep x DIR`. A `;`, `&`, newline or
+    `|` at the feeder's depth ends the statement, and so does leaving the substitution the feeder stood in.
+    cut[k]: command k is cut off from the words that follow it by a substitution that has words after it in the same statement, as in
+    `grep $(echo -r) x DIR`, where the substitution can hand the search a flag. A substitution that is the last word (`ls $(pwd)`) is not a cut."""
+    n = len(cmds)
+    carried, depth_after = [False] * n, [0] * n
+    depth, in_bt, anchor = 0, False, None
+    for k in range(n):
+        for ch in meta[k][0]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if anchor is not None and depth < anchor:
+                    anchor = None
+            elif ch == "`":
+                depth, in_bt = (depth - 1, False) if in_bt else (depth + 1, True)
+                if anchor is not None and depth < anchor:
+                    anchor = None
+            elif ch in ";&\n|" and anchor is not None and depth <= anchor:
+                anchor = None
+        carried[k] = anchor is not None
+        depth_after[k] = depth
+        if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k]):
+            anchor = depth if anchor is None else min(anchor, depth)
+    cut = [False] * n
+    for ch in getattr(meta, "tail", ""):  # the closers after the last command
+        if ch == ")":
+            depth -= 1
+        elif ch == "`":
+            depth, in_bt = (depth - 1, False) if in_bt else (depth + 1, True)
+    if depth != 0 or in_bt or min(depth_after, default=0) < 0:
+        # the openers and closers do not balance (a `)` that closes a case pattern, an unclosed backtick): the depths cannot be trusted, so
+        # every command after the first feeder is read as one it may run, and a command followed by a substitution is cut (fail closed)
+        first = next((k for k in range(n) if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k])), None)
+        carried = [first is not None and k > first for k in range(n)]
+        return carried, [k + 1 < n and meta[k + 1][0].startswith(("$(", "`")) for k in range(n)]
+    # `pwd` prints one folder and never an option, but only while nothing in the text can change what it means or how its output is split. So the
+    # exemption holds only for a text with exactly one `pwd` (any word that holds the letters twice, a quoted script's function included, turns it
+    # off), none of the words that can rebind a name (the same set the search check uses), no change of IFS or PATH, no change of folder at all
+    # (`cd -` and a quoted `cd` too), and a session folder with no space in it.
+    all_words = [w for c in cmds for w, q in c]
+    # a script run by another command (sh -c, eval, a quoted literal) inherits functions, aliases, a folder and a startup file this text cannot see
+    pwd_is_plain = (not nested and all_words.count("pwd") == 1 and sum(w.count("pwd") for w in all_words) == 1 and not re.search(r"\s", cwd)
+                    and "." not in all_words and not any(_PWD_UNSAFE.search(w) or _PWD_UNSAFE_NAMES.search(w) for w in all_words)
+                    # a variable set by name (`X=1 cmd`, `A=b; ...`) or a working-folder option (`-C d`, `-D d`) can change what pwd prints or where it runs
+                    and not any(re.match(r"[A-Za-z_]\w*\+?=|-[CD]", w) for w in all_words))
+    for k in range(n - 1):
+        if not meta[k + 1][0].startswith(("$(", "`")):
+            continue
+        end, follows = n, False
+        for j in range(k + 2, n):
+            if depth_after[j] < depth_after[k]:
+                end = j
+                break
+            if depth_after[j] == depth_after[k]:
+                end = j
+                lead = meta[j][0]
+                follows = bool(lead) and set(lead) <= set(")`")  # words follow the substitution with no separator between
+                break
+        # A substitution that is the last word of its command can hand over a flag as well (`grep x DIR $(echo -r)`): it is a cut unless all
+        # it holds is `pwd`, which prints a folder and never an option (`ls $(pwd)`).
+        inside = cmds[k + 1:end]
+        cut[k] = follows or not (len(inside) == 1 and [w for w, q in inside[0]] == ["pwd"] and pwd_is_plain)
+    return carried, cut
 
 
 def _search_of(prog, rest, cur, flag_in=False):
@@ -857,9 +967,9 @@ def _search_of(prog, rest, cur, flag_in=False):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, not _names_a_root(roots, cur)
+        return True, flag_in or not _names_a_root(roots, cur)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
     if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
-        return True, not _names_a_root(_operands(prog, rest), cur)
+        return True, flag_in or not _names_a_root(_operands(prog, rest), cur)
     key = _SEARCH_KEY.get(prog)
     if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
@@ -873,7 +983,9 @@ def _search_of(prog, rest, cur, flag_in=False):
         return True, False
     if not any(x.startswith(_PATTERN_OPTIONS) for x in rest):
         ops = ops[1:]  # the first operand is the pattern
-    return True, not _names_a_root(ops, cur)  # fed by xargs or typed, a search that names no root walks its working folder (issue 154)
+    # typed, a search that names no root walks its working folder (issue 154); fed by xargs, parallel or a substitution it may also get a root
+    # from its input, so it is read as walking the working folder whatever roots are typed (issues 157 and 160)
+    return True, flag_in or not _names_a_root(ops, cur)
 
 
 def _is_launcher_words(words):
@@ -933,12 +1045,12 @@ def _program_of(cmd):
     return (os.path.basename(ws[i]), ws[i + 1:]) if i < len(ws) else (None, [])
 
 
-def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
+def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
     written = []
-    meta = []
+    meta = _Meta()
     cmds = _shell_commands(text, written, meta)
     if cmds is None or depth > 4:
         return None
@@ -950,6 +1062,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
+    carried, cut = _substitution_spans(cmds, meta, cwd, nested)
     cdpath = _cdpath(text)
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
@@ -970,14 +1083,14 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
         # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
-        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
+        xargs = any(os.path.basename(w) in _FEEDERS for w, q in cmd)
         # the reader ends a command at `$(`, a backtick and a plain parenthesis (so a process substitution `<(..)` too), so in
-        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. With any of them anywhere in the text, every
-        # command after an xargs is read as one that xargs may run (the wide reading).
-        if not xargs and any("(" in lead or ")" in lead or "`" in lead for lead, reads in meta) and any(
-                os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
+        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. Every command in the same pipeline or statement
+        # after an xargs or parallel is read as one the feeder may run (the wide reading, issue 164); a later statement is read on its own.
+        if carried[k]:
             xargs = True
-        flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)
+        # a search cut off from its words by a substitution can be handed a flag by it: `grep $(echo -r) x DIR` (issue 160)
+        flag_in = (xargs and not _xargs_input_is_flagfree(cmds, meta, k)) or cut[k]
         prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
             behind_wrapper = not re.search(r"\s", w) and _known_program(w) and any(os.path.basename(p) in _WRAPPERS for p, pq in cmd[:i] if not pq)
@@ -985,7 +1098,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                 # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
                 # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
-                    sub = _searches(w, cur or cwd, depth + 1, bodies)
+                    sub = _searches(w, cur or cwd, depth + 1, bodies, nested=True)
                     if sub is None or (cur is None and sub[0]):
                         return None
                     recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
@@ -1015,17 +1128,17 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                     else:
                         return None
             if script is not None:
-                sub = _searches(script, cur or cwd, depth + 1, bodies)
+                sub = _searches(script, cur or cwd, depth + 1, bodies, nested=True)
                 if sub is None or (cur is None and sub[0]):
                     return None  # a search run from a folder the text cannot name: the wide reading
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
             rec, walks = _search_of(prog, rest, cur or cwd, flag_in)
-            if cur is None and rec:
-                return None
+            if cur is None and rec and _search_of(prog, rest, cur or cwd, False)[1]:
+                return None  # a recursive search that names no root walks the folder the text cannot name: the wide reading. One that names its own roots (even if a substitution may add a flag) is judged on them below, as before issue 139
             recursive = recursive or rec
             if walks:
-                folders.append(cur)
+                folders.append(cur or cwd)  # the unknown folder is guessed as the starting one only here, where the search also names roots
     return recursive, folders, words
 
 
@@ -1077,7 +1190,7 @@ def bash_hits(command, cwd, paths):
         for lit in _code_commands(body):
             if not _SEARCH_WORD.search(lit):
                 continue
-            sub = _searches(lit, cwd)
+            sub = _searches(lit, cwd, nested=True)
             r = _info_hit(sub, cwd, paths) if sub is not None else _bash_hits_wide(lit, cwd, paths)
             if r:
                 return r
@@ -1221,7 +1334,7 @@ def pattern_start(pattern, root, cwd):
 
 
 def protected_files():
-    """Files no session may change: the list itself, and the hook, the module and its bash helper in the wall's own folder. The three places
+    """Files no session may change: the list itself, and the hook, the module, its bash helper and the cleanup command in the wall's own folder. The three places
     the wall lived before that folder existed count too, while a file is still there (a machine not yet moved runs from them); once the
     install has moved them away, ~/.claude/scripts and ~/.claude/hooks hold no wall file and are ordinary folders. A session that could edit
     a protected file could turn the wall off. They are checked by realpath, so a symlink to one counts too."""
@@ -1853,23 +1966,64 @@ def _segments(command):
     return [seg for seg in re.split(r"\|\||&&|[;|&\n]", command) if seg.strip()]
 
 
+_PY_RUN_OPTIONS = ("-I", "-B", "-s", "-S", "-u")  # the only options a run of a listed Python file may carry: none can name code, a module or another file to run. -E is left out: bash_writes_guarded reads it as another interpreter's inline-code option, and -I already covers it
+
+
+def _runs_listed_python(words, seg):
+    """True for `python [options] <file> [the file's own arguments]`, where <file> is redact_view.py, the module or the cleanup command and every word before it is one of
+    _PY_RUN_OPTIONS written alone. Anything else before the file is refused, whether or not it is joined to a value: an option that names code or a module to run, a lone
+    dash, an interactive run, a bundle of option letters. With one of those Python runs something other than the file, and the file would only be an argument handed to
+    it. The cleanup command takes no path, so nothing may follow it but --apply.
+    seg is the raw text of the part of the command the words came from. The path the rule compares must be the path the machine opens, so the file's word must be:
+    written plainly, with no quote or backslash and no white space of any kind before, in or after it (the shell would hand Python other text than the rule read,
+    and a white-space character on the end of the word is part of the file name the shell passes on);
+    a full path from /, ~/ or $HOME/ (a relative path is opened against the working folder, not against /), with no other variable (the shell's value may differ from the
+    hook's) and no ".." (it is removed as text here, but the shell follows links first); for $HOME/, a home with no white space or wildcard (the shell would split it);
+    the listed file's own name, never a link to it (a link can be re-pointed between the check and the run, and its name can be a wildcard pattern)."""
+    i = 1
+    while i < len(words) and words[i] in _PY_RUN_OPTIONS:
+        i += 1
+    if i >= len(words) or words[i].startswith("-"):
+        return False
+    word = words[i]
+    if any(ch.isspace() for ch in word):
+        return False
+    if re.split(r"[ \t]+", seg.strip(" \t"))[:i + 1] != words[:i + 1]:
+        return False
+    if not word.startswith(("/", "~/", "$HOME/")) or "$" in word[1:] or ".." in word.split("/"):
+        return False
+    if word.startswith("$HOME/") and re.search(r"[\s*?\[]", home()):
+        return False
+    p = expand(word, "/")
+    cleanup = os.path.join(wall_dir(), "wall_cleanup.py")
+    if p in (cleanup, os.path.realpath(cleanup)):
+        return all(a == "--apply" for a in words[i + 1:])
+    listed = (os.path.join(home(), ".claude", "scripts", "redact_view.py"), os.path.join(wall_dir(), "no_ai_wall.py"))
+    return p in listed or p in tuple(os.path.realpath(f) for f in listed)  # run, not edited
+
+
 def _read_only_listing(command):
-    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands (no redirection,
-    no command substitution, no program outside the short list)."""
-    if re.search(r"[<>`]|\$\(", command):
+    """True for a command that only looks at a file's existence or size, or reads the list through redact_view.py, or runs the module's own check commands, or runs the wall's cleanup
+    command wall_cleanup.py (which takes no path and moves only strays out of the wall's folder), with no redirection, no command substitution and no program outside the
+    short list. A Python file on that list is there to be run as itself and nothing else: _runs_listed_python holds the rule. This is the only gate for such a command
+    (bash_writes_guarded does not look inside a Python run), so it has to refuse every form in which Python would run something other than the listed file.
+    The program is the first word of each part of the command, so a part that starts by setting a variable is refused: that word is not a program, and
+    the real one after it would go unread. For the same reason the whole command is refused when it holds a parenthesis or a brace: those group commands and
+    define functions, so they start a command where _segments sees no new part (`ls() ( python -m x file ); ls` gives the name ls a new body), and the
+    program inside would go unread too. A first word must be a bare program name with no slash, or that name directly under /usr/bin or /bin: a path to any other folder is refused, because a program there can carry a trusted name, and so is a tilde, which the shell expands."""
+    if re.search(r"[<>`(){}]", command):
         return False
     for seg in _segments(command):
         words = _words(seg)
         if not words:
             continue
-        prog = os.path.basename(words[0])
+        folder, prog = os.path.split(words[0])
+        if "=" in words[0] or not re.fullmatch(r"[A-Za-z0-9_.+-]+", prog) or folder not in ("", "/usr/bin", "/bin"):
+            return False  # a word that sets a variable is not the program: `A=/ls python ...` must not be read as ls; nor is a word the shell expands (a tilde); nor is a path to any folder but the two system ones, where a program can carry a trusted name
         if prog in _READ_ONLY_PROGRAMS:
             continue
-        if prog.startswith("python"):
-            rest = [w for w in words[1:] if not w.startswith("-")]
-            ok = [os.path.realpath(os.path.join(home(), ".claude", "scripts", "redact_view.py")), os.path.realpath(os.path.join(wall_dir(), "no_ai_wall.py"))]  # run, not edited
-            if rest and os.path.realpath(expand(rest[0], "/")) in ok:
-                continue
+        if re.fullmatch(r"python[\d.]*", prog) and _runs_listed_python(words, seg):
+            continue
         return False
     return True
 
@@ -1883,6 +2037,114 @@ def _command_tokens(command, cwd):
                 out.append(full)
                 out.extend(_expand_globs(full))
     return out
+
+
+_HOME_OPERATOR = re.compile(r"\$\{HOME([:%#/^,@+=?-])([^}]*)\}")
+
+
+def _home_variants(command):
+    """-> the texts to judge for a command that holds `${HOME:0}`, `${HOME%/}`, `${HOME:+/dir}` or the like (issue 187). The original text comes
+    first and is always judged; then the text with every such form read as `$HOME` (HOME is always set, so the form is the home folder or a cut
+    of it), then the text with each form read as its own operand (`${HOME:+/dir}` is `/dir`, `${HOME/x/y}` has `y` put in) so a path hidden in
+    the operand is judged as a path. `${HOMEX:0}` is another variable and stays as written. Over-reading is safe: it only adds texts to check."""
+    if "${HOME" not in command:
+        return [command]
+
+    def replacement(m):
+        s = m.group(2)
+        if m.group(1) == "/":  # `${HOME/pattern/replacement}`, `${HOME//p/r}`, `${HOME/#p/r}`
+            s = s[1:] if s[:1] in ("/", "#", "%") else s
+            return s.split("/", 1)[1] if "/" in s else ""
+        return s.lstrip("-+=?") if m.group(1) == ":" else s
+
+    out = [command]
+    for text in (_HOME_OPERATOR.sub("$HOME", command), _HOME_OPERATOR.sub(lambda m: m.group(2), command), _HOME_OPERATOR.sub(replacement, command)):
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def _brace_expanded(command):
+    """-> (text, complete). text is the command with every word that holds a brace group (`a{b,c}d`, `{s..s}etopt`) written out as the words the
+    shell makes of it, or None when no word has one (issue 187). The shell turns `{a,b}` into two paths and `{1..3}` into three words; the checks
+    read one. The wall judges the original text AND this one. complete is False when a word's list was cut short or left unexpanded: a listed
+    name could be in the part not written out, so the caller refuses (fail closed). Over-reading is safe: it only adds words to be checked."""
+    if "{" not in command or ("," not in command and ".." not in command):
+        return None, True
+    out, changed, complete = [], False, True
+    for piece in re.split(r"(\s+)", command):
+        if "{" in piece and (_BRACES.search(piece) or _SEQUENCE.search(piece)):  # `{a,b}` and also `{s..s}etopt`, a sequence that writes one letter
+            words, whole = _brace_expand(piece)
+            out.append(" ".join(words))
+            changed, complete = True, complete and whole
+        else:
+            out.append(piece)
+    return ("".join(out) if changed else None), complete
+
+
+def _cd_target(seg, words, here, list_dirs):
+    """The folders the shell may be in after a `cd` or `pushd` segment, from the folders it may have been in. A target built at run time
+    (`cd -`, `$(..)`, a variable, `popd`) is unknown: then the session's own folder, the home folder and the folders of the protected files
+    all stay possible."""
+    args = [a for a in words[1:] if not a.startswith("-") or a == "-"]
+    arg = args[0] if args else "~"
+    rest = arg.replace("${HOME}", "").replace("$HOME", "")
+    if words[0] == "popd" or arg == "-" or "$" in rest or "`" in seg or "$(" in seg:
+        return set(here) | {home()} | set(list_dirs), True
+    return {expand(arg, f) for f in here}, False
+
+
+_CD_WORDS = ("cd", "pushd", "popd")
+_SEGMENT_LEADERS = ("if", "then", "else", "elif", "while", "until", "do", "!", "{", "time", "command", "builtin", "exec", "nohup")
+
+
+def _list_read_by_relative_name(command, cwd, files):
+    """-> (hit, folders). hit is True when a word of the command, joined with a folder the shell may be in at that point (the working folder,
+    then each `cd` or `pushd` in turn), is one of `files` (or a wildcard that matches one), or when the file's own name is written while the
+    shell may be in that file's folder (issue 187: `cd ~/.config/afa && cat no-ai-paths.txt`, `python3 -c "open('no-ai-paths.txt')"`). The old
+    check joined each word with the folder the session started in only, and read a word with no slash as no path at all. folders is every
+    folder a `cd` or `pushd` named in plain text (for the recursive-search check). A command that only looks at a name or size is not read."""
+    list_dirs = {os.path.dirname(os.path.normpath(f)) for f in files}
+    here, known, hit = {cwd}, {cwd}, False
+    # a `cd` inside a subshell or a substitution does not carry on after it, so there the folders only grow (the shell may be in either)
+    grows = _has_unquoted_paren(command) or "`" in command
+    segs = []
+    for seg in _segments(command):
+        words = _words(seg)
+        while words and words[0] in _SEGMENT_LEADERS:  # `if x; then cd d; ...`, `{ cd d; }`, `time cd d`, `command cd d`
+            words = words[1:]
+        segs.append((seg, words))
+    if sum(w in _CD_WORDS for w in _words(command)) > sum(bool(ws) and ws[0] in _CD_WORDS for _, ws in segs):
+        # a `cd` the reader did not take as a command of its own (`sh -c 'cd d; cat f'`, `eval "cd d"`): where the shell is is unknown, so the
+        # session folder, the home folder and the list's folder all stay possible from the start
+        here = here | {home()} | set(list_dirs)
+    for seg, words in segs:
+        if not words:
+            continue
+        if words[0] in _CD_WORDS:
+            there, unsure = _cd_target(seg, words, here, list_dirs)
+            here = here | there if grows else there
+            if not unsure:
+                known |= here
+            continue
+        if any(w in ("-C", "--chdir") or w.startswith("--chdir=") for w in words):
+            here = here | {home()} | set(list_dirs)  # `env -C d cat f`: the program runs in a folder the reader does not follow
+        if words[0] in _READ_ONLY_PROGRAMS and not re.search(r"[`$(){}]", seg):
+            continue  # `ls -la no-ai-paths.txt` after a cd: a listing, a size or a hash, as the plain form is allowed
+        if words[0] in _FIND_PROGRAMS:
+            continue  # its words are name patterns (`find -name '*.py'`), not files it reads; -exec, -delete and the like are the write check's
+        for folder in here:
+            if any(os.path.basename(f) in seg and os.path.dirname(os.path.normpath(f)) == folder for f in files):
+                hit = True
+            # every word, the first too: the reader drops a redirect sign, so `<afa/x cat` and `exec <f` start with the file and not the program
+            for w in words:
+                for piece in [w] + [p for p in w.split("=")[1:] if p]:
+                    if not piece or piece.startswith("-") and "/" not in piece:
+                        continue
+                    full = expand(piece, folder)
+                    if any(_is_protected(c, folder, files) for c in [full] + _expand_globs(full)):
+                        hit = True
+    return hit, known
 
 
 def _path_shaped(text):
@@ -1956,7 +2218,7 @@ def _split_groups(cmds):
             # Only the command's own program counts (see _text_program_at) and only the value right after its flag, so a gh elsewhere in the
             # text, or another program's -t, never hides a quoted word.
             as_text = start is not None and k > start + 1 and q and (cmd[k - 1][0] in _TEXT_VALUE_FLAGS or w.startswith(("--title=", "--body=", "--message=")))
-            if any(ch.isspace() for ch in w) and not as_text:
+            if any(ch in _SHLEX_BLANKS for ch in w) and not as_text:
                 g.extend(_words(w))
         groups.append(g)
     return groups
@@ -2098,17 +2360,30 @@ def evaluate(payload, paths=None):
         return None
     if tool == "Bash":
         command = _resolve_vars(str(ti.get("command") or ""))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed
-        r = bash_hits(command, cwd, paths)
-        if r:
-            return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
-        if any(_is_protected(t, cwd, protected_files()) for t in _command_tokens(command, cwd)) and not _read_only_listing(command):
-            return deny_protected()
-        if bash_writes_guarded(command, cwd):
-            return deny_protected()
-        if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
-            roots = _command_tokens(command, cwd) or [cwd]
-            if any(reads_list(t) for t in roots):
-                return deny_list_search()
+        # Every text the shell may run (issue 187): as written, with `${HOME:0}` and its kind read as `$HOME` and as their operand, and each of those
+        # with its brace words written out (the shell makes two paths of `{a,b}`). A brace list cut short or left unexpanded is refused, never judged part by part.
+        texts = []
+        for variant in _home_variants(command):
+            written, whole = _brace_expanded(variant)
+            if not whole:
+                return deny_protected()
+            texts.extend(x for x in (variant, written) if x and x not in texts)
+        for command in texts:
+            r = bash_hits(command, cwd, paths)
+            if r:
+                return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
+            listing = _read_only_listing(command)
+            if any(_is_protected(t, cwd, protected_files()) for t in _command_tokens(command, cwd)) and not listing:
+                return deny_protected()
+            if bash_writes_guarded(command, cwd):
+                return deny_protected()
+            hit, visited = _list_read_by_relative_name(command, cwd, protected_files()) if not listing else (False, set())
+            if hit:  # the list read by a relative name after a `cd` or from its own folder (issue 187)
+                return deny_protected()
+            if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
+                roots = (_command_tokens(command, cwd) or [cwd]) + sorted(visited - {cwd})
+                if any(reads_list(t) for t in roots):
+                    return deny_list_search()
         return None
 
     # An MCP tool or any tool this module does not know: its arguments could name a listed path in any field, so every string
