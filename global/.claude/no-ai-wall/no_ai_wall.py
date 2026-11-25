@@ -82,18 +82,71 @@ def _read(path):
         return "", "bad"
 
 
+_HOME_VAR = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+
+
 def expand(path, base=None):
     """~ and $HOME expanded, made absolute against base (default: the current folder), dots collapsed. No symlink resolution."""
     p = path.strip()
     h = home()
     if p == "~" or p.startswith("~/"):
         p = h + p[1:]
-    p = p.replace("${HOME}", h).replace("$HOME", h)
+    p = _HOME_VAR.sub(lambda m: h, p)  # `$HOMEX` is another variable, never the home folder followed by an X
     if "$" in p:
         p = os.path.expandvars(p)
     if not os.path.isabs(p):
         p = os.path.join(base or os.getcwd(), p)
     return os.path.normpath(p)
+
+
+def _cdpath(text):
+    """-> (entries, unsure) for the CDPATH a shell text may run under (issue 139): the environment's value and every CDPATH=... the text sets. A
+    plain relative `cd name` is looked up in each entry first, so it can land in a folder that is not under the working folder. unsure: a value
+    built at run time ($ or a backtick), or CDPATH named without a value the text shows (`export CDPATH` with one set before)."""
+    values = [os.environ.get("CDPATH") or ""]
+    values += [m.group(1).strip("'\"") for m in re.finditer(r"\bCDPATH=([^\s;&|)]*)", text or "")]
+    # zsh's cdpath array, and the options that make a cd take a variable's value or a named folder (zsh reads option names in any case, with or
+    # without underscores: CDABLEVARS, cdable_vars, AUTO_CD), and `hash -d` names, also change where a cd lands
+    # the shell drops quotes and backslashes before it runs a word (`ha\sh -d` is `hash -d`), so the option checks read the text without them
+    bare = re.sub(r"[\\'\"]", "", text or "")
+    # `$'..'` and `$".."` words and a comma-brace group (`{hash,x} -d`) are written out by the shell before it runs the word, in ways the
+    # quote-stripped text above does not show: any of them leaves the cd's landing folder unknown
+    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\$['\"]|\{[^{}]*(?:,|\.\.)[^{}]*\}", text or ""))
+              or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", bare))
+              or bool(re.search(r"cdablevars|autocd", bare.replace("_", "").lower()))  # zsh ignores every underscore in an option name
+              # setopt, unsetopt and emulate can change how a cd lands in ways the text does not show; zsh's short flags -J (AUTO_CD) and -T
+              # (CDABLE_VARS) do the same through `set`; `hash` with any flag (-d name=dir, -f, -r -d) can name a folder for `cd ~name`
+              or bool(re.search(r"\b(?:setopt|unsetopt|emulate)\b|\bset\b[^;&|\n]*\s-[A-Za-z]*[JT]|\bhash\b[^;&|\n]*\s-", bare)))
+    entries = [e for v in values for e in v.split(":") if e and "$" not in e and "`" not in e]
+    return entries, unsure
+
+
+def _plain_relative(arg):
+    """A `cd` operand CDPATH is applied to: relative, and not ./, ../, ~, a variable or an option (those are never looked up in CDPATH)."""
+    return bool(arg) and not arg.startswith(("/", "./", "../", "~", "$", "-", "`")) and arg not in (".", "..")
+
+
+def _cd_lands_unknown(arg, cdpath):
+    """True when the folder a `cd arg` lands in cannot be worked out from the text: `-`, a substitution or a variable (but `$HOME` itself is known),
+    a plain relative name while CDPATH or a related option may apply, or `~name` (another user's home, or a named folder, not the working folder)."""
+    return (arg == "-" or "`" in arg or "$" in _HOME_VAR.sub("", arg) or bool((cdpath[0] or cdpath[1]) and _plain_relative(arg))
+            or (arg.startswith("~") and arg != "~" and not arg.startswith("~/")))
+
+
+_MAX_CD_BASES = 400
+
+
+def _cd_bases(arg, curs, entries):
+    """Every folder a `cd arg` may leave the shell in, from each folder in curs. Home is always one: a bare `cd` goes home, and in a flat
+    list of words the word after it may belong to the next command (`cd; cat clientA/x`)."""
+    out = []
+    for c in curs:
+        out.append(expand(arg, c))
+        if _plain_relative(arg):
+            out.extend(expand(arg, e) for e in entries)
+    out.append(home())
+    out = list(dict.fromkeys(out))
+    return out if len(out) <= _MAX_CD_BASES else None  # None: too many to follow, and the caller must refuse rather than drop some
 
 
 def _segment_regex(seg):
@@ -763,8 +816,23 @@ def _operands(key, rest):
     return out
 
 
-def _names_a_root(words, cur):
-    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists."""
+_FIXED_PLACE = re.compile(r"/[A-Za-z0-9_.@%+=,:/-]*")  # no wildcard, quote, backslash, variable or substitution: the word is exactly the path it spells
+
+
+def _fixed_place(w):
+    """True only for a plain absolute path that means the same place whatever folder the shell is in: written out in full (no wildcard, variable,
+    tilde or substitution), already normal (no `..`, `.` or doubled slash), and not under /proc or /dev, whose paths (/proc/self/cwd, /dev/fd/..)
+    name the shell's own folder. `~` and $HOME are not fixed: the text may rebind HOME, and `~+`, `~-`, `~name` and $PWD name other folders."""
+    if not _FIXED_PLACE.fullmatch(w) or "//" in w or os.path.normpath(w) != (w.rstrip("/") or "/"):  # normpath keeps a leading //
+        return False
+    return not re.match(r"/(?:proc|dev)(?:/|\Z)", w)
+
+
+def _names_a_root(words, cur, unknown=False):
+    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists. unknown: the working folder is
+    one the text cannot name, so a relative root lands somewhere unseen and only roots that are absolute, under ~ or from a variable count."""
+    if unknown:
+        return bool(words) and all(_fixed_place(w) for w in words)
     for w in words:
         if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
             return True
@@ -899,7 +967,7 @@ def _substitution_spans(cmds, meta, cwd="", nested=False):
     return carried, cut
 
 
-def _search_of(prog, rest, cur, flag_in=False):
+def _search_of(prog, rest, cur, flag_in=False, unknown=False):
     """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
     flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
     if prog in _ROOTS_ONLY:
@@ -914,9 +982,9 @@ def _search_of(prog, rest, cur, flag_in=False):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, flag_in or not _names_a_root(roots, cur)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
+        return True, flag_in or not _names_a_root(roots, cur, unknown)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
     if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
-        return True, flag_in or not _names_a_root(_operands(prog, rest), cur)
+        return True, flag_in or not _names_a_root(_operands(prog, rest), cur, unknown)
     key = _SEARCH_KEY.get(prog)
     if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
@@ -932,7 +1000,7 @@ def _search_of(prog, rest, cur, flag_in=False):
         ops = ops[1:]  # the first operand is the pattern
     # typed, a search that names no root walks its working folder (issue 154); fed by xargs, parallel or a substitution it may also get a root
     # from its input, so it is read as walking the working folder whatever roots are typed (issues 157 and 160)
-    return True, flag_in or not _names_a_root(ops, cur)
+    return True, flag_in or not _names_a_root(ops, cur, unknown)
 
 
 def _is_launcher_words(words):
@@ -1010,6 +1078,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
     carried, cut = _substitution_spans(cmds, meta, cwd, nested)
+    cdpath = _cdpath(text)
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for k, cmd in enumerate(cmds):
@@ -1018,8 +1087,14 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
             continue
         words.extend(ws)
         if ws[0] == "cd" and not cmd[0][1]:
-            arg = next((a for a in ws[1:] if not a.startswith("-")), None)
-            cur = cwd if arg is None or "$" in arg or "`" in arg else expand(arg, cur)
+            arg = next((a for a in ws[1:] if a == "-" or not a.startswith("-")), None)
+            if arg is None:
+                cur = home()  # a bare cd goes home
+            elif _cd_lands_unknown(arg, cdpath) or (cur is None and not os.path.isabs(arg) and not arg.startswith("~")):
+                cur = None  # a folder the text cannot name (issue 139): never guessed at, and a relative cd after it stays unknown
+            else:
+                new = expand(arg, cur)
+                cur = None if "$" in new else new  # a variable the wall cannot read lands in a folder it cannot name, as in bash_writes_guarded
             continue
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
@@ -1039,8 +1114,8 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                 # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
                 # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
-                    sub = _searches(w, cur, depth + 1, bodies, nested=True)
-                    if sub is None:
+                    sub = _searches(w, cur or cwd, depth + 1, bodies, nested=True)
+                    if sub is None or (cur is None and sub[0]):
                         return None
                     recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
@@ -1069,15 +1144,18 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                     else:
                         return None
             if script is not None:
-                sub = _searches(script, cur, depth + 1, bodies, nested=True)
-                if sub is None:
-                    return None
+                sub = _searches(script, cur or cwd, depth + 1, bodies, nested=True)
+                if sub is None or (cur is None and sub[0]):
+                    return None  # a search run from a folder the text cannot name: the wide reading
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
-            rec, walks = _search_of(prog, rest, cur, flag_in)
+            rec, walks = _search_of(prog, rest, cur or cwd, flag_in, cur is None)
+            if cur is None and rec and (xargs or _search_of(prog, rest, cur or cwd, False, True)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
+                    not (x.startswith("-") or _fixed_place(x)) for x in rest))):
+                return None  # a recursive search that names no root walks the folder the text cannot name: the wide reading. One that names its own roots (even if a substitution may add a flag) is judged on them below, as before issue 139
             recursive = recursive or rec
             if walks:
-                folders.append(cur)
+                folders.append(cur or cwd)  # the unknown folder is guessed as the starting one only here, where the search also names roots
     return recursive, folders, words
 
 
@@ -1164,9 +1242,10 @@ def _info_hit(info, cwd, paths):
     recursive, folders, words = info
     if not recursive:
         return None
-    cur = cwd
+    curs = [cwd]  # every folder the text may have changed into (issue 139: CDPATH, and the home folder after a bare cd)
+    entries = _cdpath(" ".join(words))[0]
     for i, w in enumerate(words):
-        for base in {cur, cwd}:
+        for base in dict.fromkeys(curs + [cwd]):
             for piece in [w] + [p for p in re.split(r"[=:,]", w) if p and p != w]:
                 if not piece or (piece.startswith("-") and "/" not in piece and "~" not in piece):
                     continue
@@ -1176,7 +1255,9 @@ def _info_hit(info, cwd, paths):
                     if hit:
                         return hit, "root"
         if w == "cd" and i + 1 < len(words):
-            cur = expand(words[i + 1], cur)
+            curs = _cd_bases(words[i + 1], curs, entries)
+            if curs is None:  # too many folders to follow: refuse
+                return (paths.entries[0].raw, "root") if paths.entries else None
     for folder in folders:  # a search with no folder named walks the working folder
         hit = paths.contains(folder, folder)
         if hit:
@@ -1215,16 +1296,19 @@ def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
                         return hit, "root"
         return None
 
-    cur = cwd
+    curs = [cwd]  # every folder the text may have changed into (issue 139: CDPATH, and the home folder after a bare cd)
+    entries = _cdpath(command)[0]
     i = 0
     while i < len(words):
         w = words[i]
-        r = check(w, cur) or (check(w, cwd) if cur != cwd else None)
-        if r:
-            return r
+        for base in dict.fromkeys(curs + [cwd]):
+            r = check(w, base)
+            if r:
+                return r
         if w == "cd" and i + 1 < len(words):
-            nxt = expand(words[i + 1], cur)
-            cur = nxt
+            curs = _cd_bases(words[i + 1], curs, entries)
+            if curs is None:  # too many folders to follow: refuse
+                return (paths.entries[0].raw, "path") if paths.entries else None
         i += 1
     if recursive and walk_cwd:  # a search with no folder named walks the working folder
         hit = paths.contains(cwd, cwd)
@@ -1809,6 +1893,7 @@ def bash_writes_guarded(command, cwd):
     that mentions one. Operands are read after brace and wildcard expansion. A command that only reads or runs such a file is not stopped."""
     start = cwd or os.getcwd()
     cur = start  # None once a directory change cannot be worked out from the text (cd -, popd, an unset variable, a substitution)
+    cdpath = _cdpath(command)
     places = guarded_places()
 
     def unknown(a):  # a relative operand after a directory change the text cannot resolve: it fails closed
@@ -1832,6 +1917,10 @@ def bash_writes_guarded(command, cwd):
                 cur = None
             elif arg is None or arg == "~":
                 cur = home()
+            elif _cd_lands_unknown(arg, cdpath):
+                cur = None  # CDPATH (or a related option, or a ~name) may send the cd to a folder not under the working one (issue 139)
+            elif cur is None and not arg.startswith(("/", "~", "$")):
+                cur = None  # a relative cd from a folder the text could not name stays unknown
             else:
                 new = expand(arg, cur or start)
                 cur = None if "$" in new else new
