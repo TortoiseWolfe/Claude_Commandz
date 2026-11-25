@@ -816,8 +816,11 @@ def _operands(key, rest):
     return out
 
 
-def _names_a_root(words, cur):
-    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists."""
+def _names_a_root(words, cur, unknown=False):
+    """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists. unknown: the working folder is
+    one the text cannot name, so a relative root lands somewhere unseen and only roots that are absolute, under ~ or from a variable count."""
+    if unknown:
+        return bool(words) and all(w.startswith(("/", "~", "$")) for w in words)
     for w in words:
         if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
             return True
@@ -952,7 +955,7 @@ def _substitution_spans(cmds, meta, cwd="", nested=False):
     return carried, cut
 
 
-def _search_of(prog, rest, cur, flag_in=False):
+def _search_of(prog, rest, cur, flag_in=False, unknown=False):
     """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
     flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
     if prog in _ROOTS_ONLY:
@@ -967,9 +970,9 @@ def _search_of(prog, rest, cur, flag_in=False):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, flag_in or not _names_a_root(roots, cur)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
+        return True, flag_in or not _names_a_root(roots, cur, unknown)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
     if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
-        return True, flag_in or not _names_a_root(_operands(prog, rest), cur)
+        return True, flag_in or not _names_a_root(_operands(prog, rest), cur, unknown)
     key = _SEARCH_KEY.get(prog)
     if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
@@ -985,7 +988,7 @@ def _search_of(prog, rest, cur, flag_in=False):
         ops = ops[1:]  # the first operand is the pattern
     # typed, a search that names no root walks its working folder (issue 154); fed by xargs, parallel or a substitution it may also get a root
     # from its input, so it is read as walking the working folder whatever roots are typed (issues 157 and 160)
-    return True, flag_in or not _names_a_root(ops, cur)
+    return True, flag_in or not _names_a_root(ops, cur, unknown)
 
 
 def _is_launcher_words(words):
@@ -1078,7 +1081,8 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
             elif _cd_lands_unknown(arg, cdpath) or (cur is None and not os.path.isabs(arg) and not arg.startswith("~")):
                 cur = None  # a folder the text cannot name (issue 139): never guessed at, and a relative cd after it stays unknown
             else:
-                cur = expand(arg, cur)
+                new = expand(arg, cur)
+                cur = None if "$" in new else new  # a variable the wall cannot read lands in a folder it cannot name, as in bash_writes_guarded
             continue
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
@@ -1133,8 +1137,9 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                     return None  # a search run from a folder the text cannot name: the wide reading
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
-            rec, walks = _search_of(prog, rest, cur or cwd, flag_in)
-            if cur is None and rec and _search_of(prog, rest, cur or cwd, False)[1]:
+            rec, walks = _search_of(prog, rest, cur or cwd, flag_in, cur is None)
+            if cur is None and rec and (_search_of(prog, rest, cur or cwd, False, True)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
+                    not x.startswith(("-", "/", "~", "$")) for x in rest))):
                 return None  # a recursive search that names no root walks the folder the text cannot name: the wide reading. One that names its own roots (even if a substitution may add a flag) is judged on them below, as before issue 139
             recursive = recursive or rec
             if walks:

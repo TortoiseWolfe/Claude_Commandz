@@ -111,6 +111,16 @@ class Issue139Tests(base.Fixture):
         for cmd in ("cd $NOWHERE; cd sub; grep -r x", "cd `echo x`; cd sub; grep -r x .", "cd $NOWHERE; cd sub; find . -name x"):
             self.refused(cmd, self.p("wall"))
 
+    def test_a_relative_root_after_an_unknown_cd_takes_the_wide_reading(self):
+        # the search runs inside the folder the text cannot name, so ./sub and sub are not under the working folder; only roots that are
+        # absolute, under ~ or from a variable are judged as written (security review of the first fix for issue 139)
+        for cmd in ("cd $X; grep -r x ./clientA", "cd $X; grep -r x clientA", "cd $X; find ./clientA -name x", "cd $X; ls -R ./clientA", "cd $X; du ./clientA",
+                    "cd $X; rg x ./clientA", "cd $X; rsync -a ./clientA /tmp/out", "cd $X; grep -r x %s ./clientA" % self.work, "cd $X; tar cf /tmp/o.tar clientA"):
+            self.refused(cmd, self.p("wall"))
+            self.refused(cmd, self.tmp)  # a folder above the listed ones: the unknown folder could be the one below it
+        self.allowed("cd $X; grep -r x %s/proj" % self.work, self.work)  # an absolute root is judged as written
+        self.allowed("cd $X; find %s/proj -name x" % self.work, self.work)
+
     def test_a_known_cd_then_a_relative_cd_is_still_followed(self):
         self.allowed("cd %s/proj; cd .; cat a.txt" % self.work, self.tmp)
         self.allowed("cd %s; cd proj; rm a.txt" % self.work, self.tmp)
