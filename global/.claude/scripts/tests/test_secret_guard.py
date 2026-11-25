@@ -361,6 +361,46 @@ class MailTokenRuleG(Base):
                     "rsync -a %s /tmp/g" % self.D):
             self.blocked(cmd, "G")
 
+    def test_the_ways_around_a_text_match_still_block(self):
+        """The automated review's cases: a word in a comment, a cd, a dot-dot, quotes, $HOME and a substitution."""
+        for cmd in ("cat %s/token.json # redact_view.py" % self.D,
+                    "echo redact_view.py; cat %s/token.json" % self.D,
+                    "cd %s && cat token.json" % self.D,
+                    "cd ~/.config/afa && cat gmail/token.json",
+                    "cat ~/.config/afa/../afa/gmail/token.json",
+                    "cat ~/.config/afa/'gmail'/token.json",
+                    'cat "$HOME/.config/afa/gmail/token.json"',
+                    "cat ${HOME}//.config/./afa/gmail/token.json",
+                    "ls $(cat %s/token.json)" % self.D,
+                    "python3 -c 'print(1)' %s/token.json" % self.D,
+                    "python3 ~/x/other.py %s/token.json" % self.D,
+                    "base64 %s/token.json" % self.D,
+                    "cat <<EOF\nx\nEOF\ncat %s/token.json" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_a_symlink_or_dot_dot_path_to_the_folder_blocks_the_tools(self):
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".config", "afa", "gmail")
+            os.makedirs(folder)
+            link = os.path.join(home, "innocent")
+            os.symlink(folder, link)
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                for p in (os.path.join(link, "token.json"), os.path.join(home, ".config", "afa", "x", "..", "gmail", "token.json"),
+                          "~/.config/afa/gmail/token.json"):
+                    self.assertEqual(sg.evaluate({"tool_name": "Read", "tool_input": {"file_path": p}})[0], "G", p)
+                for path in (link, os.path.join(home, ".config", "afa"), os.path.join(home, ".config")):
+                    r = sg.evaluate({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": path, "output_mode": "content"}})
+                    self.assertEqual(r[0], "G", path)
+                self.assertIsNone(sg.evaluate({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": os.path.join(home, "src"),
+                                                                                   "output_mode": "content"}}))
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
     def test_read_and_grep_tools_block(self):
         r = sg.evaluate({"tool_name": "Read", "tool_input": {"file_path": "/home/u/.config/afa/gmail/token.json"}})
         self.assertEqual(r[0], "G")
@@ -375,6 +415,9 @@ class MailTokenRuleG(Base):
                     "curl -X POST %s/drafts/send" % base,
                     "curl -X POST '%s/drafts/r123/send'" % base,
                     "curl -X POST %s/messages:send" % base,
+                    "curl -X POST /gmail/v1/users/me/messages/send",
+                    "curl -X POST https://www.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media",
+                    "echo $(curl -X POST %s/messages/send)" % base,
                     "python3 -c \"import urllib.request as u; u.urlopen('%s/messages/send')\"" % base):
             self.blocked(cmd, "G")
 
@@ -388,6 +431,9 @@ class MailTokenRuleG(Base):
                     "grep -c refresh %s/token.json" % self.D,
                     "curl -s %s/profile" % base,
                     "grep -n 'messages/send' README.md",
+                    "git commit -m 'rule G names messages/send'",
+                    "echo redact_view.py",
+                    "AFA_GMAIL_DIR=~/.config/afa/gmail python3 ~/.claude/scripts/gmail_api.py whoami",
                     "python3 -m pytest tests/test_gmail_api.py -q"):
             self.allowed(cmd)
 
