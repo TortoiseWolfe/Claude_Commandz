@@ -830,7 +830,16 @@ class PublishReadError(Exception):
     """A safe-to-display error from validating or publishing a tower read record."""
 
 
-def publish_read(processed_file, repo_path):
+HEARTBEAT_LINE_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d [A-Za-z0-9_.-]+ up_hours=\d+ lanes=\d+ mem_free_mb=\d+")
+
+
+def publish_file(heartbeat_file, repo_path):
+    """Publish a machine heartbeat file (machine_heartbeat.py) the way the read record goes up. Refuses any file whose
+    content is not exactly one heartbeat line."""
+    return publish_read(heartbeat_file, repo_path, heartbeat=True)
+
+
+def publish_read(processed_file, repo_path, heartbeat=False):
     """Publish an IDs-only record to the workspace repository's main branch when it has changed."""
     parts = repo_path.split("/")
     if not repo_path or repo_path.startswith("/") or any(part in ("", ".", "..") for part in parts):
@@ -842,9 +851,13 @@ def publish_read(processed_file, repo_path):
     except (OSError, UnicodeDecodeError) as e:
         raise PublishReadError(f"cannot read processed file: {e}") from e
     lines = text.splitlines()
-    for number, line in enumerate(lines, start=1):
-        if not READ_RECORD_ID_RE.fullmatch(line):
-            raise PublishReadError(f"line {number} is not a draft or message ID")
+    if heartbeat:
+        if len(lines) != 1 or not HEARTBEAT_LINE_RE.fullmatch(lines[0]):
+            raise PublishReadError("the file is not exactly one heartbeat line")
+    else:
+        for number, line in enumerate(lines, start=1):
+            if not READ_RECORD_ID_RE.fullmatch(line):
+                raise PublishReadError(f"line {number} is not a draft or message ID")
 
     encoded_path = quote(repo_path, safe="/")
     endpoint = f"repos/TortoiseWolfe/workspace/contents/{encoded_path}"
@@ -875,7 +888,7 @@ def publish_read(processed_file, repo_path):
 
     request = [
         "-X", "PUT", endpoint,
-        "-f", f"message=Tower read record: {len(lines)} ids",
+        "-f", ("message=Tower heartbeat line" if heartbeat else f"message=Tower read record: {len(lines)} ids"),
         "-f", f"content={base64.b64encode(content).decode('ascii')}",
         "-f", "branch=main",
     ]
@@ -901,6 +914,8 @@ def main(argv=None):
                              "Default: NCC-74656=~/repos/hub/tower/peer-notes-processed.txt")
     parser.add_argument("--publish-read", nargs=2, metavar=("PROCESSED_FILE", "REPO_PATH"),
                         help="Publish an IDs-only read record to the workspace repository's main branch")
+    parser.add_argument("--publish-file", nargs=2, metavar=("HEARTBEAT_FILE", "REPO_PATH"),
+                        help="Publish a one-line machine heartbeat file to the workspace repository's main branch; refuses anything else")
     parser.add_argument("--files-saved", metavar="ID",
                         help="Record that the files attached to this note (its draft id or message id) are saved, so --sweep may delete it. "
                              "NX-01 runs this after it pulls the files into a release")
@@ -915,6 +930,14 @@ def main(argv=None):
             print(f"files-saved: {e}", file=sys.stderr)
             return 1
         print(f"files-saved: {args.files_saved} {'recorded' if added else 'was already recorded'}")
+        return 0
+    if args.publish_file:
+        try:
+            count, changed = publish_file(*args.publish_file)
+        except PublishReadError as e:
+            print(f"publish-file: {e}", file=sys.stderr)
+            return 1
+        print(f"heartbeat {'published' if changed else 'unchanged'}")
         return 0
     if args.publish_read:
         try:

@@ -48,6 +48,8 @@ printf '# comment\n*\t00:00\t23:59\n' >"$T/b/home/.config/afa/show-windows.tsv"
 run_poll b
 check "inside a show window: the 5 min cap makes it due" 'ran b'
 check "show window: the log says so" 'grep -q "show window" "$T/b/home/.claude/state/peer-poll.log"'
+check "peer_poll.sh calls the heartbeat write (one tower line, then a publish attempt that cannot stop the poller)" \
+  'grep -q "heartbeat write (exit 0)" "$T/b/home/.claude/state/peer-poll.log" && grep -q "heartbeat publish (exit" "$T/b/home/.claude/state/peer-poll.log" && grep -Eq " tower up_hours=[0-9]+ lanes=[0-9]+ mem_free_mb=[0-9]+$" "$T/b/home/.claude/state/heartbeats/tower.txt"'
 
 mkdir -p "$T/c/home/.config/afa"; seed c 120 3
 printf '*\t00:00\t23:59\n' >"$T/c/home/.config/afa/show-windows.tsv"

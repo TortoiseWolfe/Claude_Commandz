@@ -59,6 +59,10 @@ if [ "$machine" != NX-01 ]; then
   exit 0
 fi
 
+# NX-01's own heartbeat line (fleet review C8), written about once a day, before the NX-01 digest build below. Never fails the refresh.
+mkdir -p "$state/heartbeats"
+timeout 20 python3 -I "$here/machine_heartbeat.py" write "$state/heartbeats/nx-01.txt" --machine NX-01 || true
+
 # Harmonic Egg CI runs on this machine while its repo variable RUNNER_LABEL=workstation (harmonic-egg#351): start the runner if WSL, Docker
 # or sleep took it down. A no-op otherwise. See he_runner_watch.sh.
 timeout 120 "$here/he_runner_watch.sh" >/dev/null 2>&1 || echo "openclaw_status_refresh: he runner watch reports a problem (see ~/.claude/state/he-runner/)" >&2
