@@ -581,6 +581,29 @@ class Digest(unittest.TestCase):
         self.assertIn("old ask", flagged[0])
         self.assertIn("13 days", flagged[0])
 
+    def test_stale_hatch_line_counts_asks_older_than_seven_days(self):
+        text = ("- [ ] 2026-10-08 09:53 | Waiting on Hatch: old ask | x | r-1\n"
+                "- [ ] 2026-10-12 09:53 | Waiting on Hatch: middle ask | x | r-2\n"
+                "- [ ] 2026-10-19 09:53 | Waiting on Hatch: fresh ask | x | r-3\n")
+        groups, _ = hd.open_inbox(text)
+        line = hd.stale_hatch_line(groups["Hatch"], self.NOW)
+        self.assertIn("2 of 3 Hatch asks are older than 7 days", line)
+        self.assertIn("oldest 13 days", line)
+
+    def test_stale_hatch_line_is_empty_when_nothing_is_old(self):
+        groups, _ = hd.open_inbox("- [ ] 2026-10-19 09:53 | Waiting on Hatch: fresh ask | x | r-3\n")
+        self.assertEqual(hd.stale_hatch_line(groups["Hatch"], self.NOW), "")
+        self.assertEqual(hd.stale_hatch_line([], self.NOW), "")
+
+    def test_rendered_page_puts_the_stale_hatch_line_first_in_the_inbox_section(self):
+        text = ("- [ ] 2026-10-08 09:53 | Waiting on Hatch: old ask | x | r-1\n"
+                "- [ ] 2026-10-19 09:53 | Waiting on the tower: other | x | r-2\n")
+        page = hd.render(hd.build_sections(roadmap_body="", lane_status="", lanes_dir=fresh_dir(self), inbox_text=text,
+                                           git_log="", tidy_text="", budget="", now=self.NOW), self.NOW, "NX-01", hd.CAP_DEFAULT)
+        lines = page.splitlines()
+        head = next(i for i, ln in enumerate(lines) if ln == "## Open hub-inbox items")
+        self.assertIn("1 of 1 Hatch asks are older than 7 days", lines[head + 1])
+
     def test_a_line_with_many_fields_still_lands_in_its_owner_group(self):
         text = "- [ ] 2026-10-18 09:00 | Job: long one | a | b | c | d | e | f | r-9\n- [ ] 2026-10-18 09:00 | odd start | a | b | c | d | e | r-8\n"
         groups, _ = hd.open_inbox(text)
