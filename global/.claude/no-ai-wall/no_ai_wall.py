@@ -108,7 +108,8 @@ def _cdpath(text):
     # zsh's cdpath array, and the options that make a cd take a variable's value or a named folder (zsh reads option names in any case, with or
     # without underscores: CDABLEVARS, cdable_vars, AUTO_CD), and `hash -d` names, also change where a cd lands
     unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", text or ""))
-              or bool(re.search(r"cdable_?vars|auto_?cd|\bhash\s+-\w*d", text or "", re.I)))
+              or bool(re.search(r"cdablevars|autocd", (text or "").replace("_", "").lower()))  # zsh ignores every underscore in an option name
+              or bool(re.search(r"\bhash\b[^;&|\n]*\s-\w*d", text or "")))  # `hash -d name=dir`, with the flag anywhere after hash (`hash -r -d`)
     entries = [e for v in values for e in v.split(":") if e and "$" not in e and "`" not in e]
     return entries, unsure
 

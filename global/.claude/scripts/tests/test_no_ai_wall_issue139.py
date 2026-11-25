@@ -44,7 +44,8 @@ class Issue139Tests(base.Fixture):
                     "shopt -s cdable_vars; cd clientA; rm docs/secret.txt", "export CDPATH; cd clientA; rm docs/secret.txt",
                     # zsh reads option names in any case and with or without underscores; a named folder is not the working folder
                     "setopt CDABLEVARS; cd clientA; rm docs/secret.txt", "setopt CDABLE_VARS; cd clientA; rm docs/secret.txt",
-                    "setopt AUTO_CD; cd clientA; rm docs/secret.txt", "hash -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall,
+                    "setopt AUTO_CD; cd clientA; rm docs/secret.txt", "setopt c_d_a_b_l_e_v_a_r_s; cd clientA; rm docs/secret.txt",
+                    "setopt _cdable__vars_; cd clientA; rm docs/secret.txt", "hash -r -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall, "hash -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall,
                     "cd ~someone; rm docs/secret.txt", "cd ~+; rm docs/secret.txt"):
             self.refused(cmd, self.work)
         self.allowed("cd ~/proj; cat a.txt", self.work)  # a folder under the home folder is still read as one
