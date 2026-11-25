@@ -16,6 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import hub_digest as hd  # noqa: E402
+hd.PARKED_FILE = Path("/nonexistent/parked-cards.txt")   # no test reads the real private list
 from tmpdirs import fresh_dir  # noqa: E402
 
 NOW = datetime(2026, 10, 16, 21, 0)
@@ -1378,6 +1379,28 @@ class CoopCards(unittest.TestCase):
         reader = self.dated_reader(d, [(24, "due 2026-11-05"), (25, "due 2026-11-10")])
         lines = hd.coop_cards_lines(inbox, self.NOV5, cache=Path(d) / "c.json", reader=reader)
         self.assertFalse(any("passed" in l for l in lines), lines)
+
+    def test_a_parked_card_leaves_the_counts_and_shows_only_as_parked_n(self):
+        d = fresh_dir(self)
+        parked = Path(d) / "parked.txt"
+        parked.write_text("# made-up ids only\nb2/24 | 2026-11-25 | made up words that must never reach the page\n\nnot a card line\n9/99 | 2026-11-25 | a card that is not open\n")
+        reader = self.dated_reader(d, [(23, "due -"), (24, "due -"), (25, "due -")])
+        lines = hd.coop_cards_lines("", self.NOV5, cache=Path(d) / "c.json", reader=reader, parked_file=parked)
+        self.assertEqual(lines[0], "Co-op cards: 2 open | stalled 2 | blocked 0 | moving 0 | parked 1")
+        self.assertEqual(len(lines), 3)
+        self.assertFalse(any("b2/24" in l or "made up words" in l for l in lines), lines)
+        # with no parked file the header is as before, and the card is back
+        lines = hd.coop_cards_lines("", self.NOV5, cache=Path(d) / "c2.json", reader=reader, parked_file=Path(d) / "none.txt")
+        self.assertEqual(lines[0], "Co-op cards: 3 open | stalled 3 | blocked 0 | moving 0")
+        self.assertTrue(any("b2/24" in l for l in lines), lines)
+
+    def test_load_parked_reads_the_first_field_only_and_never_fails(self):
+        d = fresh_dir(self)
+        f = Path(d) / "parked.txt"
+        f.write_text("b8/77 | 2026-11-25 | words\n 2/5|2026-11-25|\nB3/4 | x\nb2/9\n# b1/1 | commented out\nb2/x | bad\n")
+        self.assertEqual(hd.load_parked(f), {"b8/77", "b2/5", "b2/9"})
+        self.assertEqual(hd.load_parked(Path(d) / "missing.txt"), set())
+        self.assertEqual(hd.load_parked(Path(d)), set())   # a folder, not a file
 
     def test_a_stalled_past_due_card_is_listed_once_and_the_oldest_move_comes_first(self):
         d = fresh_dir(self)
