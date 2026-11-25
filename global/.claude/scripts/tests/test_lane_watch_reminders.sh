@@ -315,6 +315,12 @@ for dp_form in "DONE $dp_t | items 6: shipped it" "DONE $dp_t | items 6:" "DONE 
   dp_watch "${dp_form}${dp_proof6}" "$TMP/dp-out9d"
   dp_quiet "$TMP/dp-out9d" || { dp_ok=0; echo "FAIL a colon after the count is not a time (issue 131): $dp_form out=$(cat "$TMP/dp-out9d") send=$(cat "$SEND_LOG")"; }
 done
+# The wording the hub saw wake it twice on a mail lane: "DONE items 4: ..." with four proof lines (issue 131).
+dp_proof4="${nl}${nl}## Proof${nl}- https://example.com/1${nl}- https://example.com/2${nl}- https://example.com/3${nl}- https://example.com/4"
+for dp_form in "DONE items 4: shipped it" "DONE $dp_t | items 4: shipped it" "DONE $dp_t | the mail is absorbed, items 4: all four"; do
+  dp_watch "${dp_form}${dp_proof4}" "$TMP/dp-out9e"
+  dp_quiet "$TMP/dp-out9e" || { dp_ok=0; echo "FAIL four proofs under 'items 4:' must not wake the hub (issue 131): $dp_form out=$(cat "$TMP/dp-out9e") send=$(cat "$SEND_LOG")"; }
+done
 dp_watch "DONE BY 5:00 PM | half way" "$TMP/dp-out9b"
 dp_watch2_out="$TMP/dp-out9c"; dp_quiet9b=0; dp_quiet "$TMP/dp-out9b" && dp_quiet9b=1
 dp_watch "DONE $dp_t | by hand" "$dp_watch2_out"
