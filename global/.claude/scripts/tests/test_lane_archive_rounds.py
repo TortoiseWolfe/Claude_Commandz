@@ -129,6 +129,17 @@ class ArchiveRounds(unittest.TestCase):
         self.assertEqual(lar.archive_folder(d), [])
         self.assertEqual(target.read_text(), "keep me")
 
+    def test_a_second_hard_link_to_the_archive_is_never_written_through(self):
+        # A hard link is a second name for the same bytes, so it passes a plain-file check; the archive must have one name only.
+        text = "QUEUE EMPTY\n\n" + rounds(4)
+        d = self.folder(**{"report.md": text})
+        target = Path(fresh_dir(self)) / "victim.txt"
+        target.write_text("keep me")
+        os.link(target, d / "report-archive.md")
+        self.assertEqual(lar.archive_folder(d), [])
+        self.assertEqual(target.read_text(), "keep me")
+        self.assertEqual((d / "report.md").read_text(), text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,8 @@ def archive_file(path, min_bytes=DEFAULT_MIN_BYTES):
     try:
         fd = os.open(arch, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
+            if not _plain_ours(os.fstat(f.fileno())):  # judge the file we really opened, not the name we looked at a moment ago
+                return None
             f.write(old)
             f.flush()
             os.fsync(f.fileno())
@@ -92,7 +94,12 @@ def _ours_or_absent(p, must_exist=False):
         return not must_exist
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+    return _plain_ours(st)
+
+
+def _plain_ours(st):
+    """A regular file of ours with one name only: a second hard link means another path reaches the same bytes."""
+    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and st.st_nlink == 1
 
 
 def archive_folder(folder, min_bytes=DEFAULT_MIN_BYTES):
