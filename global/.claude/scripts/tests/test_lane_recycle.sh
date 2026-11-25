@@ -1157,6 +1157,53 @@ assert_eq "$(recycle_stop_file q-lane)" "$STOPF" 'recycle_stop_file prints the p
 HOME="$OLD_HOME"
 sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q clear_recycle_stop || fail 'the start/restart index row is preceded by clear_recycle_stop'; ok
 
+# Issue 128 (19 Nov, 47 recycles in a day): the notes a lane re-reads at its start grew by a section a round and nothing was archived.
+# --start-load prints the fresh session's start load and its session id (lane_watch.sh names a lane over 30K once); --status shows it beside the
+# context; a recycle moves every finished round of report.md and status.md to an archive file before it clears the lane, and the re-prime
+# says where they went and to keep long tool output out of the conversation.
+add_row sl-lane subscription sl-sess; usage_rec 95000 45000 >"$PROJ/sl-sess.jsonl"
+lane --start-load sl-lane
+assert_eq "$LAST_OUT" '45 sl-sess' '--start-load prints the first-turn load in K and the session id'
+lane --start-load nobody
+assert_eq "$LAST_OUT" '?' '--start-load for an unknown lane prints ?'
+add_row sl-cx codex -
+lane --start-load sl-cx
+assert_eq "$LAST_OUT" 'n/a' '--start-load for an engine lane prints n/a'
+qreset; basepane
+lane --status
+assert_contains "$LAST_OUT" 'context:130K start:20K' '--status shows the start load beside the context'
+grep -v -e $'\tsl-lane\t' -e $'\tsl-cx\t' "$INDEX" >"$TMP/index-sl" || true; cat "$TMP/index-sl" >"$INDEX"; rm -f "$TMP/index-sl"
+ar_rounds() {  # ar_rounds <n>: n invented rounds of about 1100 bytes
+  local i j w; w="$(printf 'w%.0s' $(seq 1 120))"
+  for i in $(seq 1 "$1"); do printf '## Round %s\n' "$i"; for j in 1 2 3 4 5 6 7 8; do printf 'work line %s\n' "$w"; done; echo; done
+}
+rm -f "$HAND"/report-archive.md "$HAND"/status-archive.md
+{ echo 'QUEUE EMPTY'; echo; ar_rounds 6; } >"$HAND/report.md"; { echo 'status top'; ar_rounds 5; } >"$HAND/status.md"
+qreset; basepane; rm -f "$RLOG" "$STOPF" "$HFAILF"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a lane with long notes is recycled'
+assert_eq "$(head -n 1 "$HAND/report.md")" 'QUEUE EMPTY' 'report.md keeps its line 1'
+assert_contains "$(cat "$HAND/report.md")" '## Round 6' 'report.md keeps the open round'
+assert_not_contains "$(cat "$HAND/report.md")" '## Round 5' 'report.md loses the finished rounds'
+assert_contains "$(cat "$HAND/report-archive.md")" '## Round 1' 'the finished rounds are in report-archive.md'
+assert_contains "$(cat "$HAND/status-archive.md")" '## Round 4' 'and in status-archive.md'
+assert_contains "$(cat "$HAND/status.md")" '## Round 5' 'status.md keeps the open round'
+assert_contains "$LAST_OUT" 'moved to report-archive.md' 'the recycle says what it archived'
+ar_re="$(grep -n -- 'context was cleared' "$ST/sent.log" | head -1 | cut -d: -f1)"
+[ -n "$ar_re" ] || fail 'the re-prime was typed'; ok
+ar_text="$(sed -n "${ar_re}p" "$ST/sent.log")"
+assert_contains "$ar_text" 'report-archive.md' 'the re-prime says where the old rounds went'
+assert_contains "$ar_text" 'to a file' 'the re-prime tells the lane to send long tool output to a file'
+# A recycle of a lane with short notes leaves them alone.
+printf 'QUEUE EMPTY\n## Round 1\na\n## Round 2\nb\n' >"$HAND/report.md"; rm -f "$HAND/status.md" "$HAND"/*-archive.md
+qreset; basepane; rm -f "$RLOG" "$STOPF" "$HFAILF"
+FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a lane with short notes is recycled'
+[ ! -e "$HAND/report-archive.md" ] || fail 'short notes are not archived'; ok
+rm -f "$HAND/report.md"
+qreset; lane --dry-run --recycle q-lane
+assert_contains "$LAST_OUT" 'report-archive.md' '--recycle --dry-run names the archive step'
+
 # Issue 165 (23 Nov): a lane's standing word to deploy lived only in prompt.md, so after a recycle the auto-mode checker read it as file data and
 # refused every deploy. A "Standing word:" line in the prompt is now typed to the fresh session as its own message after the re-prime.
 sw_reset() { qreset; rm -f "$RLOG" "$STOPF" "$HFAILF"; basepane; }
