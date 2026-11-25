@@ -1591,9 +1591,11 @@ class Issue154Tests(Fixture):
         self.allowed("ls | xargs grep x", self.p("work"))
         self.allowed("git ls-files | xargs grep -n x", self.p("work"))
         self.allowed("echo -r | xargs grep x", self.p("work"))
-        # a search that names its roots outside every listed folder
-        self.allowed("echo -r | xargs grep x %s" % self.p("work"), self.tmp)
-        self.allowed("echo -r | xargs grep x %s" % self.p("wall/open"), self.tmp)
+        # a search that names its roots outside every listed folder, run where no listed folder lies under the session folder. Run from a folder
+        # that holds one it is refused since issue 157: an input that is not plain words can add a root of its own
+        self.allowed("echo -r | xargs grep x %s" % self.p("work"), self.p("work"))
+        self.allowed("echo -r | xargs grep x %s" % self.p("wall/open"), self.p("work"))
+        self.refused("echo -r | xargs grep x %s" % self.p("work"), self.tmp)
 
     def test_a_search_that_names_a_listed_folder_through_xargs_is_still_refused(self):
         for cmd in ("echo hi | xargs grep -r x %s" % self.p("wall/clientA"), "echo -r | xargs grep x %s" % self.p("wall/clientA/docs"),
