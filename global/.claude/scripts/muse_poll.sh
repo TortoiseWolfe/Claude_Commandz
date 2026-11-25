@@ -169,7 +169,7 @@ mcp__claude_ai_Gmail__delete_draft,mcp__claude_ai_Gmail__trash_message,mcp__clau
 mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__claude_ai_Gmail__mark_thread_spam,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow,Bash(*--apply*),Bash(*--test-mode*)"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")" --name muse-poll-check --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read(/$STATE/agent-notes-processed.txt)" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
@@ -197,7 +197,7 @@ if [[ -n "$cnew" ]]; then
     CENV=(GUSTO_UNATTENDED=1 GUSTO_QUEUED_IDS_FILE="$PAYIDS")
   fi
   hprompt=$(cat "$S/muse_poll.client-handle.prompt"); hprompt=${hprompt//\{\{HOME\}\}/$HOME}
-  env "${CENV[@]}" timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --model sonnet --max-turns 12 "${LEANFLAGS[@]}" \
+  env "${CENV[@]}" timeout 300 "$CLAUDE" -p "$hprompt"$'\n\n'"$cnew" --name muse-poll-client-handle --model sonnet --max-turns 12 "${LEANFLAGS[@]}" \
     --permission-mode default --disallowedTools "$DENY" --allowedTools "$CALLOW" >>"$LOG" 2>&1
   echo "$(ts) client handler finished (exit $?)" >>"$LOG"
 fi
@@ -324,7 +324,7 @@ HANDLE_PROMPT="$(cat "$S/muse_poll.handle.prompt")
 
 THE CHECK JUST FOUND THESE NOTE IDS: ${ids[*]}
 Read each one by its id (get_draft for an id starting r, otherwise get_message), whatever tag its subject starts with, and handle it by the rules above. Every id in this list must be recorded with muse_poll_record.sh processed <id> before you finish, even a receipt or a note with nothing to answer. If one is a note written by this machine (subject starts with \"[NX-01>\"), record it and do nothing else with it."
-timeout 1200 "$CLAUDE" -p "$HANDLE_PROMPT" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
+timeout 1200 "$CLAUDE" -p "$HANDLE_PROMPT" --name muse-poll-handle --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 handler_exit=$?
 echo "$(ts) handler finished (exit $handler_exit)" >>"$LOG"

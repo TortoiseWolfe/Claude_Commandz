@@ -95,7 +95,7 @@ mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__
 mcp__claude_ai_Gmail__send_message,mcp__claude_ai_Gmail__reply,mcp__claude_ai_Gmail__forward,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --name peer-poll-check --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
@@ -107,7 +107,7 @@ ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 Bash($S/peer_poll_record.sh:*)"
-timeout 1200 "$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
+timeout 1200 "$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")" --name peer-poll-handle --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
 # Publish the read record (draft IDs only) so NX-01's sweep can see what this tower has read; this

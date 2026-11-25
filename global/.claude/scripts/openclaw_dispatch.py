@@ -886,7 +886,7 @@ class LaneHost:
         # --setting-sources project: his user settings are left out, because their allow list is wide (python3, git push ...) and would
         # widen this call's four commands; that also leaves out his plugins, hooks and CLAUDE.md. The cwd is the pass's own folder.
         settings = json.dumps({"disableClaudeAiConnectors": not mcp_tools, "autoMemoryEnabled": False})
-        argv = [str(CLAUDE_BIN), "-p", prompt, "--model", "sonnet", "--max-turns", str(PASS_MAX_TURNS), "--output-format", "json",
+        argv = [str(CLAUDE_BIN), "-p", prompt, "--name", "openclaw-dispatch-pass", "--model", "sonnet", "--max-turns", str(PASS_MAX_TURNS), "--output-format", "json",
                 "--permission-mode", "dontAsk", "--tools", "Bash,ToolSearch" if mcp_tools else "Bash", "--allowedTools", allow,
                 "--settings", settings, "--setting-sources", "project", "--disable-slash-commands", "--no-session-persistence"]
         if mcp_tools:
