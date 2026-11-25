@@ -89,6 +89,30 @@ class ReadGapTests(base.Fixture):
         # another variable that only starts with HOME is not the home folder
         self.allowed("cat ${HOMEX:0}/meetings/a.md", self.work)
 
+    def test_a_path_hidden_in_the_operand_of_a_home_variable_is_judged(self):
+        # `${HOME:+/dir}` is `/dir` and `${HOME/#*/dir}` is `dir`: reading the form as the home folder alone would miss the walled path inside it
+        m = os.path.join(self.meet, "actions.md")
+        for cmd in ("cat ${HOME:+%s}" % self.meet + "/actions.md", "cat ${HOME/#*/%s}" % self.meet + "/actions.md", "cat ${HOME/%*/" + self.meet + "}/actions.md",
+                    "cat ${HOME:+" + m + "}", "cat ${HOME:+" + self.pfile + "}"):
+            self.refused(cmd, self.work)
+
+    def test_a_brace_list_cut_short_is_refused_not_judged_in_part(self):
+        # `{a..z}{a..z}` makes 676 words, over the cap of 256: the walled `zz` is in the part never written out
+        self.paths(self.p("home/meetings/coop"), self.p("work/zz"))
+        self.refused("cat %s/{a..z}{a..z}/f.txt" % self.work, self.work)
+        self.allowed("cat %s/{a..c}{a..c}/f.txt" % self.work, self.work)  # the whole list is written out and none of it is walled
+
+    # ---- a cd the reader does not take as a command of its own ----
+
+    def test_a_cd_behind_a_keyword_a_wrapper_or_a_quoted_script_is_followed(self):
+        c = self.cfg
+        for cmd in ("if true; then cd %s; cat no-ai-paths.txt; fi" % c, "{ cd %s; cat no-ai-paths.txt; }" % c, "time cd %s && cat no-ai-paths.txt" % c,
+                    "command cd %s && cat no-ai-paths.txt" % c, "builtin cd %s; cat no-ai-paths.txt" % c, "while true; do cd %s; cat no-ai-paths.txt; done" % c,
+                    "sh -c 'cd %s; cat no-ai-paths.txt'" % c, "bash -c \"cd %s && cat no-ai-paths.txt\"" % c, "eval 'cd %s; cat no-ai-paths.txt'" % c,
+                    "env -C %s cat no-ai-paths.txt" % c, "cd %s; (cd /; true); cat no-ai-paths.txt" % c):  # the subshell's cd does not undo the first
+            self.refused(cmd, self.work)
+        self.allowed("if true; then cd %s; cat a.txt; fi" % self.work, self.work)
+
     # ---- the plain shapes the hub named stay refused, through the hook itself ----
 
     def hook(self, command, **extra):

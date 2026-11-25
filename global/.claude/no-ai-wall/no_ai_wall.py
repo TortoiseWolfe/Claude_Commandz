@@ -1859,30 +1859,47 @@ def _command_tokens(command, cwd):
     return out
 
 
-_HOME_OPERATOR = re.compile(r"\$\{HOME[:%#/^,@+=?-][^}]*\}")
+_HOME_OPERATOR = re.compile(r"\$\{HOME([:%#/^,@+=?-])([^}]*)\}")
 
 
-def _home_operators(command):
-    """`${HOME:0}`, `${HOME%/}`, `${HOME:-x}` and the like read as `$HOME` (issue 187): HOME is always set, so every such form is the home folder
-    or a cut of it, and the text after it is judged as a path under the home folder. `${HOMEX:0}` is another variable and stays as written."""
-    return _HOME_OPERATOR.sub("$HOME", command)
+def _home_variants(command):
+    """-> the texts to judge for a command that holds `${HOME:0}`, `${HOME%/}`, `${HOME:+/dir}` or the like (issue 187). The original text comes
+    first and is always judged; then the text with every such form read as `$HOME` (HOME is always set, so the form is the home folder or a cut
+    of it), then the text with each form read as its own operand (`${HOME:+/dir}` is `/dir`, `${HOME/x/y}` has `y` put in) so a path hidden in
+    the operand is judged as a path. `${HOMEX:0}` is another variable and stays as written. Over-reading is safe: it only adds texts to check."""
+    if "${HOME" not in command:
+        return [command]
+
+    def replacement(m):
+        s = m.group(2)
+        if m.group(1) == "/":  # `${HOME/pattern/replacement}`, `${HOME//p/r}`, `${HOME/#p/r}`
+            s = s[1:] if s[:1] in ("/", "#", "%") else s
+            return s.split("/", 1)[1] if "/" in s else ""
+        return s.lstrip("-+=?") if m.group(1) == ":" else s
+
+    out = [command]
+    for text in (_HOME_OPERATOR.sub("$HOME", command), _HOME_OPERATOR.sub(lambda m: m.group(2), command), _HOME_OPERATOR.sub(replacement, command)):
+        if text not in out:
+            out.append(text)
+    return out
 
 
 def _brace_expanded(command):
-    """The command with every word that holds a comma-brace group (`a{b,c}d`) written out as the words the shell makes of it, or None when no
-    word has one (issue 187). The shell turns `{a,b}` into two paths and `{1..3}` into three words; the checks read one. The wall then
-    judges the original text AND this one. Over-reading is safe: it only adds words to be checked."""
+    """-> (text, complete). text is the command with every word that holds a brace group (`a{b,c}d`, `{s..s}etopt`) written out as the words the
+    shell makes of it, or None when no word has one (issue 187). The shell turns `{a,b}` into two paths and `{1..3}` into three words; the checks
+    read one. The wall judges the original text AND this one. complete is False when a word's list was cut short or left unexpanded: a listed
+    name could be in the part not written out, so the caller refuses (fail closed). Over-reading is safe: it only adds words to be checked."""
     if "{" not in command or ("," not in command and ".." not in command):
-        return None
-    out, changed = [], False
+        return None, True
+    out, changed, complete = [], False, True
     for piece in re.split(r"(\s+)", command):
         if "{" in piece and (_BRACES.search(piece) or _SEQUENCE.search(piece)):  # `{a,b}` and also `{s..s}etopt`, a sequence that writes one letter
-            words, _ = _brace_expand(piece)
+            words, whole = _brace_expand(piece)
             out.append(" ".join(words))
-            changed = True
+            changed, complete = True, complete and whole
         else:
             out.append(piece)
-    return "".join(out) if changed else None
+    return ("".join(out) if changed else None), complete
 
 
 def _cd_target(seg, words, here, list_dirs):
@@ -1897,6 +1914,10 @@ def _cd_target(seg, words, here, list_dirs):
     return {expand(arg, f) for f in here}, False
 
 
+_CD_WORDS = ("cd", "pushd", "popd")
+_SEGMENT_LEADERS = ("if", "then", "else", "elif", "while", "until", "do", "!", "{", "time", "command", "builtin", "exec", "nohup")
+
+
 def _list_read_by_relative_name(command, cwd, files):
     """-> (hit, folders). hit is True when a word of the command, joined with a folder the shell may be in at that point (the working folder,
     then each `cd` or `pushd` in turn), is one of `files` (or a wildcard that matches one), or when the file's own name is written while the
@@ -1905,15 +1926,29 @@ def _list_read_by_relative_name(command, cwd, files):
     folder a `cd` or `pushd` named in plain text (for the recursive-search check). A command that only looks at a name or size is not read."""
     list_dirs = {os.path.dirname(os.path.normpath(f)) for f in files}
     here, known, hit = {cwd}, {cwd}, False
+    # a `cd` inside a subshell or a substitution does not carry on after it, so there the folders only grow (the shell may be in either)
+    grows = _has_unquoted_paren(command) or "`" in command
+    segs = []
     for seg in _segments(command):
         words = _words(seg)
+        while words and words[0] in _SEGMENT_LEADERS:  # `if x; then cd d; ...`, `{ cd d; }`, `time cd d`, `command cd d`
+            words = words[1:]
+        segs.append((seg, words))
+    if sum(w in _CD_WORDS for w in _words(command)) > sum(bool(ws) and ws[0] in _CD_WORDS for _, ws in segs):
+        # a `cd` the reader did not take as a command of its own (`sh -c 'cd d; cat f'`, `eval "cd d"`): where the shell is is unknown, so the
+        # session folder, the home folder and the list's folder all stay possible from the start
+        here = here | {home()} | set(list_dirs)
+    for seg, words in segs:
         if not words:
             continue
-        if words[0] in ("cd", "pushd", "popd"):
-            here, unsure = _cd_target(seg, words, here, list_dirs)
+        if words[0] in _CD_WORDS:
+            there, unsure = _cd_target(seg, words, here, list_dirs)
+            here = here | there if grows else there
             if not unsure:
                 known |= here
             continue
+        if any(w in ("-C", "--chdir") or w.startswith("--chdir=") for w in words):
+            here = here | {home()} | set(list_dirs)  # `env -C d cat f`: the program runs in a folder the reader does not follow
         if words[0] in _READ_ONLY_PROGRAMS and not re.search(r"[`$(){}]", seg):
             continue  # `ls -la no-ai-paths.txt` after a cd: a listing, a size or a hash, as the plain form is allowed
         if words[0] in _FIND_PROGRAMS:
@@ -2143,9 +2178,16 @@ def evaluate(payload, paths=None):
                     return r
         return None
     if tool == "Bash":
-        command = _home_operators(_resolve_vars(str(ti.get("command") or "")))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed; `${HOME:0}` as `$HOME`
-        # The text as written AND with its comma-brace words written out: the shell makes two paths of `{a,b}` (issue 187)
-        for command in [command] + [x for x in [_brace_expanded(command)] if x]:
+        command = _resolve_vars(str(ti.get("command") or ""))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed
+        # Every text the shell may run (issue 187): as written, with `${HOME:0}` and its kind read as `$HOME` and as their operand, and each of those
+        # with its brace words written out (the shell makes two paths of `{a,b}`). A brace list cut short or left unexpanded is refused, never judged part by part.
+        texts = []
+        for variant in _home_variants(command):
+            written, whole = _brace_expanded(variant)
+            if not whole:
+                return deny_protected()
+            texts.extend(x for x in (variant, written) if x and x not in texts)
+        for command in texts:
             r = bash_hits(command, cwd, paths)
             if r:
                 return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
