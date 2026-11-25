@@ -64,14 +64,19 @@ async function refreshBand($: Engine) {
 
 const LOG = '.claude/state/mods/blast-radius.log'
 
-const RUN_IT = '1 - Run it'
-const REFUSE = '2 - Refuse'
+// Option 1 starts with "Hold" because the card-rules guard (ask-card-guard.py) refuses every card whose first option does not: a click
+// that only focuses the window picks option 1, so option 1 must be the one that changes nothing. Without it this card never reached
+// him and every held command read "guard failed" (issue 168).
+const HOLD = 'Hold, ask me again'
+const RUN_IT = '2 - Run it'
+const REFUSE = '3 - Refuse'
 
 // The dialog returns a label, or the text typed under "Other" ("Type something."). Only the exact Run it label runs the
 // command; anything else is a refusal, and a typed reason goes back to the session so it can adjust instead of retrying blind.
 const refusal = (choice: string) => {
   const base = 'Blast Radius: refused at the prompt. The command did not run.'
   const reason = choice.trim()
+  if (reason === HOLD) return 'Blast Radius: held at the prompt. The command did not run. Ask again when he is ready to decide.'
   return reason === '' || reason === REFUSE
     ? base
     : `${base} Jonathan's reason, in his words: "${reason}". Do not resend this command or a reworded copy; change what you are doing or explain it to him in chat.`
@@ -358,7 +363,7 @@ export const register: Register = on => {
     try {
       choice = await $.ui.ask(
         `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
-        [RUN_IT, REFUSE],
+        [HOLD, RUN_IT, REFUSE],
       )
     } catch (err) {
       // The dialog itself failed: nobody approved, so the command is held, and the cause is written down.

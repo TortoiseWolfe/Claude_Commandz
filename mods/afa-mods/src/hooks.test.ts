@@ -99,7 +99,7 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }, { name: 'b' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('/home/t/afa-mods-test')
@@ -125,15 +125,35 @@ describe('blast radius', () => {
     expect(r.deny).toContain(reason)
     expect(r.deny).toContain('Do not resend')
   })
+  test('interactive: option 1 is Hold and changes nothing, as the card-rules guard requires (issue 168)', async ($, on) => {
+    setup(on)
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    on('fs.stat', () => ({ value: { kind: 'directory', size: 0, mtimeMs: 0, isLink: false } }))
+    on('fs.list', () => ({ value: [] }))
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    let labels: string[] = []
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      labels = e.questions[0].options.map((o: any) => (typeof o === 'string' ? o : o.label))
+      return answer(e, labels[0])
+    })
+    const r = (await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })) as any
+    expect(labels[0]).toMatch(/^Hold/)
+    expect(labels[0]).not.toMatch(/recommended/i)
+    expect(labels).toContain('2 - Run it')
+    expect(labels).toContain('3 - Refuse')
+    expect(labels).toHaveLength(3)
+    expect(r.deny).toContain('held at the prompt')
+    expect(r.deny).toContain('did not run')
+  })
   test('interactive: a typed reason that starts with 1 is a refusal, never a Run it', async ($, on) => {
     const reason = '1 hour later, after the window'
     const r = await refuseWith($, on, reason)
     expect(r.deny).toContain(reason)
   })
   test('interactive: plain Refuse adds no reason and Run it still runs', async ($, on) => {
-    const r = await refuseWith($, on, '2 - Refuse')
+    const r = await refuseWith($, on, '3 - Refuse')
     expect(r.deny).toBe('Blast Radius: refused at the prompt. The command did not run.')
-    const ran = await refuseWith($, on, '1 - Run it').catch((e: unknown) => e)
+    const ran = await refuseWith($, on, '2 - Run it').catch((e: unknown) => e)
     expect((ran as any).deny).toBeUndefined()
   })
   test('non-interactive: denies git push --force, logs it', async ($, on) => {
@@ -194,7 +214,7 @@ describe('blast radius', () => {
     on('fs.list', () => ({ value: [{ name: 'a' }] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     const r: any = await $.tool.call({ tool: 'Bash', command: 'rm -rf /home/t/afa-mods-test' })
     expect(asked).toContain('Blast Radius stopped a command before it ran')
@@ -223,7 +243,7 @@ describe('blast radius, unattended lane', () => {
     on('session.surfaces', () => ({ value: ['terminal'] }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = true
-      return answer(e, '1 - Run it')
+      return answer(e, '2 - Run it')
     })
     on('fs.write', ($: any, e: any) => {
       seen.log += e.text
@@ -347,7 +367,7 @@ describe('blast radius, unattended lane', () => {
     on('fs.list', () => ({ value: [] }))
     on('tool.call', { tool: 'AskUserQuestion' }, () => {
       asked = true
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     await $.tool.call({ tool: 'Bash', command: `rm -rf ${HOME}/repos/ScriptHammer` })
     expect(asked).toBe(true)
@@ -384,7 +404,7 @@ describe('blast radius always says what it would touch', () => {
       on('fs.list', () => ({ value: [{ name: 'a' }] }))
       on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
         asked = JSON.stringify(e)
-        return answer(e, '2 - Refuse')
+        return answer(e, '3 - Refuse')
       })
       await $.tool.call({ tool: 'Bash', command })
       expect(asked).toContain('Blast Radius stopped a command before it ran')
@@ -454,7 +474,7 @@ describe('blast radius, rm inside docker run', () => {
     }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     on('fs.write', ($: any, e: any) => {
       seen.log += e.text
@@ -596,7 +616,7 @@ describe('blast radius, docker run with no CPU cap and no timeout', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -712,7 +732,7 @@ describe('blast radius, lane denies what it can name the fix for', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -806,7 +826,7 @@ describe('blast radius, read-only production proofs', () => {
     on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     const r: any = await $.tool.call({ tool: 'Bash', command })
@@ -946,7 +966,7 @@ describe('blast radius, the guard never crashes on a production deploy call', ()
     on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
       seen.asked = JSON.stringify(e)
       if (opts.askThrows) throw new Error('dialog broke: no surface')
-      return answer(e, '2 - Refuse')
+      return answer(e, '3 - Refuse')
     })
     on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
     return seen
