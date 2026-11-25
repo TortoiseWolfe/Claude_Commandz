@@ -1,4 +1,14 @@
-"""The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir."""
+"""The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir.
+
+A rule for anyone who reviews the guard with a helper (issue 79, 12 Nov 2026): the helper must never RUN the commands it
+generates. A helper that did so in a throwaway home still wrote two stray files and overwrote the live settings file with 3
+bytes, because a generated command that starts a shell with an emptied environment drops the home variable, and the shell
+then takes the real home folder from the account list. A review helper loads the guard's decision function, asks it for a
+verdict on each generated command (as the tests below do with a fake home) and counts the differences between two versions;
+a person reads the differences. A check that really must run a command runs it where the real home folder cannot be reached
+at all, such as a container (a sealed copy of a small system with no link to the home folder); a changed home setting alone is
+never called a sandbox. The same two sentences belong in the first lines of the helper brief used for guard reviews.
+"""
 import io
 import os
 import shutil
@@ -26,7 +36,10 @@ class Fixture(unittest.TestCase):
         for f in ("wall/clientA/docs/secret.txt", "wall/clientB/notes.md", "wall/open/ok.txt", "work/a.txt"):
             with open(os.path.join(self.tmp, f), "w") as fh:
                 fh.write("x")
-        self._env = {k: os.environ.get(k) for k in ("HOME", "NO_AI_PATHS_FILE", "NO_AI_REFUSAL_LOG")}
+        # NO_AI_QUIET is the "already warned once in this shell" switch (issue 78): a lane's shell has it set before the tests start,
+        # so every test runs with it removed and the answer is the same in a lane, a plain terminal and CI.
+        self._env = {k: os.environ.get(k) for k in ("HOME", "NO_AI_PATHS_FILE", "NO_AI_REFUSAL_LOG", "NO_AI_QUIET")}
+        os.environ.pop("NO_AI_QUIET", None)
         os.environ["HOME"] = self.home
         self.pfile = os.path.join(self.tmp, "paths.txt")
         self.log = os.path.join(self.tmp, "refusals.log")
