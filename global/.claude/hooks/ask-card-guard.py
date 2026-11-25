@@ -23,6 +23,11 @@ Checks (all failures are collected, so one retry fixes everything):
      message. Reads the transcript with unverified-pending.py from the same folder; if the
      transcript or that file cannot be read, only this check is skipped.
 
+Blast Radius cards are the one exception to checks 3 and 4 (the afa-mods plugin's "Run it?" dialog for a held command). Their question
+carries the held command word for word, so the command's own text ("gh pr merge", "#12", "send") is not the model's wording and no
+live lookup can be asked of it (25 Nov: a held production command failed with "no answer"). A card counts as one only when it has one
+question that starts with BLAST_OPENING and exactly two options, "Hold, ask me again" then "2 - Run it". Checks 1 and 2 still apply.
+
 Kill switch: ASK_CARD_GUARD=off in the environment.
 Other tools, unreadable stdin and any unexpected error: allow, so a bug here cannot stop every card.
 Tests: cd global/.claude/hooks && python3 -m pytest tests/test_ask_card_guard.py -q -p no:cacheprovider
@@ -42,6 +47,19 @@ WORD_REF = re.compile(r"(?<!\w)(?:PR|pull\s+request|issue|card|ticket)s?\s*#?\s*
 MAIL_CUE = re.compile(r"\b(?:send|sent|unsent|draft|drafts)\b", re.I)
 PR_CUE = re.compile(r"\b(?:merge|merged|merges)\b|\bpull\s+request\b|\bPR\s*#?\s*\d+", re.I)
 URL = re.compile(r"https://\S")
+
+# The afa-mods Blast Radius dialog (mods/afa-mods/src/index.tsx): its question starts with this, and its two options are these labels.
+BLAST_OPENING = "Blast Radius stopped a command before it ran:"
+BLAST_OPTIONS = ["Hold, ask me again", "2 - Run it"]
+
+
+def is_blast_card(questions):
+    if len(questions) != 1 or not isinstance(questions[0], dict):
+        return False
+    q = questions[0]
+    opts = q.get("options")
+    labels = [str(o.get("label") or "") for o in opts if isinstance(o, dict)] if isinstance(opts, list) else []
+    return str(q.get("question") or "").startswith(BLAST_OPENING) and labels == BLAST_OPTIONS
 
 
 def load_scanner():
@@ -155,8 +173,9 @@ def main():
         if not isinstance(payload, dict) or payload.get("tool_name") != "AskUserQuestion":
             return 0
         questions, first, text = card_parts(payload)
-        problems = (check_one_question(questions) + check_hold_first(first)
-                    + check_reference(first, text) + check_live_state(payload, text))
+        problems = check_one_question(questions) + check_hold_first(first)
+        if not is_blast_card(questions):
+            problems += check_reference(first, text) + check_live_state(payload, text)
     except Exception:
         return 0
     if problems:

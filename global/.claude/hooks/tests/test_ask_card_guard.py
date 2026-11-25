@@ -210,6 +210,48 @@ class BlastRadiusCards(Base):
                 old[0]["options"] = [{"label": "1 - Run it", "description": ""}, {"label": "2 - Refuse", "description": ""}]
                 self.assertIn("Option 1", self.refused(old))
 
+    # 25 Nov, second failure: 0.3.8 had Hold first, but a held production command whose own text said "merge", "send" or "#12" still
+    # tripped the reference and live-lookup checks, because the card quotes the command word for word.
+    COMMAND_TEXTS = ["gh pr merge 12 --admin", "deploy --prod # after the merge of PR 12 and issue #7", "scripts/send-draft.sh --prod",
+                     "echo pull request 5 sent && deploy --prod"]
+
+    def real_card_with(self, command):
+        q = json.loads(json.dumps(self.cards()["production deploy"]["questions"]))
+        text = q[0]["question"]
+        start = text.index("scripts/portainer-deploy.sh") if "scripts/portainer-deploy.sh" in text else None
+        self.assertIsNotNone(start, "the saved production card no longer holds its sample command")
+        q[0]["question"] = text.replace("timeout 120 scripts/portainer-deploy.sh redeploy --prod", command)
+        self.assertIn(command, q[0]["question"])
+        return q
+
+    def test_a_held_command_that_says_merge_send_or_a_number_still_passes(self):
+        quiet = self.transcript([user("run the deploy")])  # no gh or Gmail lookup since the owner's message
+        for command in self.COMMAND_TEXTS:
+            with self.subTest(command=command):
+                self.allowed(self.real_card_with(command), transcript=quiet)
+
+    def test_the_same_words_in_a_card_that_is_not_blast_radius_are_still_checked(self):
+        quiet = self.transcript([user("run the deploy")])
+        for command in self.COMMAND_TEXTS:
+            with self.subTest(command=command):
+                self.refused([card(question="Shall I run this? " + command)], transcript=quiet)
+
+    def test_the_opening_alone_is_not_enough(self):
+        quiet = self.transcript([user("x")])
+        q = self.real_card_with("gh pr merge 12 --admin")
+        q[0]["options"] = [{"label": "Hold, ask me again", "description": ""}, {"label": "Run it", "description": ""}]
+        self.assertIn("pull request", self.refused(q, transcript=quiet))
+        q[0]["options"] = [{"label": "Hold, ask me again", "description": ""}, {"label": "2 - Run it", "description": ""},
+                           {"label": "Skip", "description": ""}]
+        self.refused(q, transcript=quiet)
+
+    def test_a_blast_radius_card_still_needs_hold_first_and_one_question(self):
+        q = self.real_card_with("gh pr merge 12 --admin")
+        q[0]["options"] = list(reversed(q[0]["options"]))
+        self.assertIn("Option 1", self.refused(q))
+        two = self.real_card_with("deploy --prod") * 2
+        self.assertIn("One decision per card", self.refused(two))
+
 
 class Allowed(Base):
     def test_kill_switch(self):
