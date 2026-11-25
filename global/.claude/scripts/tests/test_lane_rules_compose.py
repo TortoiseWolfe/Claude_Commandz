@@ -37,7 +37,7 @@ ROUTES = """# Routes
 """
 
 
-def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, routes=None, keywords=None):
+def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_prompt=False, routes=None, keywords=None, rules="auto"):  # rules="auto": the keyword picking; None: the default (core only)
     with tempfile.TemporaryDirectory() as tmp:
         d = rules_dir(tmp)
         rf = Path(tmp) / "routes.md"
@@ -53,7 +53,8 @@ def run(prompt, connectors="off", folder="/home/u/repos/ScriptHammer", missing_p
             pf.write_text(prompt)
         out = Path(tmp) / "rules.md"
         r = subprocess.run([sys.executable, "-I", str(SCRIPT), "--name", "x", "--dir", folder, "--connectors", connectors,
-                            "--prompt", str(pf), "--out", str(out), "--rules-dir", str(d)], capture_output=True, text=True, env=env)
+                            "--prompt", str(pf), "--out", str(out), "--rules-dir", str(d)] + (["--rules", rules] if rules else []),
+                           capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr
         return r.stdout.strip().split(","), out.read_text()
 
@@ -214,11 +215,28 @@ class RulesOptionTest(unittest.TestCase):
         self.assertEqual(parts, PARTS)
         self.assertNotIn("not loaded", text)
 
-    def test_auto_equals_no_option(self):
-        a = run_rules("auto")
+    def test_no_option_is_core_only_and_warns(self):
+        a = run_rules("core")
         b = run_rules(None)
         self.assertEqual((a[2], a[3]), (b[2], b[3]))
-        self.assertNotIn("but the prompt mentions", a[3])
+        self.assertEqual(b[2], ["core"])
+        self.assertIn("but the prompt mentions", b[3])
+
+    def test_auto_still_picks_by_keyword(self):
+        _, _, parts, text = run_rules("auto")
+        self.assertIn("mail", parts)
+        self.assertNotIn("but the prompt mentions", text)
+
+    def test_default_with_connectors_on_still_loads_mail(self):
+        _, text = run("Fix the parser.", connectors="on", rules=None)
+        self.assertIn("rule text of mail", text)
+
+    def test_default_adds_no_routes_but_auto_and_all_do(self):
+        _, text = run("Add a DNS record in the Cloudflare dashboard.", routes=ROUTES, rules=None)
+        self.assertNotIn("Routes that worked or failed before", text)
+        for spec in ("auto", "all"):
+            _, text = run("Add a DNS record in the Cloudflare dashboard.", routes=ROUTES, rules=spec)
+            self.assertIn("Routes that worked or failed before", text)
 
     def test_unknown_part_exits_2_and_writes_nothing(self):
         rc, err, _, text = run_rules("mail,bogus")
