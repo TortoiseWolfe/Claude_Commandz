@@ -122,6 +122,12 @@ class XargsFamilyTests(base.Fixture):
                     "eval 'pwd() { echo -R; }'; ls %s $(pwd)" % a, "command alias pwd=x; ls %s $(pwd)" % a, "builtin cd /; ls %s $(pwd)" % a,
                     "bash -c 'pwd() { echo -R; }; ls %s $(pwd)'" % a, "export -f pwd; ls %s $(pwd)" % a):
             self.refused(cmd, self.tmp)
+        # a variable set by name, a startup variable, a nested shell, a working-folder option, and a variable set by a builtin each end the exemption
+        for cmd in ("X=1 ls %s $(pwd)" % a, "BASH_ENV=f ls %s $(pwd)" % a, "env BASH_ENV=f sh -c 'ls %s $(pwd)'" % a, "env -C / ls %s $(pwd)" % a,
+                    "env --chdir=/ ls %s $(pwd)" % a, "bash -c 'ls %s $(pwd)'" % a, "sh -c 'ls %s $(pwd)'" % a, "PROMPT_COMMAND=x; ls %s $(pwd)" % a,
+                    "read IFS <<< -; ls %s $(pwd)" % a, "printf -v IFS -; ls %s $(pwd)" % a, "ls %s $(pwd) $(pwd)" % a):
+            self.refused(cmd, self.tmp)
+        self.allowed("ls %s $(pwd)" % self.safe, self.tmp)
         # a session folder with a space in its name splits in two where it is printed, so the exemption is off there
         spaced = self.p("a -R b")
         os.makedirs(spaced, exist_ok=True)

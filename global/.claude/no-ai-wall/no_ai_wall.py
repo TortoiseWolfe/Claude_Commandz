@@ -815,10 +815,13 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
 
 
-_PWD_UNSAFE = re.compile(r"\b(?:" + "|".join(sorted(w for w in ("alias", "unalias", "function", "hash", "enable", "eval", "source", "builtin", "command", "declare", "typeset", "export", "readonly", "local", "unset", "set", "shopt", "trap", "exec", "env", "IFS", "PATH", "command_not_found_handle", "cd", "pushd", "popd", "chdir"))) + r")\b")
+_PWD_UNSAFE = re.compile(r"\b(?:" + "|".join(sorted(w for w in ("alias", "unalias", "function", "hash", "enable", "eval", "source", "builtin", "command", "declare", "typeset", "export", "readonly", "local", "unset", "set", "shopt", "trap", "exec", "env", "IFS", "PATH", "command_not_found_handle", "cd", "pushd", "popd", "chdir",
+                                                  "read", "printf", "mapfile", "readarray", "getopts", "let", "bash", "sh", "zsh", "dash", "ksh", "fish", "sudo", "nohup", "setsid", "time", "timeout", "nice", "stdbuf"))) + r")\b")
+# the startup and environment names that can rebind a builtin, matched anywhere in a word so a prefix or a suffix cannot hide them
+_PWD_UNSAFE_NAMES = re.compile(r"BASH_ENV|BASH_FUNC|ENV=|PROMPT_COMMAND|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT|LD_PRELOAD|--wd|--chdir|--working-directory")
 
 
-def _substitution_spans(cmds, meta, cwd=""):
+def _substitution_spans(cmds, meta, cwd="", nested=False):
     """-> (carried, cut), two lists with one flag per command, from how the reader cut the text at substitutions (issues 160 and 164).
 
     The reader ends a command at `$(`, a backtick and a parenthesis, so the words of one shell command can land in several of ours. Each command's
@@ -866,8 +869,11 @@ def _substitution_spans(cmds, meta, cwd=""):
     # off), none of the words that can rebind a name (the same set the search check uses), no change of IFS or PATH, no change of folder at all
     # (`cd -` and a quoted `cd` too), and a session folder with no space in it.
     all_words = [w for c in cmds for w, q in c]
-    pwd_is_plain = (all_words.count("pwd") == 1 and sum(w.count("pwd") for w in all_words) == 1 and not re.search(r"\s", cwd)
-                    and "." not in all_words and not any(_PWD_UNSAFE.search(w) for w in all_words))
+    # a script run by another command (sh -c, eval, a quoted literal) inherits functions, aliases, a folder and a startup file this text cannot see
+    pwd_is_plain = (not nested and all_words.count("pwd") == 1 and sum(w.count("pwd") for w in all_words) == 1 and not re.search(r"\s", cwd)
+                    and "." not in all_words and not any(_PWD_UNSAFE.search(w) or _PWD_UNSAFE_NAMES.search(w) for w in all_words)
+                    # a variable set by name (`X=1 cmd`, `A=b; ...`) or a working-folder option (`-C d`, `-D d`) can change what pwd prints or where it runs
+                    and not any(re.match(r"[A-Za-z_]\w*\+?=|-[CD]", w) for w in all_words))
     for k in range(n - 1):
         if not meta[k + 1][0].startswith(("$(", "`")):
             continue
@@ -981,7 +987,7 @@ def _program_of(cmd):
     return (os.path.basename(ws[i]), ws[i + 1:]) if i < len(ws) else (None, [])
 
 
-def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
+def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
     """-> (recursive, folders, words) for a shell text, or None when it cannot be read with certainty. recursive: some command in it searches
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
@@ -998,7 +1004,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
-    carried, cut = _substitution_spans(cmds, meta, cwd)
+    carried, cut = _substitution_spans(cmds, meta, cwd, nested)
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for k, cmd in enumerate(cmds):
@@ -1028,7 +1034,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                 # a quoted word is data, except the one a command that runs a string (env -S, ssh, watch...) hands on to a shell. The word the
                 # command runs is never data, however it is quoted or escaped: 'find' and \find are find.
                 if re.search(r"\s", w) and any(os.path.basename(p) in _RUNS_A_STRING for p, pq in cmd[:i] if not pq):
-                    sub = _searches(w, cur, depth + 1, bodies)
+                    sub = _searches(w, cur, depth + 1, bodies, nested=True)
                     if sub is None:
                         return None
                     recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
@@ -1058,7 +1064,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
                     else:
                         return None
             if script is not None:
-                sub = _searches(script, cur, depth + 1, bodies)
+                sub = _searches(script, cur, depth + 1, bodies, nested=True)
                 if sub is None:
                     return None
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
@@ -1118,7 +1124,7 @@ def bash_hits(command, cwd, paths):
         for lit in _code_commands(body):
             if not _SEARCH_WORD.search(lit):
                 continue
-            sub = _searches(lit, cwd)
+            sub = _searches(lit, cwd, nested=True)
             r = _info_hit(sub, cwd, paths) if sub is not None else _bash_hits_wide(lit, cwd, paths)
             if r:
                 return r
