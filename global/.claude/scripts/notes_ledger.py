@@ -8,6 +8,9 @@ unless a line names a GitHub pull request or commit (and then only `gh`, with --
   notes_ledger.py order  [--match S] [--owner P] [--state S,S] [--include-stale] [--limit N]
                                                      ONE block per open item: state, the decision already made, the deadline, the evidence
   notes_ledger.py risk                               one escalation line per at-risk item (empty output = nothing at risk)
+  notes_ledger.py expire [--days 14] [--close]       open Job lines older than N days (the date at the start of the line) with no "[keep]"
+                                                     in the line or its notes. A dry run lists them; --close ticks them "[x]" and appends
+                                                     " (expired after N days)". Never deletes text; never touches Hub, Question or client lines.
 
 Common flags: --inbox F  --lanes-dir D  --now "YYYY-MM-DD HH:MM" (tests)  --no-net
 
@@ -26,7 +29,8 @@ A deadline is "due: 2026-11-07 1:00 PM", "due: 2026-11-07 13:00", "due: 1 PM" (t
 (a date alone means 5:00 PM that day). The margin is SHORT_MARGIN_H hours before a deadline that was set under a day ahead, LONG_MARGIN_H
 hours before any other.
 
-The board is read, never written (the `ledger --write` file is a separate snapshot). Nothing here ticks, moves or deletes a line.
+The board is read, never written (the `ledger --write` file is a separate snapshot), with one exception: `expire --close` ticks old Job
+lines. Nothing here moves or deletes a line.
 """
 import argparse
 import hashlib
@@ -402,6 +406,47 @@ def cmd_stale(a):
     return 0
 
 
+def expirable(item, now, days):
+    """An open Job line whose own date is more than `days` days back and that nothing marks [keep]."""
+    return (item.owner == "Job" and item.created is not None and (now.date() - item.created.date()).days > days
+            and "[keep]" not in item.full_text())
+
+
+def cmd_expire(a):
+    now = datetime.strptime(a.now, "%Y-%m-%d %H:%M") if a.now else datetime.now().replace(second=0, microsecond=0)
+    p = Path(os.path.realpath(a.inbox))
+    if not p.exists():
+        print("no board at %s" % a.inbox)
+        return 0
+    lines = p.read_text(errors="replace").splitlines(keepends=True)
+    pre, blocks = split_blocks(lines)
+    items = [Item(b) for b in blocks]
+    hits = [i for i in items if i.ok and i.open and expirable(i, now, a.days)]
+    for i in hits:
+        print("%s | %s" % (i.id, short(i.text, 160)))
+    if not hits:
+        print("no open Job lines older than %d days" % a.days)
+        return 0
+    if not a.close:
+        print("%d open Job line(s) older than %d days (dry run, nothing changed). Close them with: expire --close; spare one by adding [keep] to it." % (len(hits), a.days))
+        return 0
+    out = list(pre)
+    n = 0
+    for it in items:
+        b = it.block
+        if it in hits:
+            head = b[0].rstrip("\r\n")
+            end = b[0][len(head):]
+            b = ["- [x] " + head[6:] + " (expired after %d days)" % a.days + end] + b[1:]
+            n += 1
+        out.extend(b)
+    tmp = p.with_name(p.name + ".expire.tmp")
+    tmp.write_text("".join(out))
+    os.replace(tmp, p)
+    print("closed %d Job line(s) older than %d days" % (n, a.days))
+    return 0
+
+
 def pick(items, a, now):
     out = items if a.include_stale else fresh(items, now, a.stale_days)
     if a.owner:
@@ -472,7 +517,7 @@ def cmd_risk(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    ap.add_argument("cmd", choices=["counts", "stale", "ledger", "order", "risk"])
+    ap.add_argument("cmd", choices=["counts", "stale", "ledger", "order", "risk", "expire"])
     ap.add_argument("--inbox", default=os.environ.get("HUB_INBOX") or os.environ.get("MUSE_INBOX") or str(HOME / ".claude/state/hub-inbox.md"))
     ap.add_argument("--lanes-dir", default=str(HOME / ".claude/state/lanes"))
     ap.add_argument("--stale-days", type=int, default=int(os.environ.get("HUB_STALE_DAYS", STALE_DAYS)))
@@ -484,8 +529,10 @@ def main(argv=None):
     ap.add_argument("--include-stale", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--write")
+    ap.add_argument("--days", type=int, default=int(os.environ.get("HUB_EXPIRE_DAYS", 14)), help="expire: age in days (default 14)")
+    ap.add_argument("--close", action="store_true", help="expire: tick the listed Job lines (the default is a dry run)")
     a = ap.parse_args(argv)
-    return {"counts": cmd_counts, "stale": cmd_stale, "ledger": cmd_ledger, "order": cmd_order, "risk": cmd_risk}[a.cmd](a)
+    return {"counts": cmd_counts, "stale": cmd_stale, "ledger": cmd_ledger, "order": cmd_order, "risk": cmd_risk, "expire": cmd_expire}[a.cmd](a)
 
 
 if __name__ == "__main__":

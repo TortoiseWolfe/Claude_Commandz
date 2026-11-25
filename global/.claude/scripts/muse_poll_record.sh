@@ -27,6 +27,8 @@
 #                                                them, --all lists both.
 #   muse_poll_record.sh ledger|order|risk|counts|stale  -> notes_ledger.py (state word per open item from checked facts, one work-order
 #                                                block per item, the at-risk escalation line, counts only, the stale list). No model.
+#   muse_poll_record.sh expire [--days 14] [--close]  -> open Job lines older than N days and not marked [keep]: a dry-run list; --close ticks
+#                                                them and appends " (expired after N days)". Never deletes, never touches Hub/Question/client lines.
 #   muse_poll_record.sh archive [<days>]      -> moves done lines (with their indented notes) not touched for more
 #                                                than <days> (default 7) to hub-inbox-archive/YYYY-MM.md
 #
@@ -83,7 +85,10 @@ case "${1:-}" in
       echo "already queued: $qid"
       exit 0
     fi
-    printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$INBOX"
+    # The whole line is stored. Only a line past 4000 characters is cut, and the cut is marked so nobody reads a half line as whole.
+    stored=$line
+    (( ${#stored} > 4000 )) && stored="${stored:0:4000} ... [cut]"
+    printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "$stored" >>"$INBOX"
     ;;
   active)
     touch "$STATE/muse-active.stamp"
@@ -244,6 +249,11 @@ case "${1:-}" in
       echo "($hidden stale open item(s) not shown: older than ${HUB_STALE_DAYS:-10} days with no change since. List them with: muse_poll_record.sh open --stale)"
     fi
     ;;
+  expire)
+    # Job-line expiry (notes_ledger.py expire): a dry run by default; --close ticks the old Job lines under the board lock.
+    for a in "${@:2}"; do [[ "$a" == "--close" ]] && lock; done
+    exec python3 -I "$(dirname "$(readlink -f "$0")")/notes_ledger.py" expire --inbox "$INBOX" "${@:2}"
+    ;;
   stale|counts|ledger|order|risk)
     # The ledger (notes_ledger.py): the stale view, a state word per open item from facts a script can check, one work-order block per
     # item, the at-risk escalation line. No model anywhere in this path.
@@ -252,5 +262,5 @@ case "${1:-}" in
   archive)
     exec python3 "$(dirname "$(readlink -f "$0")")/hub_inbox_archive.py" --inbox "$INBOX" --days "${2:-7}"
     ;;
-  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | tick \"<unique substring>\" \"<done note>\" | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] [--stale|--all] | archive [<days>] | stale | counts | ledger | order | risk" >&2; exit 2 ;;
+  *) echo "usage: $0 processed <id> | inbox \"<Owner: line>\" | active | done <our-draft-id> | tick \"<unique substring>\" \"<done note>\" | client-mail <label> <client> <ids> | client-talk <client> <detail> <ids> | client-seen <ids> | open [<prefix>] [-v] [--stale|--all] | archive [<days>] | stale | counts | ledger | order | risk | expire [--days N] [--close]" >&2; exit 2 ;;
 esac
