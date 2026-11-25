@@ -113,6 +113,18 @@ class ReadGapTests(base.Fixture):
             self.refused(cmd, self.work)
         self.allowed("if true; then cd %s; cat a.txt; fi" % self.work, self.work)
 
+    def test_a_redirect_stuck_to_its_file_or_first_in_the_command_is_judged_as_a_path(self):
+        # `<afa/no-ai-paths.txt cat` starts with the redirect, so the word after the program is not the only place a file can be named; `<f` and
+        # `0<f` carry the redirect sign in the same word as the file
+        c = self.cfg
+        for cmd in ("cd %s && cat <no-ai-paths.txt" % c, "cd ~/.config && <afa/no-ai-paths.txt cat", "cd ~/.config && exec <afa/no-ai-paths.txt; cat",
+                    "cd ~/.config; time <afa/no-ai-paths.txt cat", "cd ~/.config && { <afa/no-ai-paths.txt cat; }",
+                    "cd ~/.config && while true; do <afa/no-ai-paths.txt head -1; done", "cd ~/.config && 0<afa/no-ai-paths.txt cat"):
+            self.refused(cmd, self.work)
+        self.allowed("cd %s && <a.txt cat" % self.work, self.work)
+        self.allowed("cd ~/.config && cat <other.txt", self.work)
+        self.allowed("cd %s && cat >out.txt" % self.work, self.work)
+
     # ---- the plain shapes the hub named stay refused, through the hook itself ----
 
     def hook(self, command, **extra):

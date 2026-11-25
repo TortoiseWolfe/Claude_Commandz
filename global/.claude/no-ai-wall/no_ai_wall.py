@@ -1956,7 +1956,8 @@ def _list_read_by_relative_name(command, cwd, files):
         for folder in here:
             if any(os.path.basename(f) in seg and os.path.dirname(os.path.normpath(f)) == folder for f in files):
                 hit = True
-            for w in words[1:]:
+            # every word, the first too: the reader drops a redirect sign, so `<afa/x cat` and `exec <f` start with the file and not the program
+            for w in words:
                 for piece in [w] + [p for p in w.split("=")[1:] if p]:
                     if not piece or piece.startswith("-") and "/" not in piece:
                         continue
