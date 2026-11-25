@@ -702,7 +702,7 @@ def weekly_reset_ts(budget):
     year, month, day, hour, minute, half = m.groups()
     try:
         from zoneinfo import ZoneInfo
-        from openclaw_dispatch import WEEK_TZ
+        from week_reset import WEEK_TZ
         return datetime(int(year), int(month), int(day), int(hour) % 12 + (12 if half == "PM" else 0), int(minute),
                         tzinfo=ZoneInfo(WEEK_TZ)).timestamp()
     except Exception:  # noqa: BLE001 - no reset figure is better than a broken digest
@@ -711,16 +711,12 @@ def weekly_reset_ts(budget):
 
 def week_start_ts(budget, now_ts):
     """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
-    report's); without one it is the dispatcher's rule, the one place the Wednesday 16:00 UTC boundary lives (the same call
-    phase_note makes). None when the dispatcher module can't be read."""
+    report's); without one it is the fixed Wednesday 16:00 UTC rule in week_reset.py (the dispatcher keeps a copy that a test holds equal).
+    None when week_reset.py can't be read."""
     try:
-        from openclaw_dispatch import _week_edges
-        named = weekly_reset_ts(budget)
-        reset = _week_edges(now_ts, named)[3]
-        if named is None:  # the rule's reset is a fixed UTC instant (Wed 16:00 UTC), so the week began exactly seven days earlier
-            return reset.timestamp() - 7 * 86400
-        return (reset - timedelta(days=7)).timestamp()  # wall-clock: a DST change in the week moves nothing
-    except Exception:  # noqa: BLE001 - the digest must build without the dispatcher
+        from week_reset import week_start_ts as start
+        return start(now_ts, weekly_reset_ts(budget))
+    except Exception:  # noqa: BLE001 - the digest must build without it
         return None
 
 
