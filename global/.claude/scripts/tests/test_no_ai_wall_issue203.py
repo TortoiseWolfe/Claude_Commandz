@@ -60,6 +60,19 @@ class HeredocFalseAlarm(base.Fixture):
         # a copy that is then run: no prose to misread, but the text is still not read with certainty
         self.assertIsNone(w._searches("cp tool.py run.py\npython3 run.py", self.tmp))
 
+    def test_another_writer_or_a_set_variable_keeps_the_wide_reading(self):
+        # only a redirect or tee to document files lifts the give-up: tar, unzip, dd, curl, cp, mv and a variable set for a command may all put a
+        # script where the interpreter will find it (the security review of the first version)
+        for text in ("tar xf a.tar\npython3 check.py", "unzip a.zip\npython3 check.py", "curl -o run.py http://example.invalid/x\npython3 run.py",
+                     "dd if=a of=run.py\npython3 run.py", "cp a.md b.md\npython3 check.py", "mv a.py run.py\npython3 run.py",
+                     "rsync -a src/ dst/\npython3 check.py", "tee run.py <<'EOF' >/dev/null\nx\nEOF\npython3 run.py",
+                     "cat > t2-issue.md <<'EOF'\nx\nEOF\nPYTHONPATH=. python3 check.py"):
+            self.assertIsNone(w._searches(w._strip_heredocs(text), self.tmp), text)
+
+    def test_only_python_gets_the_version_flag_exemption(self):
+        for tail in ("tclsh -h", "node --version", "perl -V", "lua -v", "pwsh -h", "awk --version"):
+            self.assertIsNone(w._searches(w._strip_heredocs(self.ticket(tail)), self.tmp), tail)
+
     def test_an_unknown_program_after_a_written_file_still_takes_the_wide_reading(self):
         for tail in ("make", "mytool t2-issue.md", "python3", "python3 -"):
             self.refused(self.ticket(tail), self.tmp)
