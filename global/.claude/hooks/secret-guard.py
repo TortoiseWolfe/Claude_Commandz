@@ -69,7 +69,10 @@ READERS = ("cat tac head tail less more bat nl jq yq strings xxd od base64 sed a
            "xargs source view vi vim nano ed emacs openssl ssh-keygen gawk mawk dd comm join").split()
 VERB = re.compile(r"(?<![\w.-])(" + "|".join(READERS) + r")(?![\w.-])")
 # git commands that print a file's content or a diff of it, and an input redirect ("< file", "while read ... done < file")
-_GIT = r"(?<![\w.-])git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+\S+\s+|-\S+\s+)*"
+# The two alternatives below cannot match the same word (the second refuses the option names the first takes), so the
+# repeat has one way to match and cannot blow up on a long run of options.
+_GIT = (r"(?<![\w.-])git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+\S+\s+"
+        r"|-(?!(?:C|c|-git-dir|-work-tree|-namespace|-exec-path)\s)\S+\s+)*")
 GIT_PRINT = re.compile(_GIT + r"(?:show|cat-file|blame|diff|grep|stash\s+show)(?![\w-])"
                        r"|" + _GIT + r"log\b[^;&|]*\s(?:-p|--patch|-[a-zA-Z]*p[a-zA-Z]*)(?!\S)")
 REDIR_IN = re.compile(r"(?<!<)<(?![<(&])\s*")
@@ -623,12 +626,22 @@ def is_viewer_segment(seg):
         i += 1
     if i >= len(words) or words[i].startswith("-"):
         return False
+    if not (words[i].startswith("/") or words[i].startswith("~/")):
+        return False  # a relative path means the folder the shell is in then, which an earlier "cd" may have changed
     script = os.path.realpath(os.path.expanduser(words[i]))
     return script == os.path.realpath(os.path.expanduser("~/.claude/scripts/redact_view.py"))
 
 
+# Shell state another segment could change so that "python" or the script is not what it seems.
+SHELL_STATE = re.compile(r"(?:^|[\s;&|(])(?:export|alias|declare|typeset|readonly|unalias|hash|eval|source|function|set|env|command|builtin|exec)(?![\w-])"
+                         r"|(?:^|[\s;&|(])[A-Za-z_]\w*\+?=|(?:^|[\s;&|])\.\s|[\w-]+\s*\(\s*\)")
+
+
 def prints_sensitive(cmd):
-    segs = [seg for seg in split_segments(cmd) if not is_viewer_segment(seg)]
+    all_segs = split_segments(cmd)
+    others = [seg for seg in all_segs if not is_viewer_segment(seg)]
+    # The viewer's exemption holds only when no other part of the command could change what "python" or the script is.
+    segs = others if not any(SHELL_STATE.search(o) for o in others) else all_segs
     rest = "\n".join(segs)  # the command with the viewer's own segments taken out
     whole = sensitive_in(rest)
     if not whole:

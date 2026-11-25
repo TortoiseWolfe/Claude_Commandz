@@ -536,6 +536,23 @@ class IssueNinetyThreeF7(Base):
                     "git --git-dir=/tmp/x show HEAD:server.pem", "read l 0< ~/x/server.pem", "(cat) < ~/x/server.pem"):
             self.blocked(cmd, "B")
 
+    def test_the_viewer_needs_a_fixed_path_and_no_changed_shell_state(self):
+        for cmd in ("cd /tmp/x && python3 redact_view.py ~/x/server.pem",
+                    "cd /tmp/x; python3 ./redact_view.py ~/x/server.pem",
+                    "PATH=/tmp/x:$PATH; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "export PYTHONPATH=/tmp/x; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "alias python3=cat; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem",
+                    "python3() { cat \"$2\"; }; python3 ~/.claude/scripts/redact_view.py ~/x/server.pem"):
+            self.blocked(cmd)
+
+    def test_a_long_run_of_git_options_finishes_fast(self):
+        import time
+        for piece in ("-C a ", "-c a=b ", "-C -C ", "-c -c ", "-p -C a ", "--git-dir x "):
+            cmd = "git " + piece * 400 + "x"
+            start = time.monotonic()
+            bash(cmd)
+            self.assertLess(time.monotonic() - start, 1.0, piece)
+
     def test_the_viewer_itself_still_passes(self):
         self.allowed("python3 ~/.claude/scripts/redact_view.py ~/x/server.pem")
         self.allowed("python3 -I ~/.claude/scripts/redact_view.py ~/x/api-key.txt")
