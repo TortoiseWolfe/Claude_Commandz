@@ -64,6 +64,16 @@ class Issue139Tests(base.Fixture):
             self.refused(cmd, self.work)
         self.allowed("set -e; cd ~/proj; cat a.txt", self.work)  # -e is not a cd option
 
+    def test_ansi_c_quotes_locale_quotes_and_brace_expansion_do_not_hide_a_cd_changing_option(self):
+        # the shell writes out $'..' (with escapes), $".." and {a,b} before it runs a word: `$'ha\x73h' -d` is `hash -d`, `{hash,x} -d` is `hash -d`
+        wall = self.p("wall")
+        # (the option name is written so the quote-stripped text does not show setopt, hash or cdablevars either)
+        for cmd in ("$'set\\157pt' $'cdable\\x76ars'; cd clientA; rm docs/secret.txt", "$\"setopt\" $\"cdable\"vars; cd clientA; rm docs/secret.txt",
+                    "{setopt,x} cdable{vars,x}; cd clientA; rm docs/secret.txt", "$'ha\\x73h' -d w=%s; cd clientA; rm docs/secret.txt" % wall,
+                    "{hash,x} -d w=%s; cd clientA; rm docs/secret.txt" % wall):
+            self.refused(cmd, self.work)
+        self.allowed("cd ~/proj; cat a.txt", self.work)
+
     def test_a_variable_that_only_starts_with_home_is_not_the_home_folder(self):
         # `$HOMEX` is another variable: it must never be read as the home folder followed by an X
         self.refused("cd $HOMEX; rm docs/secret.txt", self.work)

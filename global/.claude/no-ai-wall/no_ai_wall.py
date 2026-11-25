@@ -109,7 +109,10 @@ def _cdpath(text):
     # without underscores: CDABLEVARS, cdable_vars, AUTO_CD), and `hash -d` names, also change where a cd lands
     # the shell drops quotes and backslashes before it runs a word (`ha\sh -d` is `hash -d`), so the option checks read the text without them
     bare = re.sub(r"[\\'\"]", "", text or "")
-    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", bare))
+    # `$'..'` and `$".."` words and a comma-brace group (`{hash,x} -d`) are written out by the shell before it runs the word, in ways the
+    # quote-stripped text above does not show: any of them leaves the cd's landing folder unknown
+    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\$['\"]|\{[^{}]*,[^{}]*\}", text or ""))
+              or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", bare))
               or bool(re.search(r"cdablevars|autocd", bare.replace("_", "").lower()))  # zsh ignores every underscore in an option name
               # setopt, unsetopt and emulate can change how a cd lands in ways the text does not show; zsh's short flags -J (AUTO_CD) and -T
               # (CDABLE_VARS) do the same through `set`; `hash` with any flag (-d name=dir, -f, -r -d) can name a folder for `cd ~name`
