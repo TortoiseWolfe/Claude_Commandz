@@ -7,6 +7,8 @@ set -euo pipefail
 REC=$(cd -- "$(dirname -- "$0")/.." && pwd)/muse_poll_record.sh
 TMP=$(mktemp -d); trap 'rm -rf -- "$TMP"' EXIT
 export MUSE_STATE=$TMP HUB_INBOX=$TMP/hub-inbox.md
+# client-seen stamps a mail index first; the fake one keeps this test off the hub's real index
+export MUSE_MAIL_INDEX_PY="$(dirname "$REC")/tests/fake_mail_index.py" FAKE_MAIL_INDEX_LOG="$TMP/mail-index.log"
 ok() { [[ "$2" == "$3" ]] && printf 'PASS: %s\n' "$1" || { printf 'FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3" >&2; exit 1; }; }
 
 # 1. inbox: a CR at the end of the line is not stored, and the same note queued again is seen as a duplicate.
@@ -25,11 +27,11 @@ ok 'done: ticked despite CR' 1 "$(grep -c '^- \[x\] ' "$HUB_INBOX")"
 # 3. client-seen: a seen file with Windows line ends, and a board line with CR, still tick the line.
 printf -- '- [ ] 2026-11-25 10:00 | Client mail: a client | absorb lane | abcdef0123456789\r\n' >"$HUB_INBOX"
 printf 'abcdef0123456789\r\n' >"$TMP/client-mail-seen.txt"
-bash "$REC" client-seen abcdef0123456789 >/dev/null
+bash "$REC" client-seen abcdef0123456789 --fyi >/dev/null
 ok 'client-seen: ticked despite CR in both files' 1 "$(grep -c '^- \[x\] ' "$HUB_INBOX")"
 
 # Mutation guard: an id that is not in the seen file leaves the line open.
 printf -- '- [ ] 2026-11-25 10:00 | Client mail: a client | absorb lane | 0123456789abcdef\r\n' >"$HUB_INBOX"
 printf 'abcdef0123456789\r\n' >"$TMP/client-mail-seen.txt"
-bash "$REC" client-seen abcdef0123456789 >/dev/null
+bash "$REC" client-seen abcdef0123456789 --fyi >/dev/null
 ok 'client-seen: an unseen id stays open' 1 "$(grep -c '^- \[ \] ' "$HUB_INBOX")"
