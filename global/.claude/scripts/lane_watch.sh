@@ -80,7 +80,7 @@
 # Every wake prints WAKE-REASON <code> as its first line (the existing lines follow unchanged) and appends one tab-separated row (ISO time from
 # date -Is, code, lane or -) to $LANE_WATCH_WAKE_LOG (default: wake.log in the lane state folder, $LANE_RECYCLE_DIR); a log that cannot be written
 # never stops the wake. The code comes from the first output line, one per kind of wake, from the table in wake_code: report, window-gone, dialog,
-# turn-ended, idle-remind, job-idle, handoff-orphan, step-no-link, done-no-proof, stamp-ahead, pane-dead, stale-lock, context-unknown, recycle-thrash,
+# turn-ended, idle-remind, job-idle, handoff-orphan, step-no-link, done-no-proof, stamp-ahead, pane-dead, stale-lock, context-unknown, start-load, recycle-thrash,
 # recycle-failed, update-failed, tier, green-pr, spend, hub-context, unanswered, bridge, outbox, undelivered, ask-open, ask-openclaw, budget-reading,
 # client-talk, note, check-passed, heartbeat (other for a line the table does not know). A false wake is counted with
 # lane_watch.sh --wake-counts [DAYS] (default 7): the number of wakes per code in that window, most first.
@@ -102,6 +102,7 @@ wake_code() {
     handoff) echo handoff-orphan ;;  step-url) echo step-no-link ;;   done-proof) echo done-no-proof ;;
     stamp) echo stamp-ahead ;;       dead) echo pane-dead ;;          lock) echo stale-lock ;;
     ctx) echo context-unknown ;;     thrash) echo recycle-thrash ;;   recycle-failed) echo recycle-failed ;;
+    start-load) echo start-load ;;
     update-failed) echo update-failed ;; tier) echo tier ;;           green) echo green-pr ;;
     spend) echo spend ;;             hub-context) echo hub-context ;; unanswered) echo unanswered ;;
     bridge) echo bridge ;;           outbox) echo outbox ;;           undelivered) echo undelivered ;;
@@ -127,6 +128,7 @@ wake_classify() {
     "dead: "*) kind=dead; re='^dead: ([^ ]+) ' ;;
     "stale recycle lock: "*) kind=lock; re='^stale recycle lock: ([^ ]+) ' ;;
     "context unknown: "*) kind=ctx; re='^context unknown: ([^ ]+) ' ;;
+    "start load: "*) kind=start-load; re='^start load: ([^ ]+) ' ;;
     "thrash: lane "*) kind=thrash; re='^thrash: lane ([^ ]+) ' ;;
     "recycle failed: "*) kind=recycle-failed; re='^recycle failed: ([^:]+):' ;;
     "update failed: "*) kind=update-failed; re='^update failed: ([^:]+):' ;;
@@ -278,6 +280,22 @@ ctx_unknown_check() {
   [ -e "$mark" ] && return 0
   : > "$mark"
   echo "context unknown: $l (its context has read as unknown $n times in a row, so its recycle line cannot be checked) -- look at the lane"
+  hit=1; other=1
+}
+# Start load (issue 128). start_load_check <lane> (no subshell: it sets hit and other) names a lane whose fresh session already held more than
+# LANE_WATCH_START_K (default 30) thousand tokens at its first message, once per session: a lane that starts that full is back at its recycle
+# line within minutes however often it is cleared, and what it reads at the start (prompt.md, handoff.md, report.md, status.md) is the thing to
+# shrink. lane.sh --start-load prints "<K> <session id>", or "?" or "n/a" when there is no reading. The session it named is kept in
+# .startload-<lane>. 0 or "off" turns the check off.
+start_load_check() {
+  local l=$1 lim=${LANE_WATCH_START_K:-30} ans k sess mark="$recycle_dir/.startload-$1"
+  [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -gt 0 ] || return 0
+  ans=$("$lane_sh" --start-load "$l" 2>/dev/null) || return 0
+  k=${ans%% *}; sess=${ans#* }
+  [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -gt "$lim" ] || return 0
+  [ "$(cat "$mark" 2>/dev/null)" = "$sess" ] && return 0
+  printf '%s' "$sess" > "$mark"
+  echo "start load: $l (its fresh session held ${k}K at its first message, over the ${lim}K mark: what it reads at the start is too big; archive or shrink report.md, status.md, handoff.md and prompt.md)"
   hit=1; other=1
 }
 # Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
@@ -1275,6 +1293,7 @@ while :; do
       dead_check "$l"
       high_check "$l"
       ctx_unknown_check "$l"
+      start_load_check "$l"
       green_pr_check "$l"
       done_line=$(printf '%s\n' "$pane" | turn_done_line)
       if recycle_locked "$l"; then

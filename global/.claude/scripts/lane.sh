@@ -112,6 +112,9 @@
 #   lane.sh [--dry-run] --unlock-gone   free the worktree locks lane.sh made (it locks a lane's linked worktree at start/--resume so `git worktree remove`
 #                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, n/a for an engine lane, ? if unknown)
+#   lane.sh --start-load <name>         "<K> <session id>": what the lane's live session held at its first message (? if unknown, n/a for an engine
+#                                       lane); --status shows it as start:<K>. lane_watch.sh names a lane over LANE_WATCH_START_K (30) once a session.
+#                                       --recycle also moves each finished round of report.md and status.md to report-archive.md and status-archive.md.
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
@@ -307,6 +310,7 @@ Usage:
   lane.sh --behind
   lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
+  lane.sh --start-load <name>
   lane.sh --recycle-point <name>
   (--recycle-at <K> --recycle <name> sets the line and lifts a stop: the third recycle in 30 minutes is the last until then)
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
@@ -417,6 +421,7 @@ while [ $# -gt 0 ]; do
     --behind) mode=behind; shift ;;
     --unlock-gone) mode=unlock_gone; shift ;;
     --ctx) mode=ctx; shift ;;
+    --start-load) mode=startload; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
     --pane) mode=pane; shift ;;
@@ -1115,6 +1120,16 @@ named_copies() {  # <prompt-file> <lane folder> -> how many distinct ~/repos/.wo
   n="$({ head -c 200000 -- "$1" | grep -aoE '\.worktrees/[A-Za-z0-9._-]+--[A-Za-z0-9._-]+' || true; } | sort -u | { grep -vxF -- "${own:-/}" || true; } | wc -l)"
   echo "${n// /}"
 }
+# standing_words <prompt-file> -> the text after each "Standing word:" line of the prompt (up to 3 lines, 300 characters each), joined with " | ".
+# Issue 165: a standing permission for an outward action (deploy, publish, merge) that lives only in prompt.md reaches a recycled lane as file
+# data, and the auto-mode safety checker refused every deploy until it was typed. The marker may follow a list bullet or a quote mark and any
+# case; a line that only mentions the words ("Not a standing word: ...") has text before the marker and does not count.
+standing_words() {
+  [ -r "${1:-}" ] || return 0
+  { head -c 200000 -- "$1" | LC_ALL=C tr -d '\000-\010\013-\037\177' | grep -aiE '^[[:space:]>*_-]*standing word:' || true; } | head -n 3 \
+    | sed -E 's/^[[:space:]>*_-]*[Ss][Tt][Aa][Nn][Dd][Ii][Nn][Gg] [Ww][Oo][Rr][Dd]:[[:space:]*_]*//; s/[[:space:]]+$//' | cut -c1-300 | { command grep -av '^$' || true; } \
+    | awk 'NR > 1 { printf " | " } { printf "%s", $0 } END { if (NR) printf "\n" }'
+}
 default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
   local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
@@ -1497,11 +1512,11 @@ if [ "$mode" = status ]; then
         [ -z "$sug" ] || sug="  suggestion: \"$sug\""
       fi
       printf '%-18s report:%-3s %-7s %s%s\n' "$w" "$wrote" "$state" "$last" "$sug"
-      ctx="?"
-      case "${b:-subscription}" in codex|copilot|agy|opencode|local) ctx="n/a" ;; *) { [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; } && ctx="$(ctx_k "$dir" "$id")" ;; esac
+      ctx="?"; sload="?"   # sload: what the live session held at its first message (issue 128)
+      case "${b:-subscription}" in codex|copilot|agy|opencode|local) ctx="n/a"; sload="n/a" ;; *) if [ -n "${id:-}" ] && [ "$id" != - ] && [ "$id" != "?" ]; then ctx="$(ctx_k "$dir" "$id")"; sload="$(start_k "$dir" "$id")"; fi ;; esac
       case "${b:-subscription}" in codex|copilot|agy|opencode|local) cn="n/a" ;; *) if [ -z "$row" ]; then cn="?"; else cn="${conn:--}"; [ "$cn" = - ] && cn=on; fi ;; esac
       [ -z "$why" ] || printf '    report stale: %s\n' "$([ "$why" = input ] && echo 'the lane got input after report.md was written; the report is not its last word' || echo 'a background job it started has not finished')"
-      printf '    dir:%s model:%s effort:%s connectors:%s%s%s context:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$([ "${pm:--}" = - ] || printf ' project-mcp:%s' "$pm")" "$([ "${ad:--}" = - ] || printf ' add-dirs:%s' "$ad")" "$ctx" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
+      printf '    dir:%s model:%s effort:%s connectors:%s%s%s context:%s start:%s engine/billing:%s session:%s %s\n' "${dir:-?}" "${m:-?}" "${eff:-?}" "$cn" "$([ "${pm:--}" = - ] || printf ' project-mcp:%s' "$pm")" "$([ "${ad:--}" = - ] || printf ' add-dirs:%s' "$ad")" "$ctx" "$sload" "${b:-subscription}" "$([ "${id:--}" = - ] && echo unknown || echo "$id")" "$extra"
       # A hand-off newer than the report (or with no report) is the lane's latest word: show its Done and Next first lines, read by the
       # same rules as hub_digest.py, so a recycled lane's state is visible here without opening its folder.
       if [ -n "${rep:-}" ] && [ -s "$(dirname "$rep")/handoff.md" ] && { [ ! -e "$rep" ] || [ "$(dirname "$rep")/handoff.md" -nt "$rep" ]; }; then
@@ -1545,6 +1560,9 @@ send_to() {  # <name> <text...>
   # Every name this function sets is local (as in send_held), so a caller's own dir, id, m, rk and the rest are not overwritten by the call.
   local text dir id row d n m b p rep st eff conn rk ent pm ad target how pane rc hits_before
   text="$*"; dir=""; id=""
+  # Control characters (Escape, Enter, Ctrl-C and the rest) in what is typed would be keystrokes in the lane's terminal, not text, so every
+  # caller's text loses them here; tab is kept. Security review of issue 165's standing-word message, 25 Nov 2026.
+  text="$(printf '%s' "$text" | LC_ALL=C tr -d '\000-\010\012-\037\177')"
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
     IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
@@ -1663,9 +1681,22 @@ PY
   fi
   tmux send-keys -t "$target" C-m
   if [ -n "${LANE_SEND_PANE_RE:-}" ]; then
-    local i
+    local i answered=0
     for i in $(seq 1 $(( ${LANE_SEND_CONFIRM_SECS:-15} * 2 ))); do
       [ "$(pane_hits)" -gt "$hits_before" ] && { echo "sent to $name: confirmed on its screen"; return 0; }
+      # A busy lane answers /model with "Switch model? ... the full history gets re-read" and does nothing until it is answered (issue 127).
+      # Option 1 (Yes) is already selected, so one Enter answers it. Only that one dialog, and only once per call: any other dialog is
+      # left to a person.
+      # One capture, and the whole dialog must be there: its title, the selected "1. Yes" line and the "Enter to confirm" footer. A line
+      # that only says "Switch model?" (a lane printing it, a permission prompt) is never answered (security review of issue 127).
+      if [ "$answered" = 0 ] && [ -n "${LANE_SEND_ANSWER_RE:-}" ]; then
+        local shot; shot="$(tmux capture-pane -p -t "$target" 2>/dev/null | tail -15)"
+        if command grep -qE -- "$LANE_SEND_ANSWER_RE" <<<"$shot" && command grep -qE '^[[:space:]]*❯ 1\. Yes' <<<"$shot" \
+           && command grep -qE 'Enter to confirm' <<<"$shot" && ! command grep -qiE 'Do you want to proceed|Allow|permission' <<<"$shot"; then
+          answered=1
+          tmux send-keys -t "$target" C-m
+        fi
+      fi
       sleep 0.5
     done
     echo "sent to $name: NOT CONFIRMED (no new line matching \"$LANE_SEND_PANE_RE\" on its screen)"
@@ -1761,7 +1792,9 @@ switch_model() {  # <name> <model>
   before="$(python3 -I "$um" get)"
   # /model is a local command: it never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line.
   fam="$(command grep -oiE 'opus|sonnet|haiku|fable' <<<"$newm" | head -1 || true)"  # the pane names the family ("Sonnet 5.5"), not the id
-  LANE_SEND_PANE_RE="Set model to .*${fam}" send_to "$name" "/model $newm" || rc=$?
+  # A busy lane first asks "Switch model?" (issue 127); send_to answers it with Enter and goes on waiting for the "Set model to" line, so the
+  # restore loop below runs after the default has been saved, not before.
+  LANE_SEND_PANE_RE="Set model to .*${fam}" LANE_SEND_ANSWER_RE='Switch model\?' send_to "$name" "/model $newm" || rc=$?
   for _ in $(seq 1 "${LANE_MODEL_POLLS:-12}"); do  # /model saves the default a moment after it runs: restore until it has settled
     now="$(python3 -I "$um" get)"
     if [ "$now" != "$before" ]; then
@@ -1841,13 +1874,15 @@ fi
 
 # --ctx <name>: the lane's context in K tokens as a bare number, n/a for an engine lane (no reading by design), or ? when it cannot be read (lane_watch.sh uses it against the recycle line).
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
-if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
-  [ $# -eq 1 ] || { echo "usage: lane.sh --$mode <name>" >&2; exit 1; }
+# --start-load <name>: "<K> <session id>" for the lane's live session: what it held at its first message (issue 128; lane_watch.sh names a lane over its
+# LANE_WATCH_START_K once per session), n/a for an engine lane, ? when it cannot be read.
+if [ "$mode" = ctx ] || [ "$mode" = turn ] || [ "$mode" = startload ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --${mode/startload/start-load} <name>" >&2; exit 1; }
   row="$(index_row "$1")"
   [ -n "$row" ] || { echo "?"; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
   case "${b:-subscription}" in codex|copilot|agy|opencode|local)   # no context reading exists for these by design (--turn stays ?)
-    if [ "$mode" = ctx ]; then echo "n/a"; else echo "?"; fi; exit 0 ;;
+    if [ "$mode" = ctx ] || [ "$mode" = startload ]; then echo "n/a"; else echo "?"; fi; exit 0 ;;
   esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
@@ -1858,6 +1893,11 @@ if [ "$mode" = ctx ] || [ "$mode" = turn ]; then
   if [ "$mode" = turn ]; then
     f="$(transcript_of "$dir" "$id")"
     python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_turn_kind.py" "$f" 2>/dev/null || echo "?"
+    exit 0
+  fi
+  if [ "$mode" = startload ]; then
+    v="$(start_k "$dir" "$id")"
+    case "$v" in *K) echo "${v%K} $id" ;; *) echo "?" ;; esac
     exit 0
   fi
   v="$(ctx_k "$dir" "$id")"; echo "${v%K}"
@@ -1931,7 +1971,7 @@ if [ "$mode" = recycle ]; then
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
-    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one.${jobs_note:-} $LANE_STANDING_RULE"
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. The finished rounds of report.md and status.md were moved to report-archive.md and status-archive.md in that folder at this recycle: do not read an archive unless handoff.md names the entry you need. Keep your own notes short, and send a long tool output (a test run, a log, a diff) to a file and read back only the lines you need, so the conversation does not fill up again.${jobs_note:-} $LANE_STANDING_RULE"
   }
   msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
@@ -1944,11 +1984,13 @@ if [ "$mode" = recycle ]; then
     echo "  3a. wait for the helpers the lane started: subagents for the rest of that time (still running at the end: the lane is not cleared), background jobs up to ${LANE_RECYCLE_JOB_SECS:-180}s (then cleared anyway, with a row in recycle.log)"
     echo "  3b. make sure no input is queued in the lane (a queued message would reach the fresh session): wait up to ${LANE_RECYCLE_QUEUE_SECS:-120}s for it to run, then pop it with Escape; without that the lane is not cleared"
     echo "  3c. look once more just before /clear: a turn that started after the hand-off is waited for (up to ${LANE_RECYCLE_QUEUE_SECS:-120}s) and the queue drained again; if the lane is still busy the lane is not cleared"
+    echo "  3d. move the finished rounds of $hand/report.md and $hand/status.md (each over 4096 bytes, line 1 and the open round stay) to report-archive.md and status-archive.md beside them (lane_archive_rounds.py, issue 128)"
     echo "  4. send: /clear"
     echo "  4a. wait up to 20s for the fresh session's id to be recorded (SessionStart hook) before the re-prime is typed"
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime (plus, when $hand/hub-pending.md exists by then, the sentence that sends the lane to read it: words lane.sh --send held back while the lane was past its line)"
     echo "  5b. the recycle counts as done only when the re-prime is in the new session; a re-prime found only in the old one writes a REPRIME-OLD-SESSION row, is typed once more, and fails the recycle if it misses again"
+    [ -z "$(standing_words "$p")" ] || echo "  5c. send, as its own typed message after the re-prime: Standing word ... quoted from $p (issue 165): $(standing_words "$p")"
     echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
@@ -2261,6 +2303,9 @@ PY
     lane_idle && { drain_queue || rfail "input was queued in the lane after a turn started past the hand-off, and Escape did not clear it; the lane was NOT cleared"; }
     lane_idle || rfail "a turn started after the hand-off; the lane was NOT cleared"
   fi
+  # Issue 128: the lane's notes grow by a section a round; move every finished round of report.md and status.md to report-archive.md and
+  # status-archive.md now (line 1 and the open round stay), so the fresh session does not re-read them and fill up before it starts work.
+  python3 -I "$SCRIPT_DIR/lane_archive_rounds.py" "$hand" 2>/dev/null || true
   oldf=""; old_lines=0
   if [ -n "${id:-}" ] && [ "$id" != - ]; then
     oldf="$(ls "$PROJ"/*/"$id.jsonl" 2>/dev/null | head -n 1 || true)"
@@ -2332,6 +2377,14 @@ PY
     send_reprime
     find_newid
     ! reprime_in_old || rfail "the lane was cleared but the re-prime reached the old session, not the new one; send it by hand: $msg_reprime"
+  fi
+  # Issue 165: the lane's standing word for an outward action is typed again as its own short message, not folded into the re-prime, so the
+  # auto-mode checker reads it as a person's word and not as the contents of prompt.md. A miss is logged and does not undo the recycle.
+  sw="$(standing_words "$p")"
+  if [ -n "$sw" ]; then
+    sw_msg="Standing word copied from this lane's prompt.md ($p), which the hub wrote when the lane started; it is file text typed again, not a new message from a person: $sw"
+    LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$sw_msg" >/dev/null \
+      || printf '%s\t%s\tSTANDING-WORD-NOT-SENT\tthe standing word from the prompt did not reach the fresh session; the lane reads it from prompt.md only\n' "$(date -Is)" "$name" >>"$rlog"
   fi
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"
