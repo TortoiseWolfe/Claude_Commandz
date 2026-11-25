@@ -83,7 +83,10 @@ case "${1:-}" in
       echo "already queued: $qid"
       exit 0
     fi
-    printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$INBOX"
+    # The whole line is stored. Only a line past 4000 characters is cut, and the cut is marked so nobody reads a half line as whole.
+    stored=$line
+    (( ${#stored} > 4000 )) && stored="${stored:0:4000} ... [cut]"
+    printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "$stored" >>"$INBOX"
     ;;
   active)
     touch "$STATE/muse-active.stamp"
