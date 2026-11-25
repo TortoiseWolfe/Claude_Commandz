@@ -1070,6 +1070,27 @@ class Decode(unittest.TestCase):
         self.assertTrue(out.startswith("lane ") and out.endswith(" ok"), out)
 
 
+class MachinesSection(unittest.TestCase):
+    def test_the_machines_section_follows_lanes_running_with_three_lines(self):
+        d = Path(fresh_dir(self))
+        (d / "nx-01.txt").write_text("2026-10-16T20:30:00-04:00 NX-01 up_hours=42 lanes=8 mem_free_mb=5120\n")
+        (d / "tower.txt").write_text("2026-10-12T11:00:00-04:00 tower up_hours=3 lanes=0 mem_free_mb=900\n")
+        env = {"HEARTBEAT_NX01_FILE": str(d / "nx-01.txt"), "HEARTBEAT_TOWER_FILE": str(d / "tower.txt"),
+               "HEARTBEAT_MACE_FILE": str(d / "mace.txt")}
+        with mock.patch.dict(os.environ, env):
+            lines = hd.machine_lines(datetime(2026, 10, 16, 21, 0, tzinfo=ZoneInfo("America/New_York")))
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("NX-01: up 42 h, 8 lanes", lines[0])
+        self.assertIn("tower: LAST SEEN 4 days ago", lines[1])
+        self.assertIn("mace: no heartbeat", lines[2])
+        page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=INBOX,
+                                           git_log="", tidy_text=TIDY, budget="Week resets Wed: used 1%", now=NOW, machines=lines),
+                         NOW, "NX-01", hd.CAP_DEFAULT)
+        self.assertIn("## Machines\n" + "\n".join(lines), page)
+        self.assertLess(page.index("## Lanes running"), page.index("## Machines"))
+        self.assertLess(page.index("## Machines"), page.index("## Open hub-inbox items"))
+
+
 class LiveState(unittest.TestCase):
     """The old env-gated RealState test ran the digest against the real roadmap and skipped everywhere else. Its asserts now run twice:
     on invented text of the real shape here (every machine, every run), and on the live text inside hub_digest.py itself, which fails

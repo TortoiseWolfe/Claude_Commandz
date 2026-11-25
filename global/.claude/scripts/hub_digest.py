@@ -206,7 +206,7 @@ def dispatcher_open_questions(dispatcher=None):
 # The live-state check: the code that reads the roadmap issue and the hub-inbox must notice when the live text no longer parses
 # ---------------------------------------------------------------------------------------------
 
-PAGE_HEADINGS = ["## Lanes running", "## Open hub-inbox items", "## Employer replies (job mail)", "## Roadmap", "## Budget this week",
+PAGE_HEADINGS = ["## Lanes running", "## Machines", "## Open hub-inbox items", "## Employer replies (job mail)", "## Roadmap", "## Budget this week",
                  "## ~/repos, last 10 commits", "## Tidy report"]
 PAGE_HARD_CAP = 7150  # 6144 until 29 Oct 2026 (the Incoming mail section)
 
@@ -1216,9 +1216,27 @@ def new_since_lines(raw_lines, limit=NEW_TITLE_LIMITS[0], routine_count=0):
     return out
 
 
+def machine_lines(now=None):
+    """The Machines section: one line per machine from machine_heartbeat.py report (NX-01, the tower, the Mac mini). Files:
+    HEARTBEAT_NX01_FILE, HEARTBEAT_TOWER_FILE, HEARTBEAT_MACE_FILE override them (tests). The tower's file is the one it publishes
+    to hub/tower/ in the workspace checkout; when that is missing, its own local path, so the line is still named tower."""
+    beats = HOME / ".claude/state/heartbeats"
+    tower = os.environ.get("HEARTBEAT_TOWER_FILE") or str(HOME / "repos/hub/tower/heartbeat.txt")
+    if not os.path.exists(tower):
+        tower = str(beats / "tower.txt")
+    files = [os.environ.get("HEARTBEAT_NX01_FILE") or str(beats / "nx-01.txt"), tower,
+             os.environ.get("HEARTBEAT_MACE_FILE") or str(beats / "mace.txt")]
+    cmd = [sys.executable, "-I", str(Path(__file__).resolve().parent / "machine_heartbeat.py"), "report", *files]
+    if now is not None:
+        cmd += ["--now", str(now.timestamp())]
+    got = _run(cmd, timeout=20)
+    lines = [l for l in (got or "").splitlines() if l.startswith("- ")]
+    return lines[:3] or ["- heartbeat report unavailable"]
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
                    report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
-                   mail=None, machine="NX-01", drafts=None, coop_cards=None, rules_lines=None, unanswered=None):
+                   mail=None, machine="NX-01", drafts=None, coop_cards=None, rules_lines=None, unanswered=None, machines=None):
     sections = []
 
     if open_questions_error:
@@ -1237,6 +1255,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if dead:
         lines.append(f"- {dead} older lanes have ended")
     sections.append(("Lanes running", lines or ["- none"]))
+    sections.append(("Machines", machines or ["- not checked (no heartbeat lookup in this build)"]))
 
     sections.append(spend_section(spend))
 
@@ -1508,7 +1527,7 @@ def main(argv=None):
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine, unanswered=unanswered,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
-                          coop_cards=coop_cards,
+                          coop_cards=coop_cards, machines=machine_lines(now),
                           rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
