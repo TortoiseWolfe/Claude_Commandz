@@ -64,15 +64,17 @@ async function refreshBand($: Engine) {
 
 const LOG = '.claude/state/mods/blast-radius.log'
 
-const RUN_IT = '1 - Run it'
-const REFUSE = '2 - Refuse'
+// Option 1 is Hold, never Run it: a click that only focuses the window or an Enter picks option 1, so the first option must be the safe one,
+// and ask-card-guard.py refuses any decision card whose first option does not start with "Hold" (the cause of 25 Nov's "no answer" on production commands).
+const HOLD = 'Hold, ask me again'
+const RUN_IT = '2 - Run it'
 
 // The dialog returns a label, or the text typed under "Other" ("Type something."). Only the exact Run it label runs the
 // command; anything else is a refusal, and a typed reason goes back to the session so it can adjust instead of retrying blind.
 const refusal = (choice: string) => {
   const base = 'Blast Radius: refused at the prompt. The command did not run.'
   const reason = choice.trim()
-  return reason === '' || reason === REFUSE
+  return reason === '' || reason === HOLD
     ? base
     : `${base} Jonathan's reason, in his words: "${reason}". Do not resend this command or a reworded copy; change what you are doing or explain it to him in chat.`
 }
@@ -358,7 +360,7 @@ export const register: Register = on => {
     try {
       choice = await $.ui.ask(
         `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
-        [RUN_IT, REFUSE],
+        [HOLD, RUN_IT],
       )
     } catch (err) {
       // The dialog itself failed: nobody approved, so the command is held, and the cause is written down.
