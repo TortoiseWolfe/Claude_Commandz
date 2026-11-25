@@ -95,10 +95,19 @@ mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__
 mcp__claude_ai_Gmail__send_message,mcp__claude_ai_Gmail__reply,mcp__claude_ai_Gmail__forward,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
+check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --name peer-poll-check --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
   --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
 echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
+# One heartbeat line a day (fleet review C8): write it, then publish it the way the read record is published, so NX-01's hub page can say
+# whether this tower is idle. It runs on every due poll, not only when a note arrived (the read record block below is reached only then).
+# The write skips a line under 20 hours old; a failure is logged and never stops the poller.
+mkdir -p "$STATE/heartbeats"
+timeout 20 python3 -I "$S/machine_heartbeat.py" write "$STATE/heartbeats/tower.txt" --machine tower >>"$LOG" 2>&1
+echo "$(ts) heartbeat write (exit $?)" >>"$LOG"
+PATH=$HOME/.local/bin:$PATH timeout 60 python3 $S/notes_check.py \
+  --publish-file "$STATE/heartbeats/tower.txt" hub/tower/heartbeat.txt >>"$LOG" 2>&1
+echo "$(ts) heartbeat publish (exit $?)" >>"$LOG"
 [[ "$check" == NEW* ]] || exit 0
 # a note for this machine arrived: the exchange is live. A cc:<id> item alone is only a line queued for the hub, so it does not speed the poll up.
 for item in ${check#NEW}; do [[ "$item" == cc:* ]] || { touch "$ACTIVE"; break; }; done
@@ -107,7 +116,7 @@ ALLOW="Read,Grep,Glob,\
 mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__get_draft,mcp__claude_ai_Gmail__search_threads,\
 mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__create_draft,\
 Bash($S/peer_poll_record.sh:*)"
-timeout 1200 "$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")" --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
+timeout 1200 "$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")" --name peer-poll-handle --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
 # Publish the read record (draft IDs only) so NX-01's sweep can see what this tower has read; this

@@ -206,7 +206,7 @@ def dispatcher_open_questions(dispatcher=None):
 # The live-state check: the code that reads the roadmap issue and the hub-inbox must notice when the live text no longer parses
 # ---------------------------------------------------------------------------------------------
 
-PAGE_HEADINGS = ["## Lanes running", "## Open hub-inbox items", "## Employer replies (job mail)", "## Roadmap", "## Budget this week",
+PAGE_HEADINGS = ["## Lanes running", "## Machines", "## Open hub-inbox items", "## Employer replies (job mail)", "## Roadmap", "## Budget this week",
                  "## ~/repos, last 10 commits", "## Tidy report"]
 PAGE_HARD_CAP = 7150  # 6144 until 29 Oct 2026 (the Incoming mail section)
 
@@ -321,6 +321,7 @@ GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
 PEER_INBOX = "peer-inbox.md"  # a machine other than NX-01 reads this by default; NX-01 reads hub-inbox.md
 OWNER_SHOWN = {"NX-01": 5, "other": 15}  # lines listed per group: NX-01's page keeps 5, any other machine's lists up to 15
 STALE_WAIT_DAYS = 5   # a "Waiting on ..." line older than this is flagged: the hub sends one reminder or closes it with a reason
+HATCH_FREE_ENGINE_DAYS = 7   # a "Waiting on Hatch" line older than this goes to a free-engine lane instead of waiting longer (C9)
 OWNER_PREFIX = re.compile(r"^(?:waiting on |job:|question:|hub:|\[(?:NX-01|MUSE)>)", re.I)  # the canonical owners (the legacy "[CC>MUSE]" start stays under other when a line is unreadable)
 CLIENT_LINE = re.compile(r"^client (?:mail|alert|talk):", re.I)
 
@@ -360,6 +361,17 @@ def wait_age_days(day, now):
     if d > now:
         d = d.replace(year=now.year - 1)
     return (now - d).days
+
+
+def stale_hatch_line(items, now, days=HATCH_FREE_ENGINE_DAYS):
+    """One page line for the Hatch asks older than `days` (items: [(MM-DD, title)] from open_inbox), or "" when none.
+    The hub reads it as: start a free-engine lane (OpenCode on a public repo, or agy) for the lookup, or close the ask with a reason."""
+    ages = [wait_age_days(d, now) for d, _t in items if re.match(r"\d\d-\d\d$", d)]
+    old = [a for a in ages if a > days]
+    if not old:
+        return ""
+    return (f"- {len(old)} of {len(items)} Hatch asks are older than {days} days (oldest {max(old)} days): "
+            f"send each web lookup to a free-engine lane, keep dashboard clicks with Hatch, or close it with a reason")
 
 
 NOTE_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -1233,9 +1245,27 @@ def new_since_lines(raw_lines, limit=NEW_TITLE_LIMITS[0], routine_count=0):
     return out
 
 
+def machine_lines(now=None):
+    """The Machines section: one line per machine from machine_heartbeat.py report (NX-01, the tower, the Mac mini). Files:
+    HEARTBEAT_NX01_FILE, HEARTBEAT_TOWER_FILE, HEARTBEAT_MACE_FILE override them (tests). The tower's file is the one it publishes
+    to hub/tower/ in the workspace checkout; when that is missing, its own local path, so the line is still named tower."""
+    beats = HOME / ".claude/state/heartbeats"
+    tower = os.environ.get("HEARTBEAT_TOWER_FILE") or str(HOME / "repos/hub/tower/heartbeat.txt")
+    if not os.path.exists(tower):
+        tower = str(beats / "tower.txt")
+    files = [os.environ.get("HEARTBEAT_NX01_FILE") or str(beats / "nx-01.txt"), tower,
+             os.environ.get("HEARTBEAT_MACE_FILE") or str(beats / "mace.txt")]
+    cmd = [sys.executable, "-I", str(Path(__file__).resolve().parent / "machine_heartbeat.py"), "report", *files]
+    if now is not None:
+        cmd += ["--now", str(now.timestamp())]
+    got = _run(cmd, timeout=20)
+    lines = [l for l in (got or "").splitlines() if l.startswith("- ")]
+    return lines[:3] or ["- heartbeat report unavailable"]
+
+
 def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log, tidy_text, budget, now,
                    report_hours=24, open_questions_text="", open_questions_error=None, spend=None, internship=None, hours=None,
-                   mail=None, machine="NX-01", drafts=None, coop_cards=None, rules_lines=None, unanswered=None):
+                   mail=None, machine="NX-01", drafts=None, coop_cards=None, rules_lines=None, unanswered=None, machines=None):
     sections = []
 
     if open_questions_error:
@@ -1254,6 +1284,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if dead:
         lines.append(f"- {dead} older lanes have ended")
     sections.append(("Lanes running", lines or ["- none"]))
+    sections.append(("Machines", machines or ["- not checked (no heartbeat lookup in this build)"]))
 
     sections.append(spend_section(spend))
 
@@ -1295,6 +1326,9 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if notes:
         sections.append((f"Notes waiting for this hub ({len(notes)}, newest first)", [f"- {t}" for _, t in notes]))
     il = []
+    stale_hatch = stale_hatch_line(groups["Hatch"], now)
+    if stale_hatch:
+        il.append(stale_hatch)  # first, so the size cap (which trims from the end) keeps it
     shown = OWNER_SHOWN["NX-01" if machine == "NX-01" else "other"]
     for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "NX-01", "From NX-01", "From Muse", "jobs", "hub"]:
         items = groups[g][::-1]  # the file is oldest first; every group is read newest first (21 Nov 2026: the oldest five hid the newest line)
@@ -1525,7 +1559,7 @@ def main(argv=None):
                           git_log=git_log, tidy_text=tidy, budget=budget, now=now, report_hours=a.report_hours,
                           open_questions_text=open_questions_text, open_questions_error=open_questions_error, spend=spend, internship=internship, hours=hours, mail=mail, machine=machine, unanswered=unanswered,
                           drafts=None if a.roadmap_file else drafts_lines(now=now),
-                          coop_cards=coop_cards,
+                          coop_cards=coop_cards, machines=machine_lines(now),
                           rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), drift_line(time.time()), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
     if a.strict or not a.roadmap_file:
