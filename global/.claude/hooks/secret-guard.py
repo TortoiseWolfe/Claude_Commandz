@@ -5,6 +5,7 @@ stdin: {"tool_name": ..., "tool_input": {...}}
 block: reason on stderr, exit 2.  allow: exit 0.  internal error: allow + log.
 The reason never echoes a matched secret.
 """
+import glob
 import importlib.util
 import json
 import os
@@ -248,8 +249,8 @@ GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|(?:messa
 GMAIL_PLAIN = {"ls", "stat", "test", "[", "[[", "realpath", "readlink"}  # none of these reads a file's content (wc, du and file can)
 GMAIL_SCRIPTS = ("~/.claude/scripts/redact_view.py", "~/.claude/scripts/gmail_api.py")  # the only scripts that may run against the folder
 GMAIL_QUOTE_WORDS = {"grep", "rg", "git"}  # a quoted mention (a search pattern, a commit message) is not a call
-GMAIL_EXEC_WORDS = {"curl", "wget", "nc", "ncat", "socat", "xargs", "node", "perl", "ruby", "php", "sh", "bash", "zsh", "dash",
-                    "eval", "source", ".", "env", "openssl"}  # words that could turn quoted text into a call
+GMAIL_GIT_QUOTING = {"commit", "log", "grep", "show", "diff", "tag", "status"}  # git subcommands that take a message or a pattern and run nothing
+GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
 GMAIL_GLOB = re.compile(r"[*?\[{]")
 GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
@@ -319,17 +320,56 @@ def gmail_segment_ok(seg):
     return False
 
 
+def gmail_resolves_into_folder(seg):
+    """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
+    or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
+    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen."""
+    folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
+    parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))}
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return True  # a segment that can't be split can't be checked
+    cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
+
+    def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
+        real = os.path.realpath(os.path.expanduser(gmail_norm(path)))
+        return real == folder or real in parents or real.startswith(folder + os.sep)
+
+    for i, w in enumerate(words):
+        if not w or w.startswith("-") and not cd:
+            continue
+        if cd and i > 0 and not w.startswith("-"):
+            real = os.path.realpath(os.path.expanduser(gmail_norm(w)))
+            if real == folder or real in parents or real.startswith(folder + os.sep):
+                return True
+            continue
+        if "/" in w or w.startswith(("~", ".")):
+            if inside(w):
+                return True
+            if GMAIL_GLOB.search(w):
+                for m in sorted(glob.glob(os.path.expanduser(gmail_norm(w))))[:200]:
+                    if inside(m):
+                        return True
+    return False
+
+
 def gmail_credential_use(cmd):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
-    for seg in split_segments(cmd):
+    segs = split_segments(cmd)
+    if re.search(r"gmail_api\.py|redact_view\.py", cmd) and GMAIL_ENV_INJECT.search(cmd):
+        return "folder"  # the two scripts that may hold the token must not run with variables that load other code
+    for seg in segs:
         norm = gmail_norm(seg)
-        if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)) and not gmail_segment_ok(seg):
+        if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
+                or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
     for seg in split_segments(cmd):
         if GMAIL_SEND.search(gmail_norm(seg)):
             words = gmail_words(seg) or []
-            quoted = (words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg
-                      and not (os.path.basename(words[0]) == "git" and ("-c" in words or "--exec-path" in "".join(words))))
+            quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
+            if quoted and os.path.basename(words[0]) == "git":  # git runs aliases and config: only a read-only subcommand counts, never with -c or GIT_ variables
+                quoted = len(words) > 1 and words[1] in GMAIL_GIT_QUOTING and not GMAIL_ENV_INJECT.search(seg)
             if quoted:
                 continue
             return "send"

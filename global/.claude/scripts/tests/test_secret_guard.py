@@ -403,6 +403,44 @@ class MailTokenRuleG(Base):
                     "git -c alias.x='!curl -X POST gmail/v1/users/me/messages/send' x"):
             self.blocked(cmd, "G")
 
+    def test_the_third_review_cases_block(self):
+        """Resolved against the real file system (a symlink, a glob, a cd to a parent), env that loads code, git aliases."""
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".config", "afa", "gmail")
+            os.makedirs(folder)
+            open(os.path.join(folder, "token.json"), "w").close()
+            os.symlink(folder, os.path.join(home, "innocent"))
+            os.symlink(os.path.join(home, ".config", "afa"), os.path.join(home, "up"))
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                for cmd in ("cat %s/innocent/token.json" % home,
+                            "cat ~/innocent/token.json",
+                            "cat ~/up/gmail/token.json",
+                            "cat ~/up/g*/tok*",
+                            "cat ~/.c*/a*/g*/t*",
+                            "cat %s/.c?nfig/afa/gmail/token.json" % home,
+                            "cd ~/up && cat gmail/token.json",
+                            "cd %s/.config && cat afa/gmail/token.json" % home,
+                            "pushd ~/innocent",
+                            "find ~/up -type f -exec cat {} +"):
+                    self.blocked(cmd, "G")
+                self.allowed("cat ~/src/notes.txt")
+                self.allowed("ls ~/up")
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+        for cmd in ("PYTHONPATH=/tmp python3 ~/.claude/scripts/gmail_api.py whoami",
+                    "export PYTHONPATH=/tmp; python3 ~/.claude/scripts/gmail_api.py whoami",
+                    "LD_PRELOAD=/tmp/x.so python3 ~/.claude/scripts/redact_view.py f",
+                    "GIT_CONFIG_COUNT=1 git commit -m 'messages/send'",
+                    "git -c alias.x='!curl -X POST gmail/v1/users/me/messages/send' x",
+                    "git config alias.x '!curl -X POST gmail/v1/users/me/messages/send'",
+                    "git x --msg 'messages/send'"):
+            self.blocked(cmd, "G")
+
     def test_a_symlink_or_dot_dot_path_to_the_folder_blocks_the_tools(self):
         with tempfile.TemporaryDirectory() as home:
             folder = os.path.join(home, ".config", "afa", "gmail")
