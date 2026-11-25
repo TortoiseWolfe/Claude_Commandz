@@ -525,6 +525,17 @@ class IssueNinetyThreeF7(Base):
                     "python3 -c 'print(open(\"server.pem\").read())'; echo redact_view.py"):
             self.blocked(cmd)
 
+    def test_a_lookalike_viewer_exempts_nothing(self):
+        for cmd in ("python3 ./redact_view.py ~/x/server.pem", "python3 -c 'print(1)' redact_view.py ~/x/server.pem",
+                    "python3 /tmp/redact_view.py ~/x/server.pem", "FOO=1 python3 ~/.claude/scripts/redact_view.py x; cat ~/x/server.pem",
+                    "python3 ~/.claude/scripts/redact_view.py <(cat ~/x/server.pem)", "python3 -W x ~/.claude/scripts/redact_view.py ~/x/server.pem"):
+            self.blocked(cmd)
+
+    def test_git_global_options_and_other_redirects(self):
+        for cmd in ("git -C /tmp show HEAD:server.pem", "git -c core.pager=cat diff -- server.pem",
+                    "git --git-dir=/tmp/x show HEAD:server.pem", "read l 0< ~/x/server.pem", "(cat) < ~/x/server.pem"):
+            self.blocked(cmd, "B")
+
     def test_the_viewer_itself_still_passes(self):
         self.allowed("python3 ~/.claude/scripts/redact_view.py ~/x/server.pem")
         self.allowed("python3 -I ~/.claude/scripts/redact_view.py ~/x/api-key.txt")

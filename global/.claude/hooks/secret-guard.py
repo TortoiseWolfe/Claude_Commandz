@@ -69,9 +69,10 @@ READERS = ("cat tac head tail less more bat nl jq yq strings xxd od base64 sed a
            "xargs source view vi vim nano ed emacs openssl ssh-keygen gawk mawk dd comm join").split()
 VERB = re.compile(r"(?<![\w.-])(" + "|".join(READERS) + r")(?![\w.-])")
 # git commands that print a file's content or a diff of it, and an input redirect ("< file", "while read ... done < file")
-GIT_PRINT = re.compile(r"(?<![\w.-])git\s+(?:-\S+\s+)*(?:show|cat-file|blame|diff|grep|stash\s+show)(?![\w-])"
-                       r"|(?<![\w.-])git\s+(?:-\S+\s+)*log\b[^;&|]*\s(?:-p|--patch|-[a-zA-Z]*p[a-zA-Z]*)(?!\S)")
-REDIR_IN = re.compile(r"(?<![<\w&])<(?![<(])\s*")
+_GIT = r"(?<![\w.-])git\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+\S+\s+|-\S+\s+)*"
+GIT_PRINT = re.compile(_GIT + r"(?:show|cat-file|blame|diff|grep|stash\s+show)(?![\w-])"
+                       r"|" + _GIT + r"log\b[^;&|]*\s(?:-p|--patch|-[a-zA-Z]*p[a-zA-Z]*)(?!\S)")
+REDIR_IN = re.compile(r"(?<!<)<(?![<(&])\s*")
 INTERP = re.compile(r"(?<![\w.-])(?:python3?|node|ruby|perl)(?![\w.-])")
 INTERP_EVAL = re.compile(r"(?<!\S)(?:-[a-zA-Z]*[ce]|--eval)(?!\S)|<<")
 SHELL_C = re.compile(r"(?<![\w.-])(?:ba|z)?sh\s+-\w*c\b")
@@ -606,16 +607,24 @@ def process_listing_in(cmd):
 
 
 def is_viewer_segment(seg):
-    """True when the segment RUNS the redacting viewer: python on its own as the program and redact_view.py as the
-    script. The viewer's name elsewhere in a command (an echo, a comment, a second command) does not exempt anything."""
+    """True when the segment RUNS the redacting viewer: python (a safe option or none) on the real ~/.claude/scripts/redact_view.py,
+    with no shell syntax in it. The viewer's name elsewhere in a command (an echo, a comment, another command, a copy of the
+    script in another folder) does not exempt anything."""
+    if re.search(r"[<>(){}$`\\#]", seg):
+        return False
     try:
         words = shlex.split(seg, posix=True)
     except ValueError:
         return False
-    if not words or not re.fullmatch(r"python[\d.]*", os.path.basename(words[0])):
+    if not words or not re.fullmatch(r"python[\d.]*", os.path.basename(words[0])) or "=" in words[0]:
         return False
-    rest = [w for w in words[1:] if not w.startswith("-")]
-    return bool(rest) and os.path.basename(rest[0]) == "redact_view.py" and ";" not in seg and "$(" not in seg and "`" not in seg
+    i = 1
+    while i < len(words) and words[i] in ("-I", "-u", "-B", "-E", "-s", "-S", "-O", "-OO"):
+        i += 1
+    if i >= len(words) or words[i].startswith("-"):
+        return False
+    script = os.path.realpath(os.path.expanduser(words[i]))
+    return script == os.path.realpath(os.path.expanduser("~/.claude/scripts/redact_view.py"))
 
 
 def prints_sensitive(cmd):
@@ -631,8 +640,8 @@ def prints_sensitive(cmd):
         if not label:
             continue
         scan = seg if SHELL_C.search(seg) else blank_quotes(seg)
-        if GIT_PRINT.search(scan) or REDIR_IN.search(scan):
-            return label
+        if GIT_PRINT.search(scan) or REDIR_IN.search(scan) or "redact_view.py" in seg:
+            return label  # (a segment that names the viewer but is not the real one is a lookalike script)
         verbs = set(VERB.findall(scan))
         if SHELL_C.search(seg) and verbs:
             return label
@@ -682,13 +691,13 @@ def evaluate(payload):
         where = secret_in_file(ti["file_path"])
         if where:
             return "E", RULE_E % (ti["file_path"], where)
-    elif tool in ("Write", "Edit", "MultiEdit"):
+    elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         # What a session writes: a token-shaped value (a known key prefix, a private key, a JWT, a webhook address) is refused.
         # The name=value rule is not used here: code and tests set names like token= all the time.
-        path = ti.get("file_path")
+        path = ti.get("file_path") or ti.get("notebook_path")
         if isinstance(path, str) and gmail_path_hit(path):
             return "G", ("secret-guard: rule G, writing into the mail token's folder is blocked. That token can send mail.")
-        texts = [ti.get("content"), ti.get("new_string")]
+        texts = [ti.get("content"), ti.get("new_string"), ti.get("new_source")]
         texts += [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
         for t in texts:
             if isinstance(t, str):
