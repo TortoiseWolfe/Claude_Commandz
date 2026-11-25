@@ -817,19 +817,23 @@ def _operands(key, rest):
 
 
 _FIXED_PLACE = re.compile(r"(?:/|~(?:/|\Z)|\$HOME(?![A-Za-z0-9_])|\$\{HOME\})")
+_HOME_REBOUND = re.compile(r"(?<![\w$])HOME\s*\+?=|\b(?:export|declare|typeset|local|readonly|unset|read|printf\s+-v|eval|env)\b[^;&|\n]*\bHOME\b")
 
 
-def _fixed_place(w):
+def _fixed_place(w, home_rebound=False):
     """True for a path that means the same place whatever folder the shell is in: absolute, the home folder, or $HOME. $PWD, ~+, ~-, ~name,
-    $OLDPWD and every other variable can name the folder the text cannot, so they are not fixed."""
+    $OLDPWD and every other variable can name the folder the text cannot, so they are not fixed; nor is anything under /proc or /dev
+    (/proc/self/cwd, /dev/fd/..), which name the shell's own folder, nor ~ and $HOME when the text rebinds HOME."""
+    if w.startswith(("/proc", "/dev")) or (home_rebound and not w.startswith("/")):
+        return False
     return bool(_FIXED_PLACE.match(w))
 
 
-def _names_a_root(words, cur, unknown=False):
+def _names_a_root(words, cur, unknown=0):
     """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists. unknown: the working folder is
     one the text cannot name, so a relative root lands somewhere unseen and only roots that are absolute, under ~ or from a variable count."""
     if unknown:
-        return bool(words) and all(_fixed_place(w) for w in words)
+        return bool(words) and all(_fixed_place(w, unknown == 2) for w in words)
     for w in words:
         if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
             return True
@@ -964,7 +968,7 @@ def _substitution_spans(cmds, meta, cwd="", nested=False):
     return carried, cut
 
 
-def _search_of(prog, rest, cur, flag_in=False, unknown=False):
+def _search_of(prog, rest, cur, flag_in=False, unknown=0):
     """-> (recursive, walks_working_folder) for one program with its words. flag_in: the program is run by an xargs whose input could carry a
     flag, so a search that has no recursive flag of its own is read as one that may get it (issue 154)."""
     if prog in _ROOTS_ONLY:
@@ -1076,6 +1080,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
     recursive, folders, words, cur = False, [], [], cwd
     carried, cut = _substitution_spans(cmds, meta, cwd, nested)
     cdpath = _cdpath(text)
+    unknown_dir = 2 if _HOME_REBOUND.search(text) else 1  # what a search reads when a cd leaves the folder unknown: 2 when HOME is rebound too
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for k, cmd in enumerate(cmds):
@@ -1146,9 +1151,9 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                     return None  # a search run from a folder the text cannot name: the wide reading
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
-            rec, walks = _search_of(prog, rest, cur or cwd, flag_in, cur is None)
-            if cur is None and rec and (xargs or _search_of(prog, rest, cur or cwd, False, True)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
-                    not (x.startswith("-") or _fixed_place(x)) for x in rest))):
+            rec, walks = _search_of(prog, rest, cur or cwd, flag_in, unknown_dir if cur is None else 0)
+            if cur is None and rec and (xargs or _search_of(prog, rest, cur or cwd, False, unknown_dir)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
+                    not (x.startswith("-") or _fixed_place(x, unknown_dir == 2)) for x in rest))):
                 return None  # a recursive search that names no root walks the folder the text cannot name: the wide reading. One that names its own roots (even if a substitution may add a flag) is judged on them below, as before issue 139
             recursive = recursive or rec
             if walks:

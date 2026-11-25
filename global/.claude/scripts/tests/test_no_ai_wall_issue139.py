@@ -129,6 +129,16 @@ class Issue139Tests(base.Fixture):
         self.allowed("cd $X; grep -r x ~/proj", self.work)  # the home folder is a fixed place
         self.allowed("cd $X; grep -r x $HOME/proj ${HOME}/b", self.work)
 
+    def test_proc_and_dev_paths_and_a_rebound_home_are_not_fixed_places(self):
+        # /proc/self/cwd and /dev/fd name the shell's own folder; a text that rebinds HOME changes what ~ and $HOME mean (third review)
+        for cmd in ("cd $X; grep -r x /proc/self/cwd/clientA", "cd $X; find /proc/thread-self/cwd -name x", "cd $X; ls -R /dev/fd/../clientA",
+                    "HOME=%s; cd $X; grep -r x ~/clientA" % self.work, "export HOME=%s; cd $X; grep -r x $HOME/clientA" % self.work,
+                    "cd $X; env HOME=%s grep -r x ~/clientA" % self.work, "declare -x HOME=%s; cd $X; du ~/clientA" % self.work,
+                    "unset HOME; cd $X; grep -r x ~/clientA", "read HOME <<< %s; cd $X; grep -r x ~/clientA" % self.work,
+                    "printf -v HOME %s; cd $X; grep -r x ${HOME}/clientA" % self.work):
+            self.refused(cmd, self.tmp)
+        self.allowed("cd $X; grep -r x ~/proj %s/b" % self.work, self.work)  # nothing rebinds HOME: the home folder is a fixed place
+
     def test_a_search_fed_by_xargs_after_an_unknown_cd_takes_the_wide_reading(self):
         # the input can carry a relative root, and it lands in the folder the text cannot name
         for cmd in ("cd $X; echo ./clientA | xargs grep -r x %s" % self.work, "cd $X; echo ./clientA | xargs find -name x", "cd $X; ls | xargs -n1 du %s/a" % self.work):
