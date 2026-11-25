@@ -24,7 +24,10 @@
 #   --cpu-shares, so interactive work in other sessions keeps priority. For `docker compose run`,
 #   limits must live in the compose file (mem_limit / cpus); the lock and timeout still apply.
 # - --light is a second, separate slot (light.lock, defaults --cpus 4 --mem 4g): CPU-only jobs never wait behind the GPU job and never need
-#   to bypass this script. Heavy jobs still queue one at a time among themselves, light jobs one at a time among themselves.
+#   to bypass this script. Heavy jobs still queue one at a time among themselves, light jobs first come first served among themselves.
+#   The light job at the head of its queue takes the heavy slot too while that slot is free and no heavy job waits for it (issue 152: a
+#   50-minute light job had held the light slot while four light jobs waited and the heavy slot sat free). A heavy job that arrives while a light
+#   job is on the heavy slot waits for that job to end, then runs in its usual order; a light job never takes the heavy slot ahead of a heavy waiter.
 # - Runs at low CPU priority (nice 10) under a hard timeout (default 30 min). The timeout counts RUN time only: it starts after the slot is
 #   taken. The slot wait comes first and has no fixed length while the queue moves, so a caller must not wrap docker-heavy.sh in an outer
 #   timeout at all: set --timeout for the run instead (an outer timeout that fires first kills the wait or the run from outside, which is what
@@ -146,7 +149,7 @@ cleanup() {
     timeout 20 docker kill $ids >/dev/null 2>&1 || true
   fi
   # the holder file is ours only once we hold the slot (a waiting job must not remove the holder's)
-  [ "$(job_field "$JOB" 2)" != running ] || rm -f "$LOCK.holder"
+  [ "$(job_field "$JOB" 2)" != running ] || rm -f "${RUN_LOCK:-$LOCK}.holder"
   rm -f "$JOB" "$ALIVE_FILE"
 }
 trap cleanup EXIT
@@ -173,9 +176,25 @@ queue_scan() {
 # First come first served. Only the head of the queue (nobody older waiting) tries the lock; the rest poll. Both waits run in the background
 # and are waited on, so --cancel (a TERM) ends the wait at once instead of after the child.
 said=0 last_move=$(date +%s) prev_holder="" prev_ahead=-1
+# heavy_waiting: 1 when a live job is waiting for the heavy slot. A light job at the head of its queue may borrow a free heavy slot only when
+# nobody is (issue 152, 23 Nov 2026: one 50-minute light job held the light slot while four light jobs waited and the heavy slot sat free).
+heavy_waiting() {
+  local f
+  for f in "$JOBS"/*.job; do
+    [ -e "$f" ] && [ "$f" != "$JOB" ] || continue
+    [ "$(job_field "$f" 3)" = heavy ] && [ "$(job_field "$f" 2)" = waiting ] && job_alive "$f" && return 0
+  done
+  return 1
+}
+RUN_SLOT=$SLOT RUN_LOCK=$LOCK
+[ "$SLOT" != light ] || exec 8>>"$DIR/lock"
 while :; do
   queue_scan
   if [ "$AHEAD" = 0 ]; then
+    # Its own slot first. Failing that, a light job takes the heavy slot if it is free and no heavy job waits for it; a heavy job that arrives
+    # while a light job holds it waits for that job to end (its flock queue, first come first served, is unchanged).
+    if flock -n 9; then break; fi
+    if [ "$SLOT" = light ] && ! heavy_waiting && flock -n 8; then RUN_SLOT=heavy RUN_LOCK="$DIR/lock"; break; fi
     flock -w 5 9 & fpid=$!
     if wait "$fpid"; then fpid=""; break; fi
   else
@@ -195,8 +214,8 @@ while :; do
     exit 75
   fi
 done
-printf '%s\trunning\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$SLOT" "$(date +%s)" "$now" "$MYSTART" "${*:1:6}" "$TICKET" "$ALIVE_FD" > "$JOB"
-printf 'tag %s since %s pid %s in %s: %s\n' "$TAG" "$(date '+%F %H:%M')" "$$" "$PWD" "${*:1:6}" > "$LOCK.holder"
+printf '%s\trunning\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$$" "$RUN_SLOT" "$(date +%s)" "$now" "$MYSTART" "${*:1:6}" "$TICKET" "$ALIVE_FD" > "$JOB"
+printf 'tag %s since %s pid %s in %s: %s%s\n' "$TAG" "$(date '+%F %H:%M')" "$$" "$PWD" "${*:1:6}" "$([ "$RUN_SLOT" = "$SLOT" ] || echo ' (a light job on the free heavy slot)')" > "$RUN_LOCK.holder"
 # in the background and waited on, so a signal to this script runs cleanup at once (bash holds a
 # trap until a foreground child ends); stdin passed on explicitly (a background job gets /dev/null).
 # The timeout starts here, after the slot is taken: it counts run time only.
