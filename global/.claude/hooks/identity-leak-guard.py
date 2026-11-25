@@ -351,6 +351,14 @@ def body_only_to_approved_host(cmd, addrs, hosts):
         return False
     if "#" in cmd or "\\" in cmd:
         return False  # shlex and the shell disagree on where a comment starts, and on what a backslash does inside a word
+    quote = ""
+    for ch in cmd:
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "{}*?[]~":
+            return False  # the shell turns an unquoted brace, star, question mark, bracket or tilde into other words; shlex leaves one word
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -362,8 +370,10 @@ def body_only_to_approved_host(cmd, addrs, hosts):
         return False
     if any(t and set(t) <= set("();<>|&") for t in toks) or any("$" in t or "`" in t or "\n" in t for t in toks):
         return False  # a second command, a pipe, a redirect, or a word made at run time
+    if len(toks) < 2 or toks[1] not in ("-q", "--disable"):
+        return False  # without it curl reads ~/.curlrc, which could set a proxy or another web address; a session could have written it
     urls, pend = [], None  # pend: the option whose value is the next word
-    for t in toks[1:]:
+    for t in toks[2:]:
         if pend is not None:
             if pend not in BODY_OPTIONS and (has_address(t, addrs) or not re.fullmatch(VALUE_OPTIONS[pend], t)):
                 return False  # only a body option's value may hold the address; a header, a login, a cookie or a referer never

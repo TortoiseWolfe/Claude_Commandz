@@ -536,7 +536,11 @@ class ApprovedHosts(unittest.TestCase):
             f.write(text)
         os.chmod(self.path, mode)
 
-    def run_cmd(self, cmd):
+    def run_cmd(self, cmd, quiet=True):
+        # The guard reads a curl command only when its first option is -q (curl then skips its own settings file, which could set a proxy),
+        # so each command below is written without it and gets it here; the one test about -q itself passes quiet=False.
+        if quiet and cmd.startswith("curl "):
+            cmd = "curl -q " + cmd[5:]
         return g.check(bash(cmd), ADDRS, ALLOWED)  # hosts read from the private file, as the hook does
 
     def allowed(self, cmd):
@@ -551,7 +555,7 @@ class ApprovedHosts(unittest.TestCase):
         h = self.HOST
         for cmd in ("curl -s -d 'email=%s' https://%s/to/abc" % (ME, h), "curl -X POST --data-urlencode email=%s https://%s/submit" % (ME, h),
                     "curl -F 'email=%s' -F name=x https://%s/f" % (ME, h), "curl --json '{\"email\": \"%s\"}' https://%s/f" % (ME, h),
-                    "curl -s -H 'Accept: text/html' -d 'email=%s' https://%s/f?x=1" % (ME, h), "curl -d'email=%s' https://%s/f" % (ME, h),
+                    "curl -s -H 'Accept: text/html' -d 'email=%s' 'https://%s/f?x=1'" % (ME, h), "curl -d'email=%s' https://%s/f" % (ME, h),
                     "curl --data-raw 'e=%s' https://%s:443/f" % (ME, h)):
             self.allowed(cmd)
 
@@ -596,6 +600,24 @@ class ApprovedHosts(unittest.TestCase):
         self.allowed("curl -sS -d 'email=%s' https://%s/f" % (ME, h))
         self.allowed("curl -s -X POST -m 20 --connect-timeout 5 -H 'Content-Type: application/json' --json '{\"e\": \"%s\"}' https://%s/f" % (ME, h))
 
+    def test_curl_must_skip_its_settings_file_and_no_word_may_be_expanded_by_the_shell(self):
+        h = self.HOST
+        ok = "curl -d 'email=%s' https://%s/f" % (ME, h)
+        self.allowed(ok)
+        # without -q first, curl reads ~/.curlrc, which a session could write to set a proxy or another web address
+        self.assertIsNotNone(self.run_cmd(ok, quiet=False))
+        self.assertIsNotNone(self.run_cmd("curl -s -q -d 'email=%s' https://%s/f" % (ME, h), quiet=False))
+        self.assertIsNone(self.run_cmd("curl --disable -d 'email=%s' https://%s/f" % (ME, h), quiet=False))  # --disable is the long form of -q
+        # the shell turns an unquoted brace, star, question mark, bracket or tilde into other words, which shlex does not
+        for cmd in ("curl -d{email=%s,x=1} https://%s/f" % (ME, h), "curl -d 'email=%s' https://%s/{f,g}" % (ME, h),
+                    "curl -d 'email=%s' https://%s/f*" % (ME, h), "curl -d 'email=%s' https://%s/f?" % (ME, h),
+                    "curl -d 'email=%s' https://%s/[fg]" % (ME, h), "curl -d ~/x https://%s/f -d 'email=%s'" % (h, ME),
+                    "curl -H{X:1,Y:2} -d 'email=%s' https://%s/f" % (ME, h), "curl -X{POST,GET} -d 'email=%s' https://%s/f" % (ME, h)):
+            self.refused(cmd)
+        # inside quotes the shell leaves them alone, so a JSON body is fine
+        self.allowed("curl --json '{\"e\": \"%s\"}' https://%s/f" % (ME, h))
+        self.allowed("curl -d \"email=%s&x=[1]*?\" https://%s/f" % (ME, h))
+
     def test_the_approved_hosts_file_cannot_be_changed_by_a_session(self):
         # a session that could add a host to the list would approve itself, so the guard that protects the two merge lists protects this file too
         lg = os.path.join(os.path.dirname(os.path.abspath(g.__file__)), "list-file-guard.py")
@@ -634,9 +656,9 @@ class ApprovedHosts(unittest.TestCase):
 
         def run(cmd):
             return subprocess.run([sys.executable, "-I", str(SRC)], input=json.dumps(bash(cmd)), capture_output=True, text=True, env=env, timeout=30).returncode
-        self.assertEqual(run("curl -d 'email=%s' https://%s/f" % (ME, self.HOST)), 0)
-        self.assertEqual(run("curl -H 'X: %s' https://%s/f" % (ME, self.HOST)), 2)
-        self.assertEqual(run("curl -d 'email=%s' https://%s/f" % (ME, self.OTHER)), 2)
+        self.assertEqual(run("curl -q -d 'email=%s' https://%s/f" % (ME, self.HOST)), 0)
+        self.assertEqual(run("curl -q -H 'X: %s' https://%s/f" % (ME, self.HOST)), 2)
+        self.assertEqual(run("curl -q -d 'email=%s' https://%s/f" % (ME, self.OTHER)), 2)
 
 
 class Registration(unittest.TestCase):
