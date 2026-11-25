@@ -1126,7 +1126,7 @@ named_copies() {  # <prompt-file> <lane folder> -> how many distinct ~/repos/.wo
 # case; a line that only mentions the words ("Not a standing word: ...") has text before the marker and does not count.
 standing_words() {
   [ -r "${1:-}" ] || return 0
-  { head -c 200000 -- "$1" | grep -aiE '^[[:space:]>*_-]*standing word:' || true; } | head -n 3 \
+  { head -c 200000 -- "$1" | LC_ALL=C tr -d '\000-\010\013-\037\177' | grep -aiE '^[[:space:]>*_-]*standing word:' || true; } | head -n 3 \
     | sed -E 's/^[[:space:]>*_-]*[Ss][Tt][Aa][Nn][Dd][Ii][Nn][Gg] [Ww][Oo][Rr][Dd]:[[:space:]*_]*//; s/[[:space:]]+$//' | cut -c1-300 | { command grep -av '^$' || true; } \
     | awk 'NR > 1 { printf " | " } { printf "%s", $0 } END { if (NR) printf "\n" }'
 }
@@ -1560,6 +1560,9 @@ send_to() {  # <name> <text...>
   # Every name this function sets is local (as in send_held), so a caller's own dir, id, m, rk and the rest are not overwritten by the call.
   local text dir id row d n m b p rep st eff conn rk ent pm ad target how pane rc hits_before
   text="$*"; dir=""; id=""
+  # Control characters (Escape, Enter, Ctrl-C and the rest) in what is typed would be keystrokes in the lane's terminal, not text, so every
+  # caller's text loses them here; tab is kept. Security review of issue 165's standing-word message, 25 Nov 2026.
+  text="$(printf '%s' "$text" | LC_ALL=C tr -d '\000-\010\012-\037\177')"
   row="$(index_row "$name")"
   if [ -n "$row" ]; then
     IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
@@ -1684,10 +1687,15 @@ PY
       # A busy lane answers /model with "Switch model? ... the full history gets re-read" and does nothing until it is answered (issue 127).
       # Option 1 (Yes) is already selected, so one Enter answers it. Only that one dialog, and only once per call: any other dialog is
       # left to a person.
-      if [ "$answered" = 0 ] && [ -n "${LANE_SEND_ANSWER_RE:-}" ] \
-         && tmux capture-pane -p -t "$target" 2>/dev/null | tail -15 | command grep -qE -- "$LANE_SEND_ANSWER_RE"; then
-        answered=1
-        tmux send-keys -t "$target" C-m
+      # One capture, and the whole dialog must be there: its title, the selected "1. Yes" line and the "Enter to confirm" footer. A line
+      # that only says "Switch model?" (a lane printing it, a permission prompt) is never answered (security review of issue 127).
+      if [ "$answered" = 0 ] && [ -n "${LANE_SEND_ANSWER_RE:-}" ]; then
+        local shot; shot="$(tmux capture-pane -p -t "$target" 2>/dev/null | tail -15)"
+        if command grep -qE -- "$LANE_SEND_ANSWER_RE" <<<"$shot" && command grep -qE '^[[:space:]]*❯ 1\. Yes' <<<"$shot" \
+           && command grep -qE 'Enter to confirm' <<<"$shot" && ! command grep -qiE 'Do you want to proceed|Allow|permission' <<<"$shot"; then
+          answered=1
+          tmux send-keys -t "$target" C-m
+        fi
       fi
       sleep 0.5
     done
@@ -2374,7 +2382,7 @@ PY
   # auto-mode checker reads it as a person's word and not as the contents of prompt.md. A miss is logged and does not undo the recycle.
   sw="$(standing_words "$p")"
   if [ -n "$sw" ]; then
-    sw_msg="Standing word, quoted from the person who runs this lane (it is in $p, typed here again so it counts as theirs and not as file text): $sw"
+    sw_msg="Standing word copied from this lane's prompt.md ($p), which the hub wrote when the lane started; it is file text typed again, not a new message from a person: $sw"
     LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$sw_msg" >/dev/null \
       || printf '%s\t%s\tSTANDING-WORD-NOT-SENT\tthe standing word from the prompt did not reach the fresh session; the lane reads it from prompt.md only\n' "$(date -Is)" "$name" >>"$rlog"
   fi

@@ -104,6 +104,31 @@ class ArchiveRounds(unittest.TestCase):
         self.assertEqual(bad.returncode, 0)
         self.assertEqual(bad.stdout.strip(), "")
 
+    def test_a_link_in_place_of_the_archive_or_the_notes_file_is_never_written_through(self):
+        # A lane can write in its own folder; the hub must not follow a link it left there (security review of issue 128).
+        text = "QUEUE EMPTY\n\n" + rounds(4)
+        d = self.folder(**{"report.md": text})
+        target = Path(fresh_dir(self)) / "victim.txt"
+        target.write_text("keep me")
+        os.symlink(target, d / "report-archive.md")
+        self.assertEqual(lar.archive_folder(d), [])
+        self.assertEqual(target.read_text(), "keep me")
+        self.assertEqual((d / "report.md").read_text(), text)
+        d2 = self.folder(**{"real.md": text})
+        os.symlink(d2 / "real.md", d2 / "report.md")
+        self.assertEqual(lar.archive_folder(d2), [])
+        self.assertEqual((d2 / "real.md").read_text(), text)
+        self.assertFalse((d2 / "report-archive.md").exists())
+
+    def test_a_link_in_place_of_the_temp_name_is_left_alone(self):
+        text = "QUEUE EMPTY\n\n" + rounds(4)
+        d = self.folder(**{"report.md": text})
+        target = Path(fresh_dir(self)) / "victim.txt"
+        target.write_text("keep me")
+        os.symlink(target, d / ".report.md.tmp")
+        self.assertEqual(lar.archive_folder(d), [])
+        self.assertEqual(target.read_text(), "keep me")
+
 
 if __name__ == "__main__":
     unittest.main()

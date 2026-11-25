@@ -20,6 +20,7 @@ Usage: lane_archive_rounds.py [--min-bytes N] <hand-off folder>
 Prints one line for each file it shortened and always exits 0 (a recycle never fails on this)."""
 
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -46,9 +47,17 @@ def split_rounds(text):
 def archive_file(path, min_bytes=DEFAULT_MIN_BYTES):
     """-> (rounds moved, bytes moved) for one file, or None when it was left alone."""
     path = Path(path)
+    arch = path.with_name(path.stem + "-archive.md")
+    tmp = path.with_name("." + path.name + ".tmp")
+    # This runs as the hub on a folder a lane can write to: a lane that swapped one of these names for a link would make the hub
+    # write through it. So the notes file, the archive and the temp name must each be absent or a plain file of ours, never a link.
+    if not (_ours_or_absent(path, must_exist=True) and _ours_or_absent(arch) and _ours_or_absent(tmp)):
+        return None
     try:
-        st = path.stat()
-        text = path.read_text(encoding="utf-8")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            text = f.read()
     except (OSError, UnicodeDecodeError):
         return None
     if st.st_size < min_bytes:
@@ -57,19 +66,33 @@ def archive_file(path, min_bytes=DEFAULT_MIN_BYTES):
     if len(sections) < 2:
         return None
     old = "".join(sections[:-1])
-    arch = path.with_name(path.stem + "-archive.md")
     try:
-        with open(arch, "a", encoding="utf-8") as f:
+        fd = os.open(arch, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(old)
             f.flush()
             os.fsync(f.fileno())
-        tmp = path.with_name("." + path.name + ".tmp")
-        tmp.write_text(head + sections[-1], encoding="utf-8")
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(head + sections[-1])
         os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
         os.replace(tmp, path)
     except OSError:
         return None
     return len(sections) - 1, len(old.encode("utf-8"))
+
+
+def _ours_or_absent(p, must_exist=False):
+    """True when p is a regular file owned by this user (not a link), or does not exist and need not."""
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return not must_exist
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
 
 
 def archive_folder(folder, min_bytes=DEFAULT_MIN_BYTES):
