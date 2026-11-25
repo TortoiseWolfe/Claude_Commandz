@@ -388,7 +388,7 @@ step_url_check() {
 }
 
 # done_proof_counts <report file>: prints "CLAIMED PROOFS". CLAIMED is the whole number after the word item or items on line 1 (case-insensitive,
-# the word not glued to a letter, digit or underscore before it, the number not followed by a digit or a colon, so "items 4:30" is no count), or
+# the word not glued to a letter, digit or underscore before it, the number not followed by a digit; a clock time such as 4:30 is blanked out first, so "items 4:30" is no count while "items 6: done" is 6), or
 # none. PROOFS counts the distinct lines of the first "## Proof" section (up to the next "## " line, at most 500 lines of it) that begin "- " and
 # hold an https:// link or a word that is an existing absolute path (a leading ~/ becomes $HOME by string replacement; at most 3 such words a line
 # are tried, after stripping quotes, brackets, commas, semicolons and a trailing full stop or colon). Nothing in the report is run or evaluated.
@@ -396,7 +396,9 @@ done_proof_counts() {
   local LC_ALL=C f=$1 line1 low claimed=none proofs=0 line w n t prev
   local -A seen=()
   line1=$(head -n 1 "$f" 2>/dev/null); line1=${line1%$'\r'}; low=${line1,,}
-  if [[ $low =~ (^|[^a-z0-9_])items?[\ :]+([0-9]{1,9})([^0-9:]|$) ]]; then claimed=$((10#${BASH_REMATCH[2]})); fi
+  # a clock time (digits, colon, digits) is no count: blank each one out first, so "items 4:30" is none but "items 6: shipped" is 6 (issue 131)
+  n=0; while [[ $low =~ ([0-9]+:[0-9]+) ]] && [ "$n" -lt 20 ]; do low=${low//"${BASH_REMATCH[1]}"/_}; n=$((n + 1)); done
+  if [[ $low =~ (^|[^a-z0-9_])items?[\ :]+([0-9]{1,9})([^0-9]|$) ]]; then claimed=$((10#${BASH_REMATCH[2]})); fi
   while IFS= read -r line; do
     line=${line%$'\r'}
     [[ $line == "- "* ]] || continue
