@@ -816,11 +816,20 @@ def _operands(key, rest):
     return out
 
 
+_FIXED_PLACE = re.compile(r"(?:/|~(?:/|\Z)|\$HOME(?![A-Za-z0-9_])|\$\{HOME\})")
+
+
+def _fixed_place(w):
+    """True for a path that means the same place whatever folder the shell is in: absolute, the home folder, or $HOME. $PWD, ~+, ~-, ~name,
+    $OLDPWD and every other variable can name the folder the text cannot, so they are not fixed."""
+    return bool(_FIXED_PLACE.match(w))
+
+
 def _names_a_root(words, cur, unknown=False):
     """True when one of the operands plainly names a place to search: a path, a wildcard, or something that exists. unknown: the working folder is
     one the text cannot name, so a relative root lands somewhere unseen and only roots that are absolute, under ~ or from a variable count."""
     if unknown:
-        return bool(words) and all(w.startswith(("/", "~", "$")) for w in words)
+        return bool(words) and all(_fixed_place(w) for w in words)
     for w in words:
         if "/" in w or w.startswith((".", "~", "$")) or any(ch in GLOB_CHARS for ch in w) or os.path.lexists(expand(w, cur)):
             return True
@@ -1138,8 +1147,8 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                 recursive, folders, words = recursive or sub[0], folders + sub[1], words + sub[2]
                 continue
             rec, walks = _search_of(prog, rest, cur or cwd, flag_in, cur is None)
-            if cur is None and rec and (_search_of(prog, rest, cur or cwd, False, True)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
-                    not x.startswith(("-", "/", "~", "$")) for x in rest))):
+            if cur is None and rec and (xargs or _search_of(prog, rest, cur or cwd, False, True)[1] or (prog in tuple(_ROOTS_ONLY) + ("cp", "mv") and any(
+                    not (x.startswith("-") or _fixed_place(x)) for x in rest))):
                 return None  # a recursive search that names no root walks the folder the text cannot name: the wide reading. One that names its own roots (even if a substitution may add a flag) is judged on them below, as before issue 139
             recursive = recursive or rec
             if walks:

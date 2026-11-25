@@ -121,6 +121,19 @@ class Issue139Tests(base.Fixture):
         self.allowed("cd $X; grep -r x %s/proj" % self.work, self.work)  # an absolute root is judged as written
         self.allowed("cd $X; find %s/proj -name x" % self.work, self.work)
 
+    def test_roots_that_name_the_unknown_folder_itself_take_the_wide_reading(self):
+        # $PWD, ${PWD}, ~+, ~- and a ~name are not fixed places: after an unknown cd they name the folder the text cannot name (second review)
+        for cmd in ("cd $X; grep -r x $PWD/clientA", "cd $X; grep -r x ${PWD}/clientA", "cd $X; grep -r x ~+/clientA", "cd $X; find ~-/clientA -name x",
+                    "cd $X; ls -R $OLDPWD/clientA", "cd $X; du ~someone/clientA", "cd $X; rsync -a $PWD/clientA /tmp/out", "cd $X; cp -r $PWD/clientA /tmp/out"):
+            self.refused(cmd, self.tmp)
+        self.allowed("cd $X; grep -r x ~/proj", self.work)  # the home folder is a fixed place
+        self.allowed("cd $X; grep -r x $HOME/proj ${HOME}/b", self.work)
+
+    def test_a_search_fed_by_xargs_after_an_unknown_cd_takes_the_wide_reading(self):
+        # the input can carry a relative root, and it lands in the folder the text cannot name
+        for cmd in ("cd $X; echo ./clientA | xargs grep -r x %s" % self.work, "cd $X; echo ./clientA | xargs find -name x", "cd $X; ls | xargs -n1 du %s/a" % self.work):
+            self.refused(cmd, self.tmp)
+
     def test_a_known_cd_then_a_relative_cd_is_still_followed(self):
         self.allowed("cd %s/proj; cd .; cat a.txt" % self.work, self.tmp)
         self.allowed("cd %s; cd proj; rm a.txt" % self.work, self.tmp)
