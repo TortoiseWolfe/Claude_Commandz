@@ -1053,6 +1053,35 @@ def _has_own_program(prog, rest):
     return any(_INLINE_FLAG.fullmatch(x) or (x == "-m" and prog.startswith("python")) or (not x.startswith("-") and _SCRIPT_FILE.search(x)) for x in rest)
 
 
+_INFO_FLAGS = {"--version", "-V", "-VV", "-h", "--help"}
+
+
+def _only_prints_info(prog, rest):
+    """True for python (only python: its version and help flags are known to exit without reading the program from stdin) asked for its version
+    or help. Another runner's flag handling is not checked here, so it gets no exemption."""
+    return re.fullmatch(r"python[\d.]*", prog or "") is not None and bool(rest) and all(x in _INFO_FLAGS for x in rest)
+
+
+def _runs_no_written_file(p, rest):
+    """True when an interpreter or shell plainly runs a script of its own (issue 203: a ticket written with a heredoc followed by
+    `python3 check.py FILE` was refused as a search of the working folder). The caller applies this only when every write in the text is
+    document text (see docs_only in _searches), so the written file cannot be the program. Two shapes only: python asked for its version or
+    help, or the first operand (after options that are not an inline flag) is a script file by its name. An inline flag (-c, -e, -m), a bare
+    word, a pipe-fed or redirect-fed program, `bash notes.md` and `python3 notes.md` keep the wide reading. A shell given a script file still
+    takes the wide reading later in _searches (its file is out of sight); this only keeps the ticket's prose from being read as that file's
+    commands."""
+    if p is None:
+        return False
+    if _only_prints_info(p, rest):
+        return True
+    for x in rest:
+        if not x.startswith("-"):
+            return _SCRIPT_FILE.search(x) is not None or (p in _SHELLS and x.endswith(".sh"))
+        if _INLINE_FLAG.fullmatch(x) or (x == "-m" and p.startswith("python")):
+            return False
+    return False
+
+
 def _program_of(cmd):
     """-> (the program's base name or None, the words after it) of a command, wrappers skipped."""
     ws = [w for w, q in cmd]
@@ -1073,8 +1102,14 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
         return None  # text written to a file that could be a script may be run later in the text: the wide reading
     live = [c for c in cmds if not _is_launcher_words([w for w, q in c])]
     progs = [_program_of(c) + (_sets_a_variable_for(c),) for c in live]
+    # The give-up is lifted for an interpreter with its own script only when every write in the text is plain document text: a redirect to a
+    # document file (checked above) or tee to document files, with no other writer (tar, cp, dd, curl...) and no variable set for any command.
+    # Anything else may put a script where the interpreter will find it, so the text keeps the wide reading.
+    docs_only = not any(env for p, rest, env in progs) and all(
+        p not in _WRITERS or (p == "tee" and all(a.startswith("-") or a.endswith(_DOC_EXTENSIONS) or a == "/dev/null" for a in rest)) for p, rest, env in progs)
     if (any(t not in ("/dev/null", "-") and not t.isdigit() for t in written) or any(p in _WRITERS for p, rest, env in progs)) and any(
-            p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
+            p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) and not (docs_only and _runs_no_written_file(p, rest))
+            for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
     carried, cut = _substitution_spans(cmds, meta, cwd, nested)
@@ -1138,7 +1173,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None, nested=False):
                 # it names; one with no program of its own (fed by a pipe or a redirect, which is out of sight) takes the wide reading
                 if bodies is not None:
                     bodies.extend(x for x, xq in cmd[i + 1:] if xq)
-                if (prog in _STDIN_RUNNERS or prog.startswith("python")) and not _has_own_program(prog, rest):
+                if (prog in _STDIN_RUNNERS or prog.startswith("python")) and not _has_own_program(prog, rest) and not _only_prints_info(prog, rest):
                     if heredocs.get(prog, 0) > 0:
                         heredocs[prog] -= 1  # this one reads its own heredoc, whose body is read through runner_bodies
                     else:
