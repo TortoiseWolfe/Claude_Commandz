@@ -110,6 +110,14 @@ class XargsFamilyTests(base.Fixture):
             self.refused(cmd, self.tmp)
         with mock.patch.dict(os.environ, {"PARALLEL": "-a flags.txt"}):
             self.refused("echo hi | parallel grep x %s" % a, self.tmp)
+        # a PARALLEL variable set earlier in the text reaches parallel too
+        for cmd in ("export PARALLEL=-a; echo hi | parallel grep x %s" % a, "declare -x PARALLEL=-a; echo hi | parallel grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        # `pwd` is exempt only while nothing can change what it prints: a function or alias of that name, a changed IFS or PATH, a second pwd, or
+        # a folder built at run time all turn the exemption off
+        for cmd in ("pwd() { echo -R; }; ls %s $(pwd)" % a, "function pwd { echo -R; }; ls %s $(pwd)" % a, "alias pwd='echo -R'; ls %s $(pwd)" % a,
+                    "IFS=-; ls %s $(pwd)" % a, "ls %s $(pwd; echo -R)" % a, "cd $X; ls %s $(pwd)" % a, "cd 'a b'; ls %s $(pwd)" % a):
+            self.refused(cmd, self.tmp)
         # separators that do not balance (a case pattern's closing parenthesis) read every later command as one the feeder may run
         self.refused("echo -r | xargs true; case x in a) grep y %s $(true);; esac" % a, self.tmp)
         # an xargs inside a substitution widens only what the substitution holds

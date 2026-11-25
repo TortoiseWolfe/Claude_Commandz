@@ -790,7 +790,9 @@ def _xargs_input_is_flagfree(cmds, meta, k):
         # GNU parallel (issue 161) puts its input where `{}` stands, reads it from `:::` and `::::`, a file or another delimiter, and has far
         # more options than xargs: any option before its command, and any replacement string or `:::` word, takes the wide reading. So does
         # a PARALLEL variable, set in the environment or in front of the command, which adds options of its own.
-        if os.environ.get("PARALLEL") or any(re.match(r"[A-Za-z_]\w*=", w) for w in xargs_words[:feeder]):
+        # The name anywhere in the text counts (`export PARALLEL=-a f; ... | parallel`, `declare`, `printf -v`): a variable set earlier in the text
+        # reaches it. A config file under ~/.parallel is on disk, which a reader of the text cannot see.
+        if os.environ.get("PARALLEL") or any("PARALLEL" in w for c in cmds for w, q in c) or any(re.match(r"[A-Za-z_]\w*=", w) for w in xargs_words[:feeder]):
             return False
         after = xargs_words[feeder + 1:]
         if after and after[0].startswith("-"):
@@ -856,6 +858,12 @@ def _substitution_spans(cmds, meta):
         first = next((k for k in range(n) if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k])), None)
         carried = [first is not None and k > first for k in range(n)]
         return carried, [k + 1 < n and meta[k + 1][0].startswith(("$(", "`")) for k in range(n)]
+    # `pwd` prints one folder and never an option, but only while nothing in the text can change what it means or how its output is split: a
+    # function or alias of that name, a changed IFS or PATH, a second `pwd` command, a word with a space in it (a folder name that would split in
+    # two), or a `cd` to a place built at run time.
+    all_words = [w for c in cmds for w, q in c]
+    pwd_is_plain = (all_words.count("pwd") == 1 and not any(re.search(r"\b(?:IFS|PATH|alias|unalias|function|enable|hash|command_not_found_handle)\b", w) for w in all_words)
+                    and not any(re.search(r"[\s$`*?\[{~]", w) for c in cmds if c and c[0][0] in ("cd", "pushd", "popd") for w, q in c[1:]))
     for k in range(n - 1):
         if not meta[k + 1][0].startswith(("$(", "`")):
             continue
@@ -872,7 +880,7 @@ def _substitution_spans(cmds, meta):
         # A substitution that is the last word of its command can hand over a flag as well (`grep x DIR $(echo -r)`): it is a cut unless all
         # it holds is `pwd`, which prints a folder and never an option (`ls $(pwd)`).
         inside = cmds[k + 1:end]
-        cut[k] = follows or not (len(inside) == 1 and [w for w, q in inside[0]] == ["pwd"])
+        cut[k] = follows or not (len(inside) == 1 and [w for w, q in inside[0]] == ["pwd"] and pwd_is_plain)
     return carried, cut
 
 
