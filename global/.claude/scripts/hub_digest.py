@@ -321,6 +321,7 @@ GROUPS = [("OpenClaw", re.compile(r"^Jonathan via OpenClaw\b", re.I)),
 PEER_INBOX = "peer-inbox.md"  # a machine other than NX-01 reads this by default; NX-01 reads hub-inbox.md
 OWNER_SHOWN = {"NX-01": 5, "other": 15}  # lines listed per group: NX-01's page keeps 5, any other machine's lists up to 15
 STALE_WAIT_DAYS = 5   # a "Waiting on ..." line older than this is flagged: the hub sends one reminder or closes it with a reason
+HATCH_FREE_ENGINE_DAYS = 7   # a "Waiting on Hatch" line older than this goes to a free-engine lane instead of waiting longer (C9)
 OWNER_PREFIX = re.compile(r"^(?:waiting on |job:|question:|hub:|\[(?:NX-01|MUSE)>)", re.I)  # the canonical owners (the legacy "[CC>MUSE]" start stays under other when a line is unreadable)
 CLIENT_LINE = re.compile(r"^client (?:mail|alert|talk):", re.I)
 
@@ -360,6 +361,17 @@ def wait_age_days(day, now):
     if d > now:
         d = d.replace(year=now.year - 1)
     return (now - d).days
+
+
+def stale_hatch_line(items, now, days=HATCH_FREE_ENGINE_DAYS):
+    """One page line for the Hatch asks older than `days` (items: [(MM-DD, title)] from open_inbox), or "" when none.
+    The hub reads it as: start a free-engine lane (OpenCode on a public repo, or agy) for the lookup, or close the ask with a reason."""
+    ages = [wait_age_days(d, now) for d, _t in items if re.match(r"\d\d-\d\d$", d)]
+    old = [a for a in ages if a > days]
+    if not old:
+        return ""
+    return (f"- {len(old)} of {len(items)} Hatch asks are older than {days} days (oldest {max(old)} days): "
+            f"send each web lookup to a free-engine lane, keep dashboard clicks with Hatch, or close it with a reason")
 
 
 NOTE_ID = re.compile(r"^[A-Za-z0-9_-]{6,}$")
@@ -1297,6 +1309,9 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     if notes:
         sections.append((f"Notes waiting for this hub ({len(notes)}, newest first)", [f"- {t}" for _, t in notes]))
     il = []
+    stale_hatch = stale_hatch_line(groups["Hatch"], now)
+    if stale_hatch:
+        il.append(stale_hatch)  # first, so the size cap (which trims from the end) keeps it
     shown = OWNER_SHOWN["NX-01" if machine == "NX-01" else "other"]
     for g in ["OpenClaw", "Hatch", "the tower", "Jonathan", "NX-01", "From NX-01", "From Muse", "jobs", "hub"]:
         items = groups[g][::-1]  # the file is oldest first; every group is read newest first (21 Nov 2026: the oldest five hid the newest line)
