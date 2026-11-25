@@ -815,7 +815,10 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
 
 
-def _substitution_spans(cmds, meta):
+_PWD_UNSAFE = re.compile(r"\b(?:" + "|".join(sorted(w for w in ("alias", "unalias", "function", "hash", "enable", "eval", "source", "builtin", "command", "declare", "typeset", "export", "readonly", "local", "unset", "set", "shopt", "trap", "exec", "env", "IFS", "PATH", "command_not_found_handle", "cd", "pushd", "popd", "chdir"))) + r")\b")
+
+
+def _substitution_spans(cmds, meta, cwd=""):
     """-> (carried, cut), two lists with one flag per command, from how the reader cut the text at substitutions (issues 160 and 164).
 
     The reader ends a command at `$(`, a backtick and a parenthesis, so the words of one shell command can land in several of ours. Each command's
@@ -858,12 +861,13 @@ def _substitution_spans(cmds, meta):
         first = next((k for k in range(n) if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k])), None)
         carried = [first is not None and k > first for k in range(n)]
         return carried, [k + 1 < n and meta[k + 1][0].startswith(("$(", "`")) for k in range(n)]
-    # `pwd` prints one folder and never an option, but only while nothing in the text can change what it means or how its output is split: a
-    # function or alias of that name, a changed IFS or PATH, a second `pwd` command, a word with a space in it (a folder name that would split in
-    # two), or a `cd` to a place built at run time.
+    # `pwd` prints one folder and never an option, but only while nothing in the text can change what it means or how its output is split. So the
+    # exemption holds only for a text with exactly one `pwd` (any word that holds the letters twice, a quoted script's function included, turns it
+    # off), none of the words that can rebind a name (the same set the search check uses), no change of IFS or PATH, no change of folder at all
+    # (`cd -` and a quoted `cd` too), and a session folder with no space in it.
     all_words = [w for c in cmds for w, q in c]
-    pwd_is_plain = (all_words.count("pwd") == 1 and not any(re.search(r"\b(?:IFS|PATH|alias|unalias|function|enable|hash|command_not_found_handle)\b", w) for w in all_words)
-                    and not any(re.search(r"[\s$`*?\[{~]", w) for c in cmds if c and c[0][0] in ("cd", "pushd", "popd") for w, q in c[1:]))
+    pwd_is_plain = (all_words.count("pwd") == 1 and sum(w.count("pwd") for w in all_words) == 1 and not re.search(r"\s", cwd)
+                    and "." not in all_words and not any(_PWD_UNSAFE.search(w) for w in all_words))
     for k in range(n - 1):
         if not meta[k + 1][0].startswith(("$(", "`")):
             continue
@@ -994,7 +998,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
-    carried, cut = _substitution_spans(cmds, meta)
+    carried, cut = _substitution_spans(cmds, meta, cwd)
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for k, cmd in enumerate(cmds):

@@ -116,8 +116,16 @@ class XargsFamilyTests(base.Fixture):
         # `pwd` is exempt only while nothing can change what it prints: a function or alias of that name, a changed IFS or PATH, a second pwd, or
         # a folder built at run time all turn the exemption off
         for cmd in ("pwd() { echo -R; }; ls %s $(pwd)" % a, "function pwd { echo -R; }; ls %s $(pwd)" % a, "alias pwd='echo -R'; ls %s $(pwd)" % a,
-                    "IFS=-; ls %s $(pwd)" % a, "ls %s $(pwd; echo -R)" % a, "cd $X; ls %s $(pwd)" % a, "cd 'a b'; ls %s $(pwd)" % a):
+                    "IFS=-; ls %s $(pwd)" % a, "ls %s $(pwd; echo -R)" % a, "cd $X; ls %s $(pwd)" % a, "cd 'a b'; ls %s $(pwd)" % a,
+                    # any change of folder, however it is spelled, and any word that can rebind a name
+                    "cd -; ls %s $(pwd)" % a, "cd /; ls %s $(pwd)" % a, "sh -c 'cd /; ls %s $(pwd)'" % a, "pushd /; ls %s $(pwd)" % a,
+                    "eval 'pwd() { echo -R; }'; ls %s $(pwd)" % a, "command alias pwd=x; ls %s $(pwd)" % a, "builtin cd /; ls %s $(pwd)" % a,
+                    "bash -c 'pwd() { echo -R; }; ls %s $(pwd)'" % a, "export -f pwd; ls %s $(pwd)" % a):
             self.refused(cmd, self.tmp)
+        # a session folder with a space in its name splits in two where it is printed, so the exemption is off there
+        spaced = self.p("a -R b")
+        os.makedirs(spaced, exist_ok=True)
+        self.refused("ls %s $(pwd)" % a, spaced)
         # separators that do not balance (a case pattern's closing parenthesis) read every later command as one the feeder may run
         self.refused("echo -r | xargs true; case x in a) grep y %s $(true);; esac" % a, self.tmp)
         # an xargs inside a substitution widens only what the substitution holds
