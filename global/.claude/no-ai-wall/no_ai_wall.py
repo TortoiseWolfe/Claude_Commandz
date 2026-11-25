@@ -759,6 +759,7 @@ def _names_a_root(words, cur):
     return False
 
 
+_FEEDERS = ("xargs", "parallel")  # the programs that run a command with words taken from their input (xargs, issue 154; parallel, issue 161)
 _XARGS_FLAGFREE_WORD = re.compile(r"[A-Za-z0-9_./:@%+=, ]*")  # a word of an echo or printf that cannot carry a flag: no dash, no escape, no expansion
 
 
@@ -774,19 +775,74 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
         return False
     xargs_words = [w for w, q in cmds[k]]
-    # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
-    # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
-    if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
-        return False
-    # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
-    # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
-    if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
-        return False
+    feeder = next((i for i, w in enumerate(xargs_words) if os.path.basename(w) in _FEEDERS), None)
+    if feeder is not None and os.path.basename(xargs_words[feeder]) == "parallel":
+        # GNU parallel (issue 161) puts its input where `{}` stands, reads it from `:::` and `::::`, a file or another delimiter, and has far
+        # more options than xargs: any option before its command, and any replacement string or `:::` word, takes the wide reading
+        after = xargs_words[feeder + 1:]
+        if after and after[0].startswith("-"):
+            return False
+        if any("{" in x or x.startswith(":::") for x in after):
+            return False
+    else:
+        # -a reads a file; -d cuts the input at a character of the caller's choosing (`echo a-r | xargs -d a ...` hands over `-r`); -I and -i put the
+        # input into the middle of a word of the command (`echo r | xargs -I@ grep -@ x DIR` builds `-r`)
+        if any(x.startswith("-") and not x.startswith("--") and ("a" in x or "d" in x or "i" in x or "I" in x) for x in xargs_words):
+            return False
+        # GNU xargs takes any unique prefix of a long option (`--a=FILE` is `--arg-file=FILE`, `--repl` is `--replace`), so a long option counts as
+        # harmless only when it is spelled out in full and is on the list of ones that do not change what the input means
+        if any(x.startswith("--") and x != "--" and x.split("=", 1)[0] not in _XARGS_SAFE_LONG for x in xargs_words):
+            return False
     prev = cmds[k - 1]
     if prev[0][1] or prev[0][0] not in ("echo", "printf"):
         return False
     # only plain words: no dash anywhere (a delimiter could expose it), no escape, quote, variable, wildcard or brace
     return all(_XARGS_FLAGFREE_WORD.fullmatch(x.replace("\\n", " ")) for x, q in prev[1:])
+
+
+def _substitution_spans(cmds, meta):
+    """-> (carried, cut), two lists with one flag per command, from how the reader cut the text at substitutions (issues 160 and 164).
+
+    The reader ends a command at `$(`, a backtick and a parenthesis, so the words of one shell command can land in several of ours. Each command's
+    `lead` holds the separator characters just before it; counting the openers and closers in them gives the nesting depth of every command.
+    carried[k]: command k stands inside the statement of an earlier xargs or parallel (same pipeline or statement, at its depth or deeper), so it
+    may be the program that feeder runs: `xargs $(true) grep x DIR` reads as the commands xargs, true and `grep x DIR`. A `;`, `&`, newline or
+    `|` at the feeder's depth ends the statement, and so does leaving the substitution the feeder stood in.
+    cut[k]: command k is cut off from the words that follow it by a substitution that has words after it in the same statement, as in
+    `grep $(echo -r) x DIR`, where the substitution can hand the search a flag. A substitution that is the last word (`ls $(pwd)`) is not a cut."""
+    n = len(cmds)
+    carried, depth_after = [False] * n, [0] * n
+    depth, in_bt, anchor = 0, False, None
+    for k in range(n):
+        for ch in meta[k][0]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if anchor is not None and depth < anchor:
+                    anchor = None
+            elif ch == "`":
+                depth, in_bt = (depth - 1, False) if in_bt else (depth + 1, True)
+                if anchor is not None and depth < anchor:
+                    anchor = None
+            elif ch in ";&\n|" and anchor is not None and depth <= anchor:
+                anchor = None
+        carried[k] = anchor is not None
+        depth_after[k] = depth
+        if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k]):
+            anchor = depth if anchor is None else min(anchor, depth)
+    cut = [False] * n
+    for k in range(n - 1):
+        if not meta[k + 1][0].startswith(("$(", "`")):
+            continue
+        for j in range(k + 2, n):
+            if depth_after[j] < depth_after[k]:
+                break
+            if depth_after[j] == depth_after[k]:
+                lead = meta[j][0]
+                cut[k] = bool(lead) and set(lead) <= set(")`")  # words follow the substitution with no separator between
+                break
+    return carried, cut
 
 
 def _search_of(prog, rest, cur, flag_in=False):
@@ -804,9 +860,9 @@ def _search_of(prog, rest, cur, flag_in=False):
             if x.startswith(("-", "(", "!", ",")):
                 break
             roots.append(x)
-        return True, not _names_a_root(roots, cur)
+        return True, flag_in or not _names_a_root(roots, cur)  # fed by xargs, the input can add a root beyond the typed ones (issue 157)
     if prog in ("tree", "du") or (prog == "ls" and (flag_in or any((x.startswith("-") and not x.startswith("--") and "R" in x) or x == "--recursive" for x in rest))):
-        return True, not _names_a_root(_operands(prog, rest), cur)
+        return True, flag_in or not _names_a_root(_operands(prog, rest), cur)
     key = _SEARCH_KEY.get(prog)
     if key == "grep" and not flag_in and not any((x.startswith("-") and not x.startswith("--") and ("r" in x or "R" in x)) or x in ("--recursive", "--dereference-recursive") for x in rest):
         return False, False
@@ -820,7 +876,9 @@ def _search_of(prog, rest, cur, flag_in=False):
         return True, False
     if not any(x.startswith(_PATTERN_OPTIONS) for x in rest):
         ops = ops[1:]  # the first operand is the pattern
-    return True, not _names_a_root(ops, cur)  # fed by xargs or typed, a search that names no root walks its working folder (issue 154)
+    # typed, a search that names no root walks its working folder (issue 154); fed by xargs, parallel or a substitution it may also get a root
+    # from its input, so it is read as walking the working folder whatever roots are typed (issues 157 and 160)
+    return True, flag_in or not _names_a_root(ops, cur)
 
 
 def _is_launcher_words(words):
@@ -897,6 +955,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             p is not None and (p not in _DATA_TOOLS or _can_run_code(p, rest, env)) for p, rest, env in progs):
         return None  # something is written (a redirect, tee, cp...) and some other program is in the text: it may be running that file, whatever its name ends in
     recursive, folders, words, cur = False, [], [], cwd
+    carried, cut = _substitution_spans(cmds, meta)
     if heredocs is None:
         heredocs = {}  # {program: heredocs _strip_heredocs dropped for it}; none given means none were recognised
     for k, cmd in enumerate(cmds):
@@ -911,14 +970,14 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
         if os.path.basename(ws[0]) in ("echo", "printf") and not cmd[0][1]:
             continue
         # a quoted or escaped xargs is still xargs (`\xargs`, `x'a'rgs`): the shell runs the program the words spell
-        xargs = any(os.path.basename(w) == "xargs" for w, q in cmd)
+        xargs = any(os.path.basename(w) in _FEEDERS for w, q in cmd)
         # the reader ends a command at `$(`, a backtick and a plain parenthesis (so a process substitution `<(..)` too), so in
-        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. With any of them anywhere in the text, every
-        # command after an xargs is read as one that xargs may run (the wide reading).
-        if not xargs and any("(" in lead or ")" in lead or "`" in lead for lead, reads in meta) and any(
-                os.path.basename(w) == "xargs" for c in cmds[:k] for w, q in c):
+        # `xargs $(true) grep x DIR` the grep stands in a command of its own with no xargs word. Every command in the same pipeline or statement
+        # after an xargs or parallel is read as one the feeder may run (the wide reading, issue 164); a later statement is read on its own.
+        if carried[k]:
             xargs = True
-        flag_in = xargs and not _xargs_input_is_flagfree(cmds, meta, k)
+        # a search cut off from its words by a substitution can be handed a flag by it: `grep $(echo -r) x DIR` (issue 160)
+        flag_in = (xargs and not _xargs_input_is_flagfree(cmds, meta, k)) or cut[k]
         prog_at = _skip_wrappers(ws, scan=False)
         for i, (w, q) in enumerate(cmd):
             behind_wrapper = not re.search(r"\s", w) and _known_program(w) and any(os.path.basename(p) in _WRAPPERS for p, pq in cmd[:i] if not pq)
