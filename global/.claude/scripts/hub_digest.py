@@ -725,7 +725,7 @@ def weekly_reset_ts(budget):
 
 def week_start_ts(budget, now_ts):
     """When the token week began, as epoch seconds: seven days before the reset. The reset is the Budget section's own (the quality
-    report's); without one it is the fixed Wednesday 16:00 UTC rule in week_reset.py (the dispatcher keeps a copy that a test holds equal).
+    report's); without one it is the fixed Wednesday 16:00 UTC rule in week_reset.py (the dispatcher imports it).
     None when week_reset.py can't be read."""
     try:
         from week_reset import week_start_ts as start
