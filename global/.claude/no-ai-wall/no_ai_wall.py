@@ -107,9 +107,13 @@ def _cdpath(text):
     values += [m.group(1).strip("'\"") for m in re.finditer(r"\bCDPATH=([^\s;&|)]*)", text or "")]
     # zsh's cdpath array, and the options that make a cd take a variable's value or a named folder (zsh reads option names in any case, with or
     # without underscores: CDABLEVARS, cdable_vars, AUTO_CD), and `hash -d` names, also change where a cd lands
-    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", text or ""))
-              or bool(re.search(r"cdablevars|autocd", (text or "").replace("_", "").lower()))  # zsh ignores every underscore in an option name
-              or bool(re.search(r"\bhash\b[^;&|\n]*\s-\w*d", text or "")))  # `hash -d name=dir`, with the flag anywhere after hash (`hash -r -d`)
+    # the shell drops quotes and backslashes before it runs a word (`ha\sh -d` is `hash -d`), so the option checks read the text without them
+    bare = re.sub(r"[\\'\"]", "", text or "")
+    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", bare))
+              or bool(re.search(r"cdablevars|autocd", bare.replace("_", "").lower()))  # zsh ignores every underscore in an option name
+              # setopt, unsetopt and emulate can change how a cd lands in ways the text does not show; zsh's short flags -J (AUTO_CD) and -T
+              # (CDABLE_VARS) do the same through `set`; `hash` with any flag (-d name=dir, -f, -r -d) can name a folder for `cd ~name`
+              or bool(re.search(r"\b(?:setopt|unsetopt|emulate)\b|\bset\b[^;&|\n]*\s-[A-Za-z]*[JT]|\bhash\b[^;&|\n]*\s-", bare)))
     entries = [e for v in values for e in v.split(":") if e and "$" not in e and "`" not in e]
     return entries, unsure
 

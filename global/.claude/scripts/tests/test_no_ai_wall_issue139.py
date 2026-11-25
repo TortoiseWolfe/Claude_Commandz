@@ -51,6 +51,19 @@ class Issue139Tests(base.Fixture):
         self.allowed("cd ~/proj; cat a.txt", self.work)  # a folder under the home folder is still read as one
         self.allowed("cd ~; cat a.txt", self.work)
 
+    def test_quoting_escaping_and_short_flags_do_not_hide_a_cd_changing_option(self):
+        # the shell removes quotes and backslashes before it runs a word, so `ha\sh -d` is `hash -d`; zsh's short flags are option names too
+        # (-J is AUTO_CD, -T is CDABLE_VARS), and setopt, unsetopt and emulate can change how a cd lands in ways the text does not show
+        wall = self.p("wall")
+        for cmd in ("ha\\sh -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall, "'hash' -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall,
+                    "ha\"\"sh -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall, "hash -f w=%s; cd clientA; rm docs/secret.txt" % wall,
+                    "set -J; cd clientA; rm docs/secret.txt", "set -T; cd clientA; rm docs/secret.txt", "set -eJ; cd clientA; rm docs/secret.txt", "set -e -J; cd clientA; rm docs/secret.txt",
+                    "se\\t -J; cd clientA; rm docs/secret.txt", "setopt autocd; cd clientA; rm docs/secret.txt", "set\\opt c\"\"dablevars; cd clientA; rm docs/secret.txt",
+                    "unsetopt cdablevars; cd clientA; rm docs/secret.txt", "emulate -L zsh; cd clientA; rm docs/secret.txt",
+                    "\\emulate zsh; cd clientA; rm docs/secret.txt"):
+            self.refused(cmd, self.work)
+        self.allowed("set -e; cd ~/proj; cat a.txt", self.work)  # -e is not a cd option
+
     def test_a_variable_that_only_starts_with_home_is_not_the_home_folder(self):
         # `$HOMEX` is another variable: it must never be read as the home folder followed by an X
         self.refused("cd $HOMEX; rm docs/secret.txt", self.work)
