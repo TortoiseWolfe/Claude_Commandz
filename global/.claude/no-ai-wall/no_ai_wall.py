@@ -82,13 +82,16 @@ def _read(path):
         return "", "bad"
 
 
+_HOME_VAR = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+
+
 def expand(path, base=None):
     """~ and $HOME expanded, made absolute against base (default: the current folder), dots collapsed. No symlink resolution."""
     p = path.strip()
     h = home()
     if p == "~" or p.startswith("~/"):
         p = h + p[1:]
-    p = p.replace("${HOME}", h).replace("$HOME", h)
+    p = _HOME_VAR.sub(lambda m: h, p)  # `$HOMEX` is another variable, never the home folder followed by an X
     if "$" in p:
         p = os.path.expandvars(p)
     if not os.path.isabs(p):
@@ -102,7 +105,7 @@ def _cdpath(text):
     built at run time ($ or a backtick), or CDPATH named without a value the text shows (`export CDPATH` with one set before)."""
     values = [os.environ.get("CDPATH") or ""]
     values += [m.group(1).strip("'\"") for m in re.finditer(r"\bCDPATH=([^\s;&|)]*)", text or "")]
-    unsure = any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)", text or ""))
+    unsure = any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b|\bcdable_vars\b", text or ""))  # zsh's cdpath array and bash's cdable_vars also change where a cd lands
     entries = [e for v in values for e in v.split(":") if e and "$" not in e and "`" not in e]
     return entries, unsure
 
@@ -110,6 +113,9 @@ def _cdpath(text):
 def _plain_relative(arg):
     """A `cd` operand CDPATH is applied to: relative, and not ./, ../, ~, a variable or an option (those are never looked up in CDPATH)."""
     return bool(arg) and not arg.startswith(("/", "./", "../", "~", "$", "-", "`")) and arg not in (".", "..")
+
+
+_MAX_CD_BASES = 400
 
 
 def _cd_bases(arg, curs, entries):
@@ -121,7 +127,8 @@ def _cd_bases(arg, curs, entries):
         if _plain_relative(arg):
             out.extend(expand(arg, e) for e in entries)
     out.append(home())
-    return list(dict.fromkeys(out))[:60]
+    out = list(dict.fromkeys(out))
+    return out if len(out) <= _MAX_CD_BASES else None  # None: too many to follow, and the caller must refuse rather than drop some
 
 
 def _segment_regex(seg):
@@ -937,7 +944,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             arg = next((a for a in ws[1:] if a == "-" or not a.startswith("-")), None)
             if arg is None:
                 cur = home()  # a bare cd goes home
-            elif arg == "-" or "`" in arg or "$" in arg.replace("${HOME}", "").replace("$HOME", "") or (
+            elif arg == "-" or "`" in arg or "$" in _HOME_VAR.sub("", arg) or (
                     (cdpath[0] or cdpath[1]) and _plain_relative(arg)) or (cur is None and not os.path.isabs(arg) and not arg.startswith("~")):
                 cur = None  # a folder the text cannot name (issue 139): never guessed at, and a relative cd after it stays unknown
             else:
@@ -1102,6 +1109,8 @@ def _info_hit(info, cwd, paths):
                         return hit, "root"
         if w == "cd" and i + 1 < len(words):
             curs = _cd_bases(words[i + 1], curs, entries)
+            if curs is None:  # too many folders to follow: refuse
+                return (paths.entries[0].raw, "root") if paths.entries else None
     for folder in folders:  # a search with no folder named walks the working folder
         hit = paths.contains(folder, folder)
         if hit:
@@ -1151,6 +1160,8 @@ def _bash_hits_wide(command, cwd, paths, searching=True, walk_cwd=True):
                 return r
         if w == "cd" and i + 1 < len(words):
             curs = _cd_bases(words[i + 1], curs, entries)
+            if curs is None:  # too many folders to follow: refuse
+                return (paths.entries[0].raw, "path") if paths.entries else None
         i += 1
     if recursive and walk_cwd:  # a search with no folder named walks the working folder
         hit = paths.contains(cwd, cwd)
