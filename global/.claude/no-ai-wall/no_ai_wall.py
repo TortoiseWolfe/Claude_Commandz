@@ -392,6 +392,11 @@ def _ansi_c_value(body):
     return "".join(out).split("\x00")[0]
 
 
+class _Meta(list):
+    """The list _shell_commands fills with (lead, reads) pairs; `tail` is the separator text left after the last command."""
+    tail = ""
+
+
 def _shell_commands(text, written=None, meta=None):
     """-> a list of commands, each a list of (word, quoted), or None when the text cannot be read with certainty. A command ends at an unquoted
     ; & | newline, parenthesis, backtick or `$(`. A redirect and its target are dropped (the targets of output redirects are added to the list
@@ -499,6 +504,8 @@ def _shell_commands(text, written=None, meta=None):
             started = True
             i += 1
     end_cmd()
+    if meta is not None and hasattr(meta, "tail"):
+        meta.tail = lead  # the separator characters after the last command (the `)` that closes a substitution): _substitution_spans balances the depth with them
     return cmds
 
 
@@ -775,10 +782,16 @@ def _xargs_input_is_flagfree(cmds, meta, k):
     if k == 0 or reads or lead.replace("\n", "") not in ("|", "|&"):
         return False
     xargs_words = [w for w, q in cmds[k]]
-    feeder = next((i for i, w in enumerate(xargs_words) if os.path.basename(w) in _FEEDERS), None)
+    feeders = [i for i, w in enumerate(xargs_words) if os.path.basename(w) in _FEEDERS]
+    if len(feeders) > 1:
+        return False  # a feeder run by a feeder (`xargs xargs grep x DIR`): the inner one takes input of its own
+    feeder = feeders[0] if feeders else None
     if feeder is not None and os.path.basename(xargs_words[feeder]) == "parallel":
         # GNU parallel (issue 161) puts its input where `{}` stands, reads it from `:::` and `::::`, a file or another delimiter, and has far
-        # more options than xargs: any option before its command, and any replacement string or `:::` word, takes the wide reading
+        # more options than xargs: any option before its command, and any replacement string or `:::` word, takes the wide reading. So does
+        # a PARALLEL variable, set in the environment or in front of the command, which adds options of its own.
+        if os.environ.get("PARALLEL") or any(re.match(r"[A-Za-z_]\w*=", w) for w in xargs_words[:feeder]):
+            return False
         after = xargs_words[feeder + 1:]
         if after and after[0].startswith("-"):
             return False
@@ -832,16 +845,34 @@ def _substitution_spans(cmds, meta):
         if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k]):
             anchor = depth if anchor is None else min(anchor, depth)
     cut = [False] * n
+    for ch in getattr(meta, "tail", ""):  # the closers after the last command
+        if ch == ")":
+            depth -= 1
+        elif ch == "`":
+            depth, in_bt = (depth - 1, False) if in_bt else (depth + 1, True)
+    if depth != 0 or in_bt or min(depth_after, default=0) < 0:
+        # the openers and closers do not balance (a `)` that closes a case pattern, an unclosed backtick): the depths cannot be trusted, so
+        # every command after the first feeder is read as one it may run, and a command followed by a substitution is cut (fail closed)
+        first = next((k for k in range(n) if any(os.path.basename(w) in _FEEDERS for w, q in cmds[k])), None)
+        carried = [first is not None and k > first for k in range(n)]
+        return carried, [k + 1 < n and meta[k + 1][0].startswith(("$(", "`")) for k in range(n)]
     for k in range(n - 1):
         if not meta[k + 1][0].startswith(("$(", "`")):
             continue
+        end, follows = n, False
         for j in range(k + 2, n):
             if depth_after[j] < depth_after[k]:
+                end = j
                 break
             if depth_after[j] == depth_after[k]:
+                end = j
                 lead = meta[j][0]
-                cut[k] = bool(lead) and set(lead) <= set(")`")  # words follow the substitution with no separator between
+                follows = bool(lead) and set(lead) <= set(")`")  # words follow the substitution with no separator between
                 break
+        # A substitution that is the last word of its command can hand over a flag as well (`grep x DIR $(echo -r)`): it is a cut unless all
+        # it holds is `pwd`, which prints a folder and never an option (`ls $(pwd)`).
+        inside = cmds[k + 1:end]
+        cut[k] = follows or not (len(inside) == 1 and [w for w, q in inside[0]] == ["pwd"])
     return carried, cut
 
 
@@ -943,7 +974,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
     or copies a folder tree. folders: the working folders of the searches that name no root, which therefore walk their working folder.
     words: every word of the commands (a lane launcher's own words left out) for the checks that read operands."""
     written = []
-    meta = []
+    meta = _Meta()
     cmds = _shell_commands(text, written, meta)
     if cmds is None or depth > 4:
         return None

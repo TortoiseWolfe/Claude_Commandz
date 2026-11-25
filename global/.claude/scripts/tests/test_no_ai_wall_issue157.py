@@ -5,6 +5,7 @@ commands of the same pipeline or statement. Fake folders only."""
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_no_ai_wall as base  # noqa: E402
@@ -89,7 +90,7 @@ class XargsFamilyTests(base.Fixture):
     def test_a_command_in_a_later_statement_is_read_on_its_own(self):
         a, s = self.above, self.safe  # the find names a safe root: a bare `find .` would itself walk the session folder, which holds a listed one
         for cmd in ("find %s -name x | xargs rm; ls $(pwd)" % s, "find %s -name x | xargs rm && ls $(pwd)" % s, "find %s -name x | xargs rm\nls $(pwd)" % s,
-                    "find %s -name x | xargs rm; grep x %s $(true)" % (s, s), "echo hi | xargs grep x %s; grep y %s $(pwd)" % (a, a),
+                    "find %s -name x | xargs rm; grep x %s $(pwd)" % (s, s), "echo hi | xargs grep x %s; grep y %s $(pwd)" % (a, a),
                     "find %s -name x | xargs rm | wc -l; ls $(pwd)" % s, "find %s -name x | xargs rm; ls `pwd`" % s):
             self.allowed(cmd, self.tmp)
 
@@ -101,6 +102,16 @@ class XargsFamilyTests(base.Fixture):
                     "echo -r | xargs $(echo a | tr a b) grep x %s" % a, "echo -r | xargs -I{} $(true) grep {} x %s" % a,
                     "echo -r | xargs $(true) $(true) grep x %s" % a, "echo -r | parallel $(true) grep x %s" % a):
             self.refused(cmd, self.tmp)
+        # a substitution that is the last word hands over a flag as well; one that holds only `pwd` never does
+        for cmd in ("grep x %s $(echo -r)" % a, "ls %s $(echo -R)" % a, "grep x %s `echo -r`" % a, "echo hi | xargs true; grep x %s $(echo -r)" % a):
+            self.refused(cmd, self.tmp)
+        # a feeder run by a feeder takes input of its own; so does a parallel that has options set in its environment
+        for cmd in ("echo hi | xargs xargs grep x %s" % a, "echo hi | PARALLEL=-a parallel grep x %s" % a, "echo hi | env PARALLEL=-a parallel grep x %s" % a):
+            self.refused(cmd, self.tmp)
+        with mock.patch.dict(os.environ, {"PARALLEL": "-a flags.txt"}):
+            self.refused("echo hi | parallel grep x %s" % a, self.tmp)
+        # separators that do not balance (a case pattern's closing parenthesis) read every later command as one the feeder may run
+        self.refused("echo -r | xargs true; case x in a) grep y %s $(true);; esac" % a, self.tmp)
         # an xargs inside a substitution widens only what the substitution holds
         self.refused("echo $(echo -r | xargs $(true) grep x %s)" % a, self.tmp)
         self.allowed("echo $(echo hi | xargs echo); ls $(pwd)", self.tmp)
