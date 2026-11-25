@@ -139,6 +139,16 @@ class Issue139Tests(base.Fixture):
             self.refused(cmd, self.tmp)
         self.allowed("cd $X; grep -r x ~/proj %s/b" % self.work, self.work)  # nothing rebinds HOME: the home folder is a fixed place
 
+    def test_only_a_plain_normal_absolute_path_is_a_fixed_place(self):
+        # fail closed (fourth review): a root with dots, doubled slashes, a wildcard or a quote can spell /proc or /dev, and ~ follows HOME
+        for root in ("/tmp/../proc/self/cwd/clientA", "//proc/self/cwd/clientA", "/./proc/self/cwd/clientA", "/pro[c]/self/cwd/clientA", "/p?oc/self/cwd/clientA",
+                     "/pr*/self/cwd/clientA", "'/proc/self/cwd/clientA'", "/proc", "/dev/fd/../clientA", "~/clientA", "$HOME/clientA", "${HOME}/clientA",
+                     "~root/clientA", "/tmp/a/../b", "/tmp//b", "/tmp/./b"):
+            self.refused("cd $X; grep -r x %s" % root, self.tmp)
+        for cmd in ("HOME=%s; cd $X; bash -c 'grep -r x ~/clientA'" % self.work, "cd $X; bash -c 'HOME=%s; grep -r x ~/clientA'" % self.work):
+            self.refused(cmd, self.tmp)
+        self.allowed("cd $X; grep -r x %s/proj %s/b" % (self.work, self.work), self.work)  # written out in full and already normal
+
     def test_a_search_fed_by_xargs_after_an_unknown_cd_takes_the_wide_reading(self):
         # the input can carry a relative root, and it lands in the folder the text cannot name
         for cmd in ("cd $X; echo ./clientA | xargs grep -r x %s" % self.work, "cd $X; echo ./clientA | xargs find -name x", "cd $X; ls | xargs -n1 du %s/a" % self.work):
