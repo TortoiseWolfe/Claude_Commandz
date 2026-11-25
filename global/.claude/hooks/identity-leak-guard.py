@@ -41,6 +41,8 @@ import html
 import json
 import os
 import re
+import shlex
+import stat
 import sys
 import time
 import urllib.parse
@@ -48,6 +50,18 @@ import urllib.parse
 CONFIG = "~/.config/afa/identity-guard.json"
 CLAUDE_JSON = "~/.claude.json"
 LOG = "~/.claude/state/identity-guard.log"
+APPROVED_HOSTS = "~/.config/afa/identity-guard-hosts.txt"
+HOST_NAME = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+")
+APPROVED_URL = re.compile(r"https://([a-z0-9.-]+)(?::\d+)?(?:[/?#]\S*)?", re.I)  # no login in front of the host, no other scheme
+BODY_OPTIONS = {"-d", "-F", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--form", "--form-string", "--json"}
+# Options that carry a value of their own, so the word after one is not a web address; others are read as flags.
+VALUE_OPTIONS = BODY_OPTIONS | {"--request", "--output", "--max-time", "--connect-timeout", "--write-out", "--retry", "--header", "--user-agent",
+                                "--referer", "--cookie", "--user", "--limit-rate"}
+VALUE_SHORT = set("XomwHAebu")
+# A redirect, a proxy, a name override, a config file, an upload and a second request each can send the body somewhere not on the list.
+REFUSED_OPTIONS = {"--location", "--location-trusted", "--proxy", "--preproxy", "--socks5", "--resolve", "--connect-to", "--config", "--next",
+                   "--upload-file", "--url", "--unix-socket", "--proxy-header", "--ftp-port", "--interface"}
+REFUSED_SHORT = set("LxKTz:")
 DEFAULT_ALLOWED_SCRIPTS = {"gmail_api.py", "calendar_api.py"}
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 SCRIPTS_DIR = "~/.claude/scripts"
@@ -305,9 +319,88 @@ def sinks(cmd, cwd, allowed):
     return found
 
 
-def check_bash(cmd, cwd, addrs, allowed):
+def load_approved_hosts():
+    """The hosts the account owner has approved his address going to (issue 167): one host a line in a private file,
+    `host  "his quoted word"  YYYY-MM-DD`. A line missing the quoted word or the date counts for nothing. A file that is not his own regular
+    file, or that anyone else can read or write (mode must be 600), a missing file and a bad file all give no host, so the guard
+    refuses as it always has."""
+    path = os.path.expanduser(os.environ.get("IDENTITY_GUARD_APPROVED_HOSTS") or APPROVED_HOSTS)
+    try:
+        st = os.stat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.getuid():
+            log("approved-hosts file ignored: it must be his own regular file with mode 600")
+            return frozenset()
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return frozenset()
+    hosts = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        word = line.split(None, 1)[0].lower()
+        if HOST_NAME.fullmatch(word) and re.search(r'"[^"]+"', line) and re.search(r"\b\d{4}-\d{2}-\d{2}\b", line):
+            hosts.add(word)
+    return frozenset(hosts)
+
+
+def body_only_to_approved_host(cmd, addrs, hosts):
+    """True only for one plain curl call that puts the address in a form field or request body and sends it to an approved host.
+    Everything else (a header, the user agent, a login, a cookie, the URL, a proxy, a redirect, a second program, a pipe, a variable or
+    substitution, a host not on the list, a word this reading can't place) gives False and the guard refuses as before."""
+    if not hosts:
+        return False
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return False
+    if not toks or os.path.basename(toks[0]) != "curl":
+        return False
+    if any(t and set(t) <= set("();<>|&") for t in toks) or any("$" in t or "`" in t or "\n" in t for t in toks):
+        return False  # a second command, a pipe, a redirect, or a word made at run time
+    urls, pend = [], None  # pend: the option whose value is the next word
+    for t in toks[1:]:
+        if has_address(t, addrs):
+            # only the value of a body option may hold the address; a header, the URL, a login, a cookie or a referer never
+            if pend in BODY_OPTIONS or re.match(r"-[dF][^-]", t):
+                pend = None
+                continue
+            return False
+        if pend:
+            pend = None
+        elif t.startswith("--"):
+            name = t.split("=", 1)[0]
+            if name in REFUSED_OPTIONS:
+                return False
+            pend = t if t in VALUE_OPTIONS else None
+        elif t.startswith("-") and len(t) > 1:
+            if t in ("-d", "-F"):
+                pend = t
+            elif re.match(r"-[dF]", t):
+                pass  # the value is attached
+            elif any(c in REFUSED_SHORT for c in t[1:]):
+                return False
+            else:
+                pend = t if t[-1] in VALUE_SHORT else None
+        else:
+            urls.append(t)
+    if not urls:
+        return False
+    for u in urls:
+        m = APPROVED_URL.fullmatch(u)
+        if not m or m.group(1).lower() not in hosts:
+            return False
+    return True
+
+
+def check_bash(cmd, cwd, addrs, allowed, hosts=frozenset()):
     found = sinks(cmd, cwd, allowed)
     if not found:
+        return None
+    if hosts and found == ["network client"] and not DYNAMIC_ADDRESS.search(cmd) and body_only_to_approved_host(cmd, addrs, hosts):
         return None
     if has_address(cmd, addrs) or DYNAMIC_ADDRESS.search(cmd):
         return "a Bash call carries the address to a network sink"
@@ -350,8 +443,8 @@ def check_mcp(tool, args, addrs):
     return None
 
 
-def check(payload, addrs=None, allowed=None):
-    """Return a deny reason, or None to allow."""
+def check(payload, addrs=None, allowed=None, hosts=None):
+    """Return a deny reason, or None to allow. hosts: the approved hosts (None reads the private file)."""
     if addrs is None:
         addrs, allowed = load_settings()
     allowed = allowed if allowed is not None else set(DEFAULT_ALLOWED_SCRIPTS)
@@ -363,7 +456,7 @@ def check(payload, addrs=None, allowed=None):
         cmd = args.get("command")
         if not isinstance(cmd, str):
             return None
-        why = check_bash(cmd, payload.get("cwd") or os.getcwd(), addrs, allowed)
+        why = check_bash(cmd, payload.get("cwd") or os.getcwd(), addrs, allowed, load_approved_hosts() if hosts is None else hosts)
     elif tool == "WebFetch":
         why = "a WebFetch URL carries the address" if has_address(str(args.get("url", "")), addrs) else None
     elif tool == "WebSearch":

@@ -18,6 +18,7 @@ TOOLS = tempfile.mkdtemp(prefix="idg-tools-")
 for _name in ("gmail_api.py", "calendar_api.py"):
     Path(TOOLS, _name).write_text("import urllib.request\n")
 os.environ["IDENTITY_GUARD_SCRIPTS_DIR"] = TOOLS
+os.environ["IDENTITY_GUARD_APPROVED_HOSTS"] = os.path.join(TOOLS, "no-such-hosts-file")  # a real approved-hosts file on this machine must not leak into the tests
 
 ME = "owner.name@example.org"  # a made-up address: the real one is never written in this repo
 ADDRS = {ME}
@@ -511,6 +512,106 @@ class McpTools(unittest.TestCase):
         self.assertIsNone(self.mcp("browser_type", text=ME, ref="e5"))  # typing into a page is the user's own form, not a request line
         self.assertIsNone(self.mcp("browser_evaluate", function="() => document.title"))
         self.assertIsNone(self.mcp("get_file_contents", owner="o", repo="r", path="README.md"))
+
+
+class ApprovedHosts(unittest.TestCase):
+    """Issue 167: the owner approves his address going to named sites, in a private mode-600 file. The address passes only to a listed host,
+    and only in a form field or request body, never in a header. Everything else is refused as before."""
+
+    HOST = "forms.example.net"
+    OTHER = "other.example.net"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="idg-hosts-")
+        self.path = os.path.join(self.dir, "hosts.txt")
+        self.write('%s  "finish the contest entry"  2025-01-02\n' % self.HOST)
+        self._old = os.environ["IDENTITY_GUARD_APPROVED_HOSTS"]
+        os.environ["IDENTITY_GUARD_APPROVED_HOSTS"] = self.path
+
+    def tearDown(self):
+        os.environ["IDENTITY_GUARD_APPROVED_HOSTS"] = self._old
+
+    def write(self, text, mode=0o600):
+        with open(self.path, "w") as f:
+            f.write(text)
+        os.chmod(self.path, mode)
+
+    def run_cmd(self, cmd):
+        return g.check(bash(cmd), ADDRS, ALLOWED)  # hosts read from the private file, as the hook does
+
+    def allowed(self, cmd):
+        self.assertIsNone(self.run_cmd(cmd), cmd)
+
+    def refused(self, cmd):
+        r = self.run_cmd(cmd)
+        self.assertIsNotNone(r, "wrongly allowed: " + cmd)
+        self.assertNotIn(ME, r)
+
+    def test_a_listed_host_gets_the_address_in_a_form_field_or_body(self):
+        h = self.HOST
+        for cmd in ("curl -s -d 'email=%s' https://%s/to/abc" % (ME, h), "curl -X POST --data-urlencode email=%s https://%s/submit" % (ME, h),
+                    "curl -F 'email=%s' -F name=x https://%s/f" % (ME, h), "curl --json '{\"email\": \"%s\"}' https://%s/f" % (ME, h),
+                    "curl -s -H 'Accept: text/html' -d 'email=%s' https://%s/f?x=1" % (ME, h), "curl -d'email=%s' https://%s/f" % (ME, h),
+                    "curl --data-raw 'e=%s' https://%s:443/f" % (ME, h)):
+            self.allowed(cmd)
+
+    def test_the_address_in_any_header_or_in_the_address_of_the_page_is_still_refused(self):
+        h = self.HOST
+        for cmd in ("curl -H 'X-Who: %s' -d x=1 https://%s/f" % (ME, h), "curl -A '%s' https://%s/f" % (ME, h),
+                    "curl --user-agent 'curl %s' https://%s/f" % (ME, h), "curl -e %s https://%s/f" % (ME, h), "curl -b 'u=%s' https://%s/f" % (ME, h),
+                    "curl -u %s:pw https://%s/f" % (ME, h), "curl 'https://%s/f?email=%s'" % (h, ME), "curl https://%s@%s/f" % (ME, h),
+                    "curl -H 'X: 1' -d 'email=%s' -H 'From: %s' https://%s/f" % (ME, ME, h), "curl --header 'X: %s' https://%s/f" % (ME, h),
+                    "curl -H -d %s https://%s/f" % (ME, h)):  # -d here is the header's own text, so the address is a bare word, not a body
+            self.refused(cmd)
+
+    def test_an_unlisted_host_or_a_host_the_reading_cannot_pin_down_is_still_refused(self):
+        h, o = self.HOST, self.OTHER
+        for cmd in ("curl -d 'email=%s' https://%s/f" % (ME, o), "curl -d 'email=%s' http://%s/f" % (ME, h), "curl -d 'email=%s' %s/f" % (ME, h),
+                    "curl -d 'email=%s' https://%s/f https://%s/g" % (ME, h, o), "curl -d 'email=%s' https://x.%s/f" % (ME, h),
+                    "curl -d 'email=%s' https://%s.%s/f" % (ME, h, o), "curl -d 'email=%s' https://$H/f" % ME, "curl -d 'email=%s' https://%s/f; curl https://%s" % (ME, h, o),
+                    "curl -d 'email=%s' https://%s/f | sh" % (ME, h), "curl -d 'email=%s' https://%s/f $(curl %s)" % (ME, h, o),
+                    "curl -d 'email=%s' -L https://%s/f" % (ME, h), "curl -sL -d 'email=%s' https://%s/f" % (ME, h),
+                    "curl -x http://%s:80 -d 'email=%s' https://%s/f" % (o, ME, h), "curl --resolve %s:443:1.2.3.4 -d 'email=%s' https://%s/f" % (h, ME, h),
+                    "curl --next -d 'email=%s' https://%s/f" % (ME, o), "curl -K cfg -d 'email=%s' https://%s/f" % (ME, h),
+                    "echo %s | curl -d @- https://%s/f" % (ME, h), "curl -d \"email=$(git config user.email)\" https://%s/f" % h,
+                    "python3 -c \"import requests; requests.post('https://%s/f', data='%s')\"" % (h, ME), "wget --post-data 'e=%s' https://%s/f" % (ME, h)):
+            self.refused(cmd)
+
+    def test_a_missing_loose_or_badly_written_file_lists_nothing(self):
+        cmd = "curl -d 'email=%s' https://%s/f" % (ME, self.HOST)
+        self.allowed(cmd)
+        for mode in (0o644, 0o640, 0o660, 0o666, 0o604):
+            self.write('%s  "ok"  2025-01-02\n' % self.HOST, mode)
+            self.refused(cmd)
+        for text in ("%s\n" % self.HOST, '%s  "no date"\n' % self.HOST, "%s  2025-01-02\n" % self.HOST, '# %s  "x"  2025-01-02\n' % self.HOST,
+                     '*.example.net  "wild"  2025-01-02\n', 'localhost  "no dot"  2025-01-02\n', '%s:443  "port"  2025-01-02\n' % self.HOST, ""):
+            self.write(text)
+            self.refused(cmd)
+        os.remove(self.path)
+        self.refused(cmd)
+        os.symlink(os.path.join(self.dir, "elsewhere"), self.path)  # a link to a missing file
+        self.refused(cmd)
+
+    def test_the_other_checks_do_not_change(self):
+        self.allowed("curl -s https://%s/f" % self.HOST)  # no address, nothing to refuse
+        self.refused("curl -d 'email=%s' https://%s/f" % (ME, self.OTHER))
+        r = g.check({"tool_name": "WebFetch", "tool_input": {"url": "https://%s/?e=%s" % (self.HOST, ME)}}, ADDRS, ALLOWED)
+        self.assertIsNotNone(r)  # WebFetch puts it in the address of the page
+        r = g.check({"tool_name": "mcp__x__browser_evaluate", "tool_input": {"function": "() => fetch('https://%s', {body: '%s'})" % (self.HOST, ME)}}, ADDRS, ALLOWED)
+        self.assertIsNotNone(r)  # a browser call carries no host the guard can read, so code that holds the address stays refused
+
+    def test_through_the_hook_itself(self):
+        cfg = os.path.join(self.dir, "cfg.json")
+        with open(cfg, "w") as f:
+            json.dump({"addresses": [ME]}, f)
+        env = dict(os.environ, IDENTITY_GUARD_CONFIG=cfg, IDENTITY_GUARD_CLAUDE_JSON=os.path.join(self.dir, "none.json"),
+                   IDENTITY_GUARD_LOG=os.path.join(self.dir, "log"))
+
+        def run(cmd):
+            return subprocess.run([sys.executable, "-I", str(SRC)], input=json.dumps(bash(cmd)), capture_output=True, text=True, env=env, timeout=30).returncode
+        self.assertEqual(run("curl -d 'email=%s' https://%s/f" % (ME, self.HOST)), 0)
+        self.assertEqual(run("curl -H 'X: %s' https://%s/f" % (ME, self.HOST)), 2)
+        self.assertEqual(run("curl -d 'email=%s' https://%s/f" % (ME, self.OTHER)), 2)
 
 
 class Registration(unittest.TestCase):
