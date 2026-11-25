@@ -507,5 +507,67 @@ class MailTokenRuleG(Base):
             self.allowed(cmd)
 
 
+class IssueNinetyThreeF7(Base):
+    """The wrong refusal and the three gaps from workspace issue 93 (all values made up)."""
+
+    def test_a_session_name_is_not_a_secret(self):
+        for cmd in ("SESSION=lanes-main; tmux list-windows -t lanes", "export SESSION=lanes-main",
+                    "SESSION=work-window-two tmux attach"):
+            self.allowed(cmd)
+
+    def test_a_real_session_secret_still_blocks(self):
+        for cmd in ("SESSION_TOKEN=abcdefghijkl curl x", "session_id=Zq7LmPw29vK run", "SESSION_COOKIE=qwertyuiop1 go"):
+            self.blocked(cmd, "A")
+
+    def test_the_viewer_name_elsewhere_in_a_command_exempts_nothing(self):
+        for cmd in ("echo redact_view.py; cat ~/x/server.pem", "cat ~/x/server.pem # redact_view.py",
+                    "cat ~/x/server.pem && python3 ~/.claude/scripts/redact_view.py other.txt",
+                    "python3 -c 'print(open(\"server.pem\").read())'; echo redact_view.py"):
+            self.blocked(cmd)
+
+    def test_the_viewer_itself_still_passes(self):
+        self.allowed("python3 ~/.claude/scripts/redact_view.py ~/x/server.pem")
+        self.allowed("python3 -I ~/.claude/scripts/redact_view.py ~/x/api-key.txt")
+
+    def test_more_print_programs_block(self):
+        for cmd in ("paste ~/x/server.pem", "fold -w 40 ~/x/server.pem", "tr a b < ~/x/server.pem",
+                    "while read l; do echo $l; done < ~/x/api-key.txt", "hexdump -C ~/x/server.pem",
+                    "xargs cat < ~/x/server.pem", "vim ~/x/server.pem", "openssl rsa -in ~/x/server.pem",
+                    "source ~/x/api-key.txt", "git show HEAD:server.pem", "git diff HEAD -- server.pem",
+                    "git log -p -- server.pem", "git cat-file -p HEAD:server.pem", "git blame server.pem"):
+            self.blocked(cmd, "B")
+
+    def test_quiet_uses_of_those_names_still_pass(self):
+        for cmd in ("ls ~/x/server.pem", "git log --oneline -- server.pem", "git status server.pem",
+                    "test -f ~/x/api-key.txt && echo there", "wc -c ~/x/server.pem", "chmod 600 ~/x/server.pem"):
+            self.allowed(cmd)
+
+
+class WriteAndEdit(unittest.TestCase):
+    def ev(self, tool, **ti):
+        return sg.evaluate({"tool_name": tool, "tool_input": ti})
+
+    def test_a_token_shaped_value_in_a_write_is_refused(self):
+        for text in ("x = '%s'" % GHO, "key: %s" % JWT, "-----BEGIN RSA " + "PRIVATE " + "K" + "EY" + "-" * 5 + "\n" + "MIIB" + "CgKC"):
+            r = self.ev("Write", file_path="/tmp/a.txt", content=text)
+            self.assertIsNotNone(r, text)
+            self.assertEqual(r[0], "F")
+
+    def test_edit_and_multiedit_are_read_too(self):
+        self.assertEqual(self.ev("Edit", file_path="/tmp/a", old_string="a", new_string="t=%s" % GHO)[0], "F")
+        self.assertEqual(self.ev("MultiEdit", file_path="/tmp/a", edits=[{"old_string": "a", "new_string": GHO}])[0], "F")
+
+    def test_ordinary_code_and_prose_pass(self):
+        for text in ("password = get_password()", "token = os.environ['TOKEN']", "SESSION=lanes-main", "just words"):
+            self.assertIsNone(self.ev("Write", file_path="/tmp/a.txt", content=text), text)
+        self.assertIsNone(self.ev("Edit", file_path="/tmp/a", old_string="x", new_string="y"))
+
+    def test_writing_into_the_mail_token_folder_is_refused(self):
+        home = os.path.expanduser("~")
+        r = self.ev("Write", file_path=home + "/.config/afa/gmail/token.json", content="{}")
+        self.assertIsNotNone(r)
+        self.assertEqual(r[0], "G")
+
+
 if __name__ == "__main__":
     unittest.main()

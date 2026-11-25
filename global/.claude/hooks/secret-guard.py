@@ -16,7 +16,7 @@ import sys
 import time
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
-        r"|credential|private[_-]?key|client[_-]?secret|session|cookie|bearer|webhook)")
+        r"|credential|private[_-]?key|client[_-]?secret|session[_-]?(?:id|key|token|secret|cookie)|cookie|bearer|webhook)")
 PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKENS = [
     ("GitHub token", r"gh[opsu]_\w{20,}"), ("GitHub PAT", r"github_pat_\w{20,}"),
@@ -65,8 +65,13 @@ ENV_RE = re.compile(r"(?<![\w-])\.env(?P<suf>\.[\w.-]+)?(?![\w-])")
 ENV_OK = {"example", "sample", "template"}
 
 READERS = ("cat tac head tail less more bat nl jq yq strings xxd od base64 sed awk cut sort uniq "
-           "grep rg diff").split()
+           "grep rg diff paste fold fmt column tr rev expand unexpand hexdump hd zcat bzcat xzcat zgrep "
+           "xargs source view vi vim nano ed emacs openssl ssh-keygen gawk mawk dd comm join").split()
 VERB = re.compile(r"(?<![\w.-])(" + "|".join(READERS) + r")(?![\w.-])")
+# git commands that print a file's content or a diff of it, and an input redirect ("< file", "while read ... done < file")
+GIT_PRINT = re.compile(r"(?<![\w.-])git\s+(?:-\S+\s+)*(?:show|cat-file|blame|diff|grep|stash\s+show)(?![\w-])"
+                       r"|(?<![\w.-])git\s+(?:-\S+\s+)*log\b[^;&|]*\s(?:-p|--patch|-[a-zA-Z]*p[a-zA-Z]*)(?!\S)")
+REDIR_IN = re.compile(r"(?<![<\w&])<(?![<(])\s*")
 INTERP = re.compile(r"(?<![\w.-])(?:python3?|node|ruby|perl)(?![\w.-])")
 INTERP_EVAL = re.compile(r"(?<!\S)(?:-[a-zA-Z]*[ce]|--eval)(?!\S)|<<")
 SHELL_C = re.compile(r"(?<![\w.-])(?:ba|z)?sh\s+-\w*c\b")
@@ -204,10 +209,17 @@ def literal_value(val):
     return not re.fullmatch(r"-?\d+(?:\.\d+)?|true|false", v, re.I)
 
 
-def find_secret(cmd):
+def find_token(text):
     for label, rx in TOKENS:
-        if re.search(rx, cmd):
+        if re.search(rx, text):
             return label
+    return None
+
+
+def find_secret(cmd):
+    label = find_token(cmd)
+    if label:
+        return label
     for m in ASSIGN.finditer(cmd):
         if m.start() and cmd[m.start() - 1] in "?&" and URL_ID.match(m.group("val")) and "://" in re.split(r"\s", cmd[:m.start()])[-1]:
             continue
@@ -593,19 +605,34 @@ def process_listing_in(cmd):
     return any(_process_listing(segment) for segment in _process_segments(cmd))
 
 
+def is_viewer_segment(seg):
+    """True when the segment RUNS the redacting viewer: python on its own as the program and redact_view.py as the
+    script. The viewer's name elsewhere in a command (an echo, a comment, a second command) does not exempt anything."""
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return False
+    if not words or not re.fullmatch(r"python[\d.]*", os.path.basename(words[0])):
+        return False
+    rest = [w for w in words[1:] if not w.startswith("-")]
+    return bool(rest) and os.path.basename(rest[0]) == "redact_view.py" and ";" not in seg and "$(" not in seg and "`" not in seg
+
+
 def prints_sensitive(cmd):
-    if "redact_view.py" in cmd:
-        return None
-    whole = sensitive_in(cmd)
+    segs = [seg for seg in split_segments(cmd) if not is_viewer_segment(seg)]
+    rest = "\n".join(segs)  # the command with the viewer's own segments taken out
+    whole = sensitive_in(rest)
     if not whole:
         return None
-    if INTERP.search(blank_quotes(cmd)) and INTERP_EVAL.search(cmd):
+    if INTERP.search(blank_quotes(rest)) and INTERP_EVAL.search(rest):
         return whole
-    for seg in split_segments(cmd):
+    for seg in segs:
         label = sensitive_in(seg)
         if not label:
             continue
         scan = seg if SHELL_C.search(seg) else blank_quotes(seg)
+        if GIT_PRINT.search(scan) or REDIR_IN.search(scan):
+            return label
         verbs = set(VERB.findall(scan))
         if SHELL_C.search(seg) and verbs:
             return label
@@ -655,6 +682,21 @@ def evaluate(payload):
         where = secret_in_file(ti["file_path"])
         if where:
             return "E", RULE_E % (ti["file_path"], where)
+    elif tool in ("Write", "Edit", "MultiEdit"):
+        # What a session writes: a token-shaped value (a known key prefix, a private key, a JWT, a webhook address) is refused.
+        # The name=value rule is not used here: code and tests set names like token= all the time.
+        path = ti.get("file_path")
+        if isinstance(path, str) and gmail_path_hit(path):
+            return "G", ("secret-guard: rule G, writing into the mail token's folder is blocked. That token can send mail.")
+        texts = [ti.get("content"), ti.get("new_string")]
+        texts += [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
+        for t in texts:
+            if isinstance(t, str):
+                label = find_token(t)
+                if label:
+                    return "F", ("secret-guard: rule F, this %s would write what looks like a real secret (%s) into a file. "
+                                 "Put the value in an environment variable or a private config file and reference it by name; "
+                                 "for a test, build a made-up value at run time." % (tool, label))
     elif tool == "Grep":
         if ti.get("output_mode") == "content" and (gmail_path_hit(ti.get("path"), content_search=True)
                                                     or GMAIL_DIR.search(gmail_norm(str(ti.get("glob") or "")))):
