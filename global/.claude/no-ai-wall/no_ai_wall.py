@@ -105,7 +105,10 @@ def _cdpath(text):
     built at run time ($ or a backtick), or CDPATH named without a value the text shows (`export CDPATH` with one set before)."""
     values = [os.environ.get("CDPATH") or ""]
     values += [m.group(1).strip("'\"") for m in re.finditer(r"\bCDPATH=([^\s;&|)]*)", text or "")]
-    unsure = any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b|\bcdable_vars\b", text or ""))  # zsh's cdpath array and bash's cdable_vars also change where a cd lands
+    # zsh's cdpath array, and the options that make a cd take a variable's value or a named folder (zsh reads option names in any case, with or
+    # without underscores: CDABLEVARS, cdable_vars, AUTO_CD), and `hash -d` names, also change where a cd lands
+    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", text or ""))
+              or bool(re.search(r"cdable_?vars|auto_?cd|\bhash\s+-\w*d", text or "", re.I)))
     entries = [e for v in values for e in v.split(":") if e and "$" not in e and "`" not in e]
     return entries, unsure
 
@@ -113,6 +116,13 @@ def _cdpath(text):
 def _plain_relative(arg):
     """A `cd` operand CDPATH is applied to: relative, and not ./, ../, ~, a variable or an option (those are never looked up in CDPATH)."""
     return bool(arg) and not arg.startswith(("/", "./", "../", "~", "$", "-", "`")) and arg not in (".", "..")
+
+
+def _cd_lands_unknown(arg, cdpath):
+    """True when the folder a `cd arg` lands in cannot be worked out from the text: `-`, a substitution or a variable (but `$HOME` itself is known),
+    a plain relative name while CDPATH or a related option may apply, or `~name` (another user's home, or a named folder, not the working folder)."""
+    return (arg == "-" or "`" in arg or "$" in _HOME_VAR.sub("", arg) or bool((cdpath[0] or cdpath[1]) and _plain_relative(arg))
+            or (arg.startswith("~") and arg != "~" and not arg.startswith("~/")))
 
 
 _MAX_CD_BASES = 400
@@ -944,8 +954,7 @@ def _searches(text, cwd, depth=0, bodies=None, heredocs=None):
             arg = next((a for a in ws[1:] if a == "-" or not a.startswith("-")), None)
             if arg is None:
                 cur = home()  # a bare cd goes home
-            elif arg == "-" or "`" in arg or "$" in _HOME_VAR.sub("", arg) or (
-                    (cdpath[0] or cdpath[1]) and _plain_relative(arg)) or (cur is None and not os.path.isabs(arg) and not arg.startswith("~")):
+            elif _cd_lands_unknown(arg, cdpath) or (cur is None and not os.path.isabs(arg) and not arg.startswith("~")):
                 cur = None  # a folder the text cannot name (issue 139): never guessed at, and a relative cd after it stays unknown
             else:
                 cur = expand(arg, cur)
@@ -1770,8 +1779,8 @@ def bash_writes_guarded(command, cwd):
                 cur = None
             elif arg is None or arg == "~":
                 cur = home()
-            elif (cdpath[0] or cdpath[1]) and _plain_relative(arg):
-                cur = None  # CDPATH may send a plain relative cd to a folder not under the working one (issue 139)
+            elif _cd_lands_unknown(arg, cdpath):
+                cur = None  # CDPATH (or a related option, or a ~name) may send the cd to a folder not under the working one (issue 139)
             elif cur is None and not arg.startswith(("/", "~", "$")):
                 cur = None  # a relative cd from a folder the text could not name stays unknown
             else:

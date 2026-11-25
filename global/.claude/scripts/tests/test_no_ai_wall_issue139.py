@@ -41,8 +41,14 @@ class Issue139Tests(base.Fixture):
     def test_other_ways_to_change_where_a_cd_lands_are_unknown_too(self):
         wall = self.p("wall")
         for cmd in ("cdpath=(%s); cd clientA; rm docs/secret.txt" % wall, "setopt cdable_vars; cd clientA; rm docs/secret.txt",
-                    "shopt -s cdable_vars; cd clientA; rm docs/secret.txt", "export CDPATH; cd clientA; rm docs/secret.txt"):
+                    "shopt -s cdable_vars; cd clientA; rm docs/secret.txt", "export CDPATH; cd clientA; rm docs/secret.txt",
+                    # zsh reads option names in any case and with or without underscores; a named folder is not the working folder
+                    "setopt CDABLEVARS; cd clientA; rm docs/secret.txt", "setopt CDABLE_VARS; cd clientA; rm docs/secret.txt",
+                    "setopt AUTO_CD; cd clientA; rm docs/secret.txt", "hash -d w=%s; cd ~w; rm clientA/docs/secret.txt" % wall,
+                    "cd ~someone; rm docs/secret.txt", "cd ~+; rm docs/secret.txt"):
             self.refused(cmd, self.work)
+        self.allowed("cd ~/proj; cat a.txt", self.work)  # a folder under the home folder is still read as one
+        self.allowed("cd ~; cat a.txt", self.work)
 
     def test_a_variable_that_only_starts_with_home_is_not_the_home_folder(self):
         # `$HOMEX` is another variable: it must never be read as the home folder followed by an X
