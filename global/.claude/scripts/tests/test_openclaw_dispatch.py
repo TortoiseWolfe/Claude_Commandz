@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import state_guard  # noqa: E402,F401  first: no test of this suite (or of the mutation harness) may write the live ~/.claude/state
 import openclaw_dispatch as dp  # noqa: E402
 import openclaw_gateway as gw  # noqa: E402
+import engine_blocks as eb  # noqa: E402
 import hub_digest as hd  # noqa: E402
 import openclaw_pickup as pk  # noqa: E402
 from tmpdirs import fresh_dir  # noqa: E402
@@ -35,6 +36,7 @@ class FakeHost:
         self.wins, self.start_ok, self.send_result, self.proj = set(), (True, "started"), (True, "sent to x: submitted"), None
         self.proj_asked = 0
         self.used, self.reset = None, None  # the week's USED percent and its reset (epoch), as week_budget() reports them
+        self.stale, self.calibrated_at = False, None  # whether the claude.ai reading behind the figures is old, and when it was taken
         self.panes = {}
         self.hub_live = set()  # lanes running now that the hub started (the dispatcher's state file does not hold them)
 
@@ -69,7 +71,7 @@ class FakeHost:
 
     def week_budget(self):
         self.proj_asked += 1
-        return {"projected": self.proj, "used": self.used, "reset": self.reset}
+        return {"projected": self.proj, "used": self.used, "reset": self.reset, "stale": self.stale, "calibrated_at": self.calibrated_at}
 
     def inject(self, text):
         try:
@@ -107,6 +109,31 @@ def live_state(case, where):
         case.addCleanup(p.stop)
 
 
+def seed_blocks(old_save):
+    """A save_state that also seeds the engine-blocks file (the one record the dispatcher now honors) for any *_blocked_until key a test
+    changes by hand. Evidence 0, so a block the dispatcher records itself (evidence = now) always replaces it. A record the dispatcher or a test wrote
+    itself (source other than \"test\") is never overwritten by a state key."""
+    def save(path, state):
+        try:
+            prev = dp.load_state(path)
+        except Exception:
+            prev = {}
+        data = eb._load()
+        for k, v in list(state.items()):
+            if not k.endswith("_blocked_until") or v == prev.get(k, 0):
+                continue
+            e = k[:-len("_blocked_until")]
+            if v > 0 and data.get(e, {}).get("source", "test") != "test":
+                continue  # the dispatcher (or a test's own eb.block) holds this record; the old key never overrides it
+            if v > 0 and eb._num(data.get(e, {}), "until") != v:
+                data[e] = {"until": v, "evidence": 0, "source": "test", "note": ""}
+            elif not v:
+                data.pop(e, None)
+        eb._save(data)
+        return old_save(path, state)
+    return save
+
+
 class Base(unittest.TestCase):
     def private_paths(self):
         """The lane index, pass flag and results log default to the live ones under ~/.claude; a test must never write those."""
@@ -115,6 +142,12 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(fresh_dir(self))
         live_state(self, self.tmp / "state")
+        patcher = mock.patch.dict(os.environ, {"AFA_ENGINE_BLOCKS": str(self.tmp / "engine-blocks.json")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(dp, "save_state", seed_blocks(dp.save_state))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.root = self.tmp / "repos"
         for name in ("own-app", "own-docker", "client-app", "foreign", "docs"):
             (self.root / name / ".git").mkdir(parents=True)
@@ -1330,7 +1363,9 @@ class Sweep(Base):
 
     def test_one_choice_honors_every_block(self):
         now = NOW
-        r = lambda state, engine: dp.resolve_engine(state, engine, now)
+        def r(state, engine):  # the blocks come from the engine-blocks file; a state key alone decides nothing
+            eb._save({k[:-len("_blocked_until")]: {"until": v, "evidence": 0, "source": "test", "note": ""} for k, v in state.items() if v > 0})
+            return dp.resolve_engine({}, engine, now)
         late = now + 100
         none = {}
         for e in ("agy", "codex", "copilot", "opencode"):
@@ -1374,15 +1409,26 @@ class Sweep(Base):
         self.assertGreater(want - (NOW + 100), dp.COPILOT_BLOCK_SECONDS)
         self.assertEqual(self.state()["copilot_blocked_until"], want)
 
-    def test_an_existing_later_block_is_never_shortened(self):
-        later = self.first_of_next_month(NOW + 100) + 30 * 86400
-        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS, copilot_blocked_until=later)
-        # an ordinary 12 hour usage-limit message, and then a monthly one, both reported while the later block stands
-        self.out_of_usage("Copilot usage limit reached", NOW)
-        self.assertEqual(self.state()["copilot_blocked_until"], later)
-        self.block(copilot_blocked_until=later)
-        self.out_of_usage("You have exceeded your monthly quota", NOW + 1000)
-        self.assertEqual(self.state()["copilot_blocked_until"], later)
+    def copilot_lane_then_block(self, block_evidence):
+        """A lane starts on Copilot; then a block is recorded (as another lane's report would); then the lane reports its own limit at NOW + 100."""
+        self.agy_out()
+        self.block(codex_blocked_until=NOW + 2 * dp.CODEX_BLOCK_SECONDS)
+        self.start("own-app", "ran on copilot")
+        lane = self.host.started[-1][0]
+        self.assertEqual(self.host.started[-1][2], "copilot")
+        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("Copilot usage limit reached\nexit 1\n")
+        eb.block("copilot", NOW + 10**6, block_evidence, "another lane")
+        dp.sweep(self.ctx, self.host, NOW + 100)
+
+    def test_newest_evidence_wins_so_a_new_report_can_move_a_block_earlier(self):
+        self.copilot_lane_then_block(0)  # older evidence than the lane's report at NOW + 100
+        self.assertEqual(eb.until("copilot", NOW), NOW + 100 + dp.COPILOT_BLOCK_SECONDS)
+
+    def test_a_report_with_older_evidence_does_not_replace_a_newer_block(self):
+        self.copilot_lane_then_block(NOW + 5000)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
 
     CODEX_LIMIT = "ERROR: You\u2019ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at %s."
 
@@ -1412,19 +1458,6 @@ class Sweep(Base):
         self.agy_out()
         self.out_of_usage(self.CODEX_LIMIT % "Feb 3rd, 2027", NOW)
         self.assertEqual(self.state()["codex_blocked_until"], self.local_epoch(2027, 2, 3, 0, 0))
-
-    def test_codex_block_never_shortens_an_existing_later_one(self):
-        later = self.local_epoch(2027, 3, 1, 0, 0)
-        self.agy_out()
-        self.start("own-app", "ran on codex")  # the lane started on Codex; the later block was set by another lane's report meanwhile
-        lane = self.host.started[-1][0]
-        self.assertEqual(self.host.started[-1][2], "codex")
-        out = Path(self.state()["lanes"][lane]["report"]).parent / "out.log"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(self.CODEX_LIMIT % "Feb 3rd, 2027 2:38 PM" + "\nexit 1\n")
-        self.block(codex_blocked_until=later)
-        dp.sweep(self.ctx, self.host, NOW + 100)
-        self.assertEqual(self.state()["codex_blocked_until"], later)
 
     AGY_LIMIT = ("error: Individual quota reached. Please upgrade your subscription to increase your limits. %s\n"
                  'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. %s","status":"RESOURCE_EXHAUSTED"}\nexit 3\n')
@@ -1801,6 +1834,55 @@ EDGES = [  # (when, phase)
 ]
 
 
+class EngineBlocksFile(Base):
+    """block_until, resolve_engine and a lane's clean run all go through the one engine-blocks file."""
+
+    def test_block_until_writes_the_file_and_keeps_the_state_key(self):
+        state = {}
+        dp.block_until(state, "codex_blocked_until", "usage limit", NOW, dp.CODEX_BLOCK_SECONDS)
+        self.assertEqual(eb.until("codex", NOW), NOW + dp.CODEX_BLOCK_SECONDS)
+        self.assertEqual(state["codex_blocked_until"], NOW + dp.CODEX_BLOCK_SECONDS)
+        rec = json.loads(Path(os.environ["AFA_ENGINE_BLOCKS"]).read_text())["codex"]
+        self.assertEqual((rec["evidence"], rec["source"]), (NOW, "dispatcher: codex reported its usage limit"))
+
+    def test_resolve_engine_honors_the_file(self):
+        eb.block("agy", NOW + 1000, NOW, "test")
+        self.assertEqual(dp.resolve_engine({}, "agy", NOW)[0], "codex")
+        self.assertEqual(dp.resolve_engine({}, "agy", NOW + 2000)[0], "agy")
+
+    def test_resolve_engine_ignores_a_stale_state_key(self):
+        self.assertEqual(dp.resolve_engine({"agy_blocked_until": NOW + 10**6}, "agy", NOW)[0], "agy")
+
+    def lane_with_report(self, name, engine, started, status="reported"):
+        state = self.state()
+        rep = self.tmp / name / "report.md"
+        rep.parent.mkdir(parents=True)
+        state["lanes"][name] = {"repo": "own-app", "engine": engine, "model": "sonnet", "started": started, "status": "started", "report": str(rep)}
+        dp.save_state(self.ctx.state_path, state)
+        if status == "reported":
+            rep.write_text("done\n")
+        else:
+            (rep.parent / "out.log").write_text("something broke\nexit 1\n")
+
+    def test_a_reported_lane_clears_a_block_recorded_before_it_started(self):
+        eb.block("copilot", NOW + 10**6, NOW - 500, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100)
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), 0)
+
+    def test_a_reported_lane_does_not_clear_a_block_recorded_after_it_started(self):
+        eb.block("copilot", NOW + 10**6, NOW - 50, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100)
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
+
+    def test_a_dead_lane_does_not_clear(self):
+        eb.block("copilot", NOW + 10**6, NOW - 500, "test")
+        self.lane_with_report("l1", "copilot", NOW - 100, status="dead")
+        dp.sweep(self.ctx, self.host, NOW)
+        self.assertEqual(eb.until("copilot", NOW), NOW + 10**6)
+
+
 class TheWeeksPhases(unittest.TestCase):
     def test_the_phase_changes_one_minute_either_side_of_each_boundary(self):
         for when, phase in EDGES:
@@ -1808,7 +1890,7 @@ class TheWeeksPhases(unittest.TestCase):
                 self.assertEqual(dp.week_phase(when)[0], phase)
 
     def test_the_boundaries_are_the_named_constants(self):
-        self.assertEqual((dp.WEEK_RESET, dp.PHASE2_START, dp.PHASE3_START), ((2, 12, 0), (0, 6, 0), (1, 6, 0)))
+        self.assertEqual((dp.WEEK_RESET_UTC, dp.PHASE2_START, dp.PHASE3_START), ((2, 16, 0), (0, 6, 0), (1, 6, 0)))
         self.assertEqual((dp.PROJECTION_LIMIT, dp.USED_LIMIT, dp.USED_LIMIT_END), (90.0, 95.0, 100.0))
 
     def test_a_reset_the_report_names_is_the_one_used_and_the_week_follows_a_dst_change(self):
@@ -1824,6 +1906,14 @@ class TheWeeksPhases(unittest.TestCase):
         self.assertEqual(dp.week_phase(ET(2026, 10, 17, 9, 53)), (1, "Mon 6:00 AM", "Wed 12:00 PM"))
         self.assertEqual(dp.week_phase(ET(2026, 10, 19, 9, 0)), (2, "Tue 6:00 AM", "Wed 12:00 PM"))
         self.assertEqual(dp.week_phase(ET(2026, 10, 20, 9, 0)), (3, None, "Wed 12:00 PM"))
+
+    def test_the_fallback_reset_is_wednesday_16_utc_so_11_am_in_winter_and_12_pm_in_summer(self):
+        self.assertEqual(dp.week_phase(ET(2026, 11, 15, 9))[2], "Wed 11:00 AM")
+        self.assertEqual(dp.week_phase(ET(2026, 7, 15, 9))[2], "Wed 12:00 PM")
+        self.assertEqual(dp._next_reset(dp._et(ET(2026, 11, 18, 10, 59))), dp._et(ET(2026, 11, 18, 11, 0)))
+        self.assertEqual(dp._next_reset(dp._et(ET(2026, 11, 18, 11, 1))), dp._et(ET(2026, 11, 25, 11, 0)))
+        self.assertEqual(dp.week_phase(ET(2026, 11, 18, 10, 59))[0], 3)
+        self.assertEqual(dp.week_phase(ET(2026, 11, 18, 11, 1))[0], 1)
 
     def test_each_phase_gates_on_its_own_figure(self):
         # (when, projected, used, held?)
@@ -1889,6 +1979,28 @@ class TheStepDownFollowsThePhase(Base):
         self.assertIn("phase 2", self.host.chats[-1])
         self.assertIn("used at 96%", self.host.chats[-1])
 
+    def test_the_direct_door_steps_down_on_a_stale_budget_and_says_since_when(self):
+        self.host.proj, self.host.used, self.host.stale, self.host.calibrated_at = 50, 50, True, ET(2026, 10, 18, 9)
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 19, 9))
+        self.assertEqual(self.host.started[-1][3], "sonnet")
+        self.assertIn("Sonnet only: the budget figures are unchecked since Sun 18 Oct 9:00 AM", self.host.chats[-1])
+        self.host.calibrated_at = None
+        self.start("client-app", "price the proposal for the contract", ET(2026, 10, 19, 9, 5))
+        self.assertIn("have no claude.ai reading on record", self.host.chats[-1])
+
+    def test_step_down_alone(self):
+        under = {"projected": 50, "used": 50, "reset": None, "stale": False, "calibrated_at": None}
+        over = dict(under, projected=108)
+        stale = dict(under, stale=True)
+        when = ET(2026, 10, 18, 9)
+        self.assertEqual(dp.step_down(under, "claude", "opus", "plain task", when), ("opus", ""))
+        self.assertEqual(dp.step_down(over, "claude", "opus", "plain task", when)[0], "sonnet")
+        self.assertEqual(dp.step_down(stale, "claude", "opus", "plain task", when)[0], "sonnet")
+        self.assertEqual(dp.step_down(over, "claude", "opus", "fix the site model", when), ("opus", ""))
+        self.assertEqual(dp.step_down(stale, "claude", "opus", "fix the site model", when), ("opus", ""))
+        self.assertEqual(dp.step_down(over, "copilot", "opus", "plain task", when), ("opus", ""))
+        self.assertEqual(dp.step_down(over, "claude", "haiku", "plain task", when)[0], "haiku")
+
     def test_phase_3_keeps_opus_at_any_usage(self):
         self.host.proj, self.host.used = 300, 99.5
         self.start("client-app", "price the proposal for the contract", ET(2026, 10, 20, 6, 1))
@@ -1908,7 +2020,40 @@ class TheHostBudget(unittest.TestCase):
     def test_the_budget_carries_used_and_the_reset_the_report_names(self):
         calls = []
         b = self.host(self.REPORT, calls).week_budget(Path(fresh_dir(self)) / "p.json", NOW)
-        self.assertEqual(b, {"projected": 106.5, "used": 83.97, "reset": ET(2026, 10, 21, 12)})
+        self.assertEqual((b["projected"], b["used"], b["reset"]), (106.5, 83.97, ET(2026, 10, 21, 12)))
+
+    def test_the_budget_is_stale_when_the_calibration_is_missing_from_another_week_old_or_the_report_unreadable(self):
+        fresh = {"pct": 90, "at": datetime.datetime.fromtimestamp(NOW - 3600).isoformat(), "other_week": False}
+        old = dict(fresh, at=datetime.datetime.fromtimestamp(NOW - 31 * 3600).isoformat())
+        cases = [("recent", fresh, False), ("missing", None, True), ("other week", dict(fresh, other_week=True), True), ("old", old, True)]
+        for label, cal, stale in cases:
+            with self.subTest(label):
+                proj = dict(self.REPORT["projection"])
+                if cal is not None:
+                    proj["calibration"] = cal
+                b = self.host({"projection": proj}, []).week_budget(Path(fresh_dir(self)) / "p.json", NOW)
+                self.assertIs(b["stale"], stale)
+                self.assertEqual(b["calibrated_at"] is None, cal is None)
+        host = dp.LaneHost()
+        host._run = lambda argv, timeout, cwd=None, stdin=None: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+        b = host.week_budget(Path(fresh_dir(self)) / "p.json", NOW)
+        self.assertEqual((b["projected"], b["stale"]), (None, True))
+
+    def test_stale_is_cached_and_a_cache_without_the_key_reads_as_not_stale(self):
+        tmp, calls = Path(fresh_dir(self)) / "p.json", []
+        host = self.host({"projection": {"projected_pct": 50.0, "used_pct": 40.0}}, calls)
+        host.week_budget(tmp, NOW)  # no calibration in REPORT: stale, and saved so
+        self.assertIs(json.loads(tmp.read_text())["stale"], True)
+        self.assertIs(host.week_budget(tmp, NOW + 60)["stale"], True)
+        self.assertEqual(len(calls), 1)
+        tmp.write_text(json.dumps({"at": NOW, "pct": 50, "used": 40, "reset": None}))
+        b = host.week_budget(tmp, NOW + 60)
+        self.assertEqual((b["stale"], b["calibrated_at"], len(calls)), (False, None, 1))
+
+    def test_a_stale_budget_does_not_hold_the_waiting_room_by_itself(self):
+        b = {"projected": 50, "used": 50, "reset": None, "stale": True, "calibrated_at": None}
+        for when in (ET(2026, 10, 18, 9), ET(2026, 10, 19, 9), ET(2026, 10, 20, 9)):
+            self.assertIsNone(dp.budget_over(b, when, held=True))
 
     def test_a_cache_from_before_the_reset_is_not_trusted_after_it(self):
         tmp, calls = Path(fresh_dir(self)) / "p.json", []

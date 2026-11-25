@@ -30,7 +30,7 @@ class SettingsHookTests(unittest.TestCase):
 
     def test_lane_watch_guard_runs_on_stop(self):
         self.assertIn(
-            "python3 ~/.claude/hooks/lane-watch-guard.py",
+            "python3 -I ~/.claude/hooks/lane-watch-guard.py",
             [c for _, c in commands("Stop")],
         )
 
@@ -133,18 +133,26 @@ class SettingsHookTests(unittest.TestCase):
     def test_identity_leak_guard_covers_every_connector(self):
         # A connector (MCP tool) can send text to an outside service as easily as Bash or a web call can.
         self.assertIn(
-            ("Bash|WebFetch|WebSearch|mcp__.*", "python3 ~/.claude/hooks/identity-leak-guard.py"),
+            ("Bash|WebFetch|WebSearch|mcp__.*", "python3 -I ~/.claude/hooks/identity-leak-guard.py"),
             commands("PreToolUse"),
         )
 
     def test_own_review_merge_guard_runs_before_every_shell_call(self):
         # lane_merge.py refuses a repo that keeps its own review; this hook refuses the plain gh, curl and
         # git commands a session could type instead, so it must see every Bash call in every session.
-        self.assertIn(("Bash", "python3 ~/.claude/hooks/own-review-merge-guard.py"), commands("PreToolUse"))
+        self.assertIn(("Bash", "python3 -I ~/.claude/hooks/own-review-merge-guard.py"), commands("PreToolUse"))
         self.assertTrue((HOOKS_DIR / "own-review-merge-guard.py").exists())
 
+    def test_docker_first_guard_runs_before_every_shell_call(self):
+        # Jonathan, 18 Nov 2026: "always Docker first! for all our projects". The hook refuses a host npm, pnpm, yarn, bun,
+        # vite, next or expo run. install_docker_first_guard.py adds this same entry on a machine, so the two must agree.
+        self.assertEqual(
+            [m for m, c in commands("PreToolUse") if c == "python3 -I ~/.claude/hooks/docker-first-guard.py"], ["Bash"]
+        )
+        self.assertTrue((HOOKS_DIR / "docker-first-guard.py").exists(), "no copy of docker-first-guard.py")
+
     def test_list_file_guard_covers_bash_and_the_edit_tools(self):
-        found = [m for m, c in commands("PreToolUse") if c == "python3 ~/.claude/hooks/list-file-guard.py"]
+        found = [m for m, c in commands("PreToolUse") if c == "python3 -I ~/.claude/hooks/list-file-guard.py"]
         self.assertEqual(len(found), 1)
         matched = found[0].split("|")
         for tool in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"):
@@ -155,7 +163,7 @@ class SettingsHookTests(unittest.TestCase):
         # One decision per card, "Hold" first, a numbered reference named in words with its address, and a live
         # check before asking about sent mail or a merge: the card is the moment of need, so the guard must see
         # every AskUserQuestion call. It reads the transcript through unverified-pending.py, so both files ship.
-        self.assertIn(("AskUserQuestion", "python3 ~/.claude/hooks/ask-card-guard.py"), commands("PreToolUse"))
+        self.assertIn(("AskUserQuestion", "python3 -I ~/.claude/hooks/ask-card-guard.py"), commands("PreToolUse"))
         self.assertTrue((HOOKS_DIR / "ask-card-guard.py").exists(), "no copy of ask-card-guard.py")
         self.assertTrue((HOOKS_DIR / "unverified-pending.py").exists(), "ask-card-guard.py loads unverified-pending.py")
 
@@ -208,7 +216,23 @@ class SettingsHookTests(unittest.TestCase):
         # Like the private inbox watcher, this guard's own file stays out of this public repo, so only its entry
         # is checked. With the entry in place and the file missing every Bash call is refused, so a restore copies
         # the file from the private backup first.
-        self.assertIn(("Bash", "python3 ~/.claude/hooks/nextcloud-guard.py"), commands("PreToolUse"))
+        self.assertIn(("Bash", "python3 -I ~/.claude/hooks/nextcloud-guard.py"), commands("PreToolUse"))
+
+    def test_every_guard_starts_in_isolated_mode(self):
+        # python3 -I ignores PYTHON* variables and the script folder and user site, so a stray file or variable
+        # cannot change how a guard behaves. Every hook whose script name ends in -guard.py must start this way.
+        import re
+
+        found = []
+        bad = []
+        for event in json.loads(SETTINGS.read_text())["hooks"]:
+            for _, command in commands(event):
+                if re.search(r"-guard\.py(\s|$)", command):
+                    found.append(command)
+                    if not command.startswith("python3 -I "):
+                        bad.append(command)
+        self.assertGreaterEqual(len(found), 8, "expected at least the 8 guard entries")
+        self.assertEqual(bad, [], "guard commands that do not start with python3 -I")
 
     def test_vercel_plugin_and_marketplace(self):
         data = json.loads(SETTINGS.read_text())

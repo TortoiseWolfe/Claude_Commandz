@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { BYPASSES, DEPLOY, FORWARDERS, REXEC, SP, WRITES, prod } from './prodcases'
+import { sha256Hex } from './prodread'
 
 const HOME = '/home/t'
 const STATE = `${HOME}/.claude/state`
@@ -910,4 +911,95 @@ describe('blast radius, read-only production proofs', () => {
       expect(r.deny).toBeDefined()
     })
   }
+})
+
+// 22 Nov: every `portainer-deploy.sh --prod backup` was refused with the guard's catch-all and nothing was written to the log. A production call
+// the guard cannot judge is an ordinary hold (hub: the dialog; lane: a refusal that names the reason), and a crash writes its cause down.
+describe('blast radius, the guard never crashes on a production deploy call', () => {
+  const REPO = `${HOME}/repos/Chattanooga-Digital`
+  const SCRIPT = `${REPO}/scripts/portainer-deploy.sh`
+  const CALLS = [`cd ${REPO} && ./scripts/portainer-deploy.sh --prod backup`, `timeout 600 ${SCRIPT} --prod redeploy 2>&1 | tail -20`]
+  // a real-sized script that is not any pinned copy: 150 KB with non-ASCII text
+  const BIG = `#!/usr/bin/env bash\n${'echo "a long line — with a dash and ünï"\n'.repeat(4000)}`
+  const rig = (on: any, vars: Record<string, string>, files: Record<string, string>, opts: { readThrows?: boolean; askThrows?: boolean } = {}) => {
+    // setup() already answers fs.exists and fs.read from FILES, so the script goes there; a getter that throws stands for a read that fails
+    delete FILES[SCRIPT]
+    for (const [path, text] of Object.entries(files)) {
+      if (opts.readThrows && path === SCRIPT) {
+        Object.defineProperty(FILES, path, {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            throw new Error('read failed: EIO')
+          },
+        })
+      } else FILES[path] = text
+    }
+    setup(on, vars)
+    on('session.surfaces', () => ({ value: ['terminal'] }))
+    const seen = { asked: '', log: '' }
+    on('fs.write', ($: any, e: any) => {
+      seen.log += e.text
+      return { value: undefined }
+    })
+    on('process.run', (_$: any, e: any) => ({ value: { exitCode: 0, stdout: `${e.argv.at(-1)}\n`, stderr: '' } }))
+    on('tool.call', { tool: 'AskUserQuestion' }, ($: any, e: any) => {
+      seen.asked = JSON.stringify(e)
+      if (opts.askThrows) throw new Error('dialog broke: no surface')
+      return answer(e, '2 - Refuse')
+    })
+    on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+    return seen
+  }
+  for (const command of CALLS) {
+    for (const [who, vars] of [['hub', {}], ['lane', { AFA_LANE: '1' }]] as const) {
+      test(`an unpinned real-sized script is an ordinary hold (${who}): ${command.slice(0, 40)}`, async ($, on) => {
+        const seen = rig(on, vars, { [SCRIPT]: BIG })
+        const r: any = await $.tool.call({ tool: 'Bash', command })
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).toContain('refused at the prompt')
+        expect(r.deny).not.toContain('its guard failed')
+      })
+      test(`an unreadable script is an ordinary hold (${who}): ${command.slice(0, 40)}`, async ($, on) => {
+        const seen = rig(on, vars, { [SCRIPT]: BIG }, { readThrows: true })
+        const r: any = await $.tool.call({ tool: 'Bash', command })
+        expect(seen.asked).toContain('production deploy')
+        expect(r.deny).not.toContain('its guard failed')
+      })
+      test(`a dialog that throws holds the command, names the cause and logs it (${who}): ${command.slice(0, 40)}`, async ($, on) => {
+        const seen = rig(on, vars, { [SCRIPT]: BIG }, { askThrows: true })
+        const r: any = await $.tool.call({ tool: 'Bash', command })
+        expect(r.deny).toContain('did not run')
+        expect(r.deny).toContain('dialog failed')
+        expect(r.deny).toContain('Cause: ')
+        expect(r.deny).toContain('production deploy')
+        expect(seen.log).toContain('| guard failed | the Run it? dialog failed: ')
+      })
+    }
+  }
+  // Something inside the guard itself throws (not the dialog): the catch-all denies, names the cause, and writes the `guard failed` line.
+  for (const [who, vars] of [['hub', {}], ['lane', { AFA_LANE: '1' }]] as const) {
+    test(`a throw inside the guard reaches the catch-all: denied with the cause, and logged (${who})`, async ($, on) => {
+      setup(on, vars)
+      const seen = { log: '' }
+      on('session.surfaces', () => {
+        throw new Error('surfaces exploded')
+      })
+      on('fs.write', ($: any, e: any) => {
+        seen.log += e.text
+        return { value: undefined }
+      })
+      on('tool.call', { tool: 'Bash' }, () => ({ result: 'ok', text: 'ok' }))
+      const r: any = await $.tool.call({ tool: 'Bash', command: 'git push --force origin main' })
+      expect(r.deny).toContain('its guard failed, so the command is held')
+      // No 'Cause: ' check here: the test engine may not hand the thrown Error to the catch-all's 4th argument
+      // (the log then says "cause not given"); the dialog test above proves the Cause text.
+      expect(r.result).toBeUndefined()
+      expect(seen.log).toContain('| guard failed | ')
+    })
+  }
+  test('the same script text is hashed to one stable 64-character answer', () => {
+    expect(sha256Hex(BIG)).toBe(sha256Hex(BIG))
+    expect(sha256Hex(BIG)).toHaveLength(64)
+  })
 })

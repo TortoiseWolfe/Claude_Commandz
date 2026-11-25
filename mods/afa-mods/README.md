@@ -26,6 +26,9 @@ commands are not held. Interactively it lists what the command would
 touch and asks `1 - Run it` / `2 - Refuse`. In a non-interactive session (`claude -p`, the Console
 lanes) it never waits: force pushes and production deploys are denied with a reason, the rest are
 allowed, and each verdict is appended to `~/.claude/state/mods/blast-radius.log`.
+If the guard itself fails (an exception, or the Run it? dialog breaking) the command is held, the refusal names the cause,
+and a `guard failed` line with the same cause is appended to that log. An unpinned or unreadable deploy script is an
+ordinary hold, never a failure.
 Regenerable caches and paths strictly inside `/tmp`, `$TMPDIR`, or an individual lane's scratch
 area are allowed without a prompt and logged as `allowed (own scratch)`.
 That includes a path built from variables the command sets itself (`S=/tmp/x; P=$S/prof; rm -rf $P`) and a relative one after a literal
@@ -125,7 +128,11 @@ claude plugin install afa-mods@afa-mods --scope user
 ```
 
 On this machine the marketplace is the local clone (`claude plugin marketplace add ~/repos/Claude_Commandz`),
-so a `git pull` plus `/reload-plugins` picks up edits.
+the marketplace folder is that clone's working tree, so it must be on `main` when you update. Claude Code keeps one copy per
+version number under `~/.claude/plugins/cache/`, so an edit that does not raise `version` in `.claude-plugin/plugin.json` is never
+installed (0.3.6 stayed in the cache for six later commits). Every change to `src/` raises the version in the same pull request.
+To install a merged version: `git -C ~/repos/Claude_Commandz switch main && git -C ~/repos/Claude_Commandz pull --ff-only`, then
+`claude plugin marketplace update afa-mods` and `claude plugin update afa-mods@afa-mods`, then open a new terminal (changes load only in new `claude` processes).
 
 ## Turn it off
 

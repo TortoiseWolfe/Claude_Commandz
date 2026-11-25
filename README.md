@@ -139,8 +139,32 @@ being read. It backs up every file it replaces and writes an `undo.sh` beside th
 git -C ~/repos/Claude_Commandz fetch -q origin main && python3 -I <(git -C ~/repos/Claude_Commandz show origin/main:global/.claude/scripts/install_scripts.py) --no-fetch
 ```
 
-Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--repo`, `--home`, `--ref`. Last line is
-`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+Flags: `--dry-run` (summary only), `--yes` (skip the question), `--list-same`, `--strict`, `--repo`, `--home`, `--ref`. Last line is
+`INSTALL OK ...` or `INSTALL FAILED ... after undoing itself`. Exit codes: 0 for `INSTALL OK` even when a drifted file was left alone
+(the last line still says `drift N`, so a `set -e` script that runs the wall installer next reaches it; issue 148), 1 when a file was held back
+until the wall is installed (or, with `--strict`, when a file drifted), 2 could not run, 3 not confirmed. Tests: `python3 -m pytest global/.claude/scripts/tests/test_install_scripts.py`.
+
+### Turning the Docker-first guard on or off (a person runs this, never a session)
+
+Jonathan's rule (18 Nov 2026): "always Docker first! for all our projects". `install_docker_first_guard.py` is a small standalone
+installer for that one hook. It is on purpose not part of `install_global.py` or `install_scripts.py`: the public repo was
+scrubbed, and a repo-wide hook or script sync could arm other live guards with placeholder text. It does two things, in order: it
+copies `global/.claude/hooks/docker-first-guard.py` to `~/.claude/hooks/`, then merges one `PreToolUse` entry (matcher `Bash`) into
+the live settings file. The merge parses the JSON, adds nothing on a second run, keeps the file's own indent, and leaves a file
+that is not valid JSON alone. A backup and an `undo.sh` go to `~/.claude/state/docker-first-guard-backups/<stamp>/`. It then proves
+the result: `npm --version` must pass and `npm ci` must be refused with the quoted rule. The last line is `PASS ...` or
+`FAIL <exact reason>` (after a failure it puts both files back). No exemption file is created; that waits for Jonathan's word.
+
+```bash
+cd ~/repos/Claude_Commandz && git pull
+python3 global/.claude/scripts/install_docker_first_guard.py              # install (safe to run again)
+python3 global/.claude/scripts/install_docker_first_guard.py --uninstall  # the off switch: entry out, then the file
+python3 global/.claude/scripts/install_docker_first_guard.py --dry-run    # say what would change, change nothing
+```
+
+Flags: `--home` (default `~/.claude`), `--source`. Exit 0 = PASS, 1 = FAIL after undoing itself, 2 = could not start. The same entry
+is mirrored in `global/dotfiles/` and checked by `test_settings_hooks.py`. Tests:
+`python3 -m pytest global/.claude/scripts/tests/test_install_docker_first_guard.py`.
 
 ### Installing the no-AI wall (a person runs this, never a session)
 

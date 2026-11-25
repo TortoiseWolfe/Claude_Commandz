@@ -38,6 +38,13 @@ STUB
 cat >"$BIN/tmux" <<'STUB'
 #!/usr/bin/env bash
 # fake lane window "rl-lane": send-keys -l <text> types, C-m submits
+if [ "$1" = capture-pane ]; then
+  # Every look at the pane is counted. FAKE_BUSY_FROM/FAKE_BUSY_TO make looks number FROM..TO show a running turn (a turn that started in a gap).
+  cn=$(( $(cat "$FAKE_ST/cap-n" 2>/dev/null || echo 0) + 1 )); echo "$cn" >"$FAKE_ST/cap-n"
+  if [ -n "${FAKE_BUSY_FROM:-}" ] && [ "$cn" -ge "$FAKE_BUSY_FROM" ] && [ "$cn" -le "${FAKE_BUSY_TO:-999999}" ]; then
+    printf '%s\n' '✻ Working… (12s · esc to interrupt)' '❯ '; exit 0
+  fi
+fi
 case "$1" in
   has-session) exit 0 ;;
   list-windows) printf "%s\n" rl-lane sh-lane q-lane rk-lane rk-fast pol-opus pol-ent pol-acme-mail pol-site pol-sonnet ;;
@@ -70,6 +77,13 @@ if text == "/clear":
     n = int(open(os.path.join(st, "n")).read()) + 1 if os.path.exists(os.path.join(st, "n")) else 1
     open(os.path.join(st, "n"), "w").write(str(n))
     open(os.path.join(st, "cur"), "w").write("new-sess-%d" % n)
+    open(os.path.join(st, "prev"), "w").write(cur)
+    if os.path.exists(os.path.join(st, "cap-n")):
+        open(os.path.join(st, "clear-cap"), "w").write(open(os.path.join(st, "cap-n")).read())
+    # FAKE_HOOK=1: the SessionStart hook records the fresh session at once, before any message (what proven_session reads).
+    if os.environ.get("FAKE_HOOK") == "1":
+        import time
+        open(os.environ["FAKE_SESS_FILE"], "w").write("new-sess-%d\t%d\t-\n" % (n, int(time.time())))
     if os.environ.get("FAKE_PROJ_AFTER_CLEAR"):
         os.makedirs(os.environ["FAKE_PROJ_AFTER_CLEAR"], exist_ok=True)
         open(os.path.join(st, "projdir"), "w").write(os.environ["FAKE_PROJ_AFTER_CLEAR"])
@@ -84,8 +98,15 @@ if text.startswith("/model "):
 if "context was cleared" in text and (os.environ.get("FAKE_DROP_ALWAYS") == "1" or (os.environ.get("FAKE_DROP_FIRST_REPRIME") == "1" and not os.path.exists(os.path.join(st, "dropped")))):
     open(os.path.join(st, "dropped"), "w").close()
     sys.exit(0)
+# FAKE_REPRIME_OLD=1: the first re-prime is handed to the OLD session (queued behind its turn); =always: every one is (issue 89).
+if "context was cleared" in text and os.environ.get("FAKE_REPRIME_OLD") and os.path.exists(os.path.join(st, "prev")) and (os.environ["FAKE_REPRIME_OLD"] == "always" or not os.path.exists(os.path.join(st, "misdir"))):
+    open(os.path.join(st, "misdir"), "w").close()
+    cur = open(os.path.join(st, "prev")).read().strip()
 with open(os.path.join(proj, cur + ".jsonl"), "a") as f:
     f.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+# A lane asked to shorten: FAKE_HANDOFF_BIG=again writes another long file, anything else a short one.
+if "and the limit is" in text and os.environ.get("FAKE_HANDOFF_BIG"):
+    open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\n" + ("x" * 350 if os.environ["FAKE_HANDOFF_BIG"] == "again" else "short") + "\n")
 if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
     open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\nnext step: carry on\n")
     if os.environ.get("FAKE_QUEUE"):
@@ -102,6 +123,8 @@ if "recycle line" in text and os.environ.get("FAKE_WRITE_HANDOFF") == "1":
             # real typed text sits in the input line
             open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f queued text\n")
             open(os.path.join(st, "typed-pane"), "w").close()
+    if os.environ.get("FAKE_HANDOFF_BIG"):
+        open(os.environ["FAKE_HANDOFF"], "w").write("# handoff\n" + "x" * 300 + "\n")
     if os.environ.get("FAKE_IDLE_AFTER") == "1":
         open(os.path.join(st, "pane"), "w").write("\u23fa handoff written\n\u273b Worked for 1m 9s \u00b7 done 1:09 PM\n\u276f \n")
 PY
@@ -133,7 +156,7 @@ usage_rec() {  # usage_rec <total-tokens> [start-tokens]: a session that held <s
 add_row() {  # add_row <name> <billing> <session>
   printf '%s\t%s\t%s\tsonnet\t%s\t%s\t%s\t%s\t-\thigh\toff\n' "$(date +%F)" "$1" "$REPO" "$2" "$HAND/prompt.md" "$HAND/report.md" "$3" >>"$INDEX"
 }
-reset_fake() { rm -f "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$ST"/helper-end "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log" "$HOME_T"/.claude/state/lanes/.recycle-stop-*; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
+reset_fake() { rm -f "$ST"/cap-n "$ST"/clear-cap "$ST"/prev "$ST"/misdir "$HOME_T/.claude/state/lanes/sessions/rl-lane" "$ST"/dropped "$ST"/projdir "$ST"/pending "$ST"/sent.log "$ST"/keys.log "$ST"/queued "$ST"/queue-run "$ST"/helper-end "$HAND/handoff.md" "$HAND"/handoff-prev*.md "$HOME_T/.claude/state/lanes/recycle.log" "$HOME_T"/.claude/state/lanes/.recycle-stop-*; echo old-sess >"$ST/cur"; rm -f "$PROJ"/new-sess-*.jsonl; }
 cur_for() { cut -f8 < <(awk -F"\t" -v n="$1" '$2==n' "$INDEX" | tail -1) >"$ST/cur"; }  # the fake lane writes into the transcript its index row names (a send is confirmed only there)
 
 # --ctx reads the last assistant usage in the lane's transcript, in K.
@@ -155,7 +178,41 @@ lane --ctx new-lane
 rm -f "$PROJ/fresh-sess.jsonl"; sed -i '/\tnew-lane\t/d' "$INDEX"
 add_row cx-lane codex -
 lane --ctx cx-lane
-[ "$LAST_OUT" = '?' ] || fail "--ctx for a Codex lane prints ?, got: $LAST_OUT"; ok
+[ "$LAST_OUT" = 'n/a' ] || fail "--ctx for a Codex lane prints n/a (no reading by design), got: $LAST_OUT"; ok
+lane --turn cx-lane
+[ "$LAST_OUT" = '?' ] || fail "--turn for a Codex lane still prints ?, got: $LAST_OUT"; ok
+
+# A status call does not rewrite the index when no row would change (the watcher calls --status every poll): same file (inode) and same bytes.
+fi_keep="$TMP/index-keep"; cp "$INDEX" "$fi_keep"
+fi_now="$(date +%s)"
+fi_row() {  # fi_row <name> <session> <start>: a full 15-column row
+  printf '%s\t%s\t%s\tsonnet\tsubscription\t%s\t%s\t%s\t%s\thigh\toff\t-\t-\t-\t-\n' "$(date +%F)" "$1" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$2" "$3"
+}
+fi_status_keeps() {  # fi_status_keeps <label>: --status leaves the index file (inode) and its bytes alone
+  local ino sum; ino="$(stat -c %i "$INDEX")"; sum="$(cksum <"$INDEX")"
+  lane --status
+  assert_exit 0 "$LAST_RC" "$1: --status exits 0"
+  assert_eq "$(stat -c %i "$INDEX")" "$ino" "$1: the index is the same file"
+  assert_eq "$(cksum <"$INDEX")" "$sum" "$1: the index has the same bytes"
+}
+fi_row fi-full fi-sess-1 "$fi_now" >"$INDEX"
+fi_status_keeps 'every row has an id and 15 columns'
+fi_row fi-noproof - "$fi_now" >>"$INDEX"
+rm -f "$HOME_T/.claude/state/lanes/sessions/fi-noproof"
+fi_status_keeps 'a row needs an id and none can be proven'
+fi_row fi-proof - "$fi_now" >>"$INDEX"
+printf 'fi-sess-2\t%s\t-\n' "$((fi_now + 1))" >"$HOME_T/.claude/state/lanes/sessions/fi-proof"
+lane --status
+assert_exit 0 "$LAST_RC" 'a provable id: --status exits 0'
+assert_eq "$(awk -F'\t' '$2 == "fi-proof" {print $8}' "$INDEX")" fi-sess-2 'a row that needs an id and can be proven gets it'
+assert_eq "$(awk -F'\t' '$2 == "fi-full" {print $8}' "$INDEX")" fi-sess-1 'the other rows keep their ids'
+printf '%s\tfi-short\t%s\tsonnet\tsubscription\t%s\t%s\tfi-sess-3\t%s\n' "$(date +%F)" "$REPO" "$HAND/prompt.md" "$HAND/report.md" "$fi_now" >>"$INDEX"
+lane --status
+assert_exit 0 "$LAST_RC" 'a short row: --status exits 0'
+assert_eq "$(awk -F'\t' '$2 == "fi-short" {print NF}' "$INDEX")" 15 'a row with fewer than 15 columns is padded to 15'
+assert_eq "$(awk -F'\t' '$2 == "fi-short" {print $8}' "$INDEX")" fi-sess-3 'the padded row keeps its id'
+assert_eq "$(awk -F'\t' 'NF != 15' "$INDEX" | wc -l)" 0 'every row has 15 columns after the pad'
+cp "$fi_keep" "$INDEX"; rm -f "$HOME_T/.claude/state/lanes/sessions"/fi-*
 
 # --turn says whether the lane's last turn only answered a Monitor event (lane_watch.sh then does not wake the hub), from its transcript.
 MON='<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event: \"download progress\"</summary>\n<event>10%</event>\n</task-notification>'
@@ -184,6 +241,18 @@ assert_contains "$LAST_OUT" '## Proof' 'the re-prime asks for a ## Proof section
 [ ! -e "$ST/sent.log" ] || fail '--dry-run typed into the window'; ok
 [ ! -e "$HAND/handoff.md" ] || fail '--dry-run wrote handoff.md'; ok
 
+# A reading that cannot be shown ("?") is never put to the lane as a size: it is told the reading is unavailable and the recycle was by hand.
+printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' >"$PROJ/old-sess.jsonl"
+reset_fake
+lane --ctx rl-lane
+[ "$LAST_OUT" = '?' ] || fail "--ctx on a transcript with no usage record prints ?, got: $LAST_OUT"; ok
+lane --dry-run --recycle rl-lane
+assert_exit 0 "$LAST_RC" '--recycle --dry-run with an unreadable context exits 0 (a by-hand recycle still works)'
+assert_contains "$LAST_OUT" 'your context reading is unavailable and I started this recycle by hand' 'the request says the reading is unavailable'
+assert_not_contains "$LAST_OUT" 'your context is at ?' 'the request never says the context is at ?'
+assert_contains "$LAST_OUT" '4. send: /clear' 'the by-hand recycle still goes on to clear the lane'
+usage_rec 130000 >"$PROJ/old-sess.jsonl"
+
 # A real recycle: hand-off request, handoff.md, /clear, re-prime, in that order; the index row follows the new session.
 # 23 Oct: a session in the lane's folder that is not the lane's (the hub's own) was born meanwhile; the row must not take it.
 reset_fake; rows_before="$(wc -l <"$INDEX")"
@@ -210,6 +279,34 @@ lane --ctx rl-lane
 [ "$LAST_OUT" != 130 ] || fail '--ctx still reads the old transcript after the recycle'; ok
 [ -d "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock" ] && fail 'recycle lock left behind'; ok
 grep -q "recycled" "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no recycled row'; ok
+
+# Hand-off size: over the limit, the lane is asked once to shorten it; the clear goes on whatever the second size is.
+size_keep="$TMP/index-size-keep"; cp "$INDEX" "$size_keep"
+size_sent() { grep -c 'and the limit is' "$ST/sent.log" || true; }
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (a) under the limit: exits 0'
+assert_eq "$(size_sent)" 0 'size (a): no shorten message'
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" HANDOFF-OVER 'size (a): no HANDOFF-OVER row'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 LANE_RECYCLE_WAIT_SECS=30 FAKE_HANDOFF_BIG=once FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (b) over then under: exits 0'
+assert_eq "$(size_sent)" 1 'size (b): exactly one shorten message'
+grep -qx /clear "$ST/sent.log" || fail 'size (b): the clear happens'; ok
+assert_not_contains "$(cat "$HOME_T/.claude/state/lanes/recycle.log")" HANDOFF-OVER 'size (b): no HANDOFF-OVER row'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=100 LANE_RECYCLE_WAIT_SECS=30 FAKE_HANDOFF_BIG=again FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (c) over twice: exits 0'
+assert_eq "$(size_sent)" 1 'size (c): exactly one shorten message'
+grep -qx /clear "$ST/sent.log" || fail 'size (c): the clear still happens'; ok
+assert_eq "$(grep -c $'\tHANDOFF-OVER\t' "$HOME_T/.claude/state/lanes/recycle.log")" 1 'size (c): one HANDOFF-OVER row'
+assert_contains "$LAST_OUT" 'after one request to shorten it' 'size (c): one line on stderr'
+reset_fake; cur_for rl-lane
+LANE_HANDOFF_MAX_BYTES=0 FAKE_HANDOFF_BIG=again FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'size (d) limit 0: exits 0'
+assert_eq "$(size_sent)" 0 'size (d): no check'
+
+cp "$size_keep" "$INDEX"; rm -f "$PROJ"/new-sess-*.jsonl
 
 # #275: a lane started in the repo folder that moved into a worktree before its recycle. After /clear its new transcript lands under the
 # worktree's own folder. The recycle must still confirm the re-prime, find the new session and record it (3 failures on 6 Nov 2026).
@@ -248,6 +345,56 @@ assert_contains "$LAST_OUT" 'did not reach it after 3 tries' 'the failure names 
 [ "$(grep -c 'context was cleared' "$ST/sent.log")" = 3 ] || fail "three tries, no more: $(cat "$ST/sent.log")"; ok
 [ "$(wc -l <"$INDEX")" = "$rows_before" ] || fail 'a failed recycle adds no index row'; ok
 
+# Issue 89, step 1: a turn that starts after the hand-off and before /clear. A first run counts the looks at the pane up to the one made just
+# before /clear is typed; the busy runs make exactly that look (and, for the second case, every later one) show a running turn.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'the normal recycle succeeds (calibration run)'
+assert_not_contains "$LAST_OUT" 'a turn started after' 'the normal path does not wait'
+CLEAR_LOOK="$(( $(cat "$ST/clear-cap") - 1 ))"   # the look made while "/clear" sits typed is the next one, so one earlier is the look before it
+sed -i '$d' "$INDEX"
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_BUSY_FROM="$CLEAR_LOOK" FAKE_BUSY_TO="$CLEAR_LOOK" LANE_RECYCLE_QUEUE_SECS=20 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'a lane busy at the second look is waited for and then cleared'
+assert_contains "$LAST_OUT" 'a turn started after the hand-off was written; waiting' 'the second idle look ran and the recycle waited'
+assert_contains "$LAST_OUT" 'recycled rl-lane' 'the recycle goes on once the turn ended'
+[ "$(grep -c '^/clear$' "$ST/sent.log")" = 1 ] || fail "one /clear typed after the wait: $(cat "$ST/sent.log")"; ok
+sed -i '$d' "$INDEX"
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_BUSY_FROM="$CLEAR_LOOK" LANE_RECYCLE_QUEUE_SECS=2 FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 1 "$LAST_RC" 'a lane that stays busy past the wait is not cleared'
+assert_contains "$LAST_OUT" 'a turn started after the hand-off; the lane was NOT cleared' 'the failure says the lane was not cleared'
+assert_not_contains "$(cat "$ST/sent.log")" '/clear' 'no /clear queued behind a running turn'
+[ "$(wc -l <"$INDEX")" = "$rows_before" ] || fail 'a refused recycle adds no index row'; ok
+
+# Issue 89, steps 2 and 3: the lane has a SessionStart record (FAKE_HOOK). Normal path: no extra rows, the re-prime is typed once.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_HOOK=1 FAKE_SESS_FILE="$HOME_T/.claude/state/lanes/sessions/rl-lane" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'a hooked lane recycles cleanly'
+RL="$HOME_T/.claude/state/lanes/recycle.log"
+grep -q $'\trecycled\t' "$RL" || fail 'recycled row written'; ok
+! grep -q 'REPRIME-OLD-SESSION\|REPRIME-RETRY' "$RL" || fail 'the normal path writes no REPRIME rows'; ok
+[ "$(grep -c 'context was cleared' "$ST/sent.log")" = 1 ] || fail 'the re-prime is typed once on the normal path'; ok
+sed -i '$d' "$INDEX"
+# The first re-prime lands in the old session: one REPRIME-OLD-SESSION row, one more typing, success because the second lands in the new one.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_REPRIME_OLD=1 FAKE_HOOK=1 FAKE_SESS_FILE="$HOME_T/.claude/state/lanes/sessions/rl-lane" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'a re-prime that landed in the old session is typed again and the recycle succeeds'
+[ "$(grep -c 'REPRIME-OLD-SESSION' "$RL")" = 1 ] || fail "one REPRIME-OLD-SESSION row: $(cat "$RL")"; ok
+[ "$(grep -c 'context was cleared' "$ST/sent.log")" = 2 ] || fail "the re-prime was typed twice, no more: $(cat "$ST/sent.log")"; ok
+grep -q 'the re-prime landed in the old session' "$RL" || fail 'the row says what happened'; ok
+[ "$(wc -l <"$INDEX")" = $((rows_before + 1)) ] || fail 'one new index row'; ok
+sed -i '$d' "$INDEX"
+# It lands in the old session both times: the recycle fails and says so; no "recycled" row.
+reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
+FAKE_REPRIME_OLD=always FAKE_HOOK=1 FAKE_SESS_FILE="$HOME_T/.claude/state/lanes/sessions/rl-lane" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 1 "$LAST_RC" 'a re-prime that keeps landing in the old session fails the recycle'
+assert_contains "$LAST_OUT" 'the re-prime reached the old session' 'the failure names the old session'
+[ "$(grep -c 'REPRIME-OLD-SESSION' "$RL")" = 1 ] || fail 'one REPRIME-OLD-SESSION row, then the failure'; ok
+! grep -q $'\trecycled\t' "$RL" || fail 'no recycled row after a failed re-prime'; ok
+[ "$(wc -l <"$INDEX")" = "$rows_before" ] || fail 'a failed recycle adds no index row'; ok
+rm -f "$HOME_T/.claude/state/lanes/sessions/rl-lane"
+
 # A lane that never writes handoff.md is NOT cleared.
 reset_fake; cur_for rl-lane; rows_before="$(wc -l <"$INDEX")"
 FAKE_WRITE_HANDOFF=0 LANE_RECYCLE_WAIT_SECS=2 lane --recycle rl-lane
@@ -276,7 +423,7 @@ assert_contains "${sent[0]}" 'Finish only the step in hand' 'the request says to
 assert_contains "${sent[0]}" 'start no new step' 'the request says to start no new step'
 assert_contains "${sent[0]}" 'very next action' 'the request makes the hand-off the very next action'
 assert_contains "${sent[0]}" 'ready to recycle' 'the request asks the lane to stop and say ready'
-assert_contains "${sent[0]}" 'recycle line (100K)' "the request names the lane's own line"
+assert_contains "${sent[0]}" 'recycle line of 100K' "the request names the lane's own line"
 # A dialog on screen holds the request back (typing would answer it) and the lane is left alone.
 reset_fake; cur_for rl-lane; printf '%s\n' 'Do you want to proceed?' '❯ 1. Yes' 'Esc to cancel' >"$ST/pane"
 FAKE_WRITE_HANDOFF=1 LANE_RECYCLE_IDLE_SECS=2 lane --recycle rl-lane
@@ -359,6 +506,13 @@ mrow m-off off 100 140000 121000 7200 200000
 is_line 150 'without connectors the measured line stops at 150K, as a line set by hand does' m-off
 mrow m-plain off 100 110000 70000 7200 200000
 is_line 120 'a plain lane that starts at 70K gets 120K' m-plain
+# Issue 83, item 4: the project's instruction file is read again for each working copy a lane steps into, so the line gets 5K more for each other working copy the prompt names.
+printf 'Work in .worktrees/proj--one, then .worktrees/proj--two (again .worktrees/proj--two) and .worktrees/proj--three.\n' >"$HAND/copies-prompt.md"
+mrow m-copies off 100 110000 64000 7200 200000
+sed -i "/	m-copies	/s#$HAND/prompt.md#$HAND/copies-prompt.md#" "$INDEX"
+is_line 129 'a start load of 64K plus 50K plus three named working copies at 5K each is 129K' m-copies
+mrow m-nocopies off 100 110000 64000 7200 200000
+is_line 114 'the same lane with a prompt that names no working copy gets 114K' m-nocopies
 mrow m-nocol off - 110000 70000 7200 200000
 is_line 120 'a row with no stored line is measured from its default' m-nocol
 # The process compacts by itself at about 0.84 of the window it was STARTED with, and /clear keeps the process: the line stays under it.

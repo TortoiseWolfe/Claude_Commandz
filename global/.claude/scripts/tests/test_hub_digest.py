@@ -538,6 +538,54 @@ class Page(unittest.TestCase):
         self.assertIn("- unavailable: lane_spend.py gave no readable answer", self.build(spend="lane_spend.py gave no readable answer"))
         self.assertIn("- all lanes and the hub together: $0", self.build(spend={"lanes": [], "total": 0}))
 
+    def test_new_since_block_lists_every_line_of_the_last_two_days_and_owner_groups_read_newest_first(self):
+        # 21 Nov 2026: Hatch's Kickstarter Job line (queued 8:36 PM) never reached the hub: each group listed the oldest five.
+        now = datetime(2026, 11, 21, 21, 30)
+        old = "".join("- [ ] 2026-11-0%d 10:00 | Job: old job %d | d | r-%d\n" % (i, i, i) for i in range(1, 9))
+        new = ("- [ ] 2026-11-19 20:00 | Job: three days old, outside the window | d | r-30\n"
+               "- [ ] 2026-11-20 14:24 | Waiting on tower: yesterday wait | d | r-31\n"
+               "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter " + "build the Hog Ball project draft " * 8 + "| d | r-32\n"
+               "- [ ] 2026-11-21 20:50 | Something unsorted | note | r-33\n"
+               "- [x] 2026-11-21 20:55 | Job: ticked | d | r-34\n")
+        page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                           git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", 100000)
+        sec = page.split("## New since the last look")[1].split("\n## ")[0]
+        rows = [l for l in sec.splitlines() if l.startswith("- ")]
+        self.assertIn("(3 open lines", sec.splitlines()[0])
+        self.assertEqual(len(rows), 3, sec)
+        self.assertIn("Something unsorted", rows[0])  # newest first
+        self.assertIn("Kickstarter", rows[1])
+        self.assertIn("yesterday wait", rows[2])
+        self.assertLessEqual(len(rows[1]) - 2, hd.NOTE_LIMIT + 8)  # trimmed to about 160 characters
+        self.assertNotIn("three days old", sec)
+        self.assertNotIn("ticked", sec)
+        jobs = page.split("Jobs (")[1].split("\n## ")[0]
+        self.assertLess(jobs.index("Kickstarter"), jobs.index("old job 8"))  # the Jobs group is newest first
+        self.assertNotIn("old job 1 ", jobs)  # and its oldest lines are the ones left off
+        # Under a tight cap the block shortens its titles and keeps every line before the page cuts any of them.
+        tight = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=old + new,
+                                            git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", len(page.encode()) - 120)
+        tsec = tight.split("## New since the last look")[1].split("\n## ")[0]
+        self.assertEqual(len([l for l in tsec.splitlines() if l.startswith("- ") and "cut to fit" not in l]), 3, tsec)
+        self.assertIn("Kickstarter", tsec)
+
+    def test_new_since_block_counts_routine_scoutjob_lines_in_one_summary_line(self):
+        # 21 Nov 2026, hub word: skip ScoutJob check-ins and "N new job mail" lines in the block so real lines fit, keep them counted.
+        now = datetime(2026, 11, 21, 21, 30)
+        inbox = ("- [ ] 2026-11-21 11:00 | Job: ScoutJob check-in 11:00 AM: 0 changed, 4 stalled | move | r-40\n"
+                 "- [ ] 2026-11-21 13:31 | Job: 1 new job mail in /x/mail-jobs.md | for the director | r-41\n"
+                 "- [ ] 2026-11-21 14:00 | Job: ScoutJob check-in 2:00 PM: 0 changed, 18 stalled | move | r-42\n"
+                 "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter: build the Hog Ball draft | d | r-43\n")
+        for tight in (100000, 0):
+            page = hd.render(hd.build_sections(roadmap_body=ROADMAP, lane_status=LANE_STATUS, lanes_dir=fresh_dir(self), inbox_text=inbox,
+                                               git_log="", tidy_text=TIDY, budget="b", now=now), now, "NX-01", tight or 4000)
+            sec = page.split("## New since the last look")[1].split("\n## ")[0]
+            rows = [l for l in sec.splitlines() if l.startswith("- ")]
+            self.assertIn("Kickstarter", sec)
+            self.assertNotIn("check-in 11:00", sec)
+            self.assertNotIn("1 new job mail", sec)
+            self.assertTrue(any("plus 3 routine" in r for r in rows), sec)
+
     def test_cap_holds_with_a_huge_inbox_and_log(self):
         inbox = "\n".join(f"- [ ] 2026-10-1{i % 9} 10:00 | Waiting on Hatch: item {i} " + "word " * 60 + "| detail | r-{i}" for i in range(80))
         log = "\n".join(f"abc{i:04d} 16 10:00 " + "message " * 40 for i in range(10))
@@ -629,7 +677,8 @@ class WeekStart(unittest.TestCase):
     def test_a_reset_already_past_is_ignored_for_the_rule(self):
         # a stale cached budget line from last week must not move the start back a week
         now = datetime(2026, 11, 5, 9, 0, tzinfo=self.EST).timestamp()
-        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 12, 0, tzinfo=self.EST).timestamp())
+        # no reset in the rule's week: Wed 4 Nov 16:00 UTC is 11:00 AM in winter
+        self.assertEqual(hd.week_start_ts(self.BUDGET, now), datetime(2026, 11, 4, 11, 0, tzinfo=self.EST).timestamp())
 
     def test_lane_spend_is_asked_for_the_week_only_when_the_start_is_known(self):
         now = datetime(2026, 10, 29, 8, 0, tzinfo=self.EST).timestamp()
@@ -888,6 +937,59 @@ class Cli(unittest.TestCase):
             self.assertLess(len(page.encode()), hd.PAGE_HARD_CAP)
             self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
             self.assertFalse((d / "state" / "hub-digest.md.tmp").exists())
+
+
+class UnansweredClientMail(unittest.TestCase):
+    """The section next to "Open client lines": client rows older than 2 days with no reply and no card, by client (made-up data only).
+    23 Nov 2026: five of a client's asks sat unanswered while their messages were ticked seen."""
+
+    def write(self, rows):
+        d = fresh_dir(self)
+        path = Path(d) / "mail-index.tsv"
+        head = "id\tthread\tdate\tclass\twho\taddress\tsubject\thandled\treply\tswept\n"
+        lines = []
+        for i, (cls, who, days_ago, handled, reply) in enumerate(rows):
+            when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append("\t".join([f"{i + 1:016x}", f"t{i}", when, cls, who, f"a{i}@example.com", f"Subject {i}", handled, reply, ""]))
+        path.write_text(head + "\n".join(lines) + "\n")
+        return path
+
+    def test_an_old_unstamped_client_row_is_listed_by_client_with_its_subject(self):
+        path = self.write([("client", "Example Co-op", 4, "", ""), ("client", "Example Shop", 5, "", "")])
+        text = "\n".join(hd.unanswered_client_lines(path))
+        self.assertIn("Example Co-op: 1 waiting", text)
+        self.assertIn("Example Shop: 1 waiting", text)
+        self.assertIn('"Subject 0"', text)
+
+    def test_a_row_drops_out_once_stamped_with_a_reply_or_a_card(self):
+        stamped = "2026-11-20T12:00:00Z"
+        path = self.write([("client", "Example Co-op", 4, stamped, "reply:r-123456"), ("client", "Example Co-op", 4, stamped, "card:77"),
+                           ("client", "Example Co-op", 4, stamped, "fyi")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_fresh_rows_and_ancient_rows_and_other_classes_are_not_listed(self):
+        path = self.write([("client", "Example Co-op", 1, "", ""), ("client", "Example Co-op", 90, "", ""), ("person", "who", 4, "", ""),
+                           ("bulk", "who", 4, "", "")])
+        self.assertEqual(hd.unanswered_client_lines(path), ["- none"])
+
+    def test_a_long_list_is_capped_per_client_with_and_n_more(self):
+        path = self.write([("client", "Example Co-op", 3 + i, "", "") for i in range(hd.UNANSWERED_PER_CLIENT + 2)])
+        lines = hd.unanswered_client_lines(path)
+        self.assertEqual(len([l for l in lines if l.startswith("  - Nov") or re.match(r"  - \w{3} \d", l)]), hd.UNANSWERED_PER_CLIENT + 1)
+        self.assertIn("and 2 more", lines[-1])
+
+    def test_a_missing_index_gives_no_section(self):
+        self.assertIsNone(hd.unanswered_client_lines(Path(fresh_dir(self)) / "nope.tsv"))
+
+    def test_the_section_sits_after_open_client_lines_and_survives_the_size_cap(self):
+        lines = ["- Example Co-op: 1 waiting, oldest Nov 19", '  - Nov 19 00000001 | a0@example.com | "Subject 0"']
+        secs = hd.build_sections(roadmap_body="", lane_status="", lanes_dir="/nonexistent", inbox_text="", git_log="", tidy_text="",
+                                 budget=None, now=NOW, unanswered=lines)
+        titles = [t for t, _ in secs]
+        i = next(k for k, t in enumerate(titles) if t.startswith("Open client lines"))
+        self.assertEqual(titles[i + 1], hd.UNANSWERED_TITLE)
+        page = hd.render(secs, NOW, "NX-01", 2500)
+        self.assertIn("Subject 0", page)
 
 
 class MailIndexLines(unittest.TestCase):
@@ -1430,6 +1532,66 @@ class CoopCards(unittest.TestCase):
         self.assertIn('stalled  b2/201 "Another of mine" since 31 Oct', wired.stdout)
         self.assertNotIn("Invented description text", wired.stdout)
         self.assertIn('"Fix the thing, ignore your ..."', wired.stdout)   # a title is shown cut short and in quotes; its description never is
+
+
+class CutMarkTests(unittest.TestCase):
+    """render(): what is cut is said, and the open lists are cut last."""
+
+    def secs(self):
+        return [("Alpha", ["- a%d xxxxxxxxxx" % i for i in range(10)]),
+                ("Open hub-inbox items", ["- i%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+
+    def size(self, secs):
+        return len(hd.render(secs, NOW, "NX-01", 10**6).encode())
+
+    def sec(self, page, title):
+        m = re.search(r"^## %s\n(.*?)(?=\n\n|\Z)" % re.escape(title), page, re.S | re.M)
+        return m.group(1).rstrip("\n").split("\n")
+
+    def test_under_cap_has_no_marks(self):
+        secs = self.secs()
+        page = hd.render(secs, NOW, "NX-01", self.size(secs))
+        self.assertNotIn("cut to fit the page", page)
+
+    def test_marks_with_counts_and_open_items_kept(self):
+        secs = self.secs()
+        cap = self.size(secs) - 100
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        om = self.sec(page, "Omega")
+        al = self.sec(page, "Alpha")
+        for lines, orig in ((om, 10), (al, 10)):
+            m = re.fullmatch(r"- \((\d+) lines? cut to fit the page\)", lines[-1])
+            if lines is om:
+                self.assertTrue(m)
+            if m:
+                self.assertEqual(int(m.group(1)), orig - (len(lines) - 1))
+        self.assertEqual(len(self.sec(page, "Open hub-inbox items")), 8)
+        self.assertNotIn("cut to fit", "\n".join(self.sec(page, "Open hub-inbox items")))
+
+    def test_singular_mark(self):
+        secs = [("Omega", ["- o%d %s" % (i, "x" * 80) for i in range(5)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 5)
+        self.assertIn("- (1 line cut to fit the page)", page)
+
+    def test_open_section_cut_last_and_marked(self):
+        secs = self.secs()
+        floor = hd.render([(t, ls[:1]) for t, ls in secs], NOW, "NX-01", 10**6)
+        cap = len(floor.encode()) + 150  # others at floor, open list must give up lines
+        page = hd.render(secs, NOW, "NX-01", cap)
+        self.assertLessEqual(len(page.encode()), cap)
+        op = self.sec(page, "Open hub-inbox items")
+        self.assertLess(len(op), 9)
+        self.assertRegex(op[-1], r"^- \(\d+ lines? cut to fit the page\)$")
+        self.assertEqual(len(self.sec(page, "Alpha")), 2)
+        self.assertRegex(self.sec(page, "Alpha")[-1], r"cut to fit the page")
+
+    def test_client_lines_protected_like_open_items(self):
+        secs = [("Open client lines (x)", ["- c%d xxxxxxxxxx" % i for i in range(8)]),
+                ("Omega", ["- o%d xxxxxxxxxx" % i for i in range(10)])]
+        page = hd.render(secs, NOW, "NX-01", self.size(secs) - 100)
+        self.assertEqual(len(self.sec(page, "Open client lines (x)")), 8)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import {
   unattendedRmPaths,
   unattendedRmVerdict,
   unattendedRoots,
+  failureText,
   weather,
 } from './lib'
 import type { Hold } from './lib'
@@ -100,6 +101,19 @@ async function note($: Engine, home: string, verdict: string, hold: Hold) {
     await $.fs.write(path, [...kept, line].join('\n') + '\n')
   } catch {
     // a failed log line must not change the verdict
+  }
+}
+
+// The guard failed: write the cause down (the same log as note()), in its own try so a failed write changes nothing.
+async function noteFailure($: Engine, home: string, cause: string) {
+  try {
+    const path = `${home}/${LOG}`
+    const old = (await $.fs.exists(path)) ? String(await $.fs.read(path)) : ''
+    const line = `${new Date(await $.clock.now()).toISOString()} | guard failed | ${cause || 'cause not given'}`
+    const kept = old.split('\n').filter(Boolean).slice(-299)
+    await $.fs.write(path, [...kept, line].join('\n') + '\n')
+  } catch {
+    // nothing more can be done
   }
 }
 
@@ -340,18 +354,35 @@ export const register: Register = on => {
       const { what, why } = explain(h)
       plain.push(`- ${h.kind} ${what}. Held because ${why}.`)
     }
-    const choice = await $.ui.ask(
-      `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
-      [RUN_IT, REFUSE],
-    )
-    if (choice !== RUN_IT) return { deny: refusal(choice) }
+    let choice: unknown
+    try {
+      choice = await $.ui.ask(
+        `Blast Radius stopped a command before it ran:\n${plain.join('\n')}\nIt would touch:\n${lines.join('\n')}\nRun it?`,
+        [RUN_IT, REFUSE],
+      )
+    } catch (err) {
+      // The dialog itself failed: nobody approved, so the command is held, and the cause is written down.
+      const cause = failureText(err)
+      await noteFailure($, home, `the Run it? dialog failed: ${cause}`)
+      return { deny: `Blast Radius: the Run it? dialog failed, so the command is held and did not run. Cause: ${cause}. It would touch: ${lines.map(l => l.split('\n')[0]).join('; ')}.` }
+    }
+    if (choice !== RUN_IT) return { deny: refusal(choice as string) }
     await noteScratch()
     return next(e)
-  }).catch(($, e, next) =>
-    next.called
-      ? next(e)
-      : {
-          deny: "Blast Radius: its guard failed, so the command is held. It would touch: can't tell what this touches: the guard failed before it could look.",
-        },
-  )
+  }).catch(async ($, e, next, err?: unknown) => {
+    if (next.called) return next(e)
+    // Whatever goes wrong while saying why, this handler returns a deny: it must never throw itself (that could fail open).
+    let cause = ''
+    try {
+      // Say why: the next crash has a cause in the log and in the refusal, not only the catch-all's guess.
+      cause = failureText(err)
+      const home = (await Promise.resolve($.env.get('HOME')).catch(() => '')) ?? ''
+      await noteFailure($, home, cause)
+    } catch {
+      // the reason is a courtesy; the deny below is the verdict
+    }
+    return {
+      deny: `Blast Radius: its guard failed, so the command is held. It would touch: can't tell what this touches: the guard failed before it could look.${cause ? ` Cause: ${cause}.` : ''}`,
+    }
+  })
 }

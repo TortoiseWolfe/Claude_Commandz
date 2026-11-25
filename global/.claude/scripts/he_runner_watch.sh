@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Keep the workstation CI runners up while a repo's variable RUNNER_LABEL says its CI runs here
-# (21 Oct 2026, harmonic-egg#351; extended 22 Oct to Chattanooga-Digital and Eduity).
+# (21 Oct 2026, harmonic-egg#351; extended 22 Oct to Chattanooga-Digital and Eduity; 23 Nov to scripthammer-stage-play and workspace).
 #
 # The runners have no systemd to restart them and die with WSL, Docker Desktop and sleep. This rides the 15-minute Windows task
 # (\AFA\OpenClawStatus -> openclaw_status_refresh.sh), whose `wsl.exe -d Debian` also brings WSL itself back after a restart.
@@ -15,6 +15,8 @@ REPOS=(
   "TortoiseWolfe/Chattanooga-Digital:$HOME/actions-runner-chattanooga-digital"
   "TortoiseWolfe/Eduity:$HOME/actions-runner-eduity"
   "TortoiseWolfe/ada-stair-generator:$HOME/actions-runner-ada-stair-generator"
+  "TortoiseWolfe/scripthammer-stage-play:$HOME/actions-runner-scripthammer-stage-play"
+  "TortoiseWolfe/workspace:$HOME/actions-runner-workspace"
 )
 # The runner's name is per machine, so one machine can never re-register (--replace) another's: NX-01 keeps the name its runners already
 # have; any other machine uses its own name from ~/.config/afa/machine, and only starts a runner whose folder exists on it.

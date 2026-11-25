@@ -81,6 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openclaw_gateway as gw  # noqa: E402  the one way to reach OpenClaw's gateway
+import engine_blocks as eb  # noqa: E402  the one file of engine usage blocks, shared with lane.sh
 
 HOME = Path(os.path.expanduser("~"))
 STATE = HOME / ".claude/state"
@@ -97,7 +98,8 @@ TEST_ENV = "AFA_OC_TEST"  # set (to anything but "" or "0") by live tests and pr
 # The week's three phases (Jonathan, 19 Oct: use all the allotted tokens, so lift what is left from Monday morning, completely from
 # Tuesday morning). Every boundary and limit lives here and nowhere else; the week itself starts at the reset the quality report names.
 WEEK_TZ = "America/New_York"
-WEEK_RESET = (2, 12, 0)    # weekday (Mon=0), hour, minute: Wednesday 12:00 PM ET, used only when the report gives no reset
+WEEK_RESET_UTC = (2, 16, 0)  # weekday (Mon=0), hour, minute in UTC: the real reset is one fixed instant, Wednesday 16:00 UTC (12:00 PM in summer time, 11:00 AM in winter); used only when the report gives no reset
+STALE_CALIBRATION_SECONDS = 30 * 3600  # a claude.ai reading older than this, or from another week, counts as unknown
 PHASE2_START = (0, 6, 0)   # Monday 6:00 AM ET
 PHASE3_START = (1, 6, 0)   # Tuesday 6:00 AM ET
 PROJECTION_LIMIT = 90.0    # phase 1: past this projection a code lane waits (hub/lane-rules.md); Claude lanes step down to Sonnet, and the waiting room holds
@@ -815,20 +817,25 @@ class LaneHost:
         return bool(r and r.returncode == 0)
 
     def week_budget(self, cache=STATE / "openclaw-dispatch-projection.json", now=None):
-        """The week's budget from model_quality_report.py (20 s), cached half an hour: {"projected": %, "used": %, "reset": epoch}, each None
-        if unknown. A cache from before the reset is no longer true once the reset has passed."""
+        """The week's budget from model_quality_report.py (20 s), cached half an hour: {"projected": %, "used": %, "reset": epoch,
+        "stale": bool, "calibrated_at": epoch or None}, each figure None if unknown. A cache from before the reset is no longer true once
+        the reset has passed. stale is True when the report has no claude.ai calibration, the calibration is from another week, or it is
+        more than 30 hours old; an unreadable report is stale too. Only the step-down door (step_down) reacts to stale: budget_over(held=True)
+        does not hold the waiting room on it, because the local usage figures are still measured. A cache file without the stale key reads as not stale."""
         now = time.time() if now is None else now
         try:
             c = json.loads(Path(cache).read_text())
             reset = c.get("reset")
             if (isinstance(c.get("pct"), (int, float)) and isinstance(c.get("used"), (int, float))
                     and 0 <= now - c.get("at", 0) < PROJECTION_CACHE_SECONDS and not (isinstance(reset, (int, float)) and reset <= now)):
+                cal = c.get("calibrated_at")
                 return {"projected": float(c["pct"]), "used": float(c["used"]),
-                        "reset": reset if isinstance(reset, (int, float)) else None}
+                        "reset": reset if isinstance(reset, (int, float)) else None,
+                        "stale": bool(c.get("stale", False)), "calibrated_at": cal if isinstance(cal, (int, float)) else None}
         except (OSError, ValueError, AttributeError):
             pass
         r = self._run(["python3", str(QUALITY), "--json"], 150)
-        out = {"projected": None, "used": None, "reset": None}
+        out = {"projected": None, "used": None, "reset": None, "stale": True, "calibrated_at": None}
         try:
             p = json.loads(r.stdout)["projection"] if r and r.returncode == 0 else {}
             for key, field in (("projected", "projected_pct"), ("used", "used_pct")):
@@ -836,11 +843,13 @@ class LaneHost:
                     out[key] = float(p[field])
             if isinstance(p.get("reset"), str):
                 out["reset"] = datetime.datetime.fromisoformat(p["reset"]).timestamp()
+            out["calibrated_at"], out["stale"] = _calibration(p.get("calibration"), now)
         except (ValueError, KeyError, TypeError, AttributeError):
-            out = {"projected": None, "used": None, "reset": None}
+            out = {"projected": None, "used": None, "reset": None, "stale": True, "calibrated_at": None}
         if out["projected"] is not None:
             try:
-                Path(cache).write_text(json.dumps({"at": now, "pct": out["projected"], "used": out["used"], "reset": out["reset"]}))
+                Path(cache).write_text(json.dumps({"at": now, "pct": out["projected"], "used": out["used"], "reset": out["reset"],
+                                                   "stale": out["stale"], "calibrated_at": out["calibrated_at"]}))
             except OSError:
                 pass
         return out
@@ -1305,7 +1314,7 @@ def resolve_engine(state, engine, now):
         if not engine_installed(e):
             missing.append(label)
             continue
-        if state.get(e + "_blocked_until", 0) > now:
+        if eb.until(e, now) > now:
             skipped.append(label)
             continue
         return (e, None, "") if not (skipped or missing) else (e,) + _out_of_usage(skipped, missing)
@@ -1374,7 +1383,8 @@ def try_again_at(tail, now):
 
 def block_until(state, key, tail, now, seconds):
     """Set state[key] after an engine reported a limit: the engine's own "try again at <date>" when it gives one, else a monthly-quota
-    message blocks until 00:00 on the 1st of next month (local time), any other limit for `seconds`. An existing later block stands."""
+    message blocks until 00:00 on the 1st of next month (local time), any other limit for `seconds`. The block is written to the shared
+    engine-blocks file (newest evidence wins, so a later block no longer stands over a newer, earlier one); state[key] is kept for old readers."""
     until = try_again_at(tail, now)
     if until is None:
         until = now + seconds
@@ -1383,6 +1393,11 @@ def block_until(state, key, tail, now, seconds):
             y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
             until = time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1))
     state[key] = max(state.get(key, 0), until)
+    engine = key[:-len("_blocked_until")] if key.endswith("_blocked_until") else key
+    try:
+        eb.block(engine, until, evidence=now, source="dispatcher: %s reported its usage limit" % engine)
+    except (eb.Malformed, OSError):
+        pass  # a damaged or unwritable file is left alone; the next block tries again
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1771,6 +1786,11 @@ def _sweep(ctx, host, now=None):
             if verdict is None:
                 continue
             lane["status"], changed = verdict, True
+            if verdict == "reported" and isinstance(lane.get("started"), (int, float)):
+                try:  # a lane that finished and reported ran clean: a block recorded before it started is out of date
+                    eb.clear(lane["engine"], evidence=lane["started"], source="dispatcher: a lane on %s ran clean" % lane["engine"])
+                except (eb.Malformed, OSError):
+                    pass
             if verdict == "dead":
                 lane["detail"], lane["failed"] = detail, True
                 tail = " ".join(_log_exit(Path(lane["report"]).parent)[1])
@@ -2304,13 +2324,9 @@ def _do_start(ctx, host, repo_word, task, now, ask_id=None, context=None, day_ca
     engine, model, why = choose_engine(path, client_reason(name, path, remote, ctx.senders, ctx.repos_txt, ctx.root), task, name == WORKSPACE, mail)
     engine, blocked_why, note = resolve_engine(state, engine, now)
     why = blocked_why or why
-    if engine == "claude":
-        over = budget_over(host.week_budget(), now)  # an unknown budget is not a block here; the waiting room is the one that holds on it
-        if over is not None:
-            if not SITE_RE.search(task):  # site-model work never steps down: a cheaper tier is no saving there
-                if model == "opus":
-                    model = "sonnet"
-                note = " (Sonnet only: %s)" % over
+    if engine == "claude":  # an unknown budget is not a block here; the waiting room is the one that holds on it
+        model, over_note = step_down(host.week_budget(), engine, model, task, now)
+        note = over_note or note
     lane = "oc-%s-%s" % (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30], time.strftime("%m%d-%H%M", time.localtime(now)))
     n = 1
     while lane in state["lanes"]:
@@ -3493,6 +3509,9 @@ def start_for_ask(ctx, host, ask_id, lane_name, dirpath, model, prompt_path, eng
         attach_context(ctx, state, lane_name, name, hand, prompt_path, context, now)
     except OSError:
         pass  # the lane still starts with the prompt the pass wrote
+    if engine == "claude":
+        model, over_note = step_down(host.week_budget(), engine, model, ask.get("task", ""), now)
+        note = over_note or note
     engine, model, _moved = prompt_site_tier(prompt_path, engine, model, lane_name, mail)  # the pass may have chosen Sonnet or Copilot for site-model work, or Opus or Fable for email
     ok, msg = _start_lane(host, mail, lane_name, path, engine, model, prompt_path, ask=ask_id)
     if not ok and msg.startswith(TIER_REFUSED):
@@ -3948,6 +3967,35 @@ def room_start(ctx, host, entry, now):
     return "%s | room %s | started%s%s" % (stamp, name, behind, blocked_note), "started %s%s%s" % (name, behind, blocked_note)
 
 
+def _calibration(cal, now):
+    """-> (the claude.ai reading's epoch or None, stale?) from the report's projection.calibration. Stale: no calibration, one from
+    another week (other_week), no readable time, or a time more than STALE_CALIBRATION_SECONDS before `now`."""
+    if not isinstance(cal, dict):
+        return None, True
+    at = None
+    try:
+        at = datetime.datetime.fromisoformat(cal["at"]).timestamp()
+    except (KeyError, ValueError, TypeError):
+        pass
+    return at, bool(cal.get("other_week")) or at is None or now - at > STALE_CALIBRATION_SECONDS
+
+
+def step_down(budget, engine, model, task, now):
+    """The one budget step-down every lane start door uses. -> (model, note). Claude only: when the week is over its limit
+    (budget_over) or the budget's claude.ai reading is stale (budget["stale"]), Opus becomes Sonnet, unless the task is site-model work
+    (SITE_RE), where a cheaper tier is no saving. The note is " (Sonnet only: <reason>)", or "" when nothing changed."""
+    if engine != "claude" or SITE_RE.search(task or ""):
+        return model, ""
+    over = budget_over(budget, now)
+    if over is None and budget.get("stale"):
+        at = budget.get("calibrated_at")
+        over = ("the budget figures are unchecked since %s" % _et(at).strftime("%a %-d %b %-I:%M %p") if isinstance(at, (int, float))
+                else "the budget figures have no claude.ai reading on record")
+    if over is None:
+        return model, ""
+    return ("sonnet" if model == "opus" else model), " (Sonnet only: %s)" % over
+
+
 def _et(ts):
     from zoneinfo import ZoneInfo
     return datetime.datetime.fromtimestamp(ts, ZoneInfo(WEEK_TZ))
@@ -3967,7 +4015,8 @@ def _at(day, spec):
 
 def week_phase(now, reset=None):
     """-> (phase 1, 2 or 3, the phase's end as a 12-hour string or None, the week's reset as one). The week is the seven days to
-    `reset` (epoch; the quality report's own reset, passed in when known), otherwise to the next Wednesday 12:00 PM Eastern.
+    `reset` (epoch; the quality report's own reset, passed in when known), otherwise to the next Wednesday 16:00 UTC (12:00 PM Eastern
+    in summer time, 11:00 AM in winter).
     Phase 1: reset to Monday 6:00 AM. Phase 2: to Tuesday 6:00 AM. Phase 3: to the reset."""
     t, phase2, phase3, r = _week_edges(now, reset)
     if t < phase2:
@@ -3977,15 +4026,25 @@ def week_phase(now, reset=None):
     return 3, None, _et_clock(r)
 
 
+def _next_reset(t):
+    """The next Wednesday 16:00 UTC after the Eastern datetime `t`, as an Eastern datetime."""
+    u = t.astimezone(datetime.timezone.utc)
+    d = u.date() + datetime.timedelta(days=(WEEK_RESET_UTC[0] - u.weekday()) % 7)
+    r = datetime.datetime(d.year, d.month, d.day, WEEK_RESET_UTC[1], WEEK_RESET_UTC[2], tzinfo=datetime.timezone.utc)
+    if r <= u:
+        r += datetime.timedelta(days=7)
+    return r.astimezone(t.tzinfo)
+
+
 def _week_edges(now, reset=None):
     """-> (now, phase 2 start, phase 3 start, reset), all Eastern datetimes of the week `now` is in."""
     t = _et(now)
     r = _et(reset) if isinstance(reset, (int, float)) and reset > now else None
     if r is None:
-        r = _at(t, WEEK_RESET)
-        if r <= t:
-            r = _at(t + datetime.timedelta(days=1), WEEK_RESET)
-    start = r - datetime.timedelta(days=7)  # wall-clock: both are Eastern datetimes of the same zone
+        r = _next_reset(t)
+        start = (r.astimezone(datetime.timezone.utc) - datetime.timedelta(days=7)).astimezone(r.tzinfo)  # the same fixed UTC instant a week earlier
+    else:
+        start = r - datetime.timedelta(days=7)  # wall-clock: both are Eastern datetimes of the same zone
     phase2 = _at(start + datetime.timedelta(days=1), PHASE2_START)
     phase3 = _at(phase2 + datetime.timedelta(days=1), PHASE3_START)
     return t, phase2, phase3, r

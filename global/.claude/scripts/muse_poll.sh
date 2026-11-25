@@ -67,7 +67,7 @@ queue_weekly_transcripts() {
     rendered=${rendered//|//}           # "|" separates inbox fields
     marker="weekly-${slug}-${day}"
     [[ -f "$inbox" ]] && grep -Fq -- "$marker" "$inbox" && continue
-    line="- [ ] $moment | Job: Weekly transcript: fetch \"$rendered\" from YouTube | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
+    line="- [ ] $moment | Job: Weekly transcript: fetch, clean, absorb \"$rendered\" from YouTube (the three steps are in the weekly-transcript prompt template) | for the ~/repos director: run lane ${slug}-transcript-${day} | $marker"
     if [[ "$mode" == print ]]; then
       printf '%s\n' "$line"
     else

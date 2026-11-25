@@ -44,7 +44,9 @@ def run(args, state, **env):
     # HUB_STALE_DAYS are not shown by default) does not depend on the date the suite runs.
     # HUB_STALE_DAYS is pinned too: these tests are about prefixes, notes and ticks, not the default limit (test_notes_ledger.py
     # holds that), so a change of the default must not move which fixture lines they see.
-    e = dict(os.environ, MUSE_STATE=str(state), HUB_TODAY="2026-10-20", HUB_STALE_DAYS="14")
+    # client-seen stamps the mail index: a stand-in stops these tests from ever reaching the live index.
+    e = dict(os.environ, MUSE_STATE=str(state), HUB_TODAY="2026-10-20", HUB_STALE_DAYS="14",
+             MUSE_MAIL_INDEX_PY=str(HERE / "fake_mail_index.py"), FAKE_MAIL_INDEX_LOG=str(Path(state) / "fake-mail-index.log"))
     e.update(env)
     e.pop("HUB_INBOX", None)
     e.pop("MUSE_INBOX", None)
@@ -218,7 +220,7 @@ class Board(unittest.TestCase):
         self.assertIn("via the old env var", self.board.read_text())
 
     def test_client_seen_ticks_through_the_symlink(self):
-        r = run(["client-seen", "1a2b3c4d5e6f7a8d"], self.st, HUB_INBOX=str(self.link))
+        r = run(["client-seen", "1a2b3c4d5e6f7a8d", "--fyi"], self.st, HUB_INBOX=str(self.link))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.link.is_symlink())
         self.assertIn("- [x] 2026-10-15 08:00 | Client mail: Example Brewing", self.board.read_text())
@@ -235,7 +237,7 @@ class Board(unittest.TestCase):
         queued = run(["client-talk", "Synthetic co-op", "TAG greg, Example Ops: \"hello\"", ident], self.st)
         self.assertEqual(queued.returncode, 0, queued.stderr)
         self.assertIn(f"| Client talk: Synthetic co-op | TAG greg, Example Ops: \"hello\" | {ident}", self.board.read_text())
-        seen = run(["client-seen", ident], self.st)
+        seen = run(["client-seen", ident, "--fyi"], self.st)
         self.assertEqual(seen.returncode, 0, seen.stderr)
         self.assertTrue(any(line.startswith("- [x] ") and ident in line for line in self.board.read_text().splitlines()))
         self.assertIn(ident, (self.st / "client-mail-seen.txt").read_text())
@@ -365,6 +367,31 @@ class Hook(unittest.TestCase):
         r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh")], input="{}", capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(r.returncode, 0)
         self.assertIn("agent-notes (before other work,): no new notes from Hatch or the tower (notes_check.py)", r.stdout)
+
+    def test_open_muse_cc_job_line_counts_as_a_note_from_hatch(self):
+        # 21 Nov 2026: Hatch's Kickstarter note sat open as a Job line while the hook said "no new notes".
+        home = Path(fresh_dir(self))
+        (home / "repos").mkdir()
+        st = home / ".claude/state"
+        st.mkdir(parents=True)
+        (st / "agent-notes-processed.txt").write_text("x\n")
+        (st / "hub-inbox.md").write_text(
+            "- [ ] 2026-11-20 14:24 | Job: [MUSE>CC] older Hatch job | d | r-1\n"
+            "- [ ] 2026-11-21 20:36 | Job: [MUSE>CC] Kickstarter build | d | r-2\n"
+            "- [ ] 2026-11-21 20:40 | Job: not from Hatch | d | r-3\n"
+            "- [x] 2026-11-21 20:50 | Job: [MUSE>CC] ticked one | d | r-4\n")
+        env = dict(os.environ, HOME=str(home), CLAUDE_PROJECT_DIR=str(home / "repos"),
+                   NOTES_CHECK_CMD="echo 'notes: none new'", MUSE_POLL_LOCK=str(home / "muse-poll.lock"))
+        env.pop("HUB_INBOX", None)
+        env.pop("MUSE_INBOX", None)
+        env.pop("MUSE_POLL", None)
+        r = subprocess.run(["bash", str(HOOKS / "muse-drafts.sh")], input="{}", capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("no new notes from Hatch or the tower", r.stdout)
+        self.assertIn("2 open [MUSE>CC] line(s)", r.stdout)
+        self.assertIn("2026-11-20 14:24, 2026-11-21 20:36", r.stdout)
+        self.assertNotIn("Kickstarter", r.stdout)  # stamps only, never the line text
+        self.assertNotIn("ticked one", r.stdout)
 
     def test_notes_check_with_note_lines_stub(self):
         home = Path(fresh_dir(self))
