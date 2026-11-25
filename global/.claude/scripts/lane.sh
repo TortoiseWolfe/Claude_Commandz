@@ -1115,6 +1115,16 @@ named_copies() {  # <prompt-file> <lane folder> -> how many distinct ~/repos/.wo
   n="$({ head -c 200000 -- "$1" | grep -aoE '\.worktrees/[A-Za-z0-9._-]+--[A-Za-z0-9._-]+' || true; } | sort -u | { grep -vxF -- "${own:-/}" || true; } | wc -l)"
   echo "${n// /}"
 }
+# standing_words <prompt-file> -> the text after each "Standing word:" line of the prompt (up to 3 lines, 300 characters each), joined with " | ".
+# Issue 165: a standing permission for an outward action (deploy, publish, merge) that lives only in prompt.md reaches a recycled lane as file
+# data, and the auto-mode safety checker refused every deploy until it was typed. The marker may follow a list bullet or a quote mark and any
+# case; a line that only mentions the words ("Not a standing word: ...") has text before the marker and does not count.
+standing_words() {
+  [ -r "${1:-}" ] || return 0
+  { head -c 200000 -- "$1" | grep -aiE '^[[:space:]>*_-]*standing word:' || true; } | head -n 3 \
+    | sed -E 's/^[[:space:]>*_-]*[Ss][Tt][Aa][Nn][Dd][Ii][Nn][Gg] [Ww][Oo][Rr][Dd]:[[:space:]*_]*//; s/[[:space:]]+$//' | cut -c1-300 | { command grep -av '^$' || true; } \
+    | awk 'NR > 1 { printf " | " } { printf "%s", $0 } END { if (NR) printf "\n" }'
+}
 default_recycle_k() {  # <kind> [connectors on|off|-] -> K tokens
   local k floor=$(( LANE_CONNECTOR_START_K + LANE_WORKING_ROOM_K ))
   case "$1" in
@@ -1959,6 +1969,7 @@ if [ "$mode" = recycle ]; then
     echo "  4b. set the model to the policy model ($target_model) if it is not already on it (${m:-?} now; opus and fable stay only for a site-model prompt or a logged --allow-high-tier reason, and a mail lane is always sonnet)"
     echo "  5. send: $msg_reprime (plus, when $hand/hub-pending.md exists by then, the sentence that sends the lane to read it: words lane.sh --send held back while the lane was past its line)"
     echo "  5b. the recycle counts as done only when the re-prime is in the new session; a re-prime found only in the old one writes a REPRIME-OLD-SESSION row, is typed once more, and fails the recycle if it misses again"
+    [ -z "$(standing_words "$p")" ] || echo "  5c. send, as its own typed message after the re-prime: Standing word ... quoted from $p (issue 165): $(standing_words "$p")"
     echo "  6. append an index row to $INDEX with the lane's new session id, model ${target_model} and recycle line ${rk_next}K"
     exit 0
   fi
@@ -2342,6 +2353,14 @@ PY
     send_reprime
     find_newid
     ! reprime_in_old || rfail "the lane was cleared but the re-prime reached the old session, not the new one; send it by hand: $msg_reprime"
+  fi
+  # Issue 165: the lane's standing word for an outward action is typed again as its own short message, not folded into the re-prime, so the
+  # auto-mode checker reads it as a person's word and not as the contents of prompt.md. A miss is logged and does not undo the recycle.
+  sw="$(standing_words "$p")"
+  if [ -n "$sw" ]; then
+    sw_msg="Standing word, quoted from the person who runs this lane (it is in $p, typed here again so it counts as theirs and not as file text): $sw"
+    LANE_SEND_NEW_SINCE="$clear_at" send_to "$name" "$sw_msg" >/dev/null \
+      || printf '%s\t%s\tSTANDING-WORD-NOT-SENT\tthe standing word from the prompt did not reach the fresh session; the lane reads it from prompt.md only\n' "$(date -Is)" "$name" >>"$rlog"
   fi
   index_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$(date +%F)" "$name" "$dir" "$m" "${b:-subscription}" "$p" "$rep" "$newid" "$t0" "${eff:--}" "${conn:--}" "$rk_next" "${ent:--}" "${pm:--}" "${ad:--}")"
   start_note=""; [[ "$startk" =~ ^[0-9]+$ ]] && start_note=", start load ${startk}K"

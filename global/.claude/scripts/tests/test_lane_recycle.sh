@@ -1157,6 +1157,34 @@ assert_eq "$(recycle_stop_file q-lane)" "$STOPF" 'recycle_stop_file prints the p
 HOME="$OLD_HOME"
 sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q clear_recycle_stop || fail 'the start/restart index row is preceded by clear_recycle_stop'; ok
 
+# Issue 165 (23 Nov): a lane's standing word to deploy lived only in prompt.md, so after a recycle the auto-mode checker read it as file data and
+# refused every deploy. A "Standing word:" line in the prompt is now typed to the fresh session as its own message after the re-prime.
+sw_reset() { qreset; rm -f "$RLOG" "$STOPF" "$HFAILF"; basepane; }
+sw_line() { grep -n -- "$1" "$ST/sent.log" 2>/dev/null | head -1 | cut -d: -f1 || true; }
+printf 'do the thing\n\nStanding word: deploy to the staging site after every green merge, no need to ask.\n- standing word: publish the notes page when its pull request merges.\nNot a Standing word: line.\n' >"$HAND/prompt.md"
+sw_reset; FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a lane whose prompt holds a standing word is recycled'
+sw_re="$(sw_line 'context was cleared')"; sw_std="$(sw_line '^Standing word')"
+[ -n "$sw_std" ] || fail "a standing word is typed to the fresh session ($(cat "$ST/sent.log"))"; ok
+[ -n "$sw_re" ] && [ "$sw_std" -gt "$sw_re" ] || fail "the standing word is its own message after the re-prime (re-prime line $sw_re, standing line $sw_std)"; ok
+sw_text="$(sed -n "${sw_std}p" "$ST/sent.log")"
+assert_contains "$sw_text" 'deploy to the staging site after every green merge, no need to ask.' 'the line quotes the first standing word'
+assert_contains "$sw_text" 'publish the notes page when its pull request merges.' 'a bulleted, lower-case marker counts too'
+assert_not_contains "$sw_text" 'Not a Standing' 'a line that only mentions the words is not a standing word'
+assert_not_contains "$(sed -n "${sw_re}p" "$ST/sent.log")" 'deploy to the staging site' 'the re-prime itself does not carry the word (a pasted block reads as file data)'
+assert_eq "$(grep -c -- '^Standing word' "$ST/sent.log")" 1 'one standing-word message, not one for each line'
+assert_contains "$(cat "$RLOG")" 'recycled' 'the recycle is logged as done'
+# No standing word, no extra message.
+echo 'do the thing' >"$HAND/prompt.md"
+sw_reset; FAKE_WRITE_HANDOFF=1 lane --recycle q-lane
+assert_exit 0 "$LAST_RC" 'a lane with no standing word is recycled'
+assert_eq "$(grep -c -- '^Standing word' "$ST/sent.log")" 0 'a prompt with no standing word sends no extra message'
+# The dry run says it.
+printf 'do the thing\nStanding word: merge it when the checks are green.\n' >"$HAND/prompt.md"
+sw_reset; lane --dry-run --recycle q-lane
+assert_contains "$LAST_OUT" 'Standing word' '--recycle --dry-run names the standing-word message'
+echo 'do the thing' >"$HAND/prompt.md"
+
 # send_to keeps its variables to itself: every name it assigns (on a "read -r" line or as a plain NAME=value) is declared local in the same
 # function, so a caller's own dir, id, m and the rest survive the call. The function runs from its first line to the first line that is just "}".
 send_to_text="$(awk '/^send_to\(\) \{/ {on = 1} on {print} on && $0 == "}" {exit}' "$SCRIPT")"
