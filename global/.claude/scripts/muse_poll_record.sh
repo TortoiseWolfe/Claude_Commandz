@@ -66,6 +66,7 @@ case "${1:-}" in
   inbox)
     line="${2:?text}"
     line="${line//$'\n'/ }"
+    line="${line//$'\r'/}"   # a line from a Windows tool ends in a carriage return; stored, it would hide the note id from the duplicate and done checks
     if ! [[ "$line" =~ $CANON_RE ]]; then
       echo "unknown prefix: start the line with Waiting on Hatch:, Waiting on tower:, Waiting on NX-01:, Waiting on NCC-74656:, Job:, Client mail:, Client alert:, Client talk:, Question: or Hub: (the owner of the next move)" >&2
       exit 1
@@ -94,7 +95,7 @@ case "${1:-}" in
     tmp=$(mktemp)
     awk -v id="$id" '
       function ids(l,  c) { c = l; return gsub(/(^|[^A-Za-z0-9_-])r-?[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]+/, "", c) }
-      BEGIN { tok = "(^|[^A-Za-z0-9_-])" id "([^A-Za-z0-9_-]|$)"; tail = "[|] " id "$" }
+      BEGIN { tok = "(^|[^A-Za-z0-9_-])" id "([^A-Za-z0-9_-]|$)"; tail = "[|] " id "\r?$" }   # \r?: a board line saved with Windows line ends still ticks
       /^- \[ \] / && ($0 ~ tail || ($0 ~ /^- \[ \] [^|]*[|] Waiting on / && $0 ~ tok && ids($0) == 1)) { sub(/^- \[ \]/, "- [x]"); n++ }
       { print }
       END { print n + 0 > "/dev/stderr" }' "$INBOX" >"$tmp" 2>"$tmp.n"
@@ -157,9 +158,11 @@ case "${1:-}" in
     done
     # tick open client lines whose IDs are all absorbed now
     tmp=$(mktemp)
+    # Both files are read with any carriage return removed, so a Windows line end never makes an id miss (the board line keeps its own bytes).
+    seen=$(tr -d '\r' <"$STATE/client-mail-seen.txt")
     while IFS= read -r line; do
       if [[ "$line" == "- [ ] "*"| Client mail: "* || "$line" == "- [ ] "*"| Client alert: "* || "$line" == "- [ ] "*"| Client talk: "* ]]; then
-        all=1; for id in ${line##*| }; do grep -qxF "$id" "$STATE/client-mail-seen.txt" || all=0; done
+        all=1; for id in ${line##*| }; do id=${id%$'\r'}; grep -qxF -- "$id" <<<"$seen" || all=0; done
         [[ $all == 1 ]] && line="- [x] ${line#- \[ \] }"
       fi
       printf '%s\n' "$line"
