@@ -9,7 +9,8 @@ It refuses (one line starting "REFUSED: ", exit 1), in this order, when:
   1. the repo is on the own-review list, or is not on the list of repos we merge in (a missing list refuses too, and so does
   a line there that does not name its owner in full), 2. the pull request is not open, is a draft or conflicts,
   3. merge_gate.py does not say GREEN, 4. the CI (continuous integration, the automatic checks) logs show any skipped,
-  deselected, expected-fail, rerun or todo test, or show no test summary at all, or a log cannot be fetched, or a job whose
+  deselected, expected-fail, rerun or todo test (or a shell test file's "N checks passed, M failed" with M above 0), or show no
+  test summary at all (the shell parts' "shell tests run: N" with N of at least 1 and "N checks passed, 0 failed" count as one), or a log cannot be fetched, or a job whose
   log shows no test summary is not one of the known non-test jobs (gitleaks, email-guard, shell),
   5. the diff touches a database migration or a deploy step, or anything under .github/ (a change to the CI itself can make
   its own checks pass); old names count too, so a renamed or deleted file is seen, 6. the branch moved while it was checked,
@@ -158,6 +159,10 @@ TAP_SKIP = re.compile(r"^\s*ok \d+\b.*#\s*skip", re.I)
 TAP_PLAN = re.compile(r"^\s*1\.\.\d+\s*$")
 GO_SKIP = re.compile(r"^\s*--- SKIP:")
 GO_SUMMARY = re.compile(r"^\s*(ok|FAIL)\s+\S+\s+[\d.]+s|^\s*--- PASS:")
+# The "shell part N" jobs of this repo (issue 207): a test file prints "55 checks passed, 0 failed", and the workflow's own loop prints
+# "shell tests run: 18" once it is done. Each line is a whole line of its own, so a workflow comment echoed into the log never matches.
+SHELL_CHECKS = re.compile(r"^\s*(\d+) checks passed, (\d+) failed\s*$")
+SHELL_RAN = re.compile(r"^\s*shell tests run: (\d+)\s*$")
 
 # Jobs that are known not to print a test summary (a secret scan, a mail check, a shell lint). Any other job whose log shows
 # no summary refuses, because a test job that ran nothing looks the same as a lint job. Compared in lower case, whole name.
@@ -212,6 +217,18 @@ def scan_log(text):
             saw = True
             found += 1
         if GO_SUMMARY.match(line):
+            saw = True
+        m = SHELL_CHECKS.match(line)
+        if m:
+            # Proven only with at least one check and no failure; any failure counts as unclean, so the pull request is refused. An empty
+            # count ("0 checks passed, 0 failed") is not a summary, so a test job that ran nothing still refuses.
+            if int(m.group(2)) > 0:
+                saw = True
+                found += int(m.group(2))
+            elif int(m.group(1)) > 0:
+                saw = True
+        m = SHELL_RAN.match(line)
+        if m and int(m.group(1)) > 0:
             saw = True
         if saw:
             summaries += 1

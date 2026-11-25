@@ -396,6 +396,47 @@ class LogSkips(Base):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.refused(self.go(scenario(logs={"101": echo, "102": echo})), "could not find a test summary")
 
+    # ---- issue 207: the "shell part N" jobs print "N checks passed, M failed" and "shell tests run: N", not a pytest line ----
+
+    SHELL_PART_LOG = ("2026-11-25T23:04:28.1384309Z \x1b[36;1mecho \"shell tests run: $ran\"\x1b[0m\n"
+                      "2026-11-25T23:04:31.7719110Z 55 checks passed, 0 failed\n"
+                      "2026-11-25T23:04:33.5589406Z ok - 33 checks passed\n"
+                      "2026-11-25T23:04:40.1540334Z All 7 checks passed\n"
+                      "2026-11-25T23:08:49.3203816Z ok   all checks passed on his own repo's PR wakes the hub\n"
+                      "2026-11-25T23:11:40.4629915Z shell tests run: 18\n")
+
+    def shell_part(self, text):
+        rollup = [job("shell part 0", 101), job("pytest", 102)]
+        return self.go(scenario(pr=pr_json(rollup), logs={"101": text, "102": PYTEST_OK}), "--check")
+
+    def test_a_shell_part_log_with_files_run_and_no_failure_is_proven(self):
+        r = self.shell_part(self.SHELL_PART_LOG)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("shell part 0", r.stdout.split("no test summary in:")[-1])
+
+    def test_either_shell_line_alone_is_proven(self):
+        for text in ("shell tests run: 18\n", "55 checks passed, 0 failed\n"):
+            r = self.shell_part(text)
+            self.assertEqual(r.returncode, 0, text + r.stdout)
+            self.assertNotIn("shell part 0", r.stdout.split("no test summary in:")[-1], text)
+
+    def test_a_shell_part_that_ran_nothing_is_still_refused(self):
+        for text in ("shell tests run: 0\n", "0 checks passed, 0 failed\n", "echo \"shell tests run: $ran\"\n"):
+            self.refused(self.go(scenario(pr=pr_json([job("shell part 0", 101)]), logs={"101": text})), "could not find a test summary")
+            self.calls.unlink()
+            self.refused(self.go(scenario(pr=pr_json([job("shell part 0", 101), job("pytest", 102)]), logs={"101": text, "102": PYTEST_OK})),
+                         "'shell part 0'", "no test summary")
+            self.calls.unlink()
+
+    def test_a_shell_check_failure_is_refused_even_in_a_green_job(self):
+        self.refused(self.shell_part("55 checks passed, 2 failed\nshell tests run: 18\n"), "'shell part 0'", "2 skipped or unclean")
+
+    def test_other_checks_lines_are_not_a_shell_summary(self):
+        for text in ("ok - 33 checks passed\n", "All 7 checks passed\n", "ok   all checks passed on his own repo's PR wakes the hub\n",
+                     "55 checks passed, 0 failed in the lint step\n"):
+            self.refused(self.go(scenario(pr=pr_json([job("shell part 0", 101)]), logs={"101": text})), "could not find a test summary")
+            self.calls.unlink()
+
     def test_a_log_that_cannot_be_fetched_is_refused(self):
         r = self.go(scenario(logs={"101": PYTEST_OK}))
         self.refused(r, "could not fetch the CI log")
@@ -593,6 +634,16 @@ class ScanUnits(unittest.TestCase):
     def test_scan_log_counts_every_unclean_pytest_word(self):
         seen, skips = lane_merge.scan_log("== 9 passed, 1 skipped, 2 deselected, 3 xfailed, 4 xpassed, 5 subtests skipped in 1s ==\n")
         self.assertEqual((seen, [n for n, _ in skips]), (1, [15]))
+
+    def test_scan_log_reads_the_shell_parts_summary_lines(self):
+        self.assertEqual(lane_merge.scan_log("55 checks passed, 0 failed\n"), (1, []))
+        self.assertEqual(lane_merge.scan_log("2026-11-25T23:11:40.4629915Z shell tests run: 18\n"), (1, []))
+        self.assertEqual(lane_merge.scan_log("55 checks passed, 0 failed\nshell tests run: 18\n"), (2, []))
+
+    def test_scan_log_does_not_count_an_empty_shell_run_and_counts_a_failure(self):
+        self.assertEqual(lane_merge.scan_log("0 checks passed, 0 failed\nshell tests run: 0\n"), (0, []))
+        seen, skips = lane_merge.scan_log("55 checks passed, 3 failed\n")
+        self.assertEqual((seen, [n for n, _ in skips]), (1, [3]))
 
     def test_scan_log_ignores_counts_that_are_not_test_results(self):
         self.assertEqual(lane_merge.scan_log("12 files changed in 3.5s\n"), (0, []))
