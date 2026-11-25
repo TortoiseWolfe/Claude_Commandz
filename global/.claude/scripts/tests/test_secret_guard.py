@@ -378,6 +378,31 @@ class MailTokenRuleG(Base):
                     "cat <<EOF\nx\nEOF\ncat %s/token.json" % self.D):
             self.blocked(cmd, "G")
 
+    def test_the_second_review_cases_block(self):
+        """Commands that look plain but read content, a python that runs other code, a glob or a cd above the folder, a send address echoed."""
+        for cmd in ("wc --files0-from=%s/token.json" % self.D,
+                    "du --files0-from=%s/token.json" % self.D,
+                    "file -f %s/token.json" % self.D,
+                    "wc -c < %s/token.json" % self.D,
+                    "python3 - %s/token.json <<'X'\nprint(open(__import__('sys').argv[1]).read())\nX" % self.D,
+                    "python3 - < ~/.claude/scripts/gmail_api.py %s/token.json" % self.D,
+                    "python3 -m http.server --directory %s" % self.D,
+                    "PYTHONSTARTUP=/tmp/x.py python3 ~/.claude/scripts/gmail_api.py whoami %s" % self.D,
+                    "PYTHONPATH=/tmp python3 ~/.claude/scripts/redact_view.py %s/token.json" % self.D,
+                    "python3 /tmp/gmail_api.py %s/token.json" % self.D,
+                    "pythonx ~/.claude/scripts/gmail_api.py %s/token.json" % self.D,
+                    "cat ~/.config/afa/gm*/token.json",
+                    "cat ~/.config/a?a/gmail/token.json",
+                    "cat ~/.config/*/gmail/token.json",
+                    "cat ~/.con*/afa/gmail/token.json",
+                    "cat ~/.config/afa/{gmail,x}/token.json",
+                    "cd ~/.config/afa; cat gm*/tok*",
+                    "cd ~/.config && cat afa/gmail/token.json",
+                    "echo https://gmail.googleapis.com/gmail/v1/users/me/messages/send | xargs curl -X POST",
+                    "printf '%s' https://gmail.googleapis.com/gmail/v1/users/me/drafts/send | xargs curl -X POST",
+                    "git -c alias.x='!curl -X POST gmail/v1/users/me/messages/send' x"):
+            self.blocked(cmd, "G")
+
     def test_a_symlink_or_dot_dot_path_to_the_folder_blocks_the_tools(self):
         with tempfile.TemporaryDirectory() as home:
             folder = os.path.join(home, ".config", "afa", "gmail")
