@@ -70,7 +70,9 @@ class Issue139Tests(base.Fixture):
         # (the option name is written so the quote-stripped text does not show setopt, hash or cdablevars either)
         for cmd in ("$'set\\157pt' $'cdable\\x76ars'; cd clientA; rm docs/secret.txt", "$\"setopt\" $\"cdable\"vars; cd clientA; rm docs/secret.txt",
                     "{setopt,x} cdable{vars,x}; cd clientA; rm docs/secret.txt", "$'ha\\x73h' -d w=%s; cd clientA; rm docs/secret.txt" % wall,
-                    "{hash,x} -d w=%s; cd clientA; rm docs/secret.txt" % wall):
+                    "{hash,x} -d w=%s; cd clientA; rm docs/secret.txt" % wall,
+                    # a sequence writes one letter too: `{s..s}etopt` is `setopt`
+                    "{s..s}etopt cdable{v..v}ars; cd clientA; rm docs/secret.txt", "{h..h}ash -d w=%s; cd clientA; rm docs/secret.txt" % wall):
             self.refused(cmd, self.work)
         self.allowed("cd ~/proj; cat a.txt", self.work)
 

@@ -111,7 +111,7 @@ def _cdpath(text):
     bare = re.sub(r"[\\'\"]", "", text or "")
     # `$'..'` and `$".."` words and a comma-brace group (`{hash,x} -d`) are written out by the shell before it runs the word, in ways the
     # quote-stripped text above does not show: any of them leaves the cd's landing folder unknown
-    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\$['\"]|\{[^{}]*,[^{}]*\}", text or ""))
+    unsure = (any("$" in v or "`" in v for v in values) or bool(re.search(r"\$['\"]|\{[^{}]*(?:,|\.\.)[^{}]*\}", text or ""))
               or bool(re.search(r"\bCDPATH\b(?!=)|\bcdpath\b", bare))
               or bool(re.search(r"cdablevars|autocd", bare.replace("_", "").lower()))  # zsh ignores every underscore in an option name
               # setopt, unsetopt and emulate can change how a cd lands in ways the text does not show; zsh's short flags -J (AUTO_CD) and -T
