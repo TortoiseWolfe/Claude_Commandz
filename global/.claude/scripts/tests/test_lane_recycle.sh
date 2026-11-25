@@ -280,6 +280,38 @@ lane --ctx rl-lane
 [ -d "$HOME_T/.claude/state/lanes/.recycle-rl-lane.lock" ] && fail 'recycle lock left behind'; ok
 grep -q "recycled" "$HOME_T/.claude/state/lanes/recycle.log" || fail 'recycle.log has no recycled row'; ok
 
+# Issue 39 (25 Nov): the lane keeps the rules it started with (its system prompt survives /clear), so the re-prime names each rule part the
+# lane loaded that was edited since: core.md here. A part the lane did not load (mail) and one that did not change (coop) are not named, and
+# once told the lane is not told again until a later edit.
+rlog_keep="$TMP/recycle-log-keep"; cp "$HOME_T/.claude/state/lanes/recycle.log" "$rlog_keep"; idx_keep="$TMP/index-rules-keep"; cp "$INDEX" "$idx_keep"   # the extra recycles must not count toward later tests
+RULES_D="$TMP/rules"; RULES_F="$HOME_T/.claude/state/lanes/.rules/$(basename "$HAND").md"; mkdir -p "$RULES_D" "$(dirname "$RULES_F")"
+for part in core mail coop; do echo "rules $part" >"$RULES_D/$part.md"; done
+printf '%s\n' '<!-- lane rules parts loaded: core, coop; not loaded: mail (read ~/repos/hub/lane-rules/<part>.md if a rule of that kind seems missing) -->' 'body' >"$RULES_F"
+touch -d '3 hours ago' "$RULES_D/coop.md"; touch -d '2 hours ago' "$RULES_F"; touch -d '1 hour ago' "$RULES_D/core.md" "$RULES_D/mail.md"
+reset_fake; cur_for rl-lane
+LANE_RULES_DIR="$RULES_D" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_exit 0 "$LAST_RC" 'rules changed: the recycle exits 0'
+reprime="$(grep 'context was cleared' "$ST/sent.log" | tail -1)"
+assert_contains "$reprime" "The hub changed rule file(s) after you started: $RULES_D/core.md." 'the re-prime names the rule part that changed'
+assert_not_contains "$reprime" "$RULES_D/coop.md" 'a loaded part that did not change is not named'
+assert_not_contains "$reprime" "$RULES_D/mail.md" 'a part the lane did not load is not named, even when edited'
+assert_contains "$reprime" "Read $HAND/prompt.md, then $HAND/handoff.md" 'and the re-prime still reads prompt.md and handoff.md'
+[ "$RULES_F" -nt "$RULES_D/core.md" ] || fail 'the lane rules file is stamped after the lane was told'; ok
+reset_fake; cur_for rl-lane
+LANE_RULES_DIR="$RULES_D" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+reprime="$(grep 'context was cleared' "$ST/sent.log" | tail -1)"
+assert_not_contains "$reprime" 'The hub changed rule file' 'told once: the next recycle does not repeat it'
+sleep 1; echo "rules core again" >"$RULES_D/core.md"
+reset_fake; cur_for rl-lane
+LANE_RULES_DIR="$RULES_D" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+reprime="$(grep 'context was cleared' "$ST/sent.log" | tail -1)"
+assert_contains "$reprime" "$RULES_D/core.md" 'a later edit is named again'
+rm -f "$RULES_F"
+reset_fake; cur_for rl-lane
+LANE_RULES_DIR="$RULES_D" FAKE_WRITE_HANDOFF=1 lane --recycle rl-lane
+assert_not_contains "$(grep 'context was cleared' "$ST/sent.log" | tail -1)" 'The hub changed rule file' 'a lane with no composed rules file is told nothing'
+
+cp "$rlog_keep" "$HOME_T/.claude/state/lanes/recycle.log"; cp "$idx_keep" "$INDEX"; rm -f "$HOME_T/.claude/state/lanes/recycle-stop-rl-lane"* 2>/dev/null || true
 # Hand-off size: over the limit, the lane is asked once to shorten it; the clear goes on whatever the second size is.
 size_keep="$TMP/index-size-keep"; cp "$INDEX" "$size_keep"
 size_sent() { grep -c 'and the limit is' "$ST/sent.log" || true; }

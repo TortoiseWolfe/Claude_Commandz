@@ -1265,6 +1265,19 @@ lane_rules_for() {  # <lane folder> <name> <dir> <connectors on|off> <prompt fil
   else printf '%s' "$LANE_RULES"; fi
 }
 
+# The rule part files edited since this lane's rules file was written (its head comment says which parts the lane loaded), one path a
+# line. Nothing when the lane has no composed rules file, or none of its parts changed.
+changed_rule_files() {  # <lane folder>
+  local f="$HOME/.claude/state/lanes/.rules/$(basename "$1").md" d="${LANE_RULES_DIR:-$HOME/repos/hub/lane-rules}" parts p
+  [ -s "$f" ] || return 0
+  parts="$(sed -n '1s/^<!-- lane rules parts loaded: \([^;]*\);.*/\1/p' "$f")"
+  for p in ${parts//,/ }; do
+    case "$p" in *[!a-z0-9_-]*|'') continue ;; esac
+    [ -f "$d/$p.md" ] && [ "$d/$p.md" -nt "$f" ] && printf '%s\n' "$d/$p.md"
+  done
+  return 0
+}
+
 claude_lane_flags() {  # <effort or empty> <connectors on|off> [lane name] [recycle K] [dir] [project servers to keep on: a,b] [extra tool rules to deny: a,b or -] [lane folder] [prompt file] [reuse the folder's rules.md: 1]
   local json p s r mcp keep
   # Keep the hub's own lean project settings (hub_lean.py) current: any machine that starts a lane gets them.
@@ -1968,10 +1981,15 @@ if [ "$mode" = recycle ]; then
   if [ "$ctxk" = "?" ]; then ctx_phrase="your context reading is unavailable and I started this recycle by hand (it may not be past your recycle line of ${rk_now}K), but Claude Code compacts on its own at a high size"
   else ctx_phrase="your context is at $ctxk, past your recycle line (${rk_now}K), and Claude Code compacts on its own not far above it"; fi
   msg_handoff="Hub: $ctx_phrase. Finish only the step in hand (the tool call you are in), start no new step, and make your very next action writing $handoff, so that a fresh session can carry on from $p and that file alone, never from this conversation, an older hand-off or a log: (1) what is done; (2) what is in flight: each file, branch, worktree, pull request and background job with its path and state; (3) the next concrete step: the exact command, or the file and line to start at; (4) what to re-arm (timers, background jobs, watchers); (5) every fact the next step needs, copied in rather than pointed at. Keep it under 120 lines: it is read in full and costs the new session context. I keep your previous handoff.md as handoff-prevN.md, so do not copy it yourself and do not send the next session to read it. Then stop, even mid-task, and say \"ready to recycle\". Once it is written I clear your context and send you back to prompt.md and handoff.md. (recycle $rid)"
+  # 25 Nov, issue 39: a lane keeps the rules it started with (they sit in its system prompt, which /clear does not reload), so a rule part
+  # the hub edited since then never reached it: the mail lane that "broke" a rule at 2:20 PM was obeying its 1:39 PM copy across 6 recycles.
+  # The re-prime now names every part this lane loaded whose file is newer than the lane's rules file, and the file is stamped afterwards.
+  rules_changed="$(changed_rule_files "$hand")"; rules_seen_at="$(date +%s)"; rules_note=""
+  [ -z "$rules_changed" ] || rules_note="The hub changed rule file(s) after you started: ${rules_changed//$'\n'/, }. Your system prompt still holds the old text, so read each once now, before the hand-off, and follow it over the old text. "
   build_reprime() {  # the re-prime message; words the hub held back for a lane past its line (hub-pending.md) are named in it
     local pend="$hand/hub-pending.md" reads="Read $p, then $handoff, and nothing else"
     [ -s "$pend" ] && reads="Read $p, then $handoff, then $pend (words the hub typed for you while you were past your line, held back so they could not queue into the recycle: act on them, then delete that file), and nothing else"
-    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. The finished rounds of report.md and status.md were moved to report-archive.md and status-archive.md in that folder at this recycle: do not read an archive unless handoff.md names the entry you need. Keep your own notes short, and send a long tool output (a test run, a log, a diff) to a file and read back only the lines you need, so the conversation does not fill up again.${jobs_note:-} $LANE_STANDING_RULE"
+    printf '%s' "Hub: your context was cleared (recycle $rid, not a restart). $reads before carrying on from the next step it names and re-arming what it lists; it is meant to be self-contained, so read a handoff-prev file or an old log only when handoff.md names the exact thing you need. ${rules_note}Your hand-off folder is unchanged: $hand. report.md line 1 changes only when the hub must act; routine status goes to status.md there. A hub request to write handoff.md marked (recycle $rid) that reaches you now is the one you already answered before the clear: ignore it. A request with a different number is a new one. The finished rounds of report.md and status.md were moved to report-archive.md and status-archive.md in that folder at this recycle: do not read an archive unless handoff.md names the entry you need. Keep your own notes short, and send a long tool output (a test run, a log, a diff) to a file and read back only the lines you need, so the conversation does not fill up again.${jobs_note:-} $LANE_STANDING_RULE"
   }
   msg_reprime="$(build_reprime)"
   if [ "$dry" = 1 ]; then
@@ -2401,6 +2419,8 @@ PY
       printf '%s\t%s\tFAILED\t%s\n' "$(date -Is)" "$name" "$stopmsg" >>"$rlog"
     fi
   fi
+  # The lane has been told about the changed rule files; stamp its rules file with the moment they were looked at, so only later edits are named next time.
+  [ -z "${rules_changed:-}" ] || touch -d "@$rules_seen_at" "$HOME/.claude/state/lanes/.rules/$(basename "$hand").md" 2>/dev/null || true
   echo "recycled $name: handoff.md written, context cleared at $ctxk, re-primed; new session $newid, line ${rk_next}K$start_note"
   [ "$stopped_now" != 1 ] || echo "recycle $name is now stopped after $rcount recycles in $(( ${LANE_THRASH_SECS:-1800} / 60 )) minutes: no further recycle will start. To start it again: lane.sh --recycle-at <K> --recycle $name" >&2
   exit 0
