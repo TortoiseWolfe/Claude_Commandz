@@ -42,6 +42,19 @@ MAX_NER_CHARS = 200_000     # a longer string skips Presidio (roster and pattern
 MAX_NER_TOTAL = 1_000_000   # characters sent to Presidio in one call
 NER_TIMEOUT = 25
 BUILTIN_ALLOW = {"claude", "anthropic"}
+# The fleet's status words, always written in capitals on line 1 of a lane's report. Presidio read BLOCKED as a person ("[PERSON_xe4c7] (Jonathan)")
+# and a lane that rewrote line 1 from what it saw wrote the placeholder into the file, so the watcher called the lane idle every 20 minutes.
+# A guessed span (Presidio or a pattern, no roster index) loses these words at its edges; what is left is masked as before, or dropped when
+# it holds no word of two letters or more. Capitals only, so a person named Ready or Hope is still caught. Roster people are never touched.
+# The words are those lane_watch.sh and report_line.py read on line 1, plus the ones the fleet writes there.
+STATUS_WORDS = (
+    "QUEUE EMPTY", "ENDED WHILE WORKING", "MORNING FILE READY", "STEP-FOR-JONATHAN", "STALLED-CARDS", "PATCH-NIGHT", "INSTALL OK",
+    "SUSPECTED-INJECTION", "TOWER-STEP", "NEED-HUB", "HUB-ACT", "BLOCKED", "WORKING", "DRAFTED", "RECYCLE", "HOURLY", "STATUS",
+    "FAILED", "READY", "EMPTY", "DONE",
+)
+_STATUS_EDGE = "|".join(re.escape(w) for w in sorted(STATUS_WORDS, key=len, reverse=True))
+STATUS_LEAD_RE = re.compile(r"^[\W_]*(?:%s)(?![A-Za-z0-9])" % _STATUS_EDGE)
+STATUS_TAIL_RE = re.compile(r"(?<![A-Za-z0-9])(?:%s)[\W_]*$" % _STATUS_EDGE)
 # Product and project words the co-op's own cards and chat are full of. Presidio sometimes reads a capitalised phrase containing one as a
 # person ("Standard Nextcloud images"); a guessed name that holds one of these words stays readable. Roster people never do.
 BUILTIN_PRODUCTS = {
@@ -297,9 +310,30 @@ class Scrubber:
         words = re.findall(r"[a-z0-9]+", written.lower())
         return any(w in self.products for w in words) and all(w in self.products or w in COMMON_WORDS for w in words)
 
+    @staticmethod
+    def _without_status_words(text, span):
+        """A guessed PERSON span with the fleet's status words cut off its edges; None when nothing worth masking is left."""
+        if span[2] != "PERSON" or span[3] is not None:
+            return span
+        a, b = span[0], span[1]
+        while True:
+            m = STATUS_LEAD_RE.match(text[a:b])
+            t = STATUS_TAIL_RE.search(text[a:b]) if not m else None
+            if m:
+                a += m.end()
+            elif t:
+                b = a + t.start()
+            else:
+                break
+        a += len(text[a:b]) - len(text[a:b].lstrip(" \t(\"'[:,;-"))  # no stray bracket or colon left at the front
+        if not re.search(r"[A-Za-z]{2}", text[a:b]):
+            return None
+        return (a, b, span[2], span[3])
+
     def _merge(self, text, spans):
         # roster spans (index set) first, then longer, then earlier
-        spans = [s for s in spans if s[1] > s[0] and text[s[0]:s[1]].strip().lower() not in self.allow
+        spans = [self._without_status_words(text, s) for s in spans if s[1] > s[0]]
+        spans = [s for s in spans if s and s[1] > s[0] and text[s[0]:s[1]].strip().lower() not in self.allow
                  and not self._product_guess(text[s[0]:s[1]], s)]
         spans.sort(key=lambda s: (s[3] is None, -(s[1] - s[0]), s[0]))
         kept = []
