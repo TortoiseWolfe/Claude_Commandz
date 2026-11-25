@@ -1,4 +1,12 @@
-"""The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir."""
+"""The no-AI wall's shared reader and its tool-call decisions. Every path here is a fake folder under a temp dir.
+
+A rule for anyone who reviews the guard with a helper (issue 79, 12 Nov 2026): the helper must never RUN the commands it
+generates. A helper that did so in a throwaway home still wrote two stray files and overwrote the live settings file with 3
+bytes, because a generated command that starts a shell with an emptied environment drops the home variable, and the shell
+then takes the real home folder from the account list. A review helper loads the guard's decision function, asks it for a
+verdict on each generated command (as the tests below do with a fake home) and counts the differences between two versions;
+a person reads the differences. The same sentence belongs in the helper brief used for guard reviews.
+"""
 import io
 import os
 import subprocess
