@@ -810,5 +810,76 @@ class NodeAllowed(Base):
         self.allowed("node tests/a.js", cwd=self.exempt_dir / "src")
 
 
+class TestLog(Base):
+    """Issue 153: a one-line log (time, outcome, word, folder; never the command) so a miss can be settled from the record."""
+
+    def log_lines(self, home):
+        path = Path(home) / ".claude" / "state" / "docker-first-guard.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def fresh_home(self):
+        home = Path(tempfile.mkdtemp(prefix="dfg-log-", dir=self.tmp))
+        (home / ".config" / "afa").mkdir(parents=True)
+        (home / ".claude" / "state").mkdir(parents=True)
+        return home
+
+    def test_no_state_folder_means_no_log_and_no_new_folder(self):
+        home = Path(tempfile.mkdtemp(prefix="dfg-nolog-", dir=self.tmp))
+        self.assertEqual(self.run_hook("node --test x.js", home=home)[0], 2)
+        self.assertEqual(list(home.iterdir()), [])
+
+    def test_a_refusal_is_logged_with_word_and_folder_but_not_the_command(self):
+        home = self.fresh_home()
+        secret = "SECRET-TOKEN-1234"
+        code, _ = self.run_hook(f"node --import ./a.mjs --test x.js --token {secret}", home=home)
+        self.assertEqual(code, 2)
+        lines = self.log_lines(home)
+        self.assertEqual(len(lines), 1, lines)
+        stamp, outcome, word, folder = lines[0].split("\t")
+        self.assertRegex(stamp, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d{4}$")
+        self.assertEqual((outcome, word, folder), ("refused", "node", str(self.non_exempt_dir)))
+        self.assertNotIn(secret, lines[0])
+        self.assertNotIn("--import", lines[0])
+
+    def test_an_allowed_watched_word_is_logged(self):
+        home = self.fresh_home()
+        code, _ = self.run_hook("node --version", home=home)
+        self.assertEqual(code, 0)
+        self.assertEqual([l.split("\t")[1:3] for l in self.log_lines(home)], [["allowed", "node"]])
+
+    def test_an_exempt_folder_is_logged_as_exempt(self):
+        home = self.fresh_home()
+        (home / ".config" / "afa" / "docker-first-exempt.txt").write_text(f"{self.exempt_dir}\n")
+        code, _ = self.run_hook("npm install", cwd=self.exempt_dir, home=home)
+        self.assertEqual(code, 0)
+        self.assertEqual([l.split("\t")[1:] for l in self.log_lines(home)], [["exempt", "npm", str(self.exempt_dir)]])
+
+    def test_other_commands_and_docker_runs_are_not_logged(self):
+        home = self.fresh_home()
+        for command in ("git status", "echo 'node --test'", "grep npm README.md", "docker run --rm img npm test", "ls"):
+            with self.subTest(command=command):
+                self.assertEqual(self.run_hook(command, home=home)[0], 0)
+        self.assertEqual(self.log_lines(home), [])
+
+    def test_a_chain_logs_each_watched_word(self):
+        home = self.fresh_home()
+        self.run_hook("npm --version && yarn install", home=home)
+        self.assertEqual([l.split("\t")[1:3] for l in self.log_lines(home)], [["allowed", "npm"], ["refused", "yarn"]])
+
+    def test_a_log_that_cannot_be_written_does_not_change_the_decision(self):
+        home = self.fresh_home()
+        (home / ".claude" / "state" / "docker-first-guard.log").mkdir()  # a folder where the log file should be
+        self.assertEqual(self.run_hook("node --test x.js", home=home)[0], 2)
+        self.assertEqual(self.run_hook("node --version", home=home)[0], 0)
+
+    def test_the_log_path_can_be_set_and_a_big_log_rolls_over(self):
+        home = self.fresh_home()
+        target = home / "custom.log"
+        target.write_text("x" * 1_000_001)
+        self.run_hook("npm test", home=home, env={"DOCKER_FIRST_LOG": str(target)})
+        self.assertTrue(Path(str(target) + ".1").exists())
+        self.assertEqual(len(target.read_text().splitlines()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
