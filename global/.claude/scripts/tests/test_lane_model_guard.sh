@@ -30,7 +30,12 @@ cat >"$BIN/tmux" <<'STUB'
 case "$1" in
   has-session) exit 0 ;;
   list-windows) printf "%s\n" mail-sw plain-sw site-sw nowrite-sw ;;
-  capture-pane) cat "$FAKE_ST/pane" ;;
+  capture-pane)
+    cat "$FAKE_ST/pane"
+    # The "Switch model?" confirm dialog sits on the screen until Enter answers it (issue 127).
+    if [ -f "$FAKE_ST/awaiting" ]; then
+      printf '%s\n' 'Switch model?' 'This conversation is cached for the current model. Switching means the full history gets re-read.' ' ❯ 1. Yes' '   2. No' 'Enter to confirm · Esc to cancel'
+    fi ;;
   display)
     # pane_is_claude uses: tmux display -p -t "lanes:<name>" '#{pane_current_command}'
     # args: display -p -t lanes:name '#{pane_current_command}'
@@ -40,6 +45,20 @@ case "$1" in
     ;;
   send-keys)
     if [ "${4:-}" = -l ]; then printf '%s' "${6:-}" >"$FAKE_ST/pending"
+    elif [ "${4:-}" = C-m ] && [ -f "$FAKE_ST/awaiting" ]; then
+      # Enter on the dialog (option 1 is selected): the switch happens now, and the default is saved a moment after, as /model does.
+      echo ENTER >>"$FAKE_ST/enters.log"
+      python3 -I - "$FAKE_ST" "$HOME/.claude/settings.json" <<'PY'
+import json, os, sys
+st, settings = sys.argv[1:3]
+arg = open(os.path.join(st, "awaiting")).read().strip()
+os.unlink(os.path.join(st, "awaiting"))
+open(os.path.join(st, "pane"), "a").write("Set model to %s 5.5 and saved as your default for new sessions\n" % arg.capitalize())
+if os.path.exists(settings):
+    d = json.load(open(settings))
+    d["model"] = arg
+    open(settings, "w").write(json.dumps(d, indent=2) + "\n")
+PY
     elif [ "${4:-}" = C-m ] && [ -s "$FAKE_ST/pending" ]; then
       python3 -I - "$FAKE_ST" "$FAKE_PROJ" "$(cat "$FAKE_ST/pending")" "$HOME/.claude/settings.json" <<'PY'
 import json, os, sys
@@ -48,6 +67,10 @@ open(os.path.join(st, "pending"), "w").close()
 open(os.path.join(st, "sent.log"), "a").write(text + "\n")
 cur = open(os.path.join(st, "cur")).read().strip()
 # /model is a local command: Claude Code never writes it to the transcript, it only prints a confirmation line on the screen.
+if text.startswith("/model ") and os.path.exists(os.path.join(st, "model-dialog")):
+    # A busy lane: Claude Code asks "Switch model?" first and does nothing until Enter answers it (issue 127).
+    open(os.path.join(st, "awaiting"), "w").write(text.split(None, 1)[1])
+    sys.exit(0)
 if text.startswith("/model "):
     if not os.path.exists(os.path.join(st, "no-pane-line")):
         arg = text.split(None, 1)[1]
@@ -243,6 +266,24 @@ assert_exit 0 "$LAST_RC" 'a switch is confirmed by a new "Set model to" line eve
 assert_contains "$LAST_OUT" 'confirmed on its screen' ''
 lane --model plain-sw sonnet
 assert_exit 0 "$LAST_RC" 'switching to the model it is already on is confirmed again'
+
+# Issue 127: a busy lane answers /model with a "Switch model?" confirm dialog and changes nothing until Enter. lane.sh answers it (option 1 is
+# already selected), waits for "Set model to", and only then puts the user default back, so the default /model saves after the Enter is undone.
+orig_settings; ORIG="$(cat "$SETTINGS")"; rm -f "$ST/enters.log"; touch "$ST/model-dialog"
+before_idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+LANE_SEND_CONFIRM_SECS=4 lane --model plain-sw haiku
+assert_exit 0 "$LAST_RC" '--model on a lane that shows the Switch model? dialog is confirmed'
+[ "$(cat "$ST/enters.log" 2>/dev/null)" = ENTER ] || fail "the dialog is answered with exactly one Enter, got: $(cat "$ST/enters.log" 2>/dev/null)"; ok
+[ ! -f "$ST/awaiting" ] || fail 'the dialog is gone after the switch'; ok
+[ "$(cat "$SETTINGS")" = "$ORIG" ] || fail "the user default is put back after the dialog's Enter saved it, got: $(cat "$SETTINGS")"; ok
+assert_contains "$LAST_OUT" 'user default model is still claude-opus-5-5' 'the dialog case reports the default unchanged'
+idx="$(awk -F'\t' '$2=="plain-sw"{m=$4} END{print m}' "$INDEX")"
+[ "$idx" = haiku ] || fail "the index row follows a switch made through the dialog, got: $idx"; ok
+rm -f "$ST/model-dialog" "$ST/enters.log"
+# With no dialog, no Enter is sent beyond the submit.
+lane --model plain-sw sonnet
+assert_exit 0 "$LAST_RC" 'a switch with no dialog still works'
+[ ! -e "$ST/enters.log" ] || fail 'no dialog, no extra Enter'; ok
 
 # Refusals type nothing and touch nothing.
 : >"$ST/sent.log"; orig_settings; ORIG="$(cat "$SETTINGS")"

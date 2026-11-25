@@ -1663,9 +1663,17 @@ PY
   fi
   tmux send-keys -t "$target" C-m
   if [ -n "${LANE_SEND_PANE_RE:-}" ]; then
-    local i
+    local i answered=0
     for i in $(seq 1 $(( ${LANE_SEND_CONFIRM_SECS:-15} * 2 ))); do
       [ "$(pane_hits)" -gt "$hits_before" ] && { echo "sent to $name: confirmed on its screen"; return 0; }
+      # A busy lane answers /model with "Switch model? ... the full history gets re-read" and does nothing until it is answered (issue 127).
+      # Option 1 (Yes) is already selected, so one Enter answers it. Only that one dialog, and only once per call: any other dialog is
+      # left to a person.
+      if [ "$answered" = 0 ] && [ -n "${LANE_SEND_ANSWER_RE:-}" ] \
+         && tmux capture-pane -p -t "$target" 2>/dev/null | tail -15 | command grep -qE -- "$LANE_SEND_ANSWER_RE"; then
+        answered=1
+        tmux send-keys -t "$target" C-m
+      fi
       sleep 0.5
     done
     echo "sent to $name: NOT CONFIRMED (no new line matching \"$LANE_SEND_PANE_RE\" on its screen)"
@@ -1761,7 +1769,9 @@ switch_model() {  # <name> <model>
   before="$(python3 -I "$um" get)"
   # /model is a local command: it never lands in the transcript, so the switch is confirmed by the pane's "Set model to" line.
   fam="$(command grep -oiE 'opus|sonnet|haiku|fable' <<<"$newm" | head -1 || true)"  # the pane names the family ("Sonnet 5.5"), not the id
-  LANE_SEND_PANE_RE="Set model to .*${fam}" send_to "$name" "/model $newm" || rc=$?
+  # A busy lane first asks "Switch model?" (issue 127); send_to answers it with Enter and goes on waiting for the "Set model to" line, so the
+  # restore loop below runs after the default has been saved, not before.
+  LANE_SEND_PANE_RE="Set model to .*${fam}" LANE_SEND_ANSWER_RE='Switch model\?' send_to "$name" "/model $newm" || rc=$?
   for _ in $(seq 1 "${LANE_MODEL_POLLS:-12}"); do  # /model saves the default a moment after it runs: restore until it has settled
     now="$(python3 -I "$um" get)"
     if [ "$now" != "$before" ]; then
