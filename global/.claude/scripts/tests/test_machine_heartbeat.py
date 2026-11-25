@@ -4,6 +4,7 @@ notes_check.py. Every fixture is invented (fake uptime, meminfo and tmux files i
 import os
 import subprocess
 import sys
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ class Base(unittest.TestCase):
                "HEARTBEAT_TMUX_OUT": str(self.d / "tmux"), "TZ": "America/New_York"}
         p = mock.patch.dict(os.environ, env)
         p.start()
+        time.tzset()  # a changed TZ is read only after this; a runner that is on UTC would otherwise print UTC
+        self.addCleanup(time.tzset)
         self.addCleanup(p.stop)
         os.environ.pop("HEARTBEAT_MACHINE", None)
 
