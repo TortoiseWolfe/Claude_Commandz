@@ -1967,6 +1967,114 @@ def _command_tokens(command, cwd):
     return out
 
 
+_HOME_OPERATOR = re.compile(r"\$\{HOME([:%#/^,@+=?-])([^}]*)\}")
+
+
+def _home_variants(command):
+    """-> the texts to judge for a command that holds `${HOME:0}`, `${HOME%/}`, `${HOME:+/dir}` or the like (issue 187). The original text comes
+    first and is always judged; then the text with every such form read as `$HOME` (HOME is always set, so the form is the home folder or a cut
+    of it), then the text with each form read as its own operand (`${HOME:+/dir}` is `/dir`, `${HOME/x/y}` has `y` put in) so a path hidden in
+    the operand is judged as a path. `${HOMEX:0}` is another variable and stays as written. Over-reading is safe: it only adds texts to check."""
+    if "${HOME" not in command:
+        return [command]
+
+    def replacement(m):
+        s = m.group(2)
+        if m.group(1) == "/":  # `${HOME/pattern/replacement}`, `${HOME//p/r}`, `${HOME/#p/r}`
+            s = s[1:] if s[:1] in ("/", "#", "%") else s
+            return s.split("/", 1)[1] if "/" in s else ""
+        return s.lstrip("-+=?") if m.group(1) == ":" else s
+
+    out = [command]
+    for text in (_HOME_OPERATOR.sub("$HOME", command), _HOME_OPERATOR.sub(lambda m: m.group(2), command), _HOME_OPERATOR.sub(replacement, command)):
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def _brace_expanded(command):
+    """-> (text, complete). text is the command with every word that holds a brace group (`a{b,c}d`, `{s..s}etopt`) written out as the words the
+    shell makes of it, or None when no word has one (issue 187). The shell turns `{a,b}` into two paths and `{1..3}` into three words; the checks
+    read one. The wall judges the original text AND this one. complete is False when a word's list was cut short or left unexpanded: a listed
+    name could be in the part not written out, so the caller refuses (fail closed). Over-reading is safe: it only adds words to be checked."""
+    if "{" not in command or ("," not in command and ".." not in command):
+        return None, True
+    out, changed, complete = [], False, True
+    for piece in re.split(r"(\s+)", command):
+        if "{" in piece and (_BRACES.search(piece) or _SEQUENCE.search(piece)):  # `{a,b}` and also `{s..s}etopt`, a sequence that writes one letter
+            words, whole = _brace_expand(piece)
+            out.append(" ".join(words))
+            changed, complete = True, complete and whole
+        else:
+            out.append(piece)
+    return ("".join(out) if changed else None), complete
+
+
+def _cd_target(seg, words, here, list_dirs):
+    """The folders the shell may be in after a `cd` or `pushd` segment, from the folders it may have been in. A target built at run time
+    (`cd -`, `$(..)`, a variable, `popd`) is unknown: then the session's own folder, the home folder and the folders of the protected files
+    all stay possible."""
+    args = [a for a in words[1:] if not a.startswith("-") or a == "-"]
+    arg = args[0] if args else "~"
+    rest = arg.replace("${HOME}", "").replace("$HOME", "")
+    if words[0] == "popd" or arg == "-" or "$" in rest or "`" in seg or "$(" in seg:
+        return set(here) | {home()} | set(list_dirs), True
+    return {expand(arg, f) for f in here}, False
+
+
+_CD_WORDS = ("cd", "pushd", "popd")
+_SEGMENT_LEADERS = ("if", "then", "else", "elif", "while", "until", "do", "!", "{", "time", "command", "builtin", "exec", "nohup")
+
+
+def _list_read_by_relative_name(command, cwd, files):
+    """-> (hit, folders). hit is True when a word of the command, joined with a folder the shell may be in at that point (the working folder,
+    then each `cd` or `pushd` in turn), is one of `files` (or a wildcard that matches one), or when the file's own name is written while the
+    shell may be in that file's folder (issue 187: `cd ~/.config/afa && cat no-ai-paths.txt`, `python3 -c "open('no-ai-paths.txt')"`). The old
+    check joined each word with the folder the session started in only, and read a word with no slash as no path at all. folders is every
+    folder a `cd` or `pushd` named in plain text (for the recursive-search check). A command that only looks at a name or size is not read."""
+    list_dirs = {os.path.dirname(os.path.normpath(f)) for f in files}
+    here, known, hit = {cwd}, {cwd}, False
+    # a `cd` inside a subshell or a substitution does not carry on after it, so there the folders only grow (the shell may be in either)
+    grows = _has_unquoted_paren(command) or "`" in command
+    segs = []
+    for seg in _segments(command):
+        words = _words(seg)
+        while words and words[0] in _SEGMENT_LEADERS:  # `if x; then cd d; ...`, `{ cd d; }`, `time cd d`, `command cd d`
+            words = words[1:]
+        segs.append((seg, words))
+    if sum(w in _CD_WORDS for w in _words(command)) > sum(bool(ws) and ws[0] in _CD_WORDS for _, ws in segs):
+        # a `cd` the reader did not take as a command of its own (`sh -c 'cd d; cat f'`, `eval "cd d"`): where the shell is is unknown, so the
+        # session folder, the home folder and the list's folder all stay possible from the start
+        here = here | {home()} | set(list_dirs)
+    for seg, words in segs:
+        if not words:
+            continue
+        if words[0] in _CD_WORDS:
+            there, unsure = _cd_target(seg, words, here, list_dirs)
+            here = here | there if grows else there
+            if not unsure:
+                known |= here
+            continue
+        if any(w in ("-C", "--chdir") or w.startswith("--chdir=") for w in words):
+            here = here | {home()} | set(list_dirs)  # `env -C d cat f`: the program runs in a folder the reader does not follow
+        if words[0] in _READ_ONLY_PROGRAMS and not re.search(r"[`$(){}]", seg):
+            continue  # `ls -la no-ai-paths.txt` after a cd: a listing, a size or a hash, as the plain form is allowed
+        if words[0] in _FIND_PROGRAMS:
+            continue  # its words are name patterns (`find -name '*.py'`), not files it reads; -exec, -delete and the like are the write check's
+        for folder in here:
+            if any(os.path.basename(f) in seg and os.path.dirname(os.path.normpath(f)) == folder for f in files):
+                hit = True
+            # every word, the first too: the reader drops a redirect sign, so `<afa/x cat` and `exec <f` start with the file and not the program
+            for w in words:
+                for piece in [w] + [p for p in w.split("=")[1:] if p]:
+                    if not piece or piece.startswith("-") and "/" not in piece:
+                        continue
+                    full = expand(piece, folder)
+                    if any(_is_protected(c, folder, files) for c in [full] + _expand_globs(full)):
+                        hit = True
+    return hit, known
+
+
 def _path_shaped(text):
     """A string an MCP tool could mean as a file: it has a slash, or starts with a dot or a ~ or $HOME. Short, one-line strings only."""
     return bool(text) and len(text) < 4096 and "\n" not in text and ("/" in text or text.startswith((".", "~", "$HOME", "${HOME}")))
@@ -2180,17 +2288,30 @@ def evaluate(payload, paths=None):
         return None
     if tool == "Bash":
         command = _resolve_vars(str(ti.get("command") or ""))  # `W=/dir; cd $W` read as `cd /dir`, so a relative path after it can be placed
-        r = bash_hits(command, cwd, paths)
-        if r:
-            return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
-        if any(_is_protected(t, cwd, protected_files()) for t in _command_tokens(command, cwd)) and not _read_only_listing(command):
-            return deny_protected()
-        if bash_writes_guarded(command, cwd):
-            return deny_protected()
-        if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
-            roots = _command_tokens(command, cwd) or [cwd]
-            if any(reads_list(t) for t in roots):
-                return deny_list_search()
+        # Every text the shell may run (issue 187): as written, with `${HOME:0}` and its kind read as `$HOME` and as their operand, and each of those
+        # with its brace words written out (the shell makes two paths of `{a,b}`). A brace list cut short or left unexpanded is refused, never judged part by part.
+        texts = []
+        for variant in _home_variants(command):
+            written, whole = _brace_expanded(variant)
+            if not whole:
+                return deny_protected()
+            texts.extend(x for x in (variant, written) if x and x not in texts)
+        for command in texts:
+            r = bash_hits(command, cwd, paths)
+            if r:
+                return deny_root(r[0]) if r[1] == "root" else deny_path(r[0])
+            listing = _read_only_listing(command)
+            if any(_is_protected(t, cwd, protected_files()) for t in _command_tokens(command, cwd)) and not listing:
+                return deny_protected()
+            if bash_writes_guarded(command, cwd):
+                return deny_protected()
+            hit, visited = _list_read_by_relative_name(command, cwd, protected_files()) if not listing else (False, set())
+            if hit:  # the list read by a relative name after a `cd` or from its own folder (issue 187)
+                return deny_protected()
+            if any(reads_content_recursively(g) for g in _command_word_groups(command)):  # `grep -r`, `rg`, `tar` and the like over the list's folder or one above it
+                roots = (_command_tokens(command, cwd) or [cwd]) + sorted(visited - {cwd})
+                if any(reads_list(t) for t in roots):
+                    return deny_list_search()
         return None
 
     # An MCP tool or any tool this module does not know: its arguments could name a listed path in any field, so every string
