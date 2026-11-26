@@ -143,6 +143,32 @@ class LaneBrief(unittest.TestCase):
             self.assertNotIn(gone, out)
         self.assertIn(f"{self.lanes}/2026-10-29-alpha", out)
 
+    def test_line_1_is_read_one_way_for_every_reader(self):
+        r = lane_brief.line1_reading
+        self.assertEqual(r("WORKING 9:00 AM | card 155"), ("WORKING", "", ""))
+        self.assertEqual(r("BLOCKED 6:25 PM | (Jonathan): ! bash hand-steps.sh"), ("BLOCKED", "jonathan", ""))
+        self.assertEqual(r("BLOCKED 6:25 PM | ( jonathan ) a step"), ("BLOCKED", "jonathan", ""))
+        self.assertEqual(r("STEP-FOR-JONATHAN 7:00 PM | https://example.test/x"), ("STEP-FOR-JONATHAN", "jonathan", ""))
+        self.assertEqual(r("BLOCKED | waits for the co-op window, Tuesday 2 Dec evening"), ("BLOCKED", "window", "Tuesday 2 Dec"))
+        self.assertEqual(r("BLOCKED 6:25 PM | waits for the production window"), ("BLOCKED", "window", ""))
+        self.assertEqual(r("BLOCKED 6:25 PM | tests fail on a missing fixture"), ("BLOCKED", "blocker", ""))
+        self.assertEqual(r("QUEUE EMPTY 5:10 PM | items 4"), ("QUEUE EMPTY", "", ""))
+        self.assertEqual(r("ENDED WHILE WORKING 5:10 PM | x"), ("ENDED WHILE WORKING", "", ""))
+        for plain in ("", "# Report", "Did the work", "BLOCKEDX 1", "blocked 6 PM | x"):
+            self.assertEqual(r(plain), ("", "", ""), plain)
+        self.assertEqual(r("BLOCKED 6:25 PM | (Jonathan): a step\nline 2 names a window"), ("BLOCKED", "jonathan", ""))
+
+    def test_the_brief_says_what_a_blocked_lane_waits_on_in_text_and_json(self):
+        self.lane("alpha", report="BLOCKED 6:25 PM | (Jonathan): ! bash hand-steps.sh")
+        self.pane("alpha", screen="  ok\n❯ \n", joined="  ok\n❯ \n")
+        out = self.run_brief("alpha").stdout
+        self.assertIn("  waits on: jonathan", out)
+        d = json.loads(self.run_brief("alpha", "--json").stdout)["report"]
+        self.assertEqual((d["line1_word"], d["waits_on"], d["waits_detail"]), ("BLOCKED", "jonathan", ""))
+        self.lane("beta", report="WORKING 9:00 AM | card 155")
+        self.pane("beta", screen="  ok\n❯ \n", joined="  ok\n❯ \n")
+        self.assertNotIn("waits on:", self.run_brief("beta").stdout)
+
     def test_lines_option_limits_the_screen(self):
         self.lane("alpha")
         self.pane("alpha", screen="\n".join(f"line {i}" for i in range(1, 31)) + "\n")

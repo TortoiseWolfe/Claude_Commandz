@@ -44,6 +44,7 @@ from zoneinfo import ZoneInfo
 HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lane_handoff_summary import handoff_summary  # noqa: E402
+from lane_brief import line1_reading  # noqa: E402
 from big_output import emit  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
@@ -1111,34 +1112,10 @@ def inbox_card_lines(inbox_text):
     return out
 
 
-LANE_STATES = ("WORKING", "DONE", "BLOCKED", "EMPTY", "QUEUE EMPTY", "RECYCLE", "DRAFTED", "MORNING FILE READY", "STEP-FOR-JONATHAN",
-               "TOWER-STEP", "FAILED", "ENDED WHILE WORKING", "HOURLY", "STATUS", "READY")   # the states report_line.py accepts, longest first below
-WINDOW_DATE_RE = re.compile(r"\b(?:(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\s+)?(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
-                            r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})\b|\b(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\b", re.I)
-
-
-def lane_line1(report_text):
-    """-> (state, kind, detail) from a lane's report.md line 1. state is the leading status word ('' when there is none, as for a heading or plain prose).
-    For BLOCKED and STEP-FOR-JONATHAN, kind says what the lane waits on: 'jonathan' (the text after the time starts with '(Jonathan' or the state is the step),
-    'window' (the text names a window; detail is the date written there, or '' when none), or 'blocker' (anything else); otherwise kind is ''."""
-    line = (report_text or "").split("\n", 1)[0].strip()
-    state = next((st for st in sorted(LANE_STATES, key=len, reverse=True)
-                  if line.startswith(st) and (len(line) == len(st) or line[len(st)] in " |:")), "")
-    if state not in ("BLOCKED", "STEP-FOR-JONATHAN"):
-        return state, "", ""
-    rest = re.sub(r"^[\s|:]*(?:(?:1[0-2]|0?[1-9]):[0-5][0-9]\s?[AaPp][Mm])?[\s|:]*", "", line[len(state):])
-    if state == "STEP-FOR-JONATHAN" or re.match(r"\(\s*jonathan\b", rest, re.I):
-        return state, "jonathan", ""
-    if re.search(r"\bwindow\b", rest, re.I):
-        m = WINDOW_DATE_RE.search(rest)
-        return state, "window", m.group(0) if m else ""
-    return state, "blocker", ""
-
-
 def lane_card_times(lane_status, lanes_dir, now_ts):
     """-> ({card: newest report time of any lane that names it}, {card: (lane name, report time) for the lanes open now with a report < 48 h old
     whose line 1 is WORKING}, {card: (lane name, report time, kind, detail) for the lanes open now with a report < 48 h old whose line 1 is BLOCKED or
-    STEP-FOR-JONATHAN; see lane_line1}). A lane that is DONE, QUEUE EMPTY or has no state word moves nothing: an idle lane is not work in progress.
+    STEP-FOR-JONATHAN; see lane_brief.line1_reading}). A lane that is DONE, QUEUE EMPTY or has no state word moves nothing: an idle lane is not work in progress.
     A lane 'names' a card when its prompt.md or report.md does. Open lanes are the ones lane.sh --status lists."""
     newest, moving, waits = {}, {}, {}
     root = Path(lanes_dir) if lanes_dir else None
@@ -1152,7 +1129,7 @@ def lane_card_times(lane_status, lanes_dir, now_ts):
             if not d.is_dir() or not times or now_ts - max(times) > LANE_LOOKBACK_DAYS * 86400:
                 continue
             text = "".join(f.read_text(errors="replace")[:LANE_TEXT_LIMIT] for f in (prompt, rep) if f.is_file())
-            state, kind, detail = lane_line1(rep.read_text(errors="replace")[:2000]) if rep.is_file() else ("", "", "")
+            state, kind, detail = line1_reading(rep.read_text(errors="replace")[:2000]) if rep.is_file() else ("", "", "")
         except OSError:
             continue
         name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", d.name)
