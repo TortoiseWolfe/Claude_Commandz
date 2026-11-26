@@ -118,9 +118,10 @@ mcp__claude_ai_Gmail__get_message,mcp__claude_ai_Gmail__get_thread,mcp__claude_a
 Bash($S/peer_poll_record.sh:*)"
 # The handler is handed the check result: without it the prompt's "check result" did not exist, and the handler rebuilt the list from
 # Gmail itself and ignored peer-files-waiting.txt (25-26 Nov 2026: one note queued five times).
-timeout 1200 "$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")
+HANDLE_PROMPT="$(cat "$S/peer_poll.handle.prompt")
 
-CHECK RESULT (the notes to handle this round, and no others): $check" --name peer-poll-handle --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
+CHECK RESULT (the notes to handle this round, and no others): $check"
+timeout 1200 "$CLAUDE" -p "$HANDLE_PROMPT" --name peer-poll-handle --model sonnet --max-turns 40 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" --allowedTools "$ALLOW" >>"$LOG" 2>&1
 echo "$(ts) handler finished (exit $?)" >>"$LOG"
 # Publish the read record (draft IDs only) so NX-01's sweep can see what this tower has read; this
