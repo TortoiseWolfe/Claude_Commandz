@@ -1457,10 +1457,61 @@ class CoopCards(unittest.TestCase):
 
     def test_a_lane_open_now_with_a_report_under_48_hours_old_makes_the_card_moving(self):
         status = "coop-cards-1 report:yes working\n    dir:/x\n"
-        lanes = [("2026-11-09-coop-cards-1", "# Report\nDid card 155 work.\n", 5)]
+        lanes = [("2026-11-09-coop-cards-1", "WORKING 9:00 AM | card 155 work\n\nDid card 155 work.\n", 5)]
         lines = self.states("", cards=(155,), lanes=lanes, lane_status=status)
         self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 0 | moving 1")
         self.assertEqual(lines[1], 'moving   b2/155 lane coop-cards-1, report 10 Nov')
+
+    def lane_cards(self, line1, hours_old=5, card=155):
+        status = "coop-cards-1 report:yes working\n    dir:/x\n"
+        lanes = [("2026-11-09-coop-cards-1", line1 + f"\n\nWorked on card {card}.\n", hours_old)]
+        return self.states("", cards=(card,), lanes=lanes, lane_status=status)
+
+    def test_a_lane_whose_line_1_is_blocked_on_jonathan_makes_the_card_wait_on_him_not_move(self):
+        lines = self.lane_cards("BLOCKED 6:25 PM | (Jonathan): ! bash hand-steps.sh, PASS on every line means done")
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 0 | moving 0 | waits 1")
+        self.assertEqual(lines[1], 'waits    b2/155 "Made up title" waits on Jonathan (lane coop-cards-1, report 10 Nov)')
+
+    def test_a_step_for_jonathan_line_also_waits_on_him(self):
+        lines = self.lane_cards("STEP-FOR-JONATHAN 7:00 PM | https://example.com/page in Chrome, done when the page says saved")
+        self.assertIn("waits on Jonathan", lines[1])
+        self.assertNotIn("moving 1", lines[0])
+
+    def test_a_lane_blocked_on_a_production_window_waits_on_the_window_and_shows_its_date(self):
+        lines = self.lane_cards("BLOCKED 6:25 PM | waits for the co-op window, Tuesday 2 Dec evening, then the install runs")
+        self.assertEqual(lines[1], 'waits    b2/155 "Made up title" waits on window (Tuesday 2 Dec) (lane coop-cards-1, report 10 Nov)')
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 0 | moving 0 | waits 1")
+        lines = self.lane_cards("BLOCKED 6:25 PM | waits for the production window")
+        self.assertIn("waits on window (date not given)", lines[1])
+
+    def test_a_blocked_line_with_neither_jonathan_nor_a_window_still_does_not_count_as_moving(self):
+        lines = self.lane_cards("BLOCKED 6:25 PM | tests fail on a missing fixture")
+        self.assertIn("waits on a blocker named on the lane's line 1", lines[1])
+        self.assertNotIn("moving 1", lines[0])
+
+    def test_a_lane_that_is_done_or_empty_or_has_no_state_word_does_not_move_the_card(self):
+        for line1 in ("DONE 5:10 PM | items 3", "QUEUE EMPTY 5:10 PM | items 4", "# Report", "Did the work, all checks green"):
+            lines = self.lane_cards(line1)
+            self.assertIn("stalled  b2/155", lines[1], line1)
+            self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 1 | blocked 0 | moving 0", line1)
+
+    def test_one_working_lane_moves_the_card_even_when_another_lane_naming_it_is_blocked(self):
+        status = "coop-cards-1 report:yes working\n    dir:/x\ncoop-cards-2 report:yes working\n    dir:/y\n"
+        lanes = [("2026-11-09-coop-cards-1", "BLOCKED 6:25 PM | (Jonathan): a step\n\ncard 155\n", 2),
+                 ("2026-11-09-coop-cards-2", "WORKING 9:00 AM | card 155\n\ncard 155\n", 9)]
+        lines = self.states("", cards=(155,), lanes=lanes, lane_status=status)
+        self.assertEqual(lines[0], "Co-op cards: 1 open | stalled 0 | blocked 0 | moving 1")
+        self.assertIn("lane coop-cards-2", lines[1])
+
+    def test_a_card_that_waits_sorts_after_stalled_and_before_blocked_and_moving(self):
+        status = "coop-cards-1 report:yes working\n    dir:/x\ncoop-cards-2 report:yes working\n    dir:/y\n"
+        lanes = [("2026-11-09-coop-cards-1", "BLOCKED 6:25 PM | (Jonathan): a step\n\ncard 155\n", 2),
+                 ("2026-11-09-coop-cards-2", "WORKING 9:00 AM | card 83\n\ncard 83\n", 3)]
+        inbox = "- [ ] 2026-11-08 07:00 | Hub: waiting on Greg: co-op card 147 | r-1234567890123456789\n"
+        lines = self.states(inbox, cards=(155, 113, 83, 147), lanes=lanes, lane_status=status,
+                            changed={155: "2026-11-05", 113: "2026-10-30", 83: "2026-11-01", 147: "2026-11-01"})
+        self.assertEqual([l.split()[0] + " " + l.split()[1] for l in lines[1:]],
+                         ["stalled b2/113", "waits b2/155", "blocked b2/147", "moving b2/83"])
 
     def test_a_lane_report_older_than_48_hours_or_a_lane_no_longer_open_does_not_move_the_card(self):
         status = "coop-cards-1 report:yes working\n"
@@ -1499,7 +1550,7 @@ class CoopCards(unittest.TestCase):
     def test_stalled_come_first_oldest_first_then_blocked_then_moving(self):
         inbox = "- [ ] 2026-11-08 07:00 | Hub: waiting on Greg: co-op card 147 | r-1234567890123456789\n"
         status = "coop-cards-1 report:yes working\n"
-        lanes = [("2026-11-09-coop-cards-1", "card 83 done\n", 2)]
+        lanes = [("2026-11-09-coop-cards-1", "WORKING 9:00 AM | card 83\n\ncard 83 under way\n", 2)]
         lines = self.states(inbox, cards=(155, 113, 83, 147), lanes=lanes, lane_status=status,
                             changed={155: "2026-11-05", 113: "2026-10-30", 83: "2026-11-01", 147: "2026-11-01"})
         self.assertEqual([l.split()[0] + " " + l.split()[1] for l in lines[1:]],
