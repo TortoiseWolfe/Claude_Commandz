@@ -17,7 +17,7 @@ No model calls and no Gmail (the client pollers queue mail and chat lines in the
   - the mail index (hub/scripts/mail_index.py keeps ~/.claude/state/mail-index.tsv): metadata counts by class for the last 2 days,
     unhandled person, job and client-alert rows, and one-time plain-rule reply results (client rows already show as client lines);
   - Jonathan's open co-op Deck cards (boards 2 and 8, read-only through deck_board.py, cached an hour in ~/.claude/state/deck-cards-cache.json):
-    one state per card: moving (an open lane names it, report < 48 h), blocked (an inbox line < 7 days old waits on a named person other than Jonathan
+    one state per card: moving (an open lane names it, report < 48 h, line 1 WORKING), waits (an open lane names it and its line 1 is BLOCKED or STEP-FOR-JONATHAN: waits on Jonathan, on a window with its date, or on a blocker; a DONE or empty lane moves nothing), blocked (an inbox line < 7 days old waits on a named person other than Jonathan
     or the hub and carries a Gmail id) or stalled (anything else, with the date it last moved); past due gets "[due 31 Oct, passed]"; a failed read prints "Deck read failed: ...", never a gap.
     A card in the private ~/.config/afa/parked-cards.txt (one line each: board/id | date | his words; only board/id is read) is one Jonathan dropped: it leaves
     every count and every line and shows only as "| parked N" in the header;
@@ -1111,13 +1111,39 @@ def inbox_card_lines(inbox_text):
     return out
 
 
+LANE_STATES = ("WORKING", "DONE", "BLOCKED", "EMPTY", "QUEUE EMPTY", "RECYCLE", "DRAFTED", "MORNING FILE READY", "STEP-FOR-JONATHAN",
+               "TOWER-STEP", "FAILED", "ENDED WHILE WORKING", "HOURLY", "STATUS", "READY")   # the states report_line.py accepts, longest first below
+WINDOW_DATE_RE = re.compile(r"\b(?:(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\s+)?(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+                            r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})\b|\b(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\b", re.I)
+
+
+def lane_line1(report_text):
+    """-> (state, kind, detail) from a lane's report.md line 1. state is the leading status word ('' when there is none, as for a heading or plain prose).
+    For BLOCKED and STEP-FOR-JONATHAN, kind says what the lane waits on: 'jonathan' (the text after the time starts with '(Jonathan' or the state is the step),
+    'window' (the text names a window; detail is the date written there, or '' when none), or 'blocker' (anything else); otherwise kind is ''."""
+    line = (report_text or "").split("\n", 1)[0].strip()
+    state = next((st for st in sorted(LANE_STATES, key=len, reverse=True)
+                  if line.startswith(st) and (len(line) == len(st) or line[len(st)] in " |:")), "")
+    if state not in ("BLOCKED", "STEP-FOR-JONATHAN"):
+        return state, "", ""
+    rest = re.sub(r"^[\s|:]*(?:(?:1[0-2]|0?[1-9]):[0-5][0-9]\s?[AaPp][Mm])?[\s|:]*", "", line[len(state):])
+    if state == "STEP-FOR-JONATHAN" or re.match(r"\(\s*jonathan\b", rest, re.I):
+        return state, "jonathan", ""
+    if re.search(r"\bwindow\b", rest, re.I):
+        m = WINDOW_DATE_RE.search(rest)
+        return state, "window", m.group(0) if m else ""
+    return state, "blocker", ""
+
+
 def lane_card_times(lane_status, lanes_dir, now_ts):
-    """-> ({card: newest report time of any lane that names it}, {card: (lane name, report time) for the lanes open now with a report < 48 h old}).
+    """-> ({card: newest report time of any lane that names it}, {card: (lane name, report time) for the lanes open now with a report < 48 h old
+    whose line 1 is WORKING}, {card: (lane name, report time, kind, detail) for the lanes open now with a report < 48 h old whose line 1 is BLOCKED or
+    STEP-FOR-JONATHAN; see lane_line1}). A lane that is DONE, QUEUE EMPTY or has no state word moves nothing: an idle lane is not work in progress.
     A lane 'names' a card when its prompt.md or report.md does. Open lanes are the ones lane.sh --status lists."""
-    newest, moving = {}, {}
+    newest, moving, waits = {}, {}, {}
     root = Path(lanes_dir) if lanes_dir else None
     if not root or not root.is_dir():
-        return newest, moving
+        return newest, moving, waits
     live = {n for n, _, _ in parse_lane_status(lane_status or "")[0]}
     for d in root.iterdir():
         try:
@@ -1126,15 +1152,19 @@ def lane_card_times(lane_status, lanes_dir, now_ts):
             if not d.is_dir() or not times or now_ts - max(times) > LANE_LOOKBACK_DAYS * 86400:
                 continue
             text = "".join(f.read_text(errors="replace")[:LANE_TEXT_LIMIT] for f in (prompt, rep) if f.is_file())
+            state, kind, detail = lane_line1(rep.read_text(errors="replace")[:2000]) if rep.is_file() else ("", "", "")
         except OSError:
             continue
         name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", d.name)
         rep_t = rep.stat().st_mtime if rep.is_file() else 0
+        fresh = name in live and rep_t and now_ts - rep_t < MOVING_HOURS * 3600
         for n in card_numbers(text):
             newest[n] = max(newest.get(n, 0), max(times))
-            if name in live and rep_t and now_ts - rep_t < MOVING_HOURS * 3600 and rep_t >= moving.get(n, ("", 0))[1]:
+            if fresh and state == "WORKING" and rep_t >= moving.get(n, ("", 0))[1]:
                 moving[n] = (name, rep_t)
-    return newest, moving
+            elif fresh and kind and rep_t >= waits.get(n, ("", 0))[1]:
+                waits[n] = (name, rep_t, kind, detail)
+    return newest, moving, waits
 
 
 def _eastern_day(ts):
@@ -1162,11 +1192,13 @@ def load_parked(path=None):
 
 
 def card_states(boards, meta, dues, inbox_text, lane_status, lanes_dir, now_ts):
-    """-> [(state, sort day, line)] one per open card. moving: a lane open now names the card and wrote its report < 48 h ago.
+    """-> [(state, sort day, line)] one per open card. moving: a lane open now names the card, wrote its report < 48 h ago and its line 1 is WORKING.
+    waits: no lane is WORKING on it, and a lane open now (report < 48 h) names it with line 1 BLOCKED or STEP-FOR-JONATHAN: it waits on Jonathan, on a
+    production window (with the date the line gives) or on a blocker the line names. A DONE or empty lane moves nothing.
     blocked: an open inbox line < 7 days old names the card, waits on a named person other than Jonathan or the hub, and carries a Gmail id.
     stalled: everything else (a line that waits on Jonathan is a question to ask, not cover). A past-due card gets a flag on any state."""
     lines_by_card = inbox_card_lines(inbox_text)
-    newest_lane, moving = lane_card_times(lane_status, lanes_dir, now_ts)
+    newest_lane, moving, waits = lane_card_times(lane_status, lanes_dir, now_ts)
     today = _eastern_day(now_ts)
     out = []
     for b, ids in sorted(boards.items()):
@@ -1181,6 +1213,10 @@ def card_states(boards, meta, dues, inbox_text, lane_status, lanes_dir, now_ts):
             if i in moving:
                 name, t = moving[i]
                 out.append(("moving", _eastern_day(t), f"moving   b{b}/{i} lane {name}, report {_short_day(_eastern_day(t))}{flag}"))   # no title: it is moving
+            elif i in waits:
+                name, t, kind, detail = waits[i]
+                what = {"jonathan": "Jonathan", "window": f"window ({detail or 'date not given'})"}.get(kind, "a blocker named on the lane's line 1")
+                out.append(("waits", _eastern_day(t), f"waits    {head} waits on {what} (lane {name}, report {_short_day(_eastern_day(t))}){flag}"))
             elif blocked:
                 day, who, _, _ = blocked[-1]
                 out.append(("blocked", day, f"blocked  {head} waits on {who.capitalize()} since {_short_day(day)}{flag}"))
@@ -1193,7 +1229,7 @@ def card_states(boards, meta, dues, inbox_text, lane_status, lanes_dir, now_ts):
                 else:
                     why = "no inbox line"
                 out.append(("stalled", moved, f"stalled  {head} since {_short_day(moved) if moved else '?'} ({why}){flag}"))
-    rank = {"stalled": 0, "blocked": 1, "moving": 2}
+    rank = {"stalled": 0, "waits": 1, "blocked": 2, "moving": 3}
     out.sort(key=lambda x: (rank[x[0]], x[1] or "0000", x[2]))
     return out
 
@@ -1209,8 +1245,9 @@ def coop_cards_lines(inbox_text, now_ts, cache=None, reader=deck_read_dues, lane
         kept = {b: [i for i in ids if f"b{b}/{i}" not in parked] for b, ids in boards.items()}   # a dropped card is not stalled work for anyone
         n_parked = sum(len(ids) - len(kept[b]) for b, ids in boards.items())
         states = card_states(kept, meta, dues, inbox_text, lane_status, lanes_dir, now_ts)
-        n = {k: sum(1 for s, _, _ in states if s == k) for k in ("stalled", "blocked", "moving")}
+        n = {k: sum(1 for s, _, _ in states if s == k) for k in ("stalled", "waits", "blocked", "moving")}
         lines.append(f"Co-op cards: {len(states)} open | stalled {n['stalled']} | blocked {n['blocked']} | moving {n['moving']}"
+                     + (f" | waits {n['waits']}" if n["waits"] else "")
                      + (f" | parked {n_parked}" if n_parked else ""))
         lines.extend(line for _, _, line in states)
     lines.extend(f"- {f}" for f in fails)
