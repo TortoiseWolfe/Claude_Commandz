@@ -219,10 +219,12 @@ LANE_SKILLS_KEEP="
 "
 # Built-in and plugin skills a lane never needs. They have no folder under ~/.claude, so the scan below cannot find them; each one is
 # named here and set to "off" the same way. Measured 26 Nov (issue 169): a fresh lane still listed these, about 7,000 characters of
-# descriptions at every start. Not listed on purpose: loop, ship-local, run and code-review:code-review (lane prompts use them).
+# descriptions at every start. Not listed on purpose: loop, ship-local, run and code-review:code-review (lane prompts use them), and
+# workflow-authoring: with that skill off, Claude Code copies its whole reference into the Workflow tool's own description, which
+# measured 17,500 characters (about 4,300 tokens) bigger, more than every skill switched off saves. Re-measure before adding a name.
 LANE_BUILTIN_SKILLS_OFF="
   dataviz artifact-design artifact-diagramming artifact-capabilities update-config keybindings-help simplify steward
-  fewer-permission-prompts claude-approvals schedule claude-api workflow-authoring plugin-authoring init
+  fewer-permission-prompts claude-approvals schedule claude-api plugin-authoring init
 "
 # The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
