@@ -373,59 +373,69 @@ class OpenRead(Base):
             r = self.rec(cmd, "--no-net", "--lanes-dir", str(self.d / "lanes"))
             self.assertEqual(r.returncode, 0, "%s: %s" % (cmd, r.stderr))
 
-
 class Expire(Base):
-    """Job-line expiry: dry run by default, --close ticks and marks, never deletes, only Job lines, [keep] is spared."""
-    EXP = """- [ ] 2026-10-01 09:00 | Job: old plain job | detail | e-0000001
-  - a note under it
-- [ ] 2026-10-01 09:00 | Job: old kept job [keep] | detail | e-0000002
-- [ ] 2026-10-01 09:00 | Hub: old hub line | detail | e-0000003
-- [ ] 2026-10-01 09:00 | Question: old question | detail | e-0000004
-- [ ] 2026-10-01 09:00 | Client mail: old client | detail | e-0000005
-- [ ] 2026-11-01 09:00 | Job: young job | detail | e-0000006
-- [x] 2026-10-01 09:00 | Job: already ticked | done | e-0000007
-- [ ] 2026-10-01 09:00 | Job: long tail %s END | e-0000008
+    """Expiry of routine machine lines (issue 29). A routine line is one a script writes with no person's words in it: a ScoutJob
+    check-in, a "new job mail" line, a recovery note. Those close on their own after 7 days. Everything else (Jonathan's words, a
+    client, money, a dated event) never closes on its own: the dry run lists it once it is over 30 days old and a person closes
+    each with a reason. Closing ticks the box and says why and when; it never deletes."""
+    # NOW is 2026-11-07 09:00, so a line dated 2026-10-31 09:00 is exactly 7 days old and stays; 2026-10-30 goes.
+    EXP = """- [ ] 2026-10-20 20:00 | Job: ScoutJob check-in 8:00 PM: 2 changed, 0 stalled | move what read access allows | state.json
+  - a machine note under it
+- [ ] 2026-10-20 09:00 | Job: 3 new job mail in /x/lanes/scout/mail-jobs.md | for the ~/repos director: read the new rows | mailjobs-aa
+- [ ] 2026-10-20 07:15 | Recovery on NX-01: down since Tue 20 Oct 1:11 AM, 2 thing(s) checked or brought back | record: /x/recovery/r.md
+- [ ] 2026-11-05 20:00 | Job: ScoutJob check-in 8:00 PM: 1 changed, 0 stalled | move what read access allows | state.json
+- [ ] 2026-10-31 09:00 | Job: ScoutJob check-in 9:00 AM: 1 changed, 0 stalled | exactly seven days old | state.json
+- [ ] 2026-10-20 10:00 | Job: ScoutJob check-in 10:00 AM: 4 changed, 1 stalled [keep] | marked keep | state.json
+- [ ] 2026-10-20 11:00 | Job: ScoutJob check-in 11:00 AM: 4 changed, 1 stalled | note below has a person's words | state.json
+  - 2026-10-21 Jonathan said hold this one
+- [ ] 2026-10-01 09:00 | Job: Sat 7 Nov window: ship the thing | plain old job with a date | e-0000001
+- [ ] 2026-10-01 09:00 | Client mail: old client | detail | e-0000002
+- [ ] 2026-10-01 09:00 | Question: old question | his call | e-0000003
+- [ ] 2026-10-25 09:00 | Job: a plain job, 13 days old | under thirty days | e-0000004
+- [x] 2026-10-01 09:00 | Job: ScoutJob check-in 8:00 AM: 0 changed, 0 stalled | already ticked | state.json
 """
+    ROUTINE_GONE = ("2 changed, 0 stalled", "3 new job mail", "Recovery on NX-01")
 
     def setUp(self):
         super().setUp()
-        self.board.write_text(self.EXP % ("y" * 900))
+        self.board.write_text(self.EXP)
 
-    def test_dry_run_lists_and_changes_nothing(self):
+    def run_rec(self, *args, timeout=30):
+        e = dict(os.environ, HUB_INBOX=str(self.board), HOME=str(self.d), MUSE_STATE=str(self.d))
+        return subprocess.run(["bash", REC, "expire", *args, "--now", NOW], capture_output=True, text=True, env=e, timeout=timeout)
+
+    def test_dry_run_counts_the_routine_lines_and_changes_nothing(self):
         before = self.board.read_text()
         r = self.cli("expire")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("old plain job", r.stdout)
-        self.assertIn("long tail", r.stdout)
-        for nope in ("kept job", "old hub", "old question", "old client", "young job", "already ticked"):
-            self.assertNotIn(nope, r.stdout)
-        self.assertIn("2 ", r.stdout)
+        self.assertIn("3 routine line(s) older than 7 days would expire", r.stdout)
+        self.assertIn("ScoutJob check-in", r.stdout)
+        self.assertIn("new job mail", r.stdout)
+        self.assertIn("Recovery on", r.stdout)
         self.assertEqual(self.board.read_text(), before)
 
-    def test_close_ticks_and_marks_only_the_right_lines(self):
+    def test_dry_run_lists_what_is_over_thirty_days_for_a_person(self):
+        r = self.cli("expire")
+        tail = r.stdout.split("older than 30 days")[1]
+        for want in ("Sat 7 Nov window", "old client", "old question"):
+            self.assertIn(want, tail)
+        for nope in ("13 days old", "3 new job mail", "2 changed", "seven days old", "marked keep"):
+            self.assertNotIn(nope, tail)
+        self.assertIn("--close-id", r.stdout)
+
+    def test_close_ticks_only_the_routine_lines_and_writes_expired_and_the_date(self):
         r = self.cli("expire", "--close")
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = self.board.read_text().splitlines()
-        self.assertEqual(lines[0], "- [x] 2026-10-01 09:00 | Job: old plain job | detail | e-0000001 (expired after 14 days)")
-        self.assertEqual(lines[1], "  - a note under it")
-        self.assertTrue(lines[2].startswith("- [ ] ") and "[keep]" in lines[2])
-        for i in (3, 4, 5, 6):
-            self.assertFalse(lines[i].endswith("days)"), lines[i])
-        self.assertTrue(lines[3].startswith("- [ ] ") and lines[4].startswith("- [ ] ") and lines[5].startswith("- [ ] "))
-        self.assertTrue(lines[8].startswith("- [x] ") and lines[8].endswith("END | e-0000008 (expired after 14 days)"))
-        self.assertEqual(len(lines), 9)  # nothing deleted
-
-    def test_days_flag_and_env(self):
-        r = self.cli("expire", "--days", "60")
-        self.assertNotIn("old plain job", r.stdout)
-        r = self.cli("expire", "--days", "3")
-        self.assertIn("young job", r.stdout)
-        r = self.cli("expire", HUB_EXPIRE_DAYS="60")
-        self.assertNotIn("old plain job", r.stdout)
-
-    def test_the_mark_names_the_days_used(self):
-        self.cli("expire", "--close", "--days", "30")
-        self.assertIn("(expired after 30 days)", self.board.read_text())
+        self.assertEqual(len(lines), len(self.EXP.splitlines()))  # nothing deleted
+        self.assertTrue(lines[0].startswith("- [x] 2026-10-20 20:00 | Job: ScoutJob check-in") and lines[0].endswith("| state.json (expired 2026-11-07)"))
+        self.assertEqual(lines[1], "  - a machine note under it")
+        self.assertTrue(lines[2].startswith("- [x] ") and lines[2].endswith("(expired 2026-11-07)"))
+        self.assertTrue(lines[3].startswith("- [x] ") and lines[3].endswith("(expired 2026-11-07)"))
+        for i in range(4, 14):
+            self.assertNotIn("expired", lines[i], lines[i])
+        self.assertTrue(all(lines[i].startswith("- [ ] ") for i in (4, 5, 6, 7, 9, 10, 11, 12)))
+        self.assertTrue(lines[13].startswith("- [x] ") and "expired" not in lines[13])
 
     def test_a_second_close_changes_nothing(self):
         self.cli("expire", "--close")
@@ -433,19 +443,87 @@ class Expire(Base):
         self.cli("expire", "--close")
         self.assertEqual(self.board.read_text(), once)
 
-    def test_a_keep_note_under_the_line_also_spares_it(self):
-        self.board.write_text("- [ ] 2026-10-01 09:00 | Job: a | d | e-1\n  - 2026-10-02 [keep] wanted\n")
+    def test_the_days_flag_and_env_change_the_age_for_routine_lines(self):
+        r = self.cli("expire", "--days", "30")
+        self.assertIn("no routine lines older than 30 days", r.stdout)
+        r = self.cli("expire", "--days", "2")
+        self.assertIn("4 routine line(s) older than 2 days would expire", r.stdout)
+        r = self.cli("expire", HUB_EXPIRE_DAYS="30")
+        self.assertIn("no routine lines older than 30 days", r.stdout)
+
+    def test_a_routine_line_with_a_person_a_client_money_or_a_date_in_it_stays(self):
+        head = "- [ ] 2026-10-20 08:00 | Job: ScoutJob check-in 8:00 AM: 1 changed, 0 stalled | move what read access allows | state.json\n"
+        for words in ("Jonathan's order", "[MUSE>CC] note", "Gail asked", "Harmonic Egg", "co-op call", "invoice 12", "costs $40", "due: 2026-11-09",
+                      "the Sat 14 Nov window", "meet Sat 14 Nov", "refund"):
+            with self.subTest(words=words):
+                self.board.write_text(head + "  - 2026-10-21 %s\n" % words)
+                self.cli("expire", "--close")
+                self.assertTrue(self.board.read_text().startswith("- [ ] "), words)
+
+    def test_a_keep_mark_in_the_line_or_a_note_spares_it(self):
+        self.board.write_text("- [ ] 2026-10-20 08:00 | Job: ScoutJob check-in 8:00 AM: 1 changed, 0 stalled | x | s.json\n  - 2026-10-21 [keep] wanted\n")
         self.cli("expire", "--close")
         self.assertTrue(self.board.read_text().startswith("- [ ] "))
 
-    def test_through_the_recorder(self):
-        e = dict(os.environ, HUB_INBOX=str(self.board), HOME=str(self.d), MUSE_STATE=str(self.d))
-        r = subprocess.run(["bash", REC, "expire", "--now", NOW], capture_output=True, text=True, env=e, timeout=60)
+    def test_a_note_dated_inside_the_window_keeps_a_routine_line_alive(self):
+        self.board.write_text("- [ ] 2026-10-20 08:00 | Job: ScoutJob check-in 8:00 AM: 1 changed, 0 stalled | x | s.json\n  - 2026-11-05 checked again\n")
+        self.cli("expire", "--close")
+        self.assertTrue(self.board.read_text().startswith("- [ ] "))
+
+    def test_close_id_ticks_one_line_with_the_reason_and_the_date(self):
+        ident = nl.Item(["- [ ] 2026-10-01 09:00 | Client mail: old client | detail | e-0000002\n"]).id
+        r = self.cli("expire", "--close-id", ident, "--reason", "Greg answered on the 5 Nov call")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("old plain job", r.stdout)
-        self.assertIn("[ ] ", self.board.read_text())
-        subprocess.run(["bash", REC, "expire", "--close", "--now", NOW], capture_output=True, text=True, env=e, timeout=60)
-        self.assertIn("(expired after 14 days)", self.board.read_text())
+        lines = self.board.read_text().splitlines()
+        self.assertEqual(lines[10], "- [x] 2026-10-01 09:00 | Client mail: old client | detail | e-0000002 (closed 2026-11-07: Greg answered on the 5 Nov call)")
+        self.assertEqual(sum(1 for ln in lines if ln.startswith("- [x] ")), 2)
+        self.assertEqual(len(lines), len(self.EXP.splitlines()))
+
+    def test_close_id_needs_a_reason_and_a_real_open_line(self):
+        before = self.board.read_text()
+        ident = nl.Item(["- [ ] 2026-10-01 09:00 | Client mail: old client | detail | e-0000002\n"]).id
+        for args in (("--close-id", ident), ("--close-id", ident, "--reason", "  "), ("--close-id", "deadbeef", "--reason", "x"),
+                     ("--close-id", nl.Item(["- [x] 2026-10-01 09:00 | Job: ScoutJob check-in 8:00 AM: 0 changed, 0 stalled | already ticked | state.json\n"]).id,
+                      "--reason", "x")):
+            r = self.cli("expire", *args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertEqual(self.board.read_text(), before, args)
+
+    def test_a_close_takes_the_board_lock_and_gives_up_when_another_writer_holds_it(self):
+        import fcntl
+        with open(self.d / "hub-inbox.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            before = self.board.read_text()
+            r = self.cli("expire", "--close", HUB_LOCK_WAIT="1")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("locked", r.stderr)
+            self.assertEqual(self.board.read_text(), before)
+        r = self.cli("expire", "--close")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(expired 2026-11-07)", self.board.read_text())
+
+    def test_a_dry_run_does_not_wait_for_the_lock(self):
+        import fcntl
+        with open(self.d / "hub-inbox.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            r = self.cli("expire", HUB_LOCK_WAIT="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_through_the_recorder_a_close_works_and_does_not_wait_on_its_own_lock(self):
+        r = self.run_rec("--close", timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.board.read_text().count("(expired 2026-11-07)"), 3)
+        r = self.run_rec("--close-id", nl.Item(["- [ ] 2026-10-01 09:00 | Question: old question | his call | e-0000003\n"]).id,
+                         "--reason", "answered", timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(closed 2026-11-07: answered)", self.board.read_text())
+
+    def test_the_recorder_dry_run_lists_without_changing(self):
+        before = self.board.read_text()
+        r = self.run_rec()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would expire", r.stdout)
+        self.assertEqual(self.board.read_text(), before)
 
 
 if __name__ == "__main__":

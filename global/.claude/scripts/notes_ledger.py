@@ -8,9 +8,12 @@ unless a line names a GitHub pull request or commit (and then only `gh`, with --
   notes_ledger.py order  [--match S] [--owner P] [--state S,S] [--include-stale] [--limit N]
                                                      ONE block per open item: state, the decision already made, the deadline, the evidence
   notes_ledger.py risk                               one escalation line per at-risk item (empty output = nothing at risk)
-  notes_ledger.py expire [--days 14] [--close]       open Job lines older than N days (the date at the start of the line) with no "[keep]"
-                                                     in the line or its notes. A dry run lists them; --close ticks them "[x]" and appends
-                                                     " (expired after N days)". Never deletes text; never touches Hub, Question or client lines.
+  notes_ledger.py expire [--days 7] [--close] [--close-id ID --reason WHY]
+                                                     routine machine lines (ScoutJob check-ins, new-job-mail lines, recovery and wake notes) with no
+                                                     person's words, client, money or dated event in them, older than N days and not marked "[keep]".
+                                                     A dry run counts them by kind; --close ticks them "[x]" and appends " (expired YYYY-MM-DD)".
+                                                     Every other open line stays; the dry run lists those older than 30 days, and --close-id ticks one
+                                                     of them with " (closed YYYY-MM-DD: WHY)". Never deletes text; --close and --close-id take hub-inbox.lock.
 
 Common flags: --inbox F  --lanes-dir D  --now "YYYY-MM-DD HH:MM" (tests)  --no-net
 
@@ -29,16 +32,17 @@ A deadline is "due: 2026-11-07 1:00 PM", "due: 2026-11-07 13:00", "due: 1 PM" (t
 (a date alone means 5:00 PM that day). The margin is SHORT_MARGIN_H hours before a deadline that was set under a day ahead, LONG_MARGIN_H
 hours before any other.
 
-The board is read, never written (the `ledger --write` file is a separate snapshot), with one exception: `expire --close` ticks old Job
-lines. Nothing here moves or deletes a line.
+The board is read, never written (the `ledger --write` file is a separate snapshot), with one exception: `expire --close` and `expire --close-id` tick lines. Nothing here moves or deletes a line.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -406,45 +410,137 @@ def cmd_stale(a):
     return 0
 
 
+# Routine machine lines: what a script writes with no person's words in it. An allowlist, so a new kind of line is kept until someone
+# adds its shape here. Each is (label for the dry run, pattern for the text after the date).
+ROUTINE_KINDS = [
+    ("ScoutJob check-in", re.compile(r"^Job: ScoutJob check-in\b"), False),
+    ("new job mail", re.compile(r"^Job: \d+ new job mail in\b"), False),
+    # A recovery note says when the machine went down ("down since Sat 7 Nov 6:05 PM"): a date in the past, not a dated event to keep.
+    ("Recovery on", re.compile(r"^Recovery on \S"), True),
+    ("wake note", re.compile(r"^(?:Job: )?Wake(?:-up)? note\b", re.I), True),
+]
+# Anything that carries a person's words, a client, money or a dated event keeps a line open even when its shape is routine.
+PROTECT = re.compile(
+    r"Jonathan|\[MUSE>|\bMUSE\b|\bGail\b|\bGreg\b|\bWilliam\b|\bAngel\b|\bGloria\b|Harmonic Egg|\bco-?op\b|\bclient|Eduity|Chattanooga"
+    r"|\$|\binvoice|\brefund|\bpay(?:ment|ments|ed|s)?\b|\bprice|\bbudget|\bdue:?\s|\bwindow\b", re.I)
+DATED_EVENT = re.compile(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.? \d{1,2} [A-Z][a-z]{2}", re.I)
+LIST_DAYS = 30
+
+
+def routine_kind(item):
+    """The label of the routine shape an open line has, else None. A [keep] mark or protected words anywhere in the line or its
+    notes (it is the whole block that is read) means None: such a line is not routine."""
+    if not item.ok or not item.open:
+        return None
+    full = item.full_text()
+    if "[keep]" in full or PROTECT.search(full):
+        return None
+    for label, rx, may_name_a_past_date in ROUTINE_KINDS:
+        if rx.match(item.text):
+            return None if DATED_EVENT.search(full) and not may_name_a_past_date else label
+    return None
+
+
+def age_days(item, now):
+    t = item.last_touch()
+    return None if t is None else (now.date() - t).days
+
+
 def expirable(item, now, days):
-    """An open Job line whose own date is more than `days` days back and that nothing marks [keep]."""
-    return (item.owner == "Job" and item.created is not None and (now.date() - item.created.date()).days > days
-            and "[keep]" not in item.full_text())
+    """A routine line nobody has touched for more than `days` days."""
+    age = age_days(item, now)
+    return routine_kind(item) is not None and age is not None and age > days
 
 
-def cmd_expire(a):
-    now = datetime.strptime(a.now, "%Y-%m-%d %H:%M") if a.now else datetime.now().replace(second=0, microsecond=0)
-    p = Path(os.path.realpath(a.inbox))
-    if not p.exists():
-        print("no board at %s" % a.inbox)
-        return 0
-    lines = p.read_text(errors="replace").splitlines(keepends=True)
-    pre, blocks = split_blocks(lines)
-    items = [Item(b) for b in blocks]
-    hits = [i for i in items if i.ok and i.open and expirable(i, now, a.days)]
-    for i in hits:
-        print("%s | %s" % (i.id, short(i.text, 160)))
-    if not hits:
-        print("no open Job lines older than %d days" % a.days)
-        return 0
-    if not a.close:
-        print("%d open Job line(s) older than %d days (dry run, nothing changed). Close them with: expire --close; spare one by adding [keep] to it." % (len(hits), a.days))
-        return 0
+def lock_board(board_path):
+    """Take hub-inbox.lock beside the board, the same lock the recorder and the archive take. -> the open file, or None when another
+    writer still holds it after HUB_LOCK_WAIT seconds (default 60)."""
+    wait = float(os.environ.get("HUB_LOCK_WAIT", 60))
+    f = open(Path(board_path).with_name("hub-inbox.lock"), "a")
+    end = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= end:
+                f.close()
+                return None
+            time.sleep(0.2)
+
+
+def rewrite_board(p, pre, items, marks):
+    """Write the board back with `marks` ({item: text to append}) ticked [x]; nothing is deleted. One temp file, one replace."""
     out = list(pre)
-    n = 0
     for it in items:
         b = it.block
-        if it in hits:
+        if it in marks:
             head = b[0].rstrip("\r\n")
             end = b[0][len(head):]
-            b = ["- [x] " + head[6:] + " (expired after %d days)" % a.days + end] + b[1:]
-            n += 1
+            b = ["- [x] " + head[6:] + marks[it] + end] + b[1:]
         out.extend(b)
     tmp = p.with_name(p.name + ".expire.tmp")
     tmp.write_text("".join(out))
     os.replace(tmp, p)
-    print("closed %d Job line(s) older than %d days" % (n, a.days))
-    return 0
+
+
+def cmd_expire(a):
+    now = datetime.strptime(a.now, "%Y-%m-%d %H:%M") if a.now else datetime.now().replace(second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    p = Path(os.path.realpath(a.inbox))
+    if not p.exists():
+        print("no board at %s" % a.inbox)
+        return 0
+    if a.close_id is not None and not (a.reason or "").strip():
+        print("--close-id needs --reason: say why the line is closed", file=sys.stderr)
+        return 2
+    held = None
+    if a.close or a.close_id is not None:
+        held = lock_board(p)
+        if held is None:
+            print("hub-inbox is locked by another writer", file=sys.stderr)
+            return 1
+    try:
+        # Read after the lock is held, so a writer that finished just before sees its lines kept.
+        lines = p.read_text(errors="replace").splitlines(keepends=True)
+        pre, blocks = split_blocks(lines)
+        items = [Item(b) for b in blocks]
+        if a.close_id is not None:
+            hit = [i for i in items if i.ok and i.open and i.id == a.close_id]
+            if not hit:
+                print("no open line with id %s" % a.close_id, file=sys.stderr)
+                return 2
+            reason = " ".join(a.reason.split())
+            rewrite_board(p, pre, items, {hit[0]: " (closed %s: %s)" % (today, reason)})
+            print("closed %s: %s" % (a.close_id, short(hit[0].text, 100)))
+            return 0
+        hits = [i for i in items if expirable(i, now, a.days)]
+        if a.close:
+            if hits:
+                rewrite_board(p, pre, items, {i: " (expired %s)" % today for i in hits})
+            print("closed %d routine line(s) older than %d days (expired %s)" % (len(hits), a.days, today))
+            return 0
+        if hits:
+            kinds = {}
+            for i in hits:
+                k = kinds.setdefault(routine_kind(i), [0, i.created])
+                k[0] += 1
+                k[1] = min(k[1], i.created)
+            print("%d routine line(s) older than %d days would expire (dry run, nothing changed; close them with: expire --close):" % (len(hits), a.days))
+            for label, (n, oldest) in sorted(kinds.items()):
+                print("  %d x %s, oldest %s" % (n, label, oldest.strftime("%Y-%m-%d")))
+        else:
+            print("no routine lines older than %d days" % a.days)
+        waiting = [i for i in items if i.ok and i.open and i not in hits and (age_days(i, now) or 0) > a.list_days]
+        waiting.sort(key=lambda i: i.last_touch())
+        print("%d open line(s) older than %d days that never close on their own (a person closes each: expire --close-id ID --reason \"why\"):"
+              % (len(waiting), a.list_days))
+        for i in waiting:
+            print("%s | %s | %s" % (i.id, i.last_touch(), short(i.text, 150)))
+        return 0
+    finally:
+        if held is not None:
+            held.close()
 
 
 def pick(items, a, now):
@@ -529,8 +625,11 @@ def main(argv=None):
     ap.add_argument("--include-stale", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--write")
-    ap.add_argument("--days", type=int, default=int(os.environ.get("HUB_EXPIRE_DAYS", 14)), help="expire: age in days (default 14)")
-    ap.add_argument("--close", action="store_true", help="expire: tick the listed Job lines (the default is a dry run)")
+    ap.add_argument("--days", type=int, default=int(os.environ.get("HUB_EXPIRE_DAYS", 7)), help="expire: age in days for a routine line (default 7)")
+    ap.add_argument("--list-days", type=int, default=LIST_DAYS, help="expire: the dry run lists other open lines older than this (default 30)")
+    ap.add_argument("--close", action="store_true", help="expire: tick the listed routine lines (the default is a dry run)")
+    ap.add_argument("--close-id", help="expire: tick this one open line (its id from the dry run); needs --reason")
+    ap.add_argument("--reason", help="expire: why --close-id closes the line")
     a = ap.parse_args(argv)
     return {"counts": cmd_counts, "stale": cmd_stale, "ledger": cmd_ledger, "order": cmd_order, "risk": cmd_risk, "expire": cmd_expire}[a.cmd](a)
 
