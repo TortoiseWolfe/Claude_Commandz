@@ -1599,7 +1599,10 @@ def main(argv=None):
                           coop_cards=coop_cards, machines=machine_lines(now),
                           rules_lines=None if a.roadmap_file else rules_size_lines() + [rules_pass_line(now), no_header_tools_line(), drift_line(time.time()), peer_review_line(now, state_file=PEER_REVIEW_STATE)])
     page = render(secs, now, machine, a.cap)
-    if a.strict or not a.roadmap_file:
+    # Only the default-cap build, the one that writes the live page, is checked and can file an alert. A run with any other cap, raised or
+    # lowered, is a one-off look (the hub reading lines the live page cuts) and prints its page. 23 Nov: a raised cap filed a false size
+    # alert; 26 Nov: --cap 40 cut the page below its own headings and filed a false "page lacks the heading" alert (issue 221).
+    if (a.strict or not a.roadmap_file) and a.cap == CAP_DEFAULT:
         problems = live_problems(body, page, cap=a.cap)
         if problems:
             sys.stderr.write("hub_digest: the live state does not parse: %s. Not writing the page; the previous one stays.\n" % "; ".join(problems))
