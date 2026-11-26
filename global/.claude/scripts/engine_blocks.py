@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """The one machine-written record of which code engines are out of usage, read by the dispatcher and by lane.sh.
 
-Usage: engine_blocks.py until ENGINE | phrase ENGINE | show | block ENGINE --until "D Mon YYYY H:MM AM" --evidence "..." --source TEXT [--note TEXT] | clear ENGINE --evidence "..." --source TEXT
+Usage: engine_blocks.py until ENGINE | phrase ENGINE | show | block ENGINE --until "D Mon YYYY H:MM AM" --evidence "..." --source TEXT [--note TEXT] | clear ENGINE --evidence "..." --source TEXT [--force]
 Use when: ask whether an engine (agy, codex, copilot, opencode) is blocked and until when; record a usage-limit block; clear a block after a clean run.
 
 File: $AFA_ENGINE_BLOCKS, else ~/.claude/state/engine-blocks.json: {"<engine>": {"until": epoch, "evidence": epoch, "source": text, "note": text}}.
 Newest evidence wins: block() replaces a record unless the record's evidence is newer (the block may move earlier or later);
-clear() removes a record only when its evidence is newer than the record's (a clean run that started after the block was recorded).
-A missing, unreadable or malformed file reads as "no blocks"; a write refuses to overwrite a malformed file (exit 2). Written atomically, mode 600.
-Dates and --evidence (default: now) are read as local time, the way date -d reads them. Exit 0 on success, including "nothing to do".
+clear() removes a record only when its evidence is newer than the record's (a clean run that started after the block was recorded),
+unless --force is given. A missing, unreadable or malformed file reads as "no blocks"; a write refuses to overwrite a malformed file (exit 2).
+Written atomically, mode 600. Dates and --evidence (default: now) are read as local time, the way date -d reads them. Exit 0 on success, including "nothing to do".
 Standard library only.
 """
 from __future__ import annotations
@@ -92,11 +92,14 @@ def block(engine, until_ts, evidence, source, note=""):
     return True
 
 
-def clear(engine, evidence, source):
-    """Remove the record when `evidence` is newer than the record's. -> True when removed. Raises Malformed on a bad file."""
+def clear(engine, evidence, source, force=False):
+    """Remove the record when `evidence` is newer than the record's, or when `force` is True.
+    -> True when removed. Raises Malformed on a bad file."""
     data = _load(strict=True)
     old = data.get(engine)
-    if old is None or not evidence > _num(old, "evidence"):
+    if old is None:
+        return False
+    if not force and not evidence > _num(old, "evidence"):
         return False
     del data[engine]
     _save(data)
@@ -162,7 +165,9 @@ def main(argv):
             return 0
         if cmd in ("block", "clear") and rest:
             engine = rest[0]
-            o = _opts(rest[1:], ("--until", "--evidence", "--source", "--note") if cmd == "block" else ("--evidence", "--source"))
+            force = "--force" in rest[1:]          # a bare flag (no value), so it is taken out before the value options are read
+            args = [a for a in rest[1:] if a != "--force"]
+            o = _opts(args, ("--until", "--evidence", "--source", "--note") if cmd == "block" else ("--evidence", "--source"))
             if "--source" not in o or (cmd == "block" and "--until" not in o):
                 raise ValueError("missing option")
             ev = parse_date(o["--evidence"]) if "--evidence" in o else int(time.time())
@@ -175,8 +180,8 @@ def main(argv):
                 done = block(engine, u, ev, o["--source"], o.get("--note", ""))
                 print(("recorded: " + phrase(engine, 0)) if done else "nothing to do: a record with newer evidence stands")
             else:
-                done = clear(engine, ev, o["--source"])
-                print("cleared" if done else "nothing to do: no record, or its evidence is not older")
+                done = clear(engine, ev, o["--source"], force)
+                print("cleared" if done else "nothing to do: no record, or its evidence is not older (use --force to override)")
             return 0
     except Malformed as e:
         print("refusing to overwrite a malformed file: %s" % e, file=sys.stderr)

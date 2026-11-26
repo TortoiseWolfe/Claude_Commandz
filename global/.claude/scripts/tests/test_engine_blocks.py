@@ -126,6 +126,20 @@ class Cli(Base):
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "cleared"))
         self.assertEqual(self.cli("phrase", "codex").stdout.strip(), "")
 
+    def test_clear_force_removes_a_stale_block_with_newer_evidence_on_record(self):
+        # Issue 26: a stale block (recorded with newer evidence than a clean run) must be clearable on purpose.
+        self.cli("block", "codex", "--until", "1 Jan 2999", "--evidence", "1 Jan 2026", "--source", "t")
+        r = self.cli("clear", "codex", "--evidence", "1 Jan 2025", "--source", "t")  # not newer: refused without --force
+        self.assertIn("nothing to do", r.stdout)
+        r = self.cli("clear", "codex", "--force", "--evidence", "1 Jan 2025", "--source", "t")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "cleared"), r.stderr)
+        self.assertEqual(self.cli("phrase", "codex").stdout.strip(), "")
+
+    def test_clear_force_with_no_record_is_nothing_to_do_and_exits_0(self):
+        r = self.cli("clear", "codex", "--force", "--source", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing to do", r.stdout)
+
     def test_older_block_says_nothing_to_do_and_exits_0(self):
         self.cli("block", "codex", "--until", "1 Jan 2999", "--evidence", "1 Jan 2026", "--source", "t")
         r = self.cli("block", "codex", "--until", "1 Feb 2999", "--evidence", "1 Jan 2025", "--source", "t")
