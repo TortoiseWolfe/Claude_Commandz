@@ -125,6 +125,15 @@ export MUSE_POLL=1                             # our own claude runs don't count
 touch "$LAST"
 queue_weekly_transcripts queue
 
+# Daily hub inbox archive (PR 215): move done blocks older than 7 days to monthly archive.
+# Runs once per day; tracked by a stamp file.
+ARCHIVE_LAST=$STATE/muse-poll-archive-last.stamp
+if (($(age "$ARCHIVE_LAST") >= 86400 - 15)); then
+  touch "$ARCHIVE_LAST"
+  timeout 120 python3 -I "$S/hub_inbox_archive.py" --days 7 >>"$LOG" 2>&1
+  echo "$(ts) archive: done" >>"$LOG"
+fi
+
 CLAUDE=${MUSE_CLAUDE:-$HOME/.local/bin/claude}
 S=$HOME/.claude/scripts
 LOG=$HOME/.claude/state/muse-poll.log
