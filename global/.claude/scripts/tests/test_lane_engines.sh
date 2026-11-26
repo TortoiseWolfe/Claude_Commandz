@@ -678,6 +678,7 @@ assert_contains "$LAST_COMMAND" 'auto-mode-setup\":\"off' 'the auto-mode setup p
 assert_contains "$LAST_COMMAND" 'claude-api\":\"off' 'a built-in skill with no folder under the claude home is off (issue 169)'
 assert_contains "$LAST_COMMAND" 'dataviz\":\"off' 'the chart skill is off in a lane (issue 169)'
 assert_not_contains "$LAST_COMMAND" 'loop\":\"off' 'the loop skill stays on: lane prompts use it'
+assert_not_contains "$LAST_COMMAND" 'workflow-authoring\":\"off' 'workflow-authoring stays on: off, it grows the Workflow tool by about 4,300 tokens (issue 169)'
 assert_not_contains "$LAST_COMMAND" 'prep\":\"off' 'a kept command stays on'
 assert_not_contains "$LAST_COMMAND" 'graphify\":\"off' 'a kept skill stays on'
 assert_not_contains "$LAST_COMMAND" 'no-skill-file' 'a folder without SKILL.md is not a skill'
