@@ -52,9 +52,10 @@ assert_contains "$LAST_OUT" "$OWN gemini-3.8-flash-high $P_CODE" 'the refusal pr
 assert_contains "$LAST_OUT" '--claude-because' 'the refusal names the override'
 assert_contains "$LAST_OUT" 'until Codex returns on 6 Dec 2999 12:43 PM' 'the refusal names the day Codex is back, from the one variable'
 assert_not_contains "$LAST_OUT" '31 Oct' 'and not the old date'
-for kind in 'needs Docker' 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review or planning (strongest tier)' 'not code'; do
+for kind in 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review or planning (strongest tier)' 'not code'; do
   assert_contains "$LAST_OUT" "$kind" "the refusal lists the accepted reason: $kind"
 done
+assert_not_contains "$LAST_OUT" 'needs Docker' 'the refusal no longer lists "needs Docker" as accepted'
 assert_not_contains "$LAST_OUT" 'mkdir -p' 'a refused lane makes no hand-off folder'
 codex_clear; lane --dry-run fix-header "$OWN" sonnet "$P_CODE"
 assert_exit 1 "$LAST_RC" 'a refusal with Codex not blocked is still a refusal'
@@ -68,8 +69,27 @@ done
 
 # ---- with a reason: allowed, logged -----------------------------------------------------------------------------------------------------
 lane --dry-run --claude-because "needs Docker" fix-header "$OWN" sonnet "$P_CODE"
-assert_exit 0 "$LAST_RC" '--claude-because "needs Docker" lets the lane start'
-assert_contains "$LAST_OUT" 'would log the agy-default override' 'a dry run says it would log the override'
+assert_exit 1 "$LAST_RC" '--claude-because "needs Docker" is refused when opencode or codex is up (AFA_ENGINES_AVAILABLE=* makes them present)'
+assert_contains "$LAST_OUT" 'refusing --claude-because "needs Docker"' 'needs Docker is refused when opencode/codex is up'
+assert_contains "$LAST_OUT" 'lane.sh --engine opencode' 'refusal suggests opencode command'
+
+# ---- "needs Docker" is refused when opencode is up ---------------------------------------------------------------------------------------
+# AFA_ENGINES_AVAILABLE=* makes all engines present, so this tests the refusal path
+lane --dry-run --claude-because "needs docker" fix-header "$OWN" sonnet "$P_CODE"
+assert_exit 1 "$LAST_RC" '--claude-because "needs docker" (lowercase) is refused when opencode is up'
+assert_contains "$LAST_OUT" 'refusing --claude-because "needs docker"' 'refusal message for lowercase'
+assert_contains "$LAST_OUT" 'lane.sh --engine opencode' 'refusal suggests opencode command'
+
+lane --dry-run --claude-because "NEEDS DOCKER" fix-header "$OWN" sonnet "$P_CODE"
+assert_exit 1 "$LAST_RC" '--claude-because "NEEDS DOCKER" (uppercase) is refused when opencode is up'
+assert_contains "$LAST_OUT" 'refusing --claude-because "NEEDS DOCKER"' 'refusal message for uppercase'
+
+# ---- other reasons still work ------------------------------------------------------------------------------------------------------------
+for reason in 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review or planning (strongest tier)' 'not code'; do
+  lane --dry-run --claude-because "$reason" fix-header "$OWN" sonnet "$P_CODE"
+  assert_exit 0 "$LAST_RC" "--claude-because \"$reason\" is still accepted"
+  assert_contains "$LAST_OUT" 'would log the agy-default override' "logs the override for: $reason"
+done
 [ ! -e "$TLOG" ] || fail 'a dry run writes no log'; ok
 lane --claude-because="needs wsl.exe" real-fix "$OWN" sonnet "$P_CODE"
 assert_exit 0 "$LAST_RC" 'a real start with a reason goes through'

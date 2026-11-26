@@ -335,8 +335,8 @@ sonnet and haiku are refused there. --allow-low-tier overrides that.
 A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a prompt about drafting or answering email) runs on sonnet;
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
-his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs Docker, needs wsl.exe,
-needs a live service, agy out of usage, review or planning (strongest tier), not code. Mail lanes, site-model prompts and client repos never need one.
+his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs wsl.exe,
+needs a live service, agy out of usage, review or planning (strongest tier), not code. ("needs Docker" is refused when opencode or codex is available: they run Docker.) Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
 --model <name> <model> switches a running lane and puts back the user default model that /model would otherwise change.
@@ -466,6 +466,32 @@ if [ "$mode" = start ] && [ -r "$HOME/.claude/state/engine-out/$engine.until" ];
     exit 1
   fi
 fi
+
+# Check if an engine is up: installed and not quota-blocked (engine-blocks.json or engine-out/*.until).
+# Returns 0 when the engine is available, 1 when blocked or not installed.
+engine_up() {  # <engine>
+  local eng="$1"
+  engine_present "$eng" || return 1
+  local until_file="$HOME/.claude/state/engine-out/$eng.until"
+  if [ -r "$until_file" ]; then
+    local until_epoch; until_epoch="$(head -n 1 "$until_file" 2>/dev/null || true)"
+    [[ "$until_epoch" =~ ^[0-9]+$ ]] && [ "$until_epoch" -gt "$(date +%s)" ] && return 1
+  fi
+  # A missing until file must not mean "up": engine-blocks.json (the one machine-written record) is checked too.
+  local blocks_file; blocks_file="$(python3 -I -c 'import os; from pathlib import Path; p=Path(os.environ.get("AFA_ENGINE_BLOCKS") or Path.home()/".claude/state/engine-blocks.json"); print(p)' 2>/dev/null)"
+  [ -r "$blocks_file" ] || return 0
+  local block_epoch; block_epoch="$(python3 -I -c "
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f: data=json.load(f)
+    rec=data.get(sys.argv[2], {})
+    u=rec.get('until', 0)
+    print(int(u)) if u > time.time() else print(0)
+except Exception: print(0)
+" "$blocks_file" "$eng" 2>/dev/null || echo 0)"
+  [[ "$block_epoch" =~ ^[0-9]+$ ]] && [ "$block_epoch" -gt "$(date +%s)" ] && return 1
+  return 0
+}
 
 case "$effort_opt" in
   ''|low|medium|high|xhigh|max) ;;
@@ -2812,6 +2838,20 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
   grep -qE "$SITE_PROMPT_RE" -- "$pf" 2>/dev/null && return 0
   ( engine=codex; allow_client=0; dir="$d"; guard_external_engine ) >/dev/null 2>&1 || return 0  # a client repo, or one that cannot be checked
   if [ -n "$claude_because" ]; then
+    # Refuse "needs Docker" when opencode or codex is up (they run commands and Docker; only agy cannot).
+    local cb_lower="$(printf '%s' "$claude_because" | tr 'A-Z' 'a-z')"
+    case "$cb_lower" in
+      *"needs docker"*)
+        if engine_up opencode || engine_up codex; then
+          {
+            echo "refusing --claude-because \"$claude_because\" for $name in $d: opencode and codex run commands and Docker; only agy cannot."
+            echo "Use: lane.sh --engine opencode $name $d sonnet $pf"
+            echo "(or --engine codex when it has quota; agy is for edit-only work that cannot run commands.)"
+          } >&2
+          return 1
+        fi
+        ;;
+    esac
     if [ "$dry" = 1 ]; then echo "# would log the agy-default override for $name ($model) to $LANE_TIER_LOG"
     else
       mkdir -p "$(dirname "$LANE_TIER_LOG")"
@@ -2823,7 +2863,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy$(cb="$(codex_back_phrase)"; [ -z "$cb" ] || printf " %s" "$cb") (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
-    echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs Docker, needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code."
+    echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code. (The Docker reason is refused while opencode or codex is up: they run Docker.)"
   } >&2
   return 1
 }
