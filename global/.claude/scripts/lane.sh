@@ -217,6 +217,13 @@ LANE_SKILLS_KEEP="
   speckit.analyze speckit.checklist speckit.clarify speckit.constitution speckit.implement speckit.plan speckit.specify
   speckit.tasks speckit.taskstoissues speckit.workflow
 "
+# Built-in and plugin skills a lane never needs. They have no folder under ~/.claude, so the scan below cannot find them; each one is
+# named here and set to "off" the same way. Measured 26 Nov (issue 169): a fresh lane still listed these, about 7,000 characters of
+# descriptions at every start. Not listed on purpose: loop, ship-local, run and code-review:code-review (lane prompts use them).
+LANE_BUILTIN_SKILLS_OFF="
+  dataviz artifact-design artifact-diagramming artifact-capabilities update-config keybindings-help simplify steward
+  fewer-permission-prompts claude-approvals schedule claude-api workflow-authoring plugin-authoring init
+"
 # The workspace CLAUDE.md lanes skip, and the slim rule file that stands in for it.
 LANE_WORKSPACE_MD="${LANE_WORKSPACE_MD:-$HOME/repos/CLAUDE.md}"
 LANE_RULES="${LANE_RULES:-$HOME/repos/hub/lane-rules.md}"
@@ -1232,7 +1239,8 @@ lane_skill_overrides() {
   python3 -I -c '
 import json, os, sys
 home, keep = sys.argv[1], set(sys.argv[2].split())
-names = set()
+names = set(sys.argv[3].split())
+
 for sub, is_skill in (("commands", False), ("skills", True)):
     d = os.path.join(home, sub)
     try:
@@ -1250,7 +1258,7 @@ off = {n: "off" for n in sorted(names - keep)}
 # a skillOverrides entry of "off" turns off both the command and the offer.
 off["auto-mode-setup"] = "off"
 print(json.dumps(off, separators=(",", ":")))
-' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" 2>/dev/null || echo '{}'
+' "${LANE_CLAUDE_HOME:-$HOME/.claude}" "$LANE_SKILLS_KEEP" "$LANE_BUILTIN_SKILLS_OFF" 2>/dev/null || echo '{}'
 }
 
 # --deny rules live one per line in ~/.claude/state/lanes/.deny/<lane folder name>.txt, outside the lane's own folder (the lane may write
