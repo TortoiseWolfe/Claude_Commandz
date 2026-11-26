@@ -495,9 +495,9 @@ lane_sh="$cu_save_lane_sh"; recycle_dir="$cu_save_dir"
 sl_dir="$TMP/sl-state"; mkdir -p "$sl_dir"; sl_ans="$TMP/sl-answer"; sl_lane_sh="$TMP/sl-lane.sh"
 cat > "$sl_lane_sh" <<'SH'
 #!/usr/bin/env bash
-case "$1" in --start-load) cat "$SL_ANS" ;; esac
+case "$1" in --start-load) cat "$SL_ANS" ;; --start-parts) cat "$SL_PARTS" 2>/dev/null ;; esac
 SH
-chmod +x "$sl_lane_sh"; export SL_ANS="$sl_ans"
+chmod +x "$sl_lane_sh"; export SL_ANS="$sl_ans" SL_PARTS="$TMP/sl-parts"
 sl_save_lane_sh="$lane_sh"; sl_save_dir="$recycle_dir"; lane_sh="$sl_lane_sh"; recycle_dir="$sl_dir"
 sl_name() { # sl_name <answer> [limit]: one start_load_check; the line it printed is in $sl_said
   hit=0; other=0; echo "$1" > "$sl_ans"
@@ -508,10 +508,17 @@ sl_expect() { # sl_expect <label> <1 if named, else 0>
   if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1: said '$sl_said'"; failures=$((failures + 1)); fi
 }
 sl_name "29 sess-a"; sl_expect "a start load of 29K is not named" 0
-sl_name "39 sess-a"
-if [ "$sl_said" = "start load: sl-lane (its fresh session held 39K at its first message, over the 30K mark: what it reads at the start is too big; archive or shrink report.md, status.md, handoff.md and prompt.md)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   a start load of 39K names the lane, with hit and other set"
+rm -f "$TMP/sl-parts"; sl_name "39 sess-a"
+if [ "$sl_said" = "start load: sl-lane (its fresh session held 39K at its first message, over the 30K mark: run lane.sh --start-parts sl-lane to see what it loads)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   a start load of 39K names the lane, with hit and other set"
 else echo "FAIL start load naming: said '$sl_said' hit=$hit other=$other"; failures=$((failures + 1)); fi
 sl_name "39 sess-a"; sl_expect "the same session is not named twice" 0
+# Issue 226: when lane.sh --start-parts has an answer, the wake carries it in place of the advice to shrink the lane's own files.
+rm -f "$sl_dir"/.startload-*; echo "its own files (handoff.md, prompt.md) total 7.6 KB, too small to be the cause; the load is the session's own setup" > "$TMP/sl-parts"
+sl_name "52 sess-p"
+if [ "$sl_said" = "start load: sl-lane (its fresh session held 52K at its first message, over the 30K mark: its own files (handoff.md, prompt.md) total 7.6 KB, too small to be the cause; the load is the session's own setup)" ]; then echo "ok   the wake carries the parts line"
+else echo "FAIL parts line in the wake: said '$sl_said'"; failures=$((failures + 1)); fi
+case "$sl_said" in *"archive or shrink report.md"*) echo "FAIL the old shrink-your-files advice is still in the wake"; failures=$((failures + 1)) ;; *) echo "ok   the wake no longer tells a lane to shrink its files by default" ;; esac
+rm -f "$TMP/sl-parts"; rm -f "$sl_dir"/.startload-*
 sl_name "41 sess-b"; sl_expect "a new session over the mark is named again" 1
 sl_name "?"; sl_expect "an unreadable start load is not named" 0
 sl_name "n/a"; sl_expect "an engine lane (n/a) is not named" 0

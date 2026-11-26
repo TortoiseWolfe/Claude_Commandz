@@ -1211,6 +1211,16 @@ assert_eq "$LAST_OUT" '?' '--start-load for an unknown lane prints ?'
 add_row sl-cx codex -
 lane --start-load sl-cx
 assert_eq "$LAST_OUT" 'n/a' '--start-load for an engine lane prints n/a'
+# Issue 226: --start-parts says what that first message was made of (the lane's own files, or the session's own setup); empty when unknown.
+{ printf '{"type":"attachment","attachment":{"type":"skill_listing","content":"%s"}}\n' "$(printf 's%.0s' $(seq 1 2500))"; usage_rec 95000 45000 | head -1; } >"$PROJ/sl-sess.jsonl"
+lane --start-parts sl-lane
+assert_contains "$LAST_OUT" 'the session'"'"'s own setup' '--start-parts says the load is the session setup when the lane files are small'
+assert_contains "$LAST_OUT" 'skill listing' '--start-parts names the biggest part'
+lane --start-parts nobody
+assert_eq "$LAST_OUT" '' '--start-parts for an unknown lane prints nothing'
+lane --start-parts sl-cx
+assert_eq "$LAST_OUT" '' '--start-parts for an engine lane prints nothing'
+usage_rec 95000 45000 >"$PROJ/sl-sess.jsonl"
 qreset; basepane
 lane --status
 assert_contains "$LAST_OUT" 'context:130K start:20K' '--status shows the start load beside the context'

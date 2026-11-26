@@ -115,6 +115,8 @@
 #   lane.sh --start-load <name>         "<K> <session id>": what the lane's live session held at its first message (? if unknown, n/a for an engine
 #                                       lane); --status shows it as start:<K>. lane_watch.sh names a lane over LANE_WATCH_START_K (30) once a session.
 #                                       --recycle also moves each finished round of report.md and status.md to report-archive.md and status-archive.md.
+#   lane.sh --start-parts <name>        one line saying what the lane's session loaded before its first answer (skill listing, CLAUDE.md files,
+#                                       tool names...) and whether its own four files are the cause (issue 226; lane_start_parts.py); empty if unknown.
 #   lane.sh --recycle-point <name>      the lane's own recycle line in K tokens (a bare number): the value stored in its index row, else the
 #                                       default for its kind of work. lane_watch.sh recycles each lane at its own line.
 #   lane.sh --deny <rule> ...           at start or --resume, repeatable (Claude lanes): a Claude Code permission rule the lane may never use, such
@@ -320,6 +322,7 @@ Usage:
   lane.sh [--dry-run] --unlock-gone
   lane.sh --ctx <name>
   lane.sh --start-load <name>
+  lane.sh --start-parts <name>
   lane.sh --recycle-point <name>
   (--recycle-at <K> --recycle <name> sets the line and lifts a stop: the third recycle in 30 minutes is the last until then)
   (start and --resume also take --recycle-at <K>, --add-dir <path> (repeatable) and --project-mcp <name[,name]>: project .mcp.json servers a lane keeps on; the rest stay off)
@@ -431,6 +434,7 @@ while [ $# -gt 0 ]; do
     --unlock-gone) mode=unlock_gone; shift ;;
     --ctx) mode=ctx; shift ;;
     --start-load) mode=startload; shift ;;
+    --start-parts) mode=startparts; shift ;;
     --recycle-point) mode=point; shift ;;
     --turn) mode=turn; shift ;;
     --pane) mode=pane; shift ;;
@@ -1925,20 +1929,27 @@ fi
 # --turn <name>: monitor, real or ? for the lane's last finished turn (lane_watch.sh skips waking the hub for a Monitor tick that asked nothing).
 # --start-load <name>: "<K> <session id>" for the lane's live session: what it held at its first message (issue 128; lane_watch.sh names a lane over its
 # LANE_WATCH_START_K once per session), n/a for an engine lane, ? when it cannot be read.
-if [ "$mode" = ctx ] || [ "$mode" = turn ] || [ "$mode" = startload ]; then
-  [ $# -eq 1 ] || { echo "usage: lane.sh --${mode/startload/start-load} <name>" >&2; exit 1; }
+# --start-parts <name>: one line on what that first message was made of and whether the lane's own files are the cause (issue 226); empty when unknown.
+if [ "$mode" = ctx ] || [ "$mode" = turn ] || [ "$mode" = startload ] || [ "$mode" = startparts ]; then
+  [ $# -eq 1 ] || { echo "usage: lane.sh --$(printf '%s' "$mode" | sed 's/startload/start-load/; s/startparts/start-parts/') <name>" >&2; exit 1; }
+  unknown() { [ "$mode" = startparts ] || echo "?"; }
   row="$(index_row "$1")"
-  [ -n "$row" ] || { echo "?"; exit 0; }
+  [ -n "$row" ] || { unknown; exit 0; }
   IFS="$TAB" read -r d n dir m b p rep id st eff conn rk ent pm ad <<<"$row"
   case "${b:-subscription}" in codex|copilot|agy|opencode|local)   # no context reading exists for these by design (--turn stays ?)
-    if [ "$mode" = ctx ] || [ "$mode" = startload ]; then echo "n/a"; else echo "?"; fi; exit 0 ;;
+    if [ "$mode" = ctx ] || [ "$mode" = startload ]; then echo "n/a"; elif [ "$mode" = turn ]; then echo "?"; fi; exit 0 ;;
   esac
   # A lane just started has no session id in its row yet (--status fills it in): look for its transcript without rewriting the index.
   if { [ -z "${id:-}" ] || [ "$id" = - ]; } && [ "${st:--}" != - ]; then
     id="$(proven_session "$1" "$st")"
   fi
-  { [ -n "${id:-}" ] && [ "$id" != - ]; } || { echo "?"; exit 0; }
+  { [ -n "${id:-}" ] && [ "$id" != - ]; } || { unknown; exit 0; }
   id="$(follow_session "$1" "$dir" "$id" "${st:-0}")"
+  if [ "$mode" = startparts ]; then
+    f="$(transcript_of "$dir" "$id")"
+    [ -n "$f" ] && [ -r "$f" ] && python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_start_parts.py" "$f" "$(dirname "$rep")" 2>/dev/null
+    exit 0
+  fi
   if [ "$mode" = turn ]; then
     f="$(transcript_of "$dir" "$id")"
     python3 -I "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lane_turn_kind.py" "$f" 2>/dev/null || echo "?"
