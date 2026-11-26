@@ -27,8 +27,12 @@
 #                                                them, --all lists both.
 #   muse_poll_record.sh ledger|order|risk|counts|stale  -> notes_ledger.py (state word per open item from checked facts, one work-order
 #                                                block per item, the at-risk escalation line, counts only, the stale list). No model.
-#   muse_poll_record.sh expire [--days 14] [--close]  -> open Job lines older than N days and not marked [keep]: a dry-run list; --close ticks
-#                                                them and appends " (expired after N days)". Never deletes, never touches Hub/Question/client lines.
+#   muse_poll_record.sh expire [--days 7] [--close] | --close-id ID --reason "why"
+#                                             -> routine machine lines (ScoutJob check-ins, new-job-mail lines, recovery and wake notes with no
+#                                                person's words, client, money or dated event in them) older than N days and not marked [keep]:
+#                                                a dry-run list; --close ticks them and appends " (expired YYYY-MM-DD)". Every other open line
+#                                                stays; the dry run lists those older than 30 days, and --close-id closes one with a reason.
+#                                                Never deletes; writes under hub-inbox.lock.
 #   muse_poll_record.sh archive [<days>]      -> moves done lines (with their indented notes) not touched for more
 #                                                than <days> (default 7) to hub-inbox-archive/YYYY-MM.md
 #
@@ -250,8 +254,9 @@ case "${1:-}" in
     fi
     ;;
   expire)
-    # Job-line expiry (notes_ledger.py expire): a dry run by default; --close ticks the old Job lines under the board lock.
-    for a in "${@:2}"; do [[ "$a" == "--close" ]] && lock; done
+    # Expiry (notes_ledger.py expire): a dry run by default; --close ticks routine machine lines older than 7 days and --close-id ID
+    # --reason "why" closes one line. The python takes hub-inbox.lock itself (as the archive does); taking it here as well would be a
+    # second open of the same lock file in the same process tree, and the two would wait on each other.
     exec python3 -I "$(dirname "$(readlink -f "$0")")/notes_ledger.py" expire --inbox "$INBOX" "${@:2}"
     ;;
   stale|counts|ledger|order|risk)
