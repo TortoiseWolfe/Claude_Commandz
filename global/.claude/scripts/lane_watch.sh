@@ -284,18 +284,20 @@ ctx_unknown_check() {
 }
 # Start load (issue 128). start_load_check <lane> (no subshell: it sets hit and other) names a lane whose fresh session already held more than
 # LANE_WATCH_START_K (default 30) thousand tokens at its first message, once per session: a lane that starts that full is back at its recycle
-# line within minutes however often it is cleared, and what it reads at the start (prompt.md, handoff.md, report.md, status.md) is the thing to
-# shrink. lane.sh --start-load prints "<K> <session id>", or "?" or "n/a" when there is no reading. The session it named is kept in
+# line within minutes however often it is cleared. The wake says what that load was made of (lane.sh --start-parts, issue 226): the lane's own four
+# files only when they are the bulk, otherwise the session's own setup. lane.sh --start-load prints "<K> <session id>", or "?" or "n/a" when there is no reading. The session it named is kept in
 # .startload-<lane>. 0 or "off" turns the check off.
 start_load_check() {
-  local l=$1 lim=${LANE_WATCH_START_K:-30} ans k sess mark="$recycle_dir/.startload-$1"
+  local l=$1 lim=${LANE_WATCH_START_K:-30} ans k sess parts mark="$recycle_dir/.startload-$1"
   [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -gt 0 ] || return 0
   ans=$("$lane_sh" --start-load "$l" 2>/dev/null) || return 0
   k=${ans%% *}; sess=${ans#* }
   [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -gt "$lim" ] || return 0
   [ "$(cat "$mark" 2>/dev/null)" = "$sess" ] && return 0
   printf '%s' "$sess" > "$mark"
-  echo "start load: $l (its fresh session held ${k}K at its first message, over the ${lim}K mark: what it reads at the start is too big; archive or shrink report.md, status.md, handoff.md and prompt.md)"
+  parts=$("$lane_sh" --start-parts "$l" 2>/dev/null | head -c 600) || parts=""
+  [ -n "$parts" ] || parts="run lane.sh --start-parts $l to see what it loads"
+  echo "start load: $l (its fresh session held ${k}K at its first message, over the ${lim}K mark: $parts)"
   hit=1; other=1
 }
 # Thrash guard. recycle_thrash <lane> (no subshell: it sets hit and other) is true, and says so once per episode, when the lane has been
