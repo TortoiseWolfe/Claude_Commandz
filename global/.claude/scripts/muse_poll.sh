@@ -129,6 +129,15 @@ CLAUDE=${MUSE_CLAUDE:-$HOME/.local/bin/claude}
 S=$HOME/.claude/scripts
 LOG=$HOME/.claude/state/muse-poll.log
 ts() { date '+%F %T'; }
+
+# Daily hub inbox archive (issue 29): move done blocks older than 7 days to monthly archive.
+# Runs once per day; tracked by a stamp file. Placed after S and LOG are set (set -u would stop the poll otherwise).
+ARCHIVE_LAST=$STATE/muse-poll-archive-last.stamp
+if (($(age "$ARCHIVE_LAST") >= 86400 - 15)); then
+  touch "$ARCHIVE_LAST"
+  timeout 120 python3 -I "$S/hub_inbox_archive.py" --days 7 >>"$LOG" 2>&1
+  echo "$(ts) archive: done" >>"$LOG"
+fi
 cd $HOME/repos || exit 1
 # Learning-loop baseline (spec 002): writes last week's record once, then this is a quick no-op. No model runs.
 [[ -f "$S/learning_baseline.py" ]] && timeout 150 python3 "$S/learning_baseline.py" observe >/dev/null 2>>"$LOG"
