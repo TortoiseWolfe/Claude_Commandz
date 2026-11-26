@@ -17,12 +17,23 @@ case "${1:-}" in
   inbox)
     line="${2:?text}"
     line="${line//$'\n'/ }"
-    # Same rule as muse_poll_record.sh: a line whose last "|" field is a note id already on the board is not added twice.
+    # A line whose last "|" field is a note id is not added if that id is already a field of ANY inbox line: open, ticked ("| done ..."
+    # is appended after the id once a line is ticked, so the id is no longer the last field), or moved to the archive folder
+    # (hub_inbox_archive.py writes ../hub-inbox-archive/*.md beside the inbox). 25-26 Nov 2026: a ticked "files waiting" line did not
+    # stop the same note being queued five times. The id is checked on its own, whatever the rest of the line says.
+    # peer-notes-processed.txt is NOT checked here: the handler records "processed" first and queues the line second (step 2, then 3).
     qid=${line:0:400}; qid=${qid##* | }
-    if [[ "${line:0:400}" == *" | "*" | "* && "$qid" =~ ^[A-Za-z0-9_-]{6,40}$ ]] && [[ -s "$STATE/peer-inbox.md" ]] \
-       && awk -v id="$qid" '/^- \[[ x]\] /{n=split($0,a," [|] "); sub(/[ \t]+$/,"",a[n]); if(a[n]==id){f=1; exit}} END{exit !f}' "$STATE/peer-inbox.md"; then
-      echo "already queued: $qid"
-      exit 0
+    if [[ "${line:0:400}" == *" | "*" | "* && "$qid" =~ ^[A-Za-z0-9_-]{6,40}$ ]]; then
+      shopt -s nullglob
+      files=("$STATE/peer-inbox.md" "$STATE"/hub-inbox-archive/*.md)
+      shopt -u nullglob
+      for f in "${files[@]}"; do
+        [[ -s "$f" ]] || continue
+        if awk -v id="$qid" '/^- \[[ x]\] /{n=split($0,a," [|] "); for(i=1;i<=n;i++){x=a[i]; sub(/^[ \t]+/,"",x); sub(/[ \t]+$/,"",x); if(x==id){f=1; exit}}} END{exit !f}' "$f"; then
+          echo "already queued: $qid"
+          exit 0
+        fi
+      done
     fi
     printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$STATE/peer-inbox.md"
     ;;

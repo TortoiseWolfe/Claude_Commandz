@@ -165,6 +165,34 @@ check "files: the file name never matches the processed-file glob notes_check.py
   '! case peer-files-waiting.txt in peer-*processed*.txt) true;; *) false;; esac'
 rec inbox "files waiting: ask NX-01 to pull | [MUSE>NCC-74656] six lines, files attached | r-9208119623742241727"
 check "files waiting line queues on the peer inbox" 'grep -q "files waiting: ask NX-01 to pull" "$R/peer-inbox.md"'
+
+# 25-26 Nov 2026: note 1a2157bb76a262b7 was queued five times. The real sequence: files <id>, inbox, the hub ticks the line (which appends
+# "| done ..." after the id), then the handler sees the note again and runs files <id> and inbox again. One line must stay.
+N=1a2157bb76a262b7
+rec files $N
+rec inbox "files waiting: ask NX-01 to pull | [MUSE>NCC-74656] RouteNote question | $N"
+check "replay: the first files + inbox for a new note queues one line" '[ "$(grep -c "| $N" "$R/peer-inbox.md")" = 1 ]'
+sed -i "/| $N\$/{s/^- \[ \]/- [x]/;s/\$/ | done 26 Nov: already answered/}" "$R/peer-inbox.md"
+check "replay: the tick appended after the id (the id is no longer the last field)" 'grep -q "^- \[x\] .*| $N | done 26 Nov" "$R/peer-inbox.md"'
+rec files $N
+check "replay: the second inbox after the tick is refused" '[ "$(rec inbox "files waiting: ask NX-01 to pull | [MUSE>NCC-74656] RouteNote question | $N")" = "already queued: $N" ]'
+check "replay: still one line for the note" '[ "$(grep -c "| $N" "$R/peer-inbox.md")" = 1 ]'
+mkdir -p "$R/hub-inbox-archive"
+printf -- '- [x] 2026-11-01 09:00 | old note | what | r-archived-77 | done 2 Nov: ok\n' >"$R/hub-inbox-archive/2026-11.md"
+check "dedupe: an id moved to the inbox archive is refused too" '[ "$(rec inbox "old note | what | r-archived-77")" = "already queued: r-archived-77" ]'
+check "dedupe: the archive refusal wrote nothing" '! grep -q "r-archived-77" "$R/peer-inbox.md"'
+rec processed r-processed-test-456
+rec inbox "some note | needs work | r-processed-test-456"
+check "dedupe: an id in the processed record is still queued the first time (handler order is processed, then inbox)" \
+  '[ "$(grep -c "r-processed-test-456" "$R/peer-inbox.md")" = 1 ]'
+
+# The handler must get the check result and must skip files-waiting ids: in the real log it was told "no check result came" and rebuilt the
+# list from Gmail itself, which ignored peer-files-waiting.txt (peer_poll.sh passed only the prompt text).
+mkdir -p "$T/hc/home/.config/afa"; seed hc 120 40
+run_poll hc FAKE_CHECK="NEW r-abc-123456 cc:r-def-123456"
+check "handler call carries the check result line" '[ "$(grep -- "--model sonnet" "$T/hc/calls" | grep -c "NEW r-abc-123456 cc:r-def-123456")" = 1 ]'
+need peer_poll.handle.prompt 'peer-files-waiting.txt' 'handle prompt: a note listed in peer-files-waiting.txt is skipped'
+
 check "usage names the files verb" '[ -n "$(rec nonsense 2>&1 | grep "files <id>")" ]'
 
 need peer_poll.handle.prompt 'peer_poll_record.sh files <id>' 'handle prompt: a note with files is recorded with the files verb'
