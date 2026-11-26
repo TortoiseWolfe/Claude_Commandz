@@ -35,6 +35,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))  # python3 -I (how lane.sh runs its helpers) leaves the script folder off the path
 from lane_handoff_summary import handoff_summary  # noqa: E402
 from lane_report_state import report_state  # noqa: E402
+from report_line import split_state  # noqa: E402  (the one list of the fleet's status words)
 
 SESSION = "lanes"
 HEADLESS_ENGINES = ("codex", "copilot", "agy", "opencode", "local")
@@ -382,6 +383,30 @@ STALE_WHY = {
 }
 
 
+WINDOW_DATE_RE = re.compile(r"\b(?:(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\s+)?(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+                            r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2})\b|\b(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\b", re.I)
+STAMP_RE = re.compile(r"^[\s|:]*(?:(?:1[0-2]|0?[1-9]):[0-5][0-9]\s?[AaPp][Mm])?[\s|:]*")
+
+
+def line1_reading(report_text):
+    """-> (state, waits_on, detail) from a report.md's line 1, the one reading every reader shares (hub_digest.py's card states use it).
+    state is the leading status word from report_line.py's list ('' for a heading, plain prose or an empty file).
+    For BLOCKED and STEP-FOR-JONATHAN, waits_on says what the lane waits on: 'jonathan' (the text after the time opens with '(Jonathan', or the state is
+    the step), 'window' (the text names a window; detail is the date written there, '' when none) or 'blocker' (anything else); otherwise ''."""
+    line = (report_text or "").split("\n", 1)[0].strip()
+    state, rest = split_state(line)
+    state = state or ""
+    if state not in ("BLOCKED", "STEP-FOR-JONATHAN"):
+        return state, "", ""
+    rest = STAMP_RE.sub("", rest, count=1)
+    if state == "STEP-FOR-JONATHAN" or re.match(r"\(\s*jonathan\b", rest, re.I):
+        return state, "jonathan", ""
+    if re.search(r"\bwindow\b", rest, re.I):
+        m = WINDOW_DATE_RE.search(rest)
+        return state, "window", m.group(0) if m else ""
+    return state, "blocker", ""
+
+
 def first_line(path):
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -426,7 +451,10 @@ def brief(name, n_lines=12, now=None):
 
     report = folder / "report.md" if folder else Path(row["report"])
     verdict, why = report_verdict(report, transcript)
-    rep = {"path": str(report), "state": verdict, "why": why, "line1": first_line(report), "time": None, "time12": None}
+    line1 = first_line(report)
+    word, waits_on, waits_detail = line1_reading(line1)
+    rep = {"path": str(report), "state": verdict, "why": why, "line1": line1, "line1_word": word, "waits_on": waits_on, "waits_detail": waits_detail,
+           "time": None, "time12": None}
     try:
         mt = report.stat().st_mtime
         rep["time"], rep["time12"] = mt, clock12(mt)
@@ -529,6 +557,8 @@ def render(b, n_lines):
         if r["state"] == "stale":
             add(f"  stale because {STALE_WHY[r['why']]}")
         add("  line 1: " + cut(r["line1"] or "(blank)"))
+        if r["waits_on"]:
+            add("  waits on: " + r["waits_on"] + (f" ({r['waits_detail']})" if r["waits_detail"] else ""))
     h = b["handoff"]
     if h["exists"]:
         add(f"hand-off: handoff.md at {h['time12']}" + (" (newer than the report)" if h["newer_than_report"] else ""))
