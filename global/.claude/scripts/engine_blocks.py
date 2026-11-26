@@ -165,7 +165,9 @@ def main(argv):
             return 0
         if cmd in ("block", "clear") and rest:
             engine = rest[0]
-            o = _opts(rest[1:], ("--until", "--evidence", "--source", "--note", "--force") if cmd == "block" else ("--evidence", "--source", "--force"))
+            force = "--force" in rest[1:]          # a bare flag (no value), so it is taken out before the value options are read
+            args = [a for a in rest[1:] if a != "--force"]
+            o = _opts(args, ("--until", "--evidence", "--source", "--note") if cmd == "block" else ("--evidence", "--source"))
             if "--source" not in o or (cmd == "block" and "--until" not in o):
                 raise ValueError("missing option")
             ev = parse_date(o["--evidence"]) if "--evidence" in o else int(time.time())
@@ -178,7 +180,6 @@ def main(argv):
                 done = block(engine, u, ev, o["--source"], o.get("--note", ""))
                 print(("recorded: " + phrase(engine, 0)) if done else "nothing to do: a record with newer evidence stands")
             else:
-                force = "--force" in o
                 done = clear(engine, ev, o["--source"], force)
                 print("cleared" if done else "nothing to do: no record, or its evidence is not older (use --force to override)")
             return 0
