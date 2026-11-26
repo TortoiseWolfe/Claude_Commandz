@@ -20,20 +20,28 @@ Never trim his words; never put a password, token or member data in any file or 
 - The newest earlier `~/.claude/state/hub-handoff-*.md`: its open items still stand unless this session closed them.
 
 ## 2. Write the hand-off file
-`~/.claude/state/hub-handoff-<YYYY-MM-DD>-<HHMM>.md` (12-hour times inside). Line 1 names the machine and time and
-which file it supersedes. Sections, in this order:
-- **Jonathan's words tonight** (verbatim quotes with times; act on them, don't re-ask)
+`~/.claude/state/hub-handoff-<YYYY-MM-DD>-<HHMM>.md` (no clock times inside unless an item depends on one, such as a
+due-by; then read `date`). Line 1 names the machine and which file it supersedes. Sections, in this order:
+- **Jonathan's words tonight** (verbatim quotes; act on them, don't re-ask)
 - **Waiting on Jonathan, in order**: each item a full question (what it touches, what yes and no do, the pick, the
   link). Mark the one sent to Hatch.
 - **Done this session** (with PR numbers, merge commits, ticket links, draft ids)
 - **Lanes** (name, repo, engine, line 1 of its report; WORKING means mid-job; EMPTY lanes and their replacements)
 - **Open waits** (Hatch, the tower, CI) and **Not committed** (other sessions' files; leave)
 - **Roadmap** (what changed on workspace#1)
+
+**Keep it under 6 KB, with no Lessons section** (workspace ticket 96: the 111 November hub hand-offs averaged 10 KB, and a
+lesson written in one reaches a single later session). Run `python3 ~/.claude/scripts/handoff_check.py --hub FILE`; it
+prints "ok" or what is wrong (too big, a heading missing, a Lessons heading). A lesson becomes a hub-list job the same day:
+`~/.claude/scripts/muse_poll_record.sh inbox "Job: <the check or rule it should become>"`; a leftover gets a job line too
+(feedback_leftovers_get_a_job_line_not_a_handoff_note.md). Cut finished work to one line each; the pull request or ticket
+link carries the rest. Fix the file until the check prints "ok" before step 3.
 /prep also starts this file at the beginning of a session and updates it after each finished item; /handoff then
 finishes it rather than starting from nothing.
 
-## 3. The first waiting question goes to Hatch
-If any question is still unanswered, send the first one to Hatch as ONE `[CC>MUSE]` draft through the agent-notes
+## 3. The first waiting question goes to Hatch (ONLY when he has gone)
+**Skip when Jonathan has typed in this session in the last two hours** (he is at the screen; the next hub asks him there).
+Only if he has been silent that long and a question is still unanswered, send the first one to Hatch as ONE `[CC>MUSE]` draft through the agent-notes
 skill: self-contained, two layers, repo and number in plain text, no URL (Gmail rewrites them), and say his quoted
 answer back counts as his word (feedback_unanswered_questions_go_to_hatch.md). Read the latest `[CC>MUSE]` drafts on
 the topic first. The rest stay in the file's order for the next hub.
