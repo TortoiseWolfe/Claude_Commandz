@@ -1196,6 +1196,26 @@ class LiveAlert(unittest.TestCase):
             self.assertEqual(again.returncode, 3)
             self.assertEqual((d / "state" / "hub-inbox.md").read_text().count("- [ ] "), 1)  # one alert a day, not one a run
 
+    def test_a_one_off_look_with_a_small_cap_files_no_alert(self):
+        # Issue 221: --cap 40 cut the page below its own headings and the check filed a false "page lacks the heading" alert.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "nq.txt").write_text("none\n")
+            for roadmap in (ROADMAP, ROADMAP.replace("### Next session should", "### Next up")):
+                r = self.run_digest(d, roadmap, "--strict", "--cap", "40")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("does not parse", r.stderr)
+                self.assertTrue((d / "out" / "hub-digest.md").exists())
+                self.assertFalse((d / "state").exists())  # nothing filed with the front desk, no wake file
+
+    def test_the_default_cap_still_files_the_alert_for_a_page_missing_a_heading(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "nq.txt").write_text("none\n")
+            r = self.run_digest(d, ROADMAP.replace("### Next session should", "### Next up"), "--strict", "--cap", str(hd.CAP_DEFAULT))
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertTrue((d / "state" / "hub-inbox.md").exists())
+
     def test_a_hermetic_build_is_not_checked_unless_asked(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
