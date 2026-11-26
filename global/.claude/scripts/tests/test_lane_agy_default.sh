@@ -69,8 +69,7 @@ done
 
 # ---- with a reason: allowed, logged -----------------------------------------------------------------------------------------------------
 lane --dry-run --claude-because "needs Docker" fix-header "$OWN" sonnet "$P_CODE"
-assert_exit 0 "$LAST_RC" '--claude-because "needs Docker" lets the lane start (AFA_ENGINES_AVAILABLE=* means all engines present, so this should now be refused - wait, the test sets AFA_ENGINES_AVAILABLE=* so all engines are present)'
-# Actually with AFA_ENGINES_AVAILABLE=* both opencode and codex are "present", so "needs Docker" should be refused
+assert_exit 1 "$LAST_RC" '--claude-because "needs Docker" is refused when opencode or codex is up (AFA_ENGINES_AVAILABLE=* makes them present)'
 assert_contains "$LAST_OUT" 'refusing --claude-because "needs Docker"' 'needs Docker is refused when opencode/codex is up'
 assert_contains "$LAST_OUT" 'lane.sh --engine opencode' 'refusal suggests opencode command'
 
@@ -91,6 +90,7 @@ for reason in 'needs wsl.exe' 'needs a live service' 'agy out of usage' 'review 
   assert_exit 0 "$LAST_RC" "--claude-because \"$reason\" is still accepted"
   assert_contains "$LAST_OUT" 'would log the agy-default override' "logs the override for: $reason"
 done
+[ ! -e "$TLOG" ] || fail 'a dry run writes no log'; ok
 lane --claude-because="needs wsl.exe" real-fix "$OWN" sonnet "$P_CODE"
 assert_exit 0 "$LAST_RC" 'a real start with a reason goes through'
 [ -s "$TLOG" ] || fail 'the override is logged'; ok

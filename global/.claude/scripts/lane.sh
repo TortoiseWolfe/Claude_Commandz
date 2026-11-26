@@ -336,7 +336,7 @@ A Claude lane doing mail (name ending -mail, an absorb-template prompt, or a pro
 fable and opus are refused unless --allow-high-tier "<reason>" is given (logged to ~/.claude/state/lanes/tier-overrides.log).
 A Claude lane in one of his own repos (not a client repo, not ~/repos itself) is refused unless --claude-because "<reason>" is given (logged to the same file):
 his own-repo code runs on agy (--engine agy <name> <dir> gemini-3.8-flash-high <prompt-file>) @CODEX_BACK@; with agy out of usage, --engine opencode <name> <dir> sonnet <prompt-file>. Accepted reasons: needs wsl.exe,
-needs a live service, agy out of usage, review or planning (strongest tier), not code. (\"needs Docker\" is refused when opencode or codex is available -- they run Docker.) Mail lanes, site-model prompts and client repos never need one.
+needs a live service, agy out of usage, review or planning (strongest tier), not code. ("needs Docker" is refused when opencode or codex is available: they run Docker.) Mail lanes, site-model prompts and client repos never need one.
 opus and fable need --allow-high-tier "<reason>" (written to the lane's index row, shown by --tier); --recycle returns a lane without a reason to sonnet.
 --tier <name> prints the lane's model and that reason.
 --model <name> <model> switches a running lane and puts back the user default model that /model would otherwise change.
@@ -473,9 +473,11 @@ engine_up() {  # <engine>
   local eng="$1"
   engine_present "$eng" || return 1
   local until_file="$HOME/.claude/state/engine-out/$eng.until"
-  [ -r "$until_file" ] || return 0
-  local until_epoch; until_epoch="$(head -n 1 "$until_file" 2>/dev/null || true)"
-  [[ "$until_epoch" =~ ^[0-9]+$ ]] && [ "$until_epoch" -gt "$(date +%s)" ] && return 1
+  if [ -r "$until_file" ]; then
+    local until_epoch; until_epoch="$(head -n 1 "$until_file" 2>/dev/null || true)"
+    [[ "$until_epoch" =~ ^[0-9]+$ ]] && [ "$until_epoch" -gt "$(date +%s)" ] && return 1
+  fi
+  # A missing until file must not mean "up": engine-blocks.json (the one machine-written record) is checked too.
   local blocks_file; blocks_file="$(python3 -I -c 'import os; from pathlib import Path; p=Path(os.environ.get("AFA_ENGINE_BLOCKS") or Path.home()/".claude/state/engine-blocks.json"); print(p)' 2>/dev/null)"
   [ -r "$blocks_file" ] || return 0
   local block_epoch; block_epoch="$(python3 -I -c "
@@ -2861,7 +2863,7 @@ agy_default_ok() {  # <name> <dir> <model> <prompt-file>
     echo "refusing a Claude lane for $name in $d: his own-repo code lanes start on agy$(cb="$(codex_back_phrase)"; [ -z "$cb" ] || printf " %s" "$cb") (his rule, 22 Oct 3:30 PM). Use:"
     echo "  lane.sh --engine agy $name $d gemini-3.8-flash-high $pf"
     echo "(agy out of usage: --engine codex, then --engine copilot, then --engine opencode $name $d sonnet $pf, each when it has quota; Claude Sonnet is the last resort.)"
-    echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code. (\"needs Docker\" is refused when opencode or codex is available -- they run Docker.)"
+    echo "or keep Claude and pass --claude-because \"<reason>\" (logged to $LANE_TIER_LOG). Accepted reasons: needs wsl.exe, needs a live service, agy out of usage, review or planning (strongest tier), not code. (The Docker reason is refused while opencode or codex is up: they run Docker.)"
   } >&2
   return 1
 }
