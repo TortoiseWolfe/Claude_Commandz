@@ -697,6 +697,8 @@ class RuleGTextTheShellDoesNotRead(Base):
             try:
                 self.blocked("bash <<'EOF'\ncat %s/token.json\nEOF" % os.path.join(t, "lnk"), "G")
                 self.blocked("bash <<'EOF'\n# it's\ncat %s/token.json\nEOF" % os.path.join(t, "lnk"), "G")
+                self.blocked("bash <<'EOF'\ncat <%s/token.json # it's\nEOF" % os.path.join(t, "lnk"), "G")  # a redirect glued to the path
+                self.blocked("cat <%s/token.json" % os.path.join(t, "lnk"), "G")
                 self.blocked("python3 - <<'EOF'\ns = it's\nopen(%s/token.json)\nEOF" % os.path.join(t, "lnk"), "G")  # a line the shell can't split
             finally:
                 if old is None:
@@ -751,6 +753,23 @@ class RuleGTextTheShellDoesNotRead(Base):
                      "trap 'echo x' DEBUG", "exec 3>&1"):
             self.blocked("%s\necho -X POST %s" % (head, self.SEND), "G")
         self.allowed("echo hi\necho -X POST %s > /tmp/n.md" % self.SEND)
+
+    def test_echo_prose_needs_every_line_of_the_command_to_be_data(self):
+        """Second blind review: an echo line is prose only when no line of the command can feed it to code or redefine echo."""
+        S = self.SEND
+        for cmd in ("echo %s |\nxargs curl -X POST" % S,
+                    "echo 'curl -X POST %s' |\nbash" % S,
+                    "{\necho 'curl -X POST %s'\n} | bash" % S,
+                    "for i in 1; do\necho curl -X POST %s\ndone | sh" % S,
+                    "(\necho 'curl -X POST %s'\n) | bash" % S,
+                    "eval 'ech''o(){ curl \"$@\"; }'\necho -X POST %s" % S,
+                    "ech\\\no(){ curl \"$@\"; }\necho -X POST %s" % S,
+                    "printf -v x 'curl -X POST %s'\n$x" % S,
+                    "a=al\n${a}ias echo=curl\necho -X POST %s" % S,
+                    "e=curl\n$e -X POST %s" % S,
+                    "ls /tmp\necho 'x messages/send' > /tmp/n.md"):
+            self.blocked(cmd, "G")
+        self.allowed("echo hi > /tmp/a\necho \"messages/send\" > /tmp/b\n\n")
 
     def test_a_shell_body_gets_no_allowlist(self):
         self.blocked("bash <<'EOF'\ngrep -q x %s\nEOF" % self.SEND, "G")

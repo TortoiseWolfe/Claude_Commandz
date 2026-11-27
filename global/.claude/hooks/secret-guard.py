@@ -355,7 +355,7 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             return True  # a segment that can't be split can't be checked
         words = []
     if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
-        words = words + [w for w in re.split(r"[\s'\"(),;]+", seg) if w]
+        words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) if w]
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
@@ -371,7 +371,7 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
-        for cand in {c.lstrip("@") for c in (w, after_eq)}:
+        for cand in {c.lstrip("@<>") for c in (w, after_eq)}:  # a redirect glued to its path (<./lnk/token.json) is that path
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
@@ -448,6 +448,8 @@ def _echo_line_is_data(text):
             words = shlex.split(seg, posix=True)
         except ValueError:
             return False
+        if words and words[0] == "printf" and any(w == "-v" or w.startswith("-v") and len(w) > 2 and w[2:3].isalpha() for w in words[1:3]):
+            return False  # printf -v NAME assigns a variable and prints nothing: its text can be run later
         if words and words[0] in ECHO_WORDS:
             return True
     return False
@@ -466,12 +468,15 @@ def split_data_heredocs(cmd):
     code, bodies, line, pending = [], [], [], []
     opaque, send = [], []
     echo_ok = not _echo_shadowed(cmd)
+    all_data = [True]  # echo/printf prose is exempt only when EVERY logical line of the command is a data line (security review 27 Nov)
     q = None
 
-    def emit(text, to_send=True):
+    def emit(text, echo_data=False):
+        """echo_data: this line is echo/printf prose; it is dropped from send_code at the end, if every line of the command is a data line."""
         code.append(text)
-        if to_send:
-            send.append(text)
+        send.append((text, echo_data))
+        if all_data[0] and text.strip() and not _heredoc_line_is_data(text, ECHO_WORDS):
+            all_data[0] = False  # a pipe at the end of a line, a { group, a for loop, xargs, eval, a variable: the echo may feed or become code
 
     while i < n:
         c = cmd[i]
@@ -520,7 +525,7 @@ def split_data_heredocs(cmd):
             line = []
             i += 1
             if not pending:
-                emit(text, not (echo_ok and _echo_line_is_data(text)))
+                emit(text, echo_ok and _echo_line_is_data(text))
                 continue
             data_line = _heredoc_line_is_data(text)
             emit(text)
@@ -548,8 +553,8 @@ def split_data_heredocs(cmd):
     if q or pending:
         return cmd, [], [], cmd
     last = "".join(line)
-    emit(last, not (echo_ok and _echo_line_is_data(last)))
-    return "".join(code), bodies, opaque, "".join(send)
+    emit(last, echo_ok and _echo_line_is_data(last))
+    return "".join(code), bodies, opaque, "".join(t for t, e in send if not (e and all_data[0]))
 
 
 def _body_rows(body):
