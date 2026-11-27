@@ -386,8 +386,8 @@ HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|
 
 def _heredoc_line_is_data(line):
     """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
-    if "$(" in line or "`" in line or ">(" in line or "<(" in line or re.search(r">&\s*[3-9]", line):  # a substitution, or a file descriptor that may lead to a shell
-        return False
+    if "$(" in line or "`" in line or ">(" in line or "<(" in line or re.search(r">&\s*(?![12](?![\w$]))|&>|\{\w+\}\s*[<>]|/dev/|/proc/", line):
+        return False  # a substitution, or a file descriptor, device or proc path that may lead to a shell
     segs = [s for s in split_segments(line) if s.strip()]
     if not segs:
         return False
@@ -450,6 +450,8 @@ def split_data_heredocs(cmd):
             if not m or (m.end() < n and cmd[m.end()] not in " \t\n;&|<>()"):
                 return cmd, []  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
             word = m.group(2) or m.group(3) or m.group(4) or m.group(5)
+            if "\\" in word or "$" in word:
+                return cmd, []  # bash's quote removal on such a delimiter is not reproduced here
             pending.append((word, bool(m.group(1)), bool(m.group(2) or m.group(3) or m.group(4)), m.group(0)))
             line.append(m.group(0))
             i = m.end()

