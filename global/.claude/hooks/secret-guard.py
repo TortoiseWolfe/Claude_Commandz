@@ -493,15 +493,22 @@ def bash_glob(pattern):
         return
     for w in words:
         w = os.path.expanduser(gmail_norm(w))  # bash does tilde and $HOME after the braces: {~,x}/... and $HO{M,x}E/... are the home folder
+        w0 = w
         w = None if len(w) > 2000 or w.count("[") > 64 else _bracket_translate(w)  # a word this long is not a path to read: refuse, and keep the hook inside its time limit
         if w is None:
             yield None
             return
+        # Issue 260: bash 5.2.15 and 5.2.37 read an unclosed [. differently (h[[.a] is the letters h[ plus a bracket, or one bracket holding
+        # [ . a), so both readings are followed and a file either one reaches counts.
+        other = _bracket_translate(w0, outer_literal=False) if "[." in w0 else None
         for m in glob.iglob(w):
             yield m
+        if other is not None and other != w:
+            for m in glob.iglob(other):
+                yield m
 
 
-def _bracket_translate(w):
+def _bracket_translate(w, outer_literal=True):
     """w with every bracket expression written the way Python's glob reads it (a ^ first is !, a POSIX class is its characters), or None
     for a form not translated exactly: an equivalence class [=x=], a collating symbol [.x.] or an unknown class name. A [:name:] outside
     a bracket is just an ordinary bracket and stays as it is."""
@@ -527,12 +534,12 @@ def _bracket_translate(w):
                 # (a jq filter in a gh -q word) is an ordinary bracket. The search starts at the character after the [, so [.] is also refused.
                 if w.find(w[j + 1] + "]", j + 1) >= 0:
                     return None
-                if w[j + 1] == ".":
-                    # bash 5.2 (checked): an unclosed [. makes the OUTER [ a literal letter and carries on just after it, so h[[.a] matches only the
+                if w[j + 1] == "." and outer_literal:
+                    # bash 5.2.15 (checked): an unclosed [. makes the OUTER [ a literal letter and carries on just after it, so h[[.a] matches only the
                     # file named h[a. Python's glob would read one bracket, so the outer [ is written as [[] and the rest is read again from there.
                     literal_outer = True
                     break
-                body.append(w[j])  # an unclosed [= is an ordinary letter of the bracket
+                body.append(w[j])  # an unclosed [= is an ordinary letter of the bracket (and, with outer_literal False, an unclosed [. too: bash 5.2.37)
                 j += 1
                 continue
             if w[j] == "[" and j + 1 < n and w[j + 1] == ":":

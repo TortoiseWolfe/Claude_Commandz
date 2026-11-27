@@ -1257,21 +1257,23 @@ class RuleGJqFilterBrackets(Base):
             self.blocked(c, "G")
 
     def test_an_unclosed_collating_start_makes_the_outer_bracket_a_letter(self):
-        """Reviewer's case: bash reads h[[.a] as the letters h[ and the bracket [.a], so it matches only a name h[a. A symlink with that
-        name reaches the home folder, and the guard must follow the same reading (the old code refused every [. as unknown)."""
-        t = tempfile.TemporaryDirectory()
-        self.addCleanup(t.cleanup)
-        home = os.path.join(t.name, "home")
-        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
-        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
-        os.symlink(home, os.path.join(t.name, "h[a"))
-        old = os.environ.get("HOME")
-        os.environ["HOME"] = home
-        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+        """Reviewer's case: bash 5.2.15 reads h[[.a] as the letters h[ and the bracket [.a], so it matches only a name h[a; bash 5.2.37 reads
+        one bracket holding [ . a, so it matches ha, h[ and h. instead. A symlink with either name reaches the home folder, and the guard
+        follows both readings, whichever bash the machine runs (the old code refused every [. as unknown)."""
         self.assertEqual(sg._bracket_translate("h[[.a]"), "h[[][.a]")
-        path = "%s/h[[.a]/.?onfig/a?a/g?ail/token.json" % t.name
-        self.assertEqual(subprocess.run(["bash", "-c", "ls " + path], capture_output=True).returncode, 0)  # bash reaches the token through the link
-        self.blocked("cat " + path, "G")
+        self.assertEqual(sg._bracket_translate("h[[.a]", outer_literal=False), "h[[.a]")
+        for link in ("h[a", "ha"):
+            t = tempfile.TemporaryDirectory()
+            self.addCleanup(t.cleanup)
+            home = os.path.join(t.name, "home")
+            os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+            open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
+            os.symlink(home, os.path.join(t.name, link))
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            self.addCleanup(lambda old=old: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+            path = "%s/h[[.a]/.?onfig/a?a/g?ail/token.json" % t.name
+            self.blocked("cat " + path, "G")  # refused whichever reading this machine's bash has
 
     def test_translation_agrees_with_bash_for_unclosed_collating_starts(self):
         t = tempfile.TemporaryDirectory()
@@ -1282,9 +1284,13 @@ class RuleGJqFilterBrackets(Base):
             got = sg._bracket_translate(pat)
             self.assertIsNotNone(got, pat)
             ours = {os.path.relpath(m, t.name) for m in glob.glob(os.path.join(glob.escape(t.name), got))}
+            alt = sg._bracket_translate(pat, outer_literal=False)  # the other bash's reading of an unclosed [.
+            if alt is not None:
+                ours |= {os.path.relpath(m, t.name) for m in glob.glob(os.path.join(glob.escape(t.name), alt))}
             r = subprocess.run(["bash", "-c", "cd %s && shopt -s nullglob && for f in %s; do printf '%%s\\n' \"$f\"; done" % (shlex.quote(t.name), pat)],
                                capture_output=True, text=True)
-            self.assertEqual(ours, set(r.stdout.split("\n")) - {""}, pat)
+            theirs = set(r.stdout.split("\n")) - {""}
+            self.assertTrue(theirs <= ours, (pat, theirs, ours))  # never miss a file this machine's bash reaches; both readings may add more
 
 
 HUB_NOTE_CMD = r'''cd ~/repos && S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000000/scratchpad && python3 ~/.claude/scripts/session_prime_facts.py > $S/facts2.txt 2>&1; head -2 $S/facts2.txt | cut -c1-120; cat > $S/note.md <<'EOF'
