@@ -363,6 +363,84 @@ def gmail_segment_ok(seg):
     return False
 
 
+# Claude_Commandz issue 238: Python's glob does not expand what bash expands before it globs: brace lists ({c,x}, {1..3}) and POSIX classes
+# ([[:alpha:]]). bash_glob does both, bounded, and yields None (the caller refuses) for any form it does not understand.
+POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "lower": "a-z", "upper": "A-Z", "xdigit": "0-9a-fA-F",
+                 "word": "a-zA-Z0-9_", "punct": "!-/:-@{-~_^", "space": " \t\n", "blank": " \t", "print": " -~", "graph": "!-~", "cntrl": "\x00-\x1f"}
+BRACE_LIMIT = 256
+
+
+def _brace_expand(s, budget):
+    """The bash brace expansion of s as a list, or None when it holds a form not understood or yields more than budget words."""
+    depth, start = 0, None
+    for i, c in enumerate(s):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                inner = s[start + 1:i]
+                parts, d, cur = [], 0, []
+                for ch in inner:
+                    if ch == "{":
+                        d += 1
+                    elif ch == "}":
+                        d -= 1
+                    if ch == "," and d == 0:
+                        parts.append("".join(cur))
+                        cur = []
+                    else:
+                        cur.append(ch)
+                parts.append("".join(cur))
+                if len(parts) == 1:
+                    seq = re.fullmatch(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])", inner)
+                    if seq:
+                        if seq.group(1) is not None:
+                            a, b = int(seq.group(1)), int(seq.group(2))
+                            if abs(b - a) >= budget:
+                                return None
+                            parts = [str(n) for n in (range(a, b + 1) if a <= b else range(a, b - 1, -1))]
+                        else:
+                            a, b = ord(seq.group(3)), ord(seq.group(4))
+                            parts = [chr(n) for n in (range(a, b + 1) if a <= b else range(a, b - 1, -1))]
+                    elif ".." in inner:
+                        return None  # a sequence with a step or padding: not understood
+                    else:
+                        rest = _brace_expand(s[i + 1:], budget)  # a lone {word} is literal text in bash
+                        return None if rest is None else [s[:i + 1] + r for r in rest]
+                tails = _brace_expand(s[i + 1:], budget)
+                if tails is None:
+                    return None
+                heads = []
+                for p in parts:
+                    sub = _brace_expand(p, budget)
+                    if sub is None:
+                        return None
+                    heads += sub
+                if len(heads) * len(tails) > budget:
+                    return None
+                return [s[:start] + h + t for h in heads for t in tails]
+    return [s]
+
+
+def bash_glob(pattern):
+    """Yield every file the shell's glob would give for pattern after brace expansion and POSIX classes, and None once for a form not understood."""
+    words = _brace_expand(pattern, BRACE_LIMIT)
+    if words is None:
+        yield None
+        return
+    for w in words:
+        def cls(m):
+            return POSIX_CLASSES.get(m.group(1), "\x00")
+        if re.search(r"\[:(\w+):\]", w) and any(m.group(1) not in POSIX_CLASSES for m in re.finditer(r"\[:(\w+):\]", w)):
+            yield None
+            return
+        for m in glob.iglob(re.sub(r"\[:(\w+):\]", cls, w)):
+            yield m
+
+
 def gmail_resolves_into_folder(seg, tolerant=False):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
@@ -413,9 +491,9 @@ def gmail_resolves_into_folder(seg, tolerant=False):
                     return True
                 if GMAIL_GLOB.search(cand):
                     n = 0
-                    for m in glob.iglob(os.path.expanduser(gmail_norm(cand))):
+                    for m in bash_glob(os.path.expanduser(gmail_norm(cand))):
                         n += 1
-                        if n > 500 or inside(m):  # too many matches to check in the hook's time: refuse rather than guess
+                        if m is None or n > 500 or inside(m):  # too many matches to check in the hook's time, or a form not understood: refuse rather than guess
                             return True
     return False
 

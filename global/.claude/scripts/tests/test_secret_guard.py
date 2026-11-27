@@ -986,6 +986,43 @@ class IssueNinetyThreeF7(Base):
             self.allowed(cmd)
 
 
+class RuleGBraceListsAndPosixClasses(Base):
+    """Issue 238: bash expands brace lists and POSIX classes before it globs; Python's glob does not."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+        os.makedirs(os.path.join(home, "docs"))
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    def test_the_two_repros_are_refused(self):
+        self.home()
+        self.blocked("cat ~/.?onfig/a[[:alpha:]]a/g?ail/token.json", "G")
+        self.blocked("cat ~/.{c,x}onfig/a{f,x}a/g{m,x}ail/token.json", "G")
+
+    def test_other_spellings_are_refused(self):
+        self.home()
+        for c in ("cat ~/.?onfig/a[![:digit:]]a/g?ail/token.json", "cat ~/.config/afa/g[[:lower:]][[:lower:]]il/token.json",
+                  "cat ~/.config/{afa,x}/gmail/token.json", "cat ~/.config/afa/gmail/{token,x}.json", "cat ~/.config/afa/{a..z}mail/t*.json",
+                  "cat ~/.config/afa/gmail/{token,{x,y}}.json", "cat ~/.config/afa/gmail/{a..z..2}.json",
+                  "cat ~/.config/afa/gmail/{token,x}{.json,.y}", "cat ~/.config/afa/gmail/[[:nosuchclass:]]*"):
+            self.blocked(c, "G")
+
+    def test_too_many_words_are_refused(self):
+        self.home()
+        self.blocked("cat ~/docs/{1..999}/{1..999}", "G")
+
+    def test_ordinary_brace_and_class_globs_pass(self):
+        self.home()
+        self.allowed("ls ~/docs/{a,b}.md ~/docs/[[:alpha:]]*.txt")
+        self.allowed("echo ~/docs/{1..3}/x")
+        self.allowed("echo ~/docs/{x}")
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})
