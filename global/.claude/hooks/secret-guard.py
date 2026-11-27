@@ -14,6 +14,7 @@ import shlex
 import stat
 import sys
 import time
+import unicodedata
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
         r"|credential|private[_-]?key|client[_-]?secret|session[_-]?(?:id|key|token|secret|cookie)|cookie|bearer|webhook)")
@@ -289,6 +290,19 @@ def split_segments(cmd):
 # viewer or a plain existence check), and a send address is refused wherever it is written out.
 GMAIL_DIR = re.compile(r"(?<![\w-])afa/gmail(?![\w-])|(?<![\w-])gmail/(?:token|client|calendar-token)[\w.-]*\.json")
 GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|(?:messages|drafts)(?:/[\w-]+)?:send(?![\w-])", re.I)
+# Claude_Commandz issue 258: a Python Google client spells the same action as svc.users().messages().send(...) (or .drafts().send), a Node one
+# as gmail.users.messages.send(...), with no REST path in it. GMAIL_SEND_CALL is the call across spaces and rows (the resource fetched by getattr
+# too, the method held as a reference or fetched by getattr). A messages() or drafts() resource and a .send somewhere in the same text
+# (GMAIL_RESOURCE_CALL, GMAIL_SEND_NAME), or a Google client marker with the words messages (or drafts) and send (GMAIL_CLIENT, GMAIL_RESOURCE_WORD,
+# GMAIL_SEND_WORD), cover the call split over a variable or built by name; all of those refuse as unclear. Letters are NFKC-folded first, as Python
+# does for identifiers (a fullwidth s in .send runs as .send).
+GMAIL_SEND_CALL = re.compile(r"(?<![\w-])(?:messages|drafts)\s*\)?\s*(?:\(\s*\))?\s*\.\s*send(?![\w-])|"
+                             r"(?<![\w-])(?:messages|drafts)\s*\)?\s*\(\s*\)\s*,\s*send(?![\w-])", re.I)
+GMAIL_RESOURCE_CALL = re.compile(r"(?<![\w-])(?:messages|drafts)\s*\)?\s*\(\s*\)", re.I)
+GMAIL_SEND_NAME = re.compile(r"[.,]\s*send(?![\w-])", re.I)
+GMAIL_CLIENT = re.compile(r"googleapiclient|googleapis|users\s*\(|build\s*\(\s*gmail", re.I)
+GMAIL_RESOURCE_WORD = re.compile(r"(?<![\w-])(?:messages|drafts)(?![\w-])", re.I)
+GMAIL_SEND_WORD = re.compile(r"(?<![\w-])send(?![\w-])", re.I)
 GMAIL_PLAIN = {"ls", "stat", "test", "[", "[[", "realpath", "readlink"}  # none of these reads a file's content (wc, du and file can)
 GMAIL_SCRIPTS = ("~/.claude/scripts/redact_view.py", "~/.claude/scripts/gmail_api.py")  # the only scripts that may run against the folder
 GMAIL_QUOTE_WORDS = {"grep", "rg", "git"}  # a quoted mention (a search pattern, a commit message) is not a call
@@ -334,6 +348,13 @@ def _ansi_c_decode(m):
             out.append(_ANSI_ESC.get(d, d))
             i += 2
     return "".join(out)
+
+
+def names_send(norm):
+    """True when text (already through gmail_norm) writes a Gmail send address, or calls a Google client's send (issue 258)."""
+    norm = unicodedata.normalize("NFKC", norm)
+    return bool(GMAIL_SEND.search(norm) or GMAIL_SEND_CALL.search(norm) or (GMAIL_RESOURCE_CALL.search(norm) and GMAIL_SEND_NAME.search(norm))
+                or (GMAIL_CLIENT.search(norm) and GMAIL_RESOURCE_WORD.search(norm) and GMAIL_SEND_WORD.search(norm)))
 
 
 def gmail_norm(text):
@@ -835,10 +856,12 @@ def _opaque_use(opaque):
                 norm = gmail_norm(seg)
                 if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
                     return "folder"
-                if GMAIL_SEND.search(norm):
+                if names_send(norm):
                     return "send"
         if _body_path_runs_hit(body):
             return "folder"
+        if names_send(gmail_norm(str(body))):  # the whole body at once: a call split over rows (a chain inside parentheses) is one call
+            return "send"
         if isinstance(body, ShellBody):
             hit = _shell_body_use(body)
             if hit:
@@ -869,7 +892,7 @@ def _shell_body_use(body):
         norm = gmail_norm(seg)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg):
             return "folder"
-        if GMAIL_SEND.search(norm):
+        if names_send(norm):
             return "send"
     return _opaque_use(opaque)
 
@@ -910,7 +933,7 @@ def gmail_credential_use(cmd):
     if hit:
         return hit
     for seg in split_segments(send_cmd):
-        if GMAIL_SEND.search(gmail_norm(seg)):
+        if names_send(gmail_norm(seg)):
             words = gmail_words(seg) or []
             quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
             if quoted and os.path.basename(words[0]) == "git":  # git runs aliases and config: only a read-only subcommand counts, never with -c or GIT_ variables
