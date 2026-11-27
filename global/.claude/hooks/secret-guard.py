@@ -296,6 +296,15 @@ GMAIL_GIT_QUOTING = {"commit", "tag", "status"}  # git subcommands that take a m
 GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
 GMAIL_GLOB = re.compile(r"[*?\[{]")
 GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
+ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand_aliases|BASH_ENV)(?![\w-])|(?:^|[\s;&|(])\.\s+\S|\.(?:bashrc|bash_profile|bash_login|profile|zshrc|zshenv)(?![\w-])")  # a way to put text into the shell's alias table or its input
+# ALIAS_DEFINER is also searched with quotes and backslashes removed (al""ias), and with _echo_shadowed (set -o posix, shopt, builtin, command);
+# a command word that starts with a variable ($a$b x=...) can build the word alias at run time. The dot-source alternative also matches
+# find . -name x: that only widens the quote-blind pass, which refuses any piece that names or globs into the token folder.
+VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc|in))[ \t]*"
+                                   r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+|\{\w+\}[<>]+&?[ \t]*\S+|&>>?[ \t]*\S+)[ \t]+)*[\w.-]*[$`{*?\[]")  # assignments and redirects (a space before the target too) may stand in front
+# the same, widened after the second security scan: any command word that holds a $, a backtick or a brace (al$b, `echo alias`, {ali,as}) can build the word alias
+# Security scan of the 241 fix: a function (ls() { cat "$@"; }), hash, export and a changed PATH or ENV also make a command word run something else.
+NAME_SHADOW = re.compile(r"[\w.-]+[ \t]*\([ \t]*\)|(?<![\w.-])(?:hash|export|enable|unalias)(?![\w-])|(?<![\w-])(?:PATH|ENV|BASH_FUNC\w*)=")
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
 
@@ -725,6 +734,20 @@ def gmail_credential_use(cmd):
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
+    bare = re.sub(r"[\"'\\]", "", cmd)
+    if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare) \
+            or NAME_SHADOW.search(bare):
+        # Claude_Commandz issue 241: an alias (or BASH_ALIASES, eval, source, a startup file) can hold an open quote, so bash's quote state
+        # then differs from the one split_segments read from the text and a quoted-looking glob runs as a command. Such a command is read
+        # quote-blind: cut at every ; & | and newline whatever the quotes, each piece checked as a row of an interpreter's heredoc is. There is
+        # no allowlist here (ls, the mail tool, the masked viewer): an alias can make any of those words run something else, so a piece that
+        # names or globs into the token folder is refused. That fails closed: set -e; ls ~/.config/afa/gmail, or the mail tool run with the
+        # folder named and the word eval, source, set or command anywhere in the command, is refused too.
+        for seg in re.split(r"[;&|\n]", cmd):
+            norm = gmail_norm(seg)
+            if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
+                    or gmail_resolves_into_folder(seg, tolerant=True)):
+                return "folder"
     hit = _opaque_use(opaque)  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
     if hit:
         return hit

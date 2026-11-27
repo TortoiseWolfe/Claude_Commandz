@@ -986,6 +986,68 @@ class IssueNinetyThreeF7(Base):
             self.allowed(cmd)
 
 
+class RuleGAliasQuoteState(Base):
+    """Issue 241: an alias whose value holds an open quote moves bash's quote state away from the one the guard reads from the text."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    def test_the_issue_repro_is_refused(self):
+        self.home()
+        self.blocked("shopt -s expand_aliases\nalias x='echo \"'\nx\n\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"", "G")
+
+    def test_other_ways_to_define_the_alias_are_refused(self):
+        self.home()
+        tail = "\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\""
+        for head in ("BASH_ALIASES[x]='echo \"'\nx\n", "eval \"alias x='echo \\\"'\"\nx\n", "source ./defs.sh\nx\n", ". ./defs.sh\nx\n"):
+            self.blocked(head + tail, "G")
+
+    def test_the_word_alias_split_by_quotes_or_built_from_variables_is_refused(self):
+        """Blind review: bash removes quotes and backslashes before it runs a word, and posix mode expands aliases without expand_aliases."""
+        self.home()
+        tail = "x\n\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\""
+        for head in ("shopt -s expand_alia\"\"ses\nal\"\"ias x='echo \"'\n", "al\\ias x='echo \"'\n", "al''ias x='echo \"'\n",
+                     "set -o posix\nal\"\"ias x='echo \"'\n", "set -o posix\na=ali b=as; $a$b x='echo \"'\n", "a=alias\n$a x='echo \"'\n",
+                     "a=ali b=as\n\"$a$b\" x='echo \"'\n", "a=ali b=as; { $a$b x='echo \"'; }\n", "a=ali b=as; if true; then $a$b x='echo \"'; fi\n",
+                     "a=ali b=as; time $a$b x='echo \"'\n", "b=as; al$b x='echo \"'\n", "`echo alias` x='echo \"'\n", "{alias,x} x='echo \"'\n",
+                     "touch ./ali$1as\nali[a]s x='echo \"'\n", "touch ./alias\nali?s x='echo \"'\n", "touch ./alias\nali* x='echo \"'\n",
+                     "a=ali b=as; 2>/dev/null $a$b x='echo \"'\n", "a=ali b=as; >/dev/null $a$b x='echo \"'\n",
+                     "a=ali b=as; > /dev/null $a$b x='echo \"'\n", "a=ali b=as; 2> /dev/null $a$b x='echo \"'\n", "a=ali b=as; &>/dev/null $a$b x='echo \"'\n",
+                     "a=ali b=as; if $a$b x='echo \"'; then :; fi\n", "a=ali b=as; while $a$b x='echo \"'; do break; done\n"):
+            self.blocked(head + tail, "G")
+
+    def test_an_allowlisted_word_is_no_exemption_when_an_alias_can_exist(self):
+        """Security review: an alias can make ls or the mail tool's name run something else, so the allowlist does not apply."""
+        self.home()
+        self.blocked("alias ls=cat\nls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("alias python3=cat\npython3 ~/.claude/scripts/gmail_api.py ~/.config/afa/gmail/token.json", "G")
+        self.blocked("ls() { cat \"$@\"; }\nls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("PATH=/tmp/x:$PATH ls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("export -f ls; ls ~/.config/afa/gmail/token.json", "G")
+        self.allowed("ls ~/.config/afa/gmail")  # no alias in the command: the plain existence check is as before
+
+    def test_a_single_quote_alias_is_refused_too(self):
+        self.home()
+        self.blocked("alias x=\"echo '\"\nx\n'; cat ~/.?onfig/a?a/g?ail/token.json; x\n'", "G")
+
+    def test_the_same_commands_without_an_alias_behave_as_before(self):
+        self.home()
+        self.allowed("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"")  # one quoted word: text, not a command
+        self.blocked("echo x; cat ~/.?onfig/a?a/g?ail/token.json", "G")
+
+    def test_an_ordinary_alias_passes(self):
+        self.home()
+        self.allowed("alias ll='ls -l'\nll /tmp")
+        self.allowed("source ~/.venv/bin/activate && ls /tmp")
+        self.allowed("eval \"$(ssh-agent -s)\"")
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})
