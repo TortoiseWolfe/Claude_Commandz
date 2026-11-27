@@ -1023,6 +1023,8 @@ class RuleGBraceListsAndPosixClasses(Base):
         self.assertLess(time.time() - t, 2)
         self.blocked("cat ~/.config/afa/g[e-[:alpha:]]ail/token.json", "G")
         self.blocked("cat ~/.config/afa/g[[:alpha:]-z]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/g[![:cntrl:]]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/gmail/[[:graph:]]oken.json", "G")
 
     def test_too_many_words_are_refused(self):
         self.home()

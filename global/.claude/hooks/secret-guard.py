@@ -456,7 +456,7 @@ def _bracket_translate(w):
         neg = j < n and w[j] in "!^"
         if neg:
             j += 1
-        body = []
+        body, wide = [], False
         if j < n and w[j] == "]":  # a ] first is a letter
             body.append("]")
             j += 1
@@ -473,6 +473,8 @@ def _bracket_translate(w):
                 if name not in POSIX_CLASSES or (body and body[-1] == "-") or w[end + 2:end + 3] == "-":
                     return None  # an unknown name, or a class standing at the end of a range: not translated exactly
                 body.append(POSIX_CLASSES[name])
+                if name in ("punct", "graph", "print", "cntrl"):
+                    wide = True  # these hold characters a Python bracket cannot spell ( ] \ ` and control bytes ): the whole bracket becomes ?, which can only match more
                 j = end + 2
                 continue
             body.append(w[j])
@@ -481,7 +483,7 @@ def _bracket_translate(w):
             out.append("[")
             i += 1
             continue
-        out.append("[" + ("!" if neg else "") + "".join(body) + "]")
+        out.append("?" if wide else "[" + ("!" if neg else "") + "".join(body) + "]")
         i = j + 1
     return "".join(out)
 
