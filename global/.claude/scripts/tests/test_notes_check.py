@@ -426,6 +426,16 @@ class TestNotesPoll(unittest.TestCase):
         self.put_draft("r-mine", "m-mine", "[NX-01>NCC-74656] Re: [NCC-74656>NX-01] topic")
         self.assertEqual(self.run_poll()[1], "NONE\n")
 
+    def test_the_towers_own_outgoing_draft_to_hatch_is_dropped_and_hatchs_note_is_still_listed(self):
+        # issue 262: the tower's own draft starts "[CC>MUSE] NCC-74656:" with no "Re: ", in a drafts search and in the sent-mail search
+        self.put_draft("r-out", "m-out", "[CC>MUSE] NCC-74656: Tower follow-ups")
+        self.put_draft("r-hatch", "m-hatch", "[MUSE>NCC-74656] Re: Tower follow-ups")
+        self.fake.messages_by_query[nc.POLL_MAIL_QUERIES[0]] = [{"id": "m-sent-out"}]
+        self.add_message_detail("m-sent-out", subject="[CC>MUSE] NCC-74656: sent copy", label_ids=["SENT"])
+        code, out, err = self.run_poll()
+        self.assertEqual((code, out, err), (0, "NEW r-hatch\n", ""))
+        self.assertIn("drop draft r-out", self.log_file.read_text(encoding="utf-8"))
+
     def test_a_tower_note_that_quotes_our_tag_later_still_counts(self):
         self.put_draft("r-tower", "m-tower", "[NCC-74656>NX-01] re: [NX-01>NCC-74656] topic")
         self.assertEqual(self.run_poll()[1], "NEW r-tower\n")
