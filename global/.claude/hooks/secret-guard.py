@@ -897,8 +897,60 @@ def _shell_body_use(body):
     return _opaque_use(opaque)
 
 
-def gmail_credential_use(cmd):
+# Claude_Commandz issue 255: shell options change what a glob matches, and gmail_resolves_into_folder expands globs the way Python does. dotglob lets
+# ? * [ match a leading dot, nocaseglob ignores case, extglob adds +(..) @(..) !(..) groups, globstar lets ** cross folders, GLOBIGNORE (any value)
+# turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
+# the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
+# (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
+GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE)(?![\w-])"
+                         r"|(?<![\w.-])shopt\b[^;&|\n]*[$`]|(?<![\w-])-O[ \t]*[^\s;&|]*[$`]")
+EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
+
+
+def _glob_option_reaches_folder(cmd, cwd=None):
+    """True when cmd sets a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob character)
+    is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's cwd, or
+    anything at all once the command has a cd, pushd or popd. A word that holds $ or .. cannot be resolved from the text and is refused."""
+    bare = re.sub(r"[\"'\\]", "", cmd)
+    if not GLOB_OPTION.search(bare):
+        return False
+    folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
+    home = os.path.realpath(os.path.expanduser("~"))
+    parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder)), home}
+
+    def reaches(directory):  # the folder, below it, or one of its parents
+        real = os.path.realpath(directory)
+        return real == folder or real in parents or real.startswith(folder + os.sep)
+
+    moves = bool(re.search(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w-])", bare))
+    try:
+        base = os.path.realpath(cwd if isinstance(cwd, str) and cwd else os.getcwd())
+    except OSError:
+        return True
+    for tok in re.split(r"[\s;&|<>`]+", bare):
+        for word in {tok, tok.split("=", 1)[1] if "=" in tok else ""}:
+            if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
+                continue
+            if "$" in word or ".." in word.split("/"):
+                return True
+            front = []
+            for comp in os.path.expanduser(gmail_norm(word)).split("/"):
+                if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp):
+                    break
+                front.append(comp)
+            fixed = "/".join(front)
+            if os.path.isabs(fixed) or word.startswith("~"):
+                if reaches(fixed or "/"):
+                    return True
+            elif moves or reaches(os.path.join(base, fixed)):
+                return True
+    return False
+
+
+def gmail_credential_use(cmd, cwd=None):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
+    if _glob_option_reaches_folder(cmd, cwd):
+        return "folder"
     whole = gmail_norm(cmd)
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
@@ -1223,7 +1275,7 @@ def evaluate(payload):
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "
                          "Never put secrets inline in commands; read them from a file or env var "
                          "inside a script, and reference them as $VAR." % s)
-        g = gmail_credential_use(cmd)
+        g = gmail_credential_use(cmd, payload.get("cwd"))
         if g == "send":
             return "G", ("secret-guard: rule G, this command names a Gmail send address. The mail tool makes drafts and never "
                          "sends; the owner sends from Gmail's own page.")
