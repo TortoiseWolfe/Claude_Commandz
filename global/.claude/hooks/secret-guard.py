@@ -553,7 +553,9 @@ def split_data_heredocs(cmd):
             # (anywhere earlier in the command, not just on this line: a regex or pattern group may run over newlines, and bash drops a
             # backslash-newline pair, so [\<newline>[ is [[)
             # (also $[ ] legacy arithmetic, a =~ regex, and the keywords whose bodies bash reads in their own way: case, coproc, select, function)
-            if re.search(r"[@?*+!<>]\(|\[\[|\(\(|\$\[|=~|(?<![\w.-])(?:case|coproc|select|function)(?![\w.-])", cmd[:i].replace("\\\n", "")):
+            # (and when an alias, eval, source or the like could be defined: an alias value may hold an open quote that bash carries over to the
+            # next lines, so a # there is inside a string; echo_ok is false exactly then)
+            if not echo_ok or re.search(r"[@?*+!<>]\(|\[\[|\(\(|\$\[|=~|(?<![\w.-])(?:case|coproc|select|function)(?![\w.-])", cmd[:i].replace("\\\n", "")):
                 # an extglob group, a [[ ]] test (a regex after =~ may hold a #) or a (( )) arithmetic open on this line: a # there is not
                 # necessarily a comment, so do not guess
                 return cmd, [], [], cmd

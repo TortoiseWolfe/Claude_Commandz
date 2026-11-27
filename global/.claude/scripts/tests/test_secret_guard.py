@@ -834,6 +834,9 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("echo $[ 1 +\n#] ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 self.blocked("echo $[ 1 + # ] ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 self.blocked("case x in\n#) ;; esac; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                # tenth review: an alias whose value holds an open quote moves bash's quote state, so a # on a later line is inside a string
+                self.blocked("shopt -s expand_aliases\nalias x='echo \"'\nx\n\"; cat ~/.?onfig/a?a/g?ail/token.json; echo \"\n#\"", "G")
+                self.blocked("shopt -s expand_aliases\nal''ias x='echo \"'\nx\n\"; cat ~/.?onfig/a?a/g?ail/token.json; echo \"\n#\"", "G")
                 # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
                 self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
                 # and a shell body that is only prose and comments, with a comment apostrophe, still passes
