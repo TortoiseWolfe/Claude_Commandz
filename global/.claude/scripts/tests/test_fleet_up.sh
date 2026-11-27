@@ -271,6 +271,18 @@ FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
 check "the agent is unlocked: the next run restarts the lane" 'grep -q -- "--restart.* sb " $FAKE_DIR/lane.log && [ ! -e $S/fleet-up.pending ]'
 FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
 check "and once restarted nothing is retried again" '[ "$(grep -c -- "--restart.* sb " $FAKE_DIR/lane.log)" = 1 ]'
+# (c) an overnight outage: the lane's hand-off is fresh against the stop (an hour before it), and the retry 15 minutes later, with no heartbeat gap left, must judge it against that
+# stop and not against its own clock (11 hours later)
+setup NCC-74656
+HAND_AT=$((NOW - 39600 - 3600)) addlane ov handoff; touch "$FAKE_DIR/session"; echo other >"$FAKE_DIR/windows"; printf '%s\n' ov >"$S/lanes/live.tsv"
+printf '%s\n' "$((NOW - 39600))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
+printf '%s\n' "BOOT=2026-10-28T14:30:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
+: >"$FAKE_DIR/lane.log"; FAKE_SSH_GOOD=/nowhere run
+check "overnight outage, no agent: the lane is parked with the stop time" 'grep -qx ov $S/fleet-up.pending && grep -qx "#stop $((NOW - 39600))" $S/fleet-up.pending && [ ! -s $FAKE_DIR/lane.log ]'
+printf '%s\n' "$((NOW + 870))" >"$S/heartbeat"; : >"$FAKE_DIR/lane.log"
+FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" NOW=$((NOW + 900)) run
+check "the retry restarts a hand-off that was fresh at the stop, 11 hours earlier" 'grep -q -- "--restart.* ov " $FAKE_DIR/lane.log && [ ! -e $S/fleet-up.pending ]'
+check "the retry record says what it is" 'grep -q "^- Retry: the machine went down at" $(ls -t $S/recovery/*.md | head -1)'
 unset SSH_AGENT_SCAN_DIR; export SSH_AUTH_SOCK=$saved_sock
 
 # 7. bad flag

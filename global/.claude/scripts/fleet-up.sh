@@ -23,6 +23,10 @@
 #                                 other dead lane is recorded as "not restarted: handoff from <date>; the hub decides": 4 Nov 2026, a
 #                                 reboot would have restarted 16 lanes at once, most from hand-offs of 29 Oct to 2 Nov (cost, and finished
 #                                 work done twice); only the hand-offs the hub asked for before the stop are meant to come back by themselves.
+#                                 With no unlocked ssh agent (ssh-add -l fails in every agent socket) a dead lane is NOT restarted: its new window
+#                                 would stop at the key's passphrase prompt (issue 184). The lanes go to state/fleet-up.pending (first line "#stop <epoch>",
+#                                 when the machine went down, so a retry judges hand-offs against the real stop), the record carries a STEP FOR
+#                                 JONATHAN line ("run: ssh-add"), and every later run retries them quietly (no record, no inbox line) until an agent works.
 #                               - long jobs in ~/.config/afa/services.tsv (see examples/services.tsv.example)
 #                             It adds one line to this machine's inbox (peer-inbox.md off NX-01, hub-inbox.md on NX-01) so /prep shows it.
 #                             The record reaches the other machine only through the notes route, which here makes Gmail drafts and never
@@ -231,7 +235,7 @@ fi
 ssh_agent_ok() {
   command -v ssh-add >/dev/null 2>&1 || return 1
   if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
-  local s
+  local s d
   for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
     d=${s%/*}   # only a real, user-owned folder nobody else can write to, and a real socket in it (no symlink, nothing planted in /tmp)
     [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ -S "$s" ] && [ ! -L "$s" ] && [ -O "$s" ] || continue
@@ -263,8 +267,15 @@ inbox_add() {  # <text>: one line in this machine's inbox
 # Lanes an earlier run could not restart for want of an unlocked agent (issue 184): retry them on this run, but stay silent (no record, no
 # inbox line) while there is still no agent, so a locked key does not write a record every run.
 if [ "$incident" = 0 ] && [ -s "$pending_file" ] && [ "$dry" != 1 ]; then
-  if ssh_agent_ok; then incident=1; else remember; exit 0; fi
+  if ssh_agent_ok; then incident=1
+  else
+    remember
+    if [ -n "${peer_changed:-}" ]; then inbox_add "Fleet: $peer_changed (read over the home network by fleet-up.sh)"; fi
+    exit 0
+  fi
 fi
+pending_stop=""   # when the machine went down, saved with the pending lanes by the run that parked them
+[ -s "$pending_file" ] && pending_stop=$(sed -n 's/^#stop \([0-9][0-9]*\)$/\1/p' "$pending_file" | head -1)
 
 if [ "$incident" = 0 ]; then
   remember
@@ -284,6 +295,8 @@ note_back() { back+=("$(clock "${FLEET_NOW:-$(date +%s)}") | $1"); }
 stop_epoch=$down_epoch
 if ! [[ "$stop_epoch" =~ ^[0-9]+$ ]]; then stop_epoch=$(iso_epoch "$boot_iso" 2>/dev/null); fi
 [[ "$stop_epoch" =~ ^[0-9]+$ ]] || stop_epoch=$now
+# a retry of lanes parked for want of an ssh agent judges their hand-offs against the original stop, not this run's boot time (an overnight outage is over 3 hours)
+if [[ "$pending_stop" =~ ^[0-9]+$ ]] && { [ -z "$down_epoch" ] || ((pending_stop < stop_epoch)); }; then stop_epoch=$pending_stop; fi
 fresh_secs=$(( ${FLEET_HANDOFF_HOURS:-3} * 3600 ))
 mtime() { stat -c %Y -- "$1" 2>/dev/null; }
 
@@ -333,11 +346,11 @@ if [ -s "$LANES/live.tsv" ]; then
 fi
 if [ -s "$pending_file" ] && [ "$dry" != 1 ]; then   # earlier skipped lanes that are still not in a window
   have=" $(lane_windows | tr '\n' ' ')"
-  while read -r l; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && [[ " ${dead[*]:-} " != *" $l "* ]] && dead+=("$l"); done <"$pending_file"
+  while read -r l; do [ -n "$l" ] && [[ "$l" != "#"* ]] && [[ "$have" != *" $l "* ]] && [[ " ${dead[*]:-} " != *" $l "* ]] && dead+=("$l"); done <"$pending_file"
 fi
 [ "$dry" = 1 ] || rm -f "$pending_file"
 if [ "${#dead[@]}" -gt 0 ] && [ "$dry" != 1 ] && ! ssh_agent_ok; then
-  printf '%s\n' "${dead[@]}" >"$pending_file"
+  { printf '#stop %s\n' "$stop_epoch"; printf '%s\n' "${dead[@]}"; } >"$pending_file"
   note_back "STEP FOR JONATHAN: no unlocked ssh agent on this machine (ssh-add -l exits non-zero in every agent socket). ${#dead[@]} dead lane(s) (${dead[*]}) were NOT restarted, because each new window would stop at the key's passphrase prompt. Open a terminal and run: ssh-add. The next run restarts them."
   dead=()
 fi
@@ -380,6 +393,7 @@ battery_txt=$(printf '%s\n' "$win" | sed -n 's/^BATT=//p' | head -1)
   echo "# Recovery on $machine, $(pretty "$now")"
   echo
   if [ -n "$down_epoch" ]; then echo "- Went down: last heartbeat $(pretty "$down_epoch")."
+  elif [[ "$pending_stop" =~ ^[0-9]+$ ]]; then echo "- Retry: the machine went down at $(pretty "$pending_stop"); lanes parked then for want of an unlocked ssh agent were retried on this run."
   else echo "- Went down: the heartbeat was not stale; a boot or a missing lanes session was found instead."; fi
   if [ -n "$boot_iso" ]; then be=$(iso_epoch "$boot_iso"); echo "- Windows started: $( [ -n "$be" ] && pretty "$be" || echo "$boot_iso" )."; fi
   if [ -n "$logon_iso" ]; then le=$(iso_epoch "$logon_iso"); echo "- Signed in (desktop shell started): $( [ -n "$le" ] && pretty "$le" || echo "$logon_iso" )."
