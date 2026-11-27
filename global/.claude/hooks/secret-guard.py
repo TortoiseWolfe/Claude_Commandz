@@ -32,6 +32,10 @@ TOKENS = [
 ]
 VAL = r"""(?:"[^"]*"|'[^']*'|[^\s"';&|)]+)"""
 ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<val>" + VAL + ")", re.I)
+# A quote that opens a word (start, or after whitespace ( [ , { = : ; | & < >), then an optional ^, "export " or "set ", right before a name:
+# the quote that follows that name's = closes this string. A quote glued to a word before it (a"NAME=") does not open one.
+CLOSES_STRING = re.compile(r"""(?:^|[\s(\[,{=:;|&<>])(["'])[\^]*(?:(?:export|set)\s+)?$""")
+GLUED = re.compile(r"""(?P<q>["'])(?P<name>[A-Za-z0-9_.-]*""" + WORD + r"""[A-Za-z0-9_.-]*)=(?P=q)(?P<val>(?=[A-Za-z0-9'"])""" + VAL + ")", re.I)
 NAME_NOT_SECRET = re.compile(r"(?:file|path|dir|url|uri|name|type|mode|host|port|header|endpoint"
                              r"|enabled|ttl|expiry|expires)$", re.I)
 FLAG_SP = re.compile(r"(?<![\w-])--(?:password|passwd|token|secret|api-?key|auth-token|access-token"
@@ -224,9 +228,26 @@ def find_secret(cmd):
     label = find_token(cmd)
     if label:
         return label
-    for m in ASSIGN.finditer(cmd):
-        if m.start() and cmd[m.start() - 1] in "?&" and URL_ID.match(m.group("val")) and "://" in re.split(r"\s", cmd[:m.start()])[-1]:
+    pos = 0
+    while True:
+        m = ASSIGN.search(cmd, pos)
+        if not m:
+            break
+        pos = m.end()
+        val = m.group("val")
+        opened = CLOSES_STRING.search(cmd[:m.start()]) if val[0] in "\"'" else None
+        if opened and opened.group(1) == val[0]:
+            # Claude_Commandz issue 239: in line.startswith("NAME=") or grep "^NAME=" the quote after the = closes a string opened
+            # before the name; it does not open a value. A value glued to that closing quote (export "NAME="abc) is the GLUED scan below.
+            pos = m.start("val") + 1
             continue
+        if m.start() and cmd[m.start() - 1] in "?&" and URL_ID.match(val) and "://" in re.split(r"\s", cmd[:m.start()])[-1]:
+            continue
+        if not NAME_NOT_SECRET.search(m.group("name")) and literal_value(val):
+            return "literal value assigned to %s" % m.group("name").lstrip("-")[:40]
+    for m in GLUED.finditer(cmd):
+        # export "NAME="abc: bash joins the quoted name= to the word after it, so that word is the value (the quoted ASSIGN match above
+        # needs a quoted value to close, and this one has none). A + or space after the closing quote is code or text, not a value.
         if not NAME_NOT_SECRET.search(m.group("name")) and literal_value(m.group("val")):
             return "literal value assigned to %s" % m.group("name").lstrip("-")[:40]
     for m in FLAG_SP.finditer(cmd):
