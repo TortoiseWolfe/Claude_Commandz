@@ -986,6 +986,44 @@ class IssueNinetyThreeF7(Base):
             self.allowed(cmd)
 
 
+class RuleGAliasQuoteState(Base):
+    """Issue 241: an alias whose value holds an open quote moves bash's quote state away from the one the guard reads from the text."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    def test_the_issue_repro_is_refused(self):
+        self.home()
+        self.blocked("shopt -s expand_aliases\nalias x='echo \"'\nx\n\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"", "G")
+
+    def test_other_ways_to_define_the_alias_are_refused(self):
+        self.home()
+        tail = "\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\""
+        for head in ("BASH_ALIASES[x]='echo \"'\nx\n", "eval \"alias x='echo \\\"'\"\nx\n", "source ./defs.sh\nx\n", ". ./defs.sh\nx\n"):
+            self.blocked(head + tail, "G")
+
+    def test_a_single_quote_alias_is_refused_too(self):
+        self.home()
+        self.blocked("alias x=\"echo '\"\nx\n'; cat ~/.?onfig/a?a/g?ail/token.json; x\n'", "G")
+
+    def test_the_same_commands_without_an_alias_behave_as_before(self):
+        self.home()
+        self.allowed("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"")  # one quoted word: text, not a command
+        self.blocked("echo x; cat ~/.?onfig/a?a/g?ail/token.json", "G")
+
+    def test_an_ordinary_alias_passes(self):
+        self.home()
+        self.allowed("alias ll='ls -l'\nll /tmp")
+        self.allowed("source ~/.venv/bin/activate && ls /tmp")
+        self.allowed("eval \"$(ssh-agent -s)\"")
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})

@@ -296,7 +296,8 @@ GMAIL_GIT_QUOTING = {"commit", "tag", "status"}  # git subcommands that take a m
 GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
 GMAIL_GLOB = re.compile(r"[*?\[{]")
 GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
-GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
+ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand_aliases|BASH_ENV)(?![\w-])|(?:^|[\s;&|(])\.\s+\S|\.(?:bashrc|bash_profile|bash_login|profile|zshrc|zshenv)(?![\w-])")  # a way to put text into the shell's alias table or its input
+GMAIL_CD_CONFIG =re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
 
 def gmail_norm(text):
@@ -725,6 +726,15 @@ def gmail_credential_use(cmd):
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
+    if ALIAS_DEFINER.search(cmd):
+        # Claude_Commandz issue 241: an alias (or BASH_ALIASES, eval, source, a startup file) can hold an open quote, so bash's quote state
+        # then differs from the one split_segments read from the text and a quoted-looking glob runs as a command. Such a command is read
+        # quote-blind: cut at every ; & | and newline whatever the quotes, each piece checked as a row of an interpreter's heredoc is.
+        for seg in re.split(r"[;&|\n]", cmd):
+            norm = gmail_norm(seg)
+            if ((GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
+                    or gmail_resolves_into_folder(seg, tolerant=True)) and not gmail_segment_ok(seg)):
+                return "folder"
     hit = _opaque_use(opaque)  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
     if hit:
         return hit
