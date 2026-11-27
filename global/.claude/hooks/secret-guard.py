@@ -354,6 +354,13 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         if not tolerant:
             return True  # a segment that can't be split can't be checked
         words = []
+        # a row with a lone apostrophe, usually in a trailing comment: split what comes before each # or quote that could start the unsplittable
+        # part, so a quoted glob in front (cat ~/.?on"f"ig/a?a/g?ail/token.json # it's) is still read as the shell reads it
+        for m in list(re.finditer(r"[#'\"]", seg))[:64]:
+            try:
+                words += shlex.split(seg[:m.start()], posix=True)
+            except ValueError:
+                continue
     if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
         words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) if w]
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
@@ -460,9 +467,9 @@ def split_data_heredocs(cmd):
     """Return (code, bodies, opaque, send_code):
       code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
                 for the token folder;
-      bodies    the bodies of data heredocs and the text of comments: searched for the token folder's name, never word-split;
-      opaque    the bodies of the other heredocs (an interpreter's, a shell's, curl's code): checked line by line on their own, so their
-                quotes cannot leak into the command lines around them (issue 234);
+      bodies    the bodies of data heredocs: searched for the token folder's name, never word-split;
+      opaque    the text of comments and the bodies of the other heredocs (an interpreter's, a shell's, curl's code): checked row by row on
+                their own with no allowlist, so their quotes cannot leak into the command lines around them (issue 234);
       send_code code without the logical lines that only print or store text (echo/printf with cat, tee ...): the text checked for a send address (issue 235).
     Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, [], [], cmd), so nothing is loosened."""
     n, i = len(cmd), 0
@@ -499,7 +506,9 @@ def split_data_heredocs(cmd):
             return cmd, [], [], cmd
         if c in "'\"":
             q = c
-        elif c == "#" and (not line or (line[-1][-1:] in " \t;&|()\n" and not line[-1].startswith("\\"))):
+        elif c == "#" and (not line or (line[-1][-1:] in " \t;&|()\n" and not line[-1].startswith("\\")
+                                        and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
+            # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
             j = cmd.find("\n", i)
             j = n if j < 0 else j
@@ -581,7 +590,7 @@ def gmail_credential_use(cmd):
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
     cmd, bodies, opaque, send_cmd = split_data_heredocs(cmd)
-    for body in bodies:  # a data body or a comment is not split into words, but one that names the token folder is still refused
+    for body in bodies:  # a data body is not split into words, but one that names the token folder is still refused
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"

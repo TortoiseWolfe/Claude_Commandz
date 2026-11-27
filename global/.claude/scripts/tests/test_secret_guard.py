@@ -774,6 +774,27 @@ class RuleGTextTheShellDoesNotRead(Base):
             self.blocked(cmd, "G")
         self.allowed("echo hi > /tmp/a\necho \"messages/send\" > /tmp/b\n\n")
 
+    def test_third_review_bypasses_stay_refused(self):
+        """A quoted glob in a shell body row with a lone apostrophe, and a # after an extglob opener."""
+        with tempfile.TemporaryDirectory() as t:
+            home = os.path.join(t, "home")
+            os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+            open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                self.blocked("bash <<'EOF'\ncat ~/.?on\"f\"ig/a?a/g?ail/token.json # it's\nEOF", "G")
+                self.blocked("bash <<'EOF'\ncat ~/.?onfig/a[\\ f]a/g?ail/token.json # it's\nEOF", "G")
+                self.blocked("bash <<'EOF'\ncat ~/.?onfig/a?a/g?ail/token.json it's\nEOF", "G")
+            finally:
+                if old is None:
+                    del os.environ["HOME"]
+                else:
+                    os.environ["HOME"] = old
+        for opener in ("@", "?", "*", "+", "!"):
+            self.blocked("echo 'curl -X POST %s #' %s(#) | bash" % (self.SEND, opener), "G")
+        self.allowed("echo ok # it's fine\nls /tmp")
+
     def test_a_shell_body_gets_no_allowlist(self):
         self.blocked("bash <<'EOF'\ngrep -q x %s\nEOF" % self.SEND, "G")
         self.blocked("bash <<'EOF'\nls ~/.config/afa/gmail\nEOF", "G")
