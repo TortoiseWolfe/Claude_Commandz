@@ -745,6 +745,12 @@ class RuleGTextTheShellDoesNotRead(Base):
         self.blocked("echo(){ curl \"$@\"; }\necho -X POST %s" % self.SEND, "G")
         self.blocked("function printf { curl \"$@\"; }\nprintf -X POST %s" % self.SEND, "G")
         self.blocked("alias echo=curl\necho -X POST %s" % self.SEND, "G")
+        # quoted or escaped keywords, and other ways to redefine a builtin (security review of the commit)
+        for head in ("al\"\"ias echo=curl", "al\\ias echo=curl", "'alias' echo=curl", "eval 'echo(){ curl \"$@\"; }'",
+                     "source /tmp/f.sh", ". /tmp/f.sh", "BASH_ALIASES[echo]=curl", "shopt -s expand_aliases", "set -o posix",
+                     "trap 'echo x' DEBUG", "exec 3>&1"):
+            self.blocked("%s\necho -X POST %s" % (head, self.SEND), "G")
+        self.allowed("echo hi\necho -X POST %s > /tmp/n.md" % self.SEND)
 
     def test_a_shell_body_gets_no_allowlist(self):
         self.blocked("bash <<'EOF'\ngrep -q x %s\nEOF" % self.SEND, "G")

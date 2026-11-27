@@ -427,7 +427,14 @@ def _heredoc_line_is_data(line, extra=()):
 
 ECHO_WORDS = frozenset({"echo", "printf"})
 # a command that defines a function or alias, or toggles builtins, can make echo or printf run anything: then no line counts as echo prose
-ECHO_SHADOW = re.compile(r"\b(?:echo|printf)\s*\(|\bfunction\b|\balias\b|\bunalias\b|\benable\b|\bdeclare\b|\btypeset\b|\bcommand\b|\bbuiltin\b")
+ECHO_SHADOW = re.compile(r"\b(?:echo|printf)\s*\(|\bfunction\b|\balias\b|\bunalias\b|\benable\b|\bdeclare\b|\btypeset\b|\bcommand\b|\bbuiltin\b"
+                         r"|\beval\b|\bsource\b|\bshopt\b|\btrap\b|\bexec\b|BASH_ALIASES|BASH_FUNC|BASH_ENV|(?:^|[\s;&|({])(?:set|\.)\s")
+
+
+def _echo_shadowed(cmd):
+    """True when the command could redefine echo or printf (a function, alias, eval, source, builtin toggle). Searched on the text with quotes
+    and backslashes removed, so al""ias, al\\ias and 'alias' are seen as alias."""
+    return bool(ECHO_SHADOW.search(cmd) or ECHO_SHADOW.search(re.sub(r"[\"'\\]", "", cmd)))
 
 
 def _echo_line_is_data(text):
@@ -458,7 +465,7 @@ def split_data_heredocs(cmd):
     n, i = len(cmd), 0
     code, bodies, line, pending = [], [], [], []
     opaque, send = [], []
-    echo_ok = not ECHO_SHADOW.search(cmd)
+    echo_ok = not _echo_shadowed(cmd)
     q = None
 
     def emit(text, to_send=True):
