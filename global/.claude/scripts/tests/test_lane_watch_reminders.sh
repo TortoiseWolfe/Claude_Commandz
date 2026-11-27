@@ -42,6 +42,30 @@ remind_case "a word that only starts with HUB (HUBRIS) is still named" yes 90 "H
 remind_case "a word that only contains HUB (GITHUB-PUSH) is still named" yes 90 "GITHUB-PUSH went through"
 remind_case "lower-case 'Hub:' is not a status word, so the lane is named" yes 90 "Hub: please merge"
 remind_case "HUB only later on the line does not count (WORKING ... HUB-ACT)" yes 90 "WORKING 1:00 PM | HUB-ACT comes later"
+# Issue 230 (27 Nov 2026): WAITING ON at the start of line 1 is waiting, like BLOCKED; a WORKING line 1 is still named.
+remind_case "WAITING ON NX-01 on line 1 (stream-push, 26 Nov) is left alone" no 90 "WAITING ON NX-01 | pull the hook, then I carry on"
+remind_case "WAITING ON ear_eval2 part 2 on line 1 (album-studio, 27 Nov) is left alone" no 90 "WAITING ON ear_eval2 part 2 (scoring container) | 11:40 PM"
+remind_case "a bare WAITING ON on line 1 is left alone" no 90 "WAITING ON"
+remind_case "WAITING ON: on line 1 is left alone" no 90 "WAITING ON: the hub's merge"
+remind_case "WORKING on line 1 is still named (the idle reminder is not off)" yes 90 "WORKING (building the fix for issue 230)"
+remind_case "WAITING UNTIL on line 1 is still named" yes 90 "WAITING UNTIL 7:00 PM | the window opens"
+remind_case "a bare WAITING on line 1 is still named" yes 90 "WAITING"
+remind_case "WAITING ONE (a longer word) on line 1 is still named" yes 90 "WAITING ONE more test"
+remind_case "WAITING ON-DECK (a hyphen joins the word) on line 1 is still named" yes 90 "WAITING ON-DECK pile"
+remind_case "lower-case 'waiting on' on line 1 is not a status word, so the lane is named" yes 90 "waiting on NX-01"
+remind_case "WAITING ON only later on the line does not count" yes 90 "WORKING | WAITING ON NX-01 later"
+# The job-idle check does not read line 1: a lane that says WAITING ON and has sat idle 45 minutes with a job still running is named once for the job
+# (no idle-remind line), and not again for the same idle stretch.
+mkdir -p "$rl_hand"; rl_reset; rm -f "$rl_dir"/.idleremind-* "$rl_dir"/.jobidle-*; printf '%s' "job" > "$JOB_FILE"
+printf '%s\n' "WAITING ON ear_eval2 part 2 (scoring container)" > "$rl_hand/report.md"; job_pane 45 > "$RC_PANE"
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/wj-out"
+if grep -q '^idle: rl has been idle [0-9]* min with a background job still running' "$TMP/wj-out" && ! grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/wj-out"; then echo "ok   WAITING ON with a stuck job: the job-idle line comes, the idle-remind line does not"; else echo "FAIL WAITING ON with a stuck job: $(cat "$TMP/wj-out")"; failures=$((failures + 1)); fi
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/wj-out2"
+if ! grep -q '^idle: rl' "$TMP/wj-out2"; then echo "ok   WAITING ON with a stuck job: the same idle stretch is named once, across a re-armed watcher"; else echo "FAIL WAITING ON job named twice: $(cat "$TMP/wj-out2")"; failures=$((failures + 1)); fi
+printf '%s\n' "WORKING (still building)" > "$rl_hand/report.md"; rm -f "$rl_dir"/.idleremind-* "$rl_dir"/.jobidle-*
+LANE_WATCH_IDLE_REMIND_MIN=20 rl_watch 95 5 "$TMP/wj-out3"
+if grep -q 'background job still running' "$TMP/wj-out3" && grep -q 'report line 1 is not QUEUE EMPTY' "$TMP/wj-out3"; then echo "ok   a WORKING line 1 with a stuck job gets both lines"; else echo "FAIL WORKING with a stuck job: $(cat "$TMP/wj-out3")"; failures=$((failures + 1)); fi
+printf '%s' "none" > "$JOB_FILE"; rm -f "$rl_dir"/.idleremind-* "$rl_dir"/.jobidle-*
 # Issue 13 (6 Nov 2026): DONE with no counted ask is a finished lane.
 remind_case "DONE <time>. on line 1 is left alone" no 90 "DONE 2:02 PM. Moved: the pull request merged"
 remind_case "DONE ... needs hub 0 is left alone" no 90 "DONE 11:10 AM | checks 1, 2, 4, 5 pass | needs hub 0"
