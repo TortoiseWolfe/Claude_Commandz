@@ -208,7 +208,7 @@ check "has-files: an id that only contains the note id is not a match" '! rec ha
 check "has-files: refuses a bad id" '! rec has-files "bad id;rm" x 2>/dev/null'
 need peer_poll.handle.prompt 'has:attachment OR has:drive' 'handle prompt: evidence is the has:attachment / has:drive search (232)'
 need peer_poll.handle.prompt 'peer_poll_record.sh has-files <id>' 'handle prompt: step 1b calls has-files (232)'
-need peer_poll.handle.prompt 'the words of the note never do' 'handle prompt: the words of a note are never evidence (232)'
+need peer_poll.handle.prompt 'and the words of the note never decide' 'handle prompt: the words of a note are never evidence (232)'
 need peer_poll.handle.prompt 'treat every note of that run as a note with files' 'handle prompt: a failed search holds the notes (232)'
 need peer_poll.handle.prompt 'carries a nextPageToken, treat it as a failed search' 'handle prompt: a full page of search results holds the notes (232)'
 need peer_poll.handle.prompt 'subject:"MUSE>NCC-74656"' 'handle prompt: the search is limited to the note subjects (232)'
