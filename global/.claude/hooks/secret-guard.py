@@ -902,25 +902,27 @@ def _shell_body_use(body):
 # turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
 # the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
 # (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
-GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE)(?![\w-])"
-                         r"|(?<![\w.-])shopt\b[^;&|\n]*[$`]|(?<![\w-])-O[ \t]*[^\s;&|]*[$`]")
+GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS)(?![\w-])"
+                         r"|(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]"
+                         r"|(?<![\w.-])(?:bash|sh)\b[^;&|\n]*[ \t]-[A-Za-z]*O[ \t]*[^\s;&|]*[$`{*?\[]")
 EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
 
 
-def _glob_option_reaches_folder(cmd, cwd=None):
-    """True when cmd sets a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob character)
-    is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's cwd, or
-    anything at all once the command has a cd, pushd or popd. A word that holds $ or .. cannot be resolved from the text and is refused."""
+def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
+    """True when cmd sets (or could set) a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob
+    character) is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's
+    cwd, or anything at all once the command has a cd, pushd or popd. A word that holds $ or .., or a ~+ ~- ~N form, cannot be resolved from the
+    text and is refused. The option counts as possibly set when the command word is a variable, a function or alias could stand in for shopt
+    (VARIABLE_COMMAND_WORD, NAME_SHADOW; looked at only with wide, on the command text without its data heredoc bodies), or a shopt or
+    bash -O argument is built at run time."""
     bare = re.sub(r"[\"'\\]", "", cmd)
-    if not GLOB_OPTION.search(bare):
+    if not (GLOB_OPTION.search(bare) or (wide and (VARIABLE_COMMAND_WORD.search(bare) or NAME_SHADOW.search(bare)))):
         return False
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
-    home = os.path.realpath(os.path.expanduser("~"))
-    parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder)), home}
 
-    def reaches(directory):  # the folder, below it, or one of its parents
-        real = os.path.realpath(directory)
-        return real == folder or real in parents or real.startswith(folder + os.sep)
+    def reaches(directory):  # the folder, below it, or any folder above it (/, /home, the home folder, ~/.config, ~/.config/afa)
+        real = os.path.realpath(directory).rstrip(os.sep)
+        return real == folder or folder.startswith(real + os.sep) or real.startswith(folder + os.sep)
 
     moves = bool(re.search(r"(?<![\w.-])(?:cd|pushd|popd)(?![\w-])", bare))
     try:
@@ -928,22 +930,30 @@ def _glob_option_reaches_folder(cmd, cwd=None):
     except OSError:
         return True
     for tok in re.split(r"[\s;&|<>`]+", bare):
-        for word in {tok, tok.split("=", 1)[1] if "=" in tok else ""}:
+        # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
+        for word in {tok} | {tok[i + 1:] for i, ch in enumerate(tok) if ch in "=("}:
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
                 continue
             if "$" in word or ".." in word.split("/"):
                 return True
-            front = []
-            for comp in os.path.expanduser(gmail_norm(word)).split("/"):
-                if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp):
-                    break
-                front.append(comp)
-            fixed = "/".join(front)
-            if os.path.isabs(fixed) or word.startswith("~"):
-                if reaches(fixed or "/"):
-                    return True
-            elif moves or reaches(os.path.join(base, fixed)):
+            expanded = _brace_expand(word, BRACE_LIMIT)
+            if expanded is None:
                 return True
+            for one in expanded:
+                one = os.path.expanduser(gmail_norm(one))
+                if one.startswith("~"):
+                    return True  # ~+ ~- ~N and ~name: a folder this text does not say
+                front = []
+                for comp in one.split("/"):
+                    if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp):
+                        break
+                    front.append(comp)
+                fixed = "/".join(front)
+                if os.path.isabs(one):
+                    if reaches(fixed or "/"):
+                        return True
+                elif moves or reaches(os.path.join(base, fixed)):
+                    return True
     return False
 
 
@@ -955,6 +965,8 @@ def gmail_credential_use(cmd, cwd=None):
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
     cmd, bodies, opaque, send_cmd = split_data_heredocs(cmd)
+    if _glob_option_reaches_folder(cmd, cwd, wide=True):
+        return "folder"
     for body in bodies:  # a data body is not split into words, but one that names the token folder is still refused
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):

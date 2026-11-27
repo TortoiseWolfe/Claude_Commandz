@@ -98,6 +98,33 @@ class RuleGGlobOptions(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_review_cases_are_refused(self):
+        """Blind review and security review of PR 264: an array assignment, an option set through a variable, a bundled -O, BASHOPTS, a front
+        that is a parent (/ or the home folder), a brace list, ~+ and a shopt argument built from a brace or a glob."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -s dotglob; x=(~/%s); cat $x" % tok,
+                        "shopt -s dotglob; declare -a x=(~/%s); cat ${x[0]}" % tok,
+                        "s=shopt; o=dotglo; $s -s $o\"b\"; cat ~/%s" % tok,
+                        "o=dotglo; bash -eO $o\"b\" -c 'cat ~/%s'" % tok,
+                        "o=dotglo; env BASHOPTS=$o\"b\" bash -c 'cat ~/%s'" % tok,
+                        "BASHOPTS=dotglob bash -c 'cat ~/%s'" % tok,
+                        "shopt -s dotglo{b,x}; cat ~/%s" % tok,
+                        "shopt -s dotglo?; cat ~/%s" % tok,
+                        "shopt -s dotglob; cat /*/*/.config/afa/gmail/token.json",
+                        "shopt -s dotglob; cat /ho?e/*/.config/afa/gmail/token.json",
+                        "shopt -s dotglob; cat ~/*/*/*/token.json",
+                        "shopt -s dotglob; cat {~,/tmp}/%s" % tok,
+                        "shopt -s dotglob; cd ~/.config/afa; cat ~+/g?ail/token.json"):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_other_uses_of_dash_o_and_variables_are_allowed(self):
+        def run(home):
+            for cmd in ('wget -O "$out" "${url}"', 'curl -O "$u" ~/docs/*.md'):
+                self.allowed(cmd)
+        self.with_home(run)
+
     def test_the_working_folder_is_the_start_of_a_relative_glob(self):
         def run(home):
             r = sg.evaluate({"tool_name": "Bash", "cwd": home, "tool_input": {"command": "shopt -s dotglob; cat ?config/a?a/g?ail/token.json"}})
@@ -111,7 +138,7 @@ class RuleGGlobOptions(Base):
             for cmd in ("shopt -s nullglob; ls ~/docs/*.md",
                         "shopt -s extglob; ls src/+(a|b).txt",
                         "shopt -s dotglob; ls ~/docs/*.md",
-                        "shopt -s nocaseglob; ls /tmp/*.TXT",
+                        "shopt -s nocaseglob; ls /var/log/*.TXT",
                         "GLOBIGNORE='*.bak'; ls /var/log/*"):
                 self.allowed(cmd)
         self.with_home(run)
