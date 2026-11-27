@@ -18,7 +18,7 @@ check muse_poll.sh '"$CLAUDE" -p "$(cat "$S/muse_poll.check.prompt")"' muse-poll
 check muse_poll.sh '"$CLAUDE" -p "$hprompt"' muse-poll-client-handle
 check muse_poll.sh '"$CLAUDE" -p "$HANDLE_PROMPT"' muse-poll-handle
 check peer_poll.sh '"$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")"' peer-poll-check
-check peer_poll.sh '"$CLAUDE" -p "$(cat "$S/peer_poll.handle.prompt")"' peer-poll-handle
+check peer_poll.sh '"$CLAUDE" -p "$HANDLE_PROMPT"' peer-poll-handle
 if grep -qF -- '"-p", prompt, "--name", "openclaw-dispatch-pass"' "$D/openclaw_dispatch.py"; then echo 'PASS: openclaw_dispatch.py names its pass'
 else echo 'FAIL: openclaw_dispatch.py: the claude -p pass has no --name' >&2; fails=$((fails+1)); fi
 # A new unnamed call: every shell line that runs claude -p must carry --name.
