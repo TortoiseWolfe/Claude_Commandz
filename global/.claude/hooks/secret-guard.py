@@ -883,6 +883,8 @@ def _body_path_runs_hit(body):
 def _shell_body_use(body):
     """A body that bash may run, read the way bash reads it: its own comments and heredocs split out, quote state carried across rows, a segment
     that cannot be split refused, no allowlist."""
+    if _glob_option_reaches_folder(str(body), None, wide=True):  # a body bash runs may set a glob option in a way only the wide reading sees
+        return "folder"
     code, bodies, opaque, _send = split_data_heredocs(str(body))
     for b in bodies:
         norm = gmail_norm(b)
@@ -902,9 +904,9 @@ def _shell_body_use(body):
 # turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
 # the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
 # (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
-GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS)(?![\w-])"
+GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt)(?![\w-])"
                          r"|(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]"
-                         r"|(?<![\w.-])(?:bash|sh)\b[^;&|\n]*[ \t]-[A-Za-z]*O[ \t]*[^\s;&|]*[$`{*?\[]")
+                         r"|(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")
 EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
 
 
@@ -931,7 +933,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
         return True
     for tok in re.split(r"[\s;&|<>`]+", bare):
         # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
-        for word in {tok} | {tok[i + 1:] for i, ch in enumerate(tok) if ch in "=("}:
+        # (a path list x=a:~/... is split at its colons too: bash expands the ~ after each one in an assignment)
+        for word in {tok} | {tok[i + 1:] for i, ch in enumerate(tok) if ch in "=(:"}:
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
                 continue
             if "$" in word or ".." in word.split("/"):

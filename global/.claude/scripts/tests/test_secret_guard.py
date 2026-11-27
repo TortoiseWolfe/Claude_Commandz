@@ -115,7 +115,11 @@ class RuleGGlobOptions(Base):
                         "shopt -s dotglob; cat /ho?e/*/.config/afa/gmail/token.json",
                         "shopt -s dotglob; cat ~/*/*/*/token.json",
                         "shopt -s dotglob; cat {~,/tmp}/%s" % tok,
-                        "shopt -s dotglob; cd ~/.config/afa; cat ~+/g?ail/token.json"):
+                        "shopt -s dotglob; cd ~/.config/afa; cat ~+/g?ail/token.json",
+                        "shopt -s dotglob; x=a:~/%s; cat $x" % tok,
+                        "setopt globdots; cat ~/%s" % tok,
+                        "bash <<'EOF'\ns=shopt; $s -s dotglob\ncat ~/%s\nEOF" % tok,
+                        "bash <<'EOF'\no=dotglo; shopt -s $o\"b\"\ncat ~/%s\nEOF" % tok):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
