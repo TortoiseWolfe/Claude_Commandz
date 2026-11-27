@@ -1141,6 +1141,25 @@ class LiveState(unittest.TestCase):
             self.assertIsNone(rx.search(page), rx.pattern)
         self.assertEqual(hd.live_problems(ROADMAP, page), [])
 
+    def test_a_lane_named_secret_token_or_password_does_not_stop_the_page(self):
+        # issue 240: the lane line is "<lane>: <line 1>", so "sh-secret: WORKING (...)" looked like secret: <value>
+        page = self.page()
+        for line in ("sh-secret: WORKING (fix pushed, review running)", "x-token: DONE items 1 (all proved)",
+                     "sh-password: BLOCKED (waits on the hub)", "my-api-key: STEP-FOR-JONATHAN https://example.test/x",
+                     "web-api-key: QUEUE EMPTY items 3"):
+            probs = hd.live_problems(ROADMAP, page + "\n- 10:00 AM " + line + "\n")
+            self.assertEqual([p for p in probs if "secret" in p], [], line)
+            self.assertEqual(hd.scrub(line), line)
+
+    def test_a_secret_with_a_name_still_stops_the_page(self):
+        page = self.page()
+        value = "".join(["hunter", "2abc"])  # built at run time: a made-up value
+        for line in (f"password: {value}", f"secret={value}", f"api_key: {value}", f"my-secret: {value}", f"x-token: {value}",
+                     f"sh-secret: WORKING{value}", f"sh-password: {value} WORKING", "see https://example.test/page?token=" + value):
+            probs = hd.live_problems(ROADMAP, page + "\n" + line + "\n")
+            self.assertTrue(any("secret" in p for p in probs), line)
+            self.assertNotIn(value, hd.scrub(line), line)
+
     def test_live_problems_names_each_way_the_roadmap_can_stop_parsing(self):
         cases = {
             "": "empty",

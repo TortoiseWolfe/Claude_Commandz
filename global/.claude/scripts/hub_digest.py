@@ -71,7 +71,11 @@ SECRETS = [
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
     re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"),
     re.compile(r"(?i)[?&;](?:token|key|code|secret|apikey|api_key|password|passwd|auth|sig)=[^\s&]+"),
-    re.compile(r"(?i)\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S{6,}"),
+    # a key word that is the tail of a hyphenated name (a lane called sh-secret: "sh-secret: WORKING") followed by a lane status word is
+    # a lane report line, not a value; any other value after it, and any key word that stands alone, still counts
+    re.compile(r"(?i)(?<![A-Za-z0-9]-)\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S{6,}"),
+    re.compile(r"(?i)(?<=[A-Za-z0-9]-)(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*"
+               r"(?!(?-i:WORKING|BLOCKED|DONE|QUEUE|STEP-FOR-JONATHAN|SUSPECTED-INJECTION)(?![A-Za-z0-9]))\S{6,}"),
     re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9])"),
 ]
 
