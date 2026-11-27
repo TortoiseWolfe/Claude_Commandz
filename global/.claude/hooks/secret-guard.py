@@ -304,6 +304,7 @@ VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else
                                    r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+|\{\w+\}[<>]+&?[ \t]*\S+|&>>?[ \t]*\S+)[ \t]+)*[\w.-]*[$`{*?\[]")  # assignments and redirects (a space before the target too) may stand in front
 # the same, widened after the second security scan: any command word that holds a $, a backtick or a brace (al$b, `echo alias`, {ali,as}) can build the word alias
 # Security scan of the 241 fix: a function (ls() { cat "$@"; }), hash, export and a changed PATH or ENV also make a command word run something else.
+QUOTE_SHIFTER = re.compile(r"\$\(|`|\$['\"]")  # a command substitution, a backtick, or an ANSI-C ($'..') or locale ($"..") quoted word
 NAME_SHADOW = re.compile(r"[\w.-]+[ \t]*\([ \t]*\)|(?<![\w.-])(?:hash|export|enable|unalias)(?![\w-])|(?<![\w-])(?:PATH|ENV|BASH_FUNC\w*)=")
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
@@ -736,14 +737,17 @@ def gmail_credential_use(cmd):
             return "folder"
     bare = re.sub(r"[\"'\\]", "", cmd)
     if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare) \
-            or NAME_SHADOW.search(bare):
+            or NAME_SHADOW.search(bare) or QUOTE_SHIFTER.search(cmd):
         # Claude_Commandz issue 241: an alias (or BASH_ALIASES, eval, source, a startup file) can hold an open quote, so bash's quote state
         # then differs from the one split_segments read from the text and a quoted-looking glob runs as a command. Such a command is read
         # quote-blind: cut at every ; & | and newline whatever the quotes, each piece checked as a row of an interpreter's heredoc is. There is
         # no allowlist here (ls, the mail tool, the masked viewer): an alias can make any of those words run something else, so a piece that
         # names or globs into the token folder is refused. That fails closed: set -e; ls ~/.config/afa/gmail, or the mail tool run with the
         # folder named and the word eval, source, set or command anywhere in the command, is refused too.
-        for seg in re.split(r"[;&|\n]", cmd):
+        # Issues 237 and 236: a command substitution inside double quotes ("$(cat ...)", a backtick) runs as a command but reads as part of one
+        # quoted word, and an ANSI-C or locale quoted word ($'..', $"..") ends at a different quote than the text reader thinks. Both are read
+        # the same way, and the pieces are also cut at ( ) and the backtick so a substitution's inside is a piece of its own.
+        for seg in re.split(r"[;&|\n]", cmd) + re.split(r"[;&|\n()`]", cmd):
             norm = gmail_norm(seg)
             if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                     or gmail_resolves_into_folder(seg, tolerant=True)):

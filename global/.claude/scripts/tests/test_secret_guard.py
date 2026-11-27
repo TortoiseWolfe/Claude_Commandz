@@ -1048,6 +1048,43 @@ class RuleGAliasQuoteState(Base):
         self.allowed("eval \"$(ssh-agent -s)\"")
 
 
+class RuleGSubstitutionAndAnsiQuotes(Base):
+    """Issues 237 and 236: a read inside a double-quoted $(...) or backtick, and a word quoted as $'..' or $"..", hides the token folder from the quote reader."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    def test_double_quoted_substitution_with_a_glob_is_refused(self):
+        self.home()
+        for c in ('echo "$(cat ~/.?onfig/a?a/g?ail/token.json)"', 'echo "`cat ~/.?onfig/a?a/g?ail/token.json`"',
+                  'echo "$(echo "$(cat ~/.?onfig/a?a/g?ail/token.json)")"', 'x="$(cat ~/.?onfig/a?a/g?ail/token.json)"',
+                  'echo "a $(true; cat ~/.?onfig/a?a/g?ail/token.json) b"', 'echo "$( cat ~/.?onfig/a?a/g?ail/token.json )"',
+                  'echo "`echo \\`cat ~/.?onfig/a?a/g?ail/token.json\\``"', 'echo "${x:-$(cat ~/.?onfig/a?a/g?ail/token.json)}"'):
+            self.blocked(c, "G")
+
+    def test_ansi_c_quoted_word_hiding_a_read_is_refused(self):
+        self.home()
+        for c in ("ls $'\\''; cat ~/.config/afa/gmail/token.json # '", "ls $'\\\\''; cat ~/.config/afa/gmail/token.json # '",
+                  "ls $'\\x27'; cat ~/.config/afa/gmail/token.json # '", "ls $'\\047'; cat ~/.config/afa/gmail/token.json # '",
+                  "ls $\"\\\"\"; cat ~/.config/afa/gmail/token.json # \"", "ls $'\\''; cat ~/.?onfig/a?a/g?ail/token.json # '",
+                  "echo $'a\\'b'; cat ~/.config/afa/gmail/token.json"):
+            self.blocked(c, "G")
+
+    def test_ordinary_substitutions_and_ansi_quotes_pass(self):
+        self.home()
+        self.allowed('echo "$(date)" "`pwd`"')
+        self.allowed("echo $'a\\tb'")
+        self.allowed('echo "$(ls ~/docs)" "$USER"')
+        self.allowed("printf '%s' $\"hello\"")
+        self.allowed('ls "$(dirname ~/docs/x)"')
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})
