@@ -38,13 +38,23 @@ case "${1:-}" in
     printf -- '- [ ] %s | %s\n' "$(date '+%F %H:%M')" "${line:0:400}" >>"$STATE/peer-inbox.md"
     ;;
   files)
-    # A note that carries files this machine cannot see (the Gmail connector here shows no attachments). Recorded here so the
+    # A note that carries files this machine cannot see (the connector read of a draft leaves its attachments out; has-files below asks Gmail's search). Recorded here so the
     # poller does not pick it up again every minute, and NEVER in peer-notes-processed.txt: that file is the read record
     # NX-01's sweep deletes from, and the files would be lost with the note (19 and 23 Nov 2026, issue 143).
     # The name must not match peer-*processed*.txt, which notes_check.py reads as a processed-ids file.
     id="${2:?note id}"
     [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || { echo "bad id" >&2; exit 1; }
     grep -qxF "$id" "$STATE/peer-files-waiting.txt" 2>/dev/null || echo "$id" >>"$STATE/peer-files-waiting.txt"
+    ;;
+  has-files)
+    # has-files <id> [<id with an attachment or Drive link>...]: exit 0 when <id> is in the list, 1 when it is not. The list is what Gmail's own
+    # search returned for "has:attachment" / "has:drive" (list_drafts for drafts, search_threads for sent notes): a draft read through the
+    # connector leaves its attachments out (proved 27 Nov 2026), so a note's words and the read's fields are never the evidence (issue 232).
+    id="${2:?note id}"
+    [[ "$id" =~ ^[A-Za-z0-9_-]{6,40}$ ]] || { echo "bad id" >&2; exit 2; }
+    shift 2
+    for other in "$@"; do [ "$other" = "$id" ] && { echo "files"; exit 0; }; done
+    echo "no files"; exit 1
     ;;
   ccseen)
     id="${2:?note id}"
@@ -54,5 +64,5 @@ case "${1:-}" in
   active)
     touch "$STATE/peer-active.stamp"
     ;;
-  *) echo "usage: $0 processed <id> | files <id> | ccseen <id> | inbox \"<line>\" | active" >&2; exit 2 ;;
+  *) echo "usage: $0 processed <id> | files <id> | has-files <id> [ids with attachments] | ccseen <id> | inbox \"<line>\" | active" >&2; exit 2 ;;
 esac

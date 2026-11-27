@@ -196,7 +196,7 @@ need peer_poll.handle.prompt 'Never call label_message' 'handle prompt: no label
 check "check prompt no longer says to never look for [MUSE>CC]" '! grep -q "Never look for" "$D/peer_poll.check.prompt"'
 
 # Issue 143: a note with attached files is never recorded as processed (NX-01's sweep deletes from that record, and the files
-# go with the note: 19 and 23 Nov 2026). The tower cannot see attachments, so it queues the note for NX-01 instead.
+# go with the note: 19 and 23 Nov 2026). The draft read leaves attachments out, so it queues the note for NX-01 instead.
 rec files r-9208119623742241727
 check "files: records the id in peer-files-waiting.txt" 'grep -qxF r-9208119623742241727 "$R/peer-files-waiting.txt"'
 check "files: does NOT touch the processed record" '! grep -q r-9208119623742241727 "$R/peer-notes-processed.txt"'
@@ -241,8 +241,22 @@ check "usage names the files verb" '[ -n "$(rec nonsense 2>&1 | grep "files <id>
 need peer_poll.handle.prompt 'peer_poll_record.sh files <id>' 'handle prompt: a note with files is recorded with the files verb'
 need peer_poll.handle.prompt 'files waiting: ask NX-01 to pull' 'handle prompt: and queued as "files waiting: ask NX-01 to pull"'
 need peer_poll.handle.prompt 'Do NOT run peer_poll_record.sh processed for this note' 'handle prompt: never processed for a note with files'
-need peer_poll.handle.prompt 'list file names' 'handle prompt: file names in the note count as files'
-need peer_poll.handle.prompt 'treat it as if it does' 'handle prompt: unsure means files'
+# Issue 232: a note is a note with files only when Gmail's own search (has:attachment / has:drive) returned it, never because its text talks
+# about files. The draft read leaves attachments out (proved 27 Nov 2026), so has-files takes the search result's ids.
+S=r-1803834663756677428   # the 26 Nov status ask: body names Brass-turntable.mp4 and Brass-still.png, no attachment
+check "has-files: the 232 note (talks about files, not in the has:attachment result) gets no files label" '[ "$(rec has-files $S r-111111111111 r-222222222222)" = "no files" ] && ! rec has-files $S r-111111111111 >/dev/null'
+check "has-files: an empty search result means no files" '! rec has-files $S >/dev/null'
+check "has-files: the same note found by the has:attachment search gets the files label" '[ "$(rec has-files $S r-111111111111 $S)" = "files" ] && rec has-files $S $S >/dev/null'
+check "has-files: an id that only contains the note id is not a match" '! rec has-files r-1803834663756677428 r-18038346637566774289 >/dev/null'
+check "has-files: refuses a bad id" '! rec has-files "bad id;rm" x 2>/dev/null'
+need peer_poll.handle.prompt 'has:attachment OR has:drive' 'handle prompt: evidence is the has:attachment / has:drive search (232)'
+need peer_poll.handle.prompt 'peer_poll_record.sh has-files <id>' 'handle prompt: step 1b calls has-files (232)'
+need peer_poll.handle.prompt 'and the words of the note never decide' 'handle prompt: the words of a note are never evidence (232)'
+need peer_poll.handle.prompt 'treat every note of that run as a note with files' 'handle prompt: a failed search holds the notes (232)'
+need peer_poll.handle.prompt 'carries a nextPageToken, treat it as a failed search' 'handle prompt: a full page of search results holds the notes (232)'
+need peer_poll.handle.prompt 'subject:"MUSE>NCC-74656"' 'handle prompt: the search is limited to the note subjects (232)'
+need peer_poll.handle.prompt 'Only the exact output "no files" releases a note' 'handle prompt: only "no files" releases a note (232)'
+check "handle prompt: file names no longer count as files by themselves" '! grep -q "or list file names" "$D/peer_poll.handle.prompt" && ! grep -q "treat it as if it does" "$D/peer_poll.handle.prompt"'
 need peer_poll.handle.prompt '(Never for a note with files' 'handle prompt: step 2 points back at the files rule'
 check "handle prompt: the files check comes before the processed step" \
   '[ "$(grep -n "^1b. FILES CHECK" "$D/peer_poll.handle.prompt" | cut -d: -f1)" -lt "$(grep -n "^2. Record it" "$D/peer_poll.handle.prompt" | cut -d: -f1)" ]'
