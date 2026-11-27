@@ -1076,6 +1076,14 @@ class RuleGSubstitutionAndAnsiQuotes(Base):
                   "echo $'a\\'b'; cat ~/.config/afa/gmail/token.json"):
             self.blocked(c, "G")
 
+    def test_a_path_spelled_with_ansi_c_or_locale_quotes_is_refused(self):
+        self.home()
+        for c in ("cat ~/.config/a$'fa'/g$'mail'/t$'oken.json'", "cat ~/.config/a$\"fa\"/g$\"mail\"/token.json",
+                  "cat ~/.config/afa/gm$'\\x61'il/token.json", "cat ~/.config/afa/gm$'\\141'il/token.json",
+                  "cat ~/.config/afa/gm$'\\u0061'il/token.json", "cat ~/.config/afa/$'gmail'/token.json",
+                  "cat ~/.config/afa/g$'m'?il/token.json"):
+            self.blocked(c, "G")
+
     def test_ordinary_substitutions_and_ansi_quotes_pass(self):
         self.home()
         self.allowed('echo "$(date)" "`pwd`"')

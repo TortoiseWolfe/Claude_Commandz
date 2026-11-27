@@ -309,10 +309,39 @@ NAME_SHADOW = re.compile(r"[\w.-]+[ \t]*\([ \t]*\)|(?<![\w.-])(?:hash|export|ena
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
 
+_ANSI_ESC = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c_decode(m):
+    """The text a $'..' word holds once bash has read its escapes (\\xHH, \\NNN, \\uHHHH, \\n, \\' and so on); an unknown escape keeps its letter."""
+    s, out, i = m.group(1), [], 0
+    while i < len(s):
+        c = s[i]
+        if c != "\\" or i + 1 >= len(s):
+            out.append(c)
+            i += 1
+            continue
+        d = s[i + 1]
+        num = re.match(r"x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}", s[i + 1:])
+        if num:
+            t = num.group(0)
+            try:
+                out.append(chr(int(t[1:], 16) if t[0] in "xuU" else int(t, 8) & 0xFF))
+            except (ValueError, OverflowError):
+                out.append("?")
+            i += 1 + len(t)
+        else:
+            out.append(_ANSI_ESC.get(d, d))
+            i += 2
+    return "".join(out)
+
+
 def gmail_norm(text):
-    """The text as the shell would spell the path: quotes and backslashes gone, ~ and $HOME written out, ./ and x/../ folded."""
+    """The text as the shell would spell the path: $'..' escapes decoded, a $ before a quote gone, quotes and backslashes gone, ~ and $HOME written out, ./ and x/../ folded."""
     home = os.path.expanduser("~")
-    t = re.sub(r"[\"'\\]", "", text)
+    t = re.sub(r"\$'((?:[^'\\]|\\.)*)'", _ansi_c_decode, text)  # issue 236: $'fa' is fa, $'\x61' is a
+    t = re.sub(r"\$(?=[\"'])", "", t)  # $"fa" and a $' left over are the plain quote
+    t = re.sub(r"[\"'\\]", "", t)
     t = re.sub(r"\$\{?HOME\}?|(?<![\w])~(?=/|\s|$)", home, t)
     t = re.sub(r"/{2,}", "/", t)
     t = re.sub(r"/\./", "/", t)
