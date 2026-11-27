@@ -480,6 +480,8 @@ NONSHELL_FEEDERS = {"python", "pypy", "node", "nodejs", "deno", "perl", "ruby", 
 def _line_runs_no_shell(line):
     """True when every command on the logical line is a known tool that does not run its input as shell (an interpreter other than a shell, curl,
     jq, grep ... or a command that only stores or posts text). Anything unclear, a pipe to a shell, env, sudo, ssh, xargs, is not."""
+    if re.search(r"\$\(|`|[<>]\(|/dev/|/proc/|>&", line):
+        return False  # a substitution, process substitution, device or descriptor path can lead to a shell
     segs = [s for s in split_segments(line) if s.strip()]
     if not segs:
         return False
@@ -491,7 +493,9 @@ def _line_runs_no_shell(line):
         words = [w for w in words if not re.match(r"^[A-Za-z_]\w*=", w)]
         if not words:
             return False
-        name = os.path.basename(words[0])
+        if "/" in words[0]:
+            return False  # a path-qualified name can be any file: not trusted as a known tool
+        name = words[0]
         if re.fullmatch(r"(?:python|pypy)[\d.]*", name):
             name = name.rstrip("0123456789.")
         if name not in NONSHELL_FEEDERS and name not in HEREDOC_DATA_WORDS:
@@ -637,11 +641,24 @@ def _opaque_use(opaque):
                     return "folder"
                 if GMAIL_SEND.search(norm):
                     return "send"
+        if _body_path_runs_hit(body):
+            return "folder"
         if isinstance(body, ShellBody):
             hit = _shell_body_use(body)
             if hit:
                 return hit
     return None
+
+
+def _body_path_runs_hit(body):
+    """True when a path-like run of the whole body, read across rows with its quotes and backslashes removed and a [...] group kept whole
+    (commas and spaces inside it included), resolves into the token folder. Whatever runs the body (a shell, or python with os.system on a
+    string that spans rows), quote state and word splitting cannot hide a glob from this scan. It refuses only a real hit on the folder."""
+    flat = re.sub(r"[\"'\\]", "", str(body))
+    for run in re.findall(r"(?:\[[^\]\n]*\]|[^\s;<>()|&`\[])+", flat):
+        if ("/" in run or run.startswith(("~", "."))) and gmail_resolves_into_folder(shlex.quote(run)):
+            return True
+    return False
 
 
 def _shell_body_use(body):

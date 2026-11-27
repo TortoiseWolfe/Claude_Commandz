@@ -800,6 +800,11 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("sudo sh <<EOF\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
                 self.blocked("(cat ~/.?onfig/a?a/g?ail/token.json)", "G")
                 self.blocked("echo $(cat ~/.?onfig/a?a/g?ail/token.json)", "G")
+                # security review of the sixth commit: python (not a shell) running a shell string that spans rows keeps no quote state either
+                self.blocked("python3 - <<'EOF'\nimport os\nos.system('''echo 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json''')\nEOF", "G")
+                self.blocked("python3 - <<'EOF'\nimport os\nos.system(\"echo 'x\\n'; cat ~/.?onfig/a[ f]a/g?ail/token.json\")\nEOF", "G")
+                self.blocked("./python3 <<'EOF'\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("python3 <<'EOF' >(bash)\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
                 # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
                 self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
                 # and a shell body that is only prose and comments, with a comment apostrophe, still passes
