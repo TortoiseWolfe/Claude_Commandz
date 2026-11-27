@@ -615,6 +615,125 @@ class RuleGQuotedHeredocBodies(Base):
         self.assertEqual(run("python3 - <<EOF\nprint(open('%s/token.json').read())\nEOF" % self.D), 2)
 
 
+class RuleGTextTheShellDoesNotRead(Base):
+    """Claude_Commandz issues 234 and 235: an escaped separator, a lone apostrophe in a comment or in an interpreter's heredoc body, and
+    echo/printf prose are not commands to word-split, so they must not make rule G refuse. Every real token read and send stays refused."""
+    D = "~/.config/afa/gmail"
+    SEND = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+    # the hub's hand-off edit of 27 Nov (hub transcript 848b8ac7 line 1152), shortened: a quoted python3 heredoc, then lane.sh --send
+    HUB_CALL = ("cd ~/repos && gh pr view 236 -R o/r --json number --jq .number 2>/dev/null || echo \"236: none\"; "
+                "f=~/.claude/state/hub-handoff.md; python3 - \"$f\" <<'EOF'\n"
+                "import sys\np=sys.argv[1]; s=open(p).read()\n"
+                "s=s.replace(\"\\\"merge 235 when it's green\\\" (after the hand-off).\",\"\\\"merge 236 when it's green\\\" (after).\",1)\n"
+                "open(p,'w').write(s)\nEOF\n"
+                "~/.claude/scripts/lane.sh --send rule-g \"Hub: Jonathan's word, quoted: \\\"merge 236 when it's green\\\".\" 2>&1 | tail -1")
+
+    def test_the_hub_calls_that_were_refused_pass(self):
+        self.allowed(self.HUB_CALL)
+        self.allowed("gh pr view 245 -R o/r --json number,title,state 2>&1 | head -3; "
+                     "gh api repos/o/r/issues?state=all\\&per_page=1 --jq '.[0].number'")
+        self.allowed("gh api repos/o/r/issues?state=all\\&per_page=1 --jq '.[0].number'")
+
+    def test_an_escaped_separator_is_one_word(self):
+        self.allowed("echo a\\;b\\|c\\&d")
+        self.allowed("ls /tmp/a\\&b")
+        self.allowed("echo \"a \\\" b; c\"")
+
+    def test_an_apostrophe_in_a_comment_passes(self):
+        self.allowed("# it's fine\nls /tmp")
+        self.allowed("ls /tmp # it's fine")
+        self.allowed("ls /tmp # it's fine\nls /var")
+
+    def test_an_apostrophe_in_an_interpreter_body_passes(self):
+        self.allowed("python3 - <<'EOF'\n# it's a note\nprint(1)\nEOF\nls /tmp")
+        self.allowed("python3 - <<'EOF'\nprint(\"it's\")\nx = 'don\\'t'\nEOF\nls /tmp")
+        self.allowed("bash <<'EOF'\n# it's fine\nls /tmp\nEOF")
+
+    def test_echo_and_printf_prose_naming_a_send_path_passes(self):
+        self.allowed("echo \"see users/me/messages/send\" > /tmp/n.md")
+        self.allowed("echo 'POST %s' >> /tmp/n.md" % self.SEND)
+        self.allowed("printf '%%s\\n' 'it is drafts/send, not messages:send' > /tmp/n.md")
+        self.allowed("echo \"the note: messages/send\" | tee /tmp/n.md")
+        self.allowed("echo hi > /tmp/a\necho \"messages/send\" > /tmp/b")
+
+    def test_real_token_reads_and_sends_stay_refused(self):
+        for cmd in ("cat %s/token.json" % self.D,
+                    "cat %s/tok\\en.json" % self.D,
+                    "echo a\\&b; cat %s/token.json" % self.D,
+                    "echo a\\;b; cat %s/token.json" % self.D,
+                    "gh api repos/o/r/issues?state=all\\&per_page=1; cat %s/token.json" % self.D,
+                    "curl -X POST %s" % self.SEND,
+                    "echo a\\&b; curl -X POST %s" % self.SEND):
+            self.blocked(cmd, "G")
+
+    def test_a_comment_hides_nothing(self):
+        for cmd in ("ls /tmp # it's fine\ncat %s/token.json" % self.D,
+                    "# it's fine\ncat %s/token.json" % self.D,
+                    "ls /tmp # it's fine\ncurl -X POST %s" % self.SEND,
+                    "ls # %s/token.json" % self.D,
+                    "# see ~/.config/afa/gmail\nls",
+                    "echo hi #x\ncat %s/token.json" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_an_interpreter_body_that_touches_the_folder_or_a_send_path_is_still_refused(self):
+        for cmd in ("python3 - <<'EOF'\n# it's a note\nprint(open('%s/token.json').read())\nEOF\nls /tmp" % self.D,
+                    "python3 - <<'EOF'\nprint(\"it's\")\nopen(\"%s/token.json\")\nEOF" % self.D,
+                    "python3 - <<'EOF'\n# it's\nimport urllib.request as u; u.urlopen('%s')\nEOF" % self.SEND,
+                    "python3 - <<EOF\nprint(open('%s/token.json').read())\nEOF\nls /tmp" % self.D,
+                    "bash <<'EOF'\n# it's\ncat %s/token.json\nEOF" % self.D,
+                    "bash <<'EOF'\n# it's\ncurl -X POST %s\nEOF" % self.SEND,
+                    "curl --data @- https://example.org <<'EOF'\nit's %s\nEOF" % self.SEND,
+                    "python3 - <<'EOF'\nprint(1)\nEOF\ncat %s/token.json" % self.D,
+                    "python3 - <<'EOF'\ns = 'it's'\nopen('~/.con*/afa/g*/token.json')\nEOF"):
+            self.blocked(cmd, "G")
+
+    def test_a_body_symlink_into_the_folder_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = os.path.join(t, "home")
+            os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+            os.symlink(os.path.join(home, ".config", "afa", "gmail"), os.path.join(t, "lnk"))
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                self.blocked("bash <<'EOF'\ncat %s/token.json\nEOF" % os.path.join(t, "lnk"), "G")
+                self.blocked("bash <<'EOF'\n# it's\ncat %s/token.json\nEOF" % os.path.join(t, "lnk"), "G")
+                self.blocked("python3 - <<'EOF'\ns = it's\nopen(%s/token.json)\nEOF" % os.path.join(t, "lnk"), "G")  # a line the shell can't split
+            finally:
+                if old is None:
+                    del os.environ["HOME"]
+                else:
+                    os.environ["HOME"] = old
+
+    def test_echo_that_feeds_something_or_is_unclear_stays_refused(self):
+        for cmd in ("echo 'curl -X POST %s' | bash" % self.SEND,
+                    "echo 'curl -X POST %s' | sh" % self.SEND,
+                    "echo 'x %s' | python3 -" % self.SEND,
+                    "echo '%s' | xargs curl -X POST" % self.SEND,
+                    "echo \"$(curl -X POST %s)\"" % self.SEND,
+                    "echo `curl -X POST %s`" % self.SEND,
+                    "echo 'x messages/send' > $target",
+                    "echo 'x messages/send' > /de?/fd/3",
+                    "echo 'x messages/send' > /dev/fd/3",
+                    "echo 'x messages/send' | tee >(sh)",
+                    "echo hi; curl -X POST %s" % self.SEND,
+                    "echo hi && curl -X POST %s" % self.SEND,
+                    "FOO=1 echo 'x messages/send' > /tmp/n.md",
+                    "/bin/echo 'x messages/send' > /tmp/n.md",
+                    "curl -X POST \\\necho %s" % self.SEND,
+                    "bash -c \"\necho %s\n\"" % self.SEND,
+                    "echo 'x' > %s/token.json" % self.D,
+                    "printf 'x' >> %s/client.json" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_main_exit_codes_for_the_new_repros(self):
+        def run(cmd):
+            p = subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                               capture_output=True, text=True, timeout=30)
+            return p.returncode
+        self.assertEqual(run("gh api repos/o/r/issues?state=all\\&per_page=1 --jq '.[0].number'"), 0)
+        self.assertEqual(run("echo a\\&b; cat %s/token.json" % self.D), 2)
+
+
 class IssueNinetyThreeF7(Base):
     """The wrong refusal and the three gaps from workspace issue 93 (all values made up)."""
 

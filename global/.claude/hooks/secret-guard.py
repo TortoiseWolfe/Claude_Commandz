@@ -239,6 +239,10 @@ def split_segments(cmd):
     segs, cur, q, i = [], [], None, 0
     while i < len(cmd):
         c = cmd[i]
+        if c == "\\" and i + 1 < len(cmd) and cmd[i + 1] != "\n" and q != "'":
+            cur.append(c + cmd[i + 1])  # Claude_Commandz issue 234: an escaped \& \; \| \" is part of its word, not a separator or a quote
+            i += 2                      # (backslash-newline still ends the segment, so a path broken across lines is still cut apart)
+            continue
         if q:
             if c == q:
                 q = None
@@ -336,16 +340,22 @@ def gmail_segment_ok(seg):
     return False
 
 
-def gmail_resolves_into_folder(seg):
+def gmail_resolves_into_folder(seg, tolerant=False):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
-    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen."""
+    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen.
+    tolerant is for a line of an interpreter's heredoc body, which is that interpreter's code and not shell: a line the shell
+    could not split (a lone apostrophe in a comment) is cut at quotes, brackets, commas and spaces, and every piece is still checked."""
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
     parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))}
     try:
         words = shlex.split(seg, posix=True)
     except ValueError:
-        return True  # a segment that can't be split can't be checked
+        if not tolerant:
+            return True  # a segment that can't be split can't be checked
+        words = []
+    if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
+        words = words + [w for w in re.split(r"[\s'\"(),;]+", seg) if w]
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
@@ -384,8 +394,9 @@ HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
 
 
-def _heredoc_line_is_data(line):
-    """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
+def _heredoc_line_is_data(line, extra=()):
+    """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...);
+    extra names more bare commands that count (echo and printf, for a line that is not fed by a heredoc)."""
     if re.search(r">\|?[ \t]*[^\s;&|<>]*[*?\[{$]", line):
         return False  # a redirect target built from a glob or a variable can land on /dev/fd or /proc
     flat = re.sub(r"[\"'\\]", "", line)  # quotes and backslashes inside a redirect target do not hide its real path
@@ -404,7 +415,7 @@ def _heredoc_line_is_data(line):
         first = words[0]
         if first == "tee" and any(re.search(r"[*?\[{$]", w) for w in words[1:]):
             return False  # tee writes to the files it is given: a glob or a variable there can land on /dev/fd or /proc
-        if first in HEREDOC_DATA_WORDS:
+        if first in HEREDOC_DATA_WORDS or first in extra:
             continue
         if first == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH:
             continue
@@ -414,12 +425,44 @@ def _heredoc_line_is_data(line):
     return True
 
 
+ECHO_WORDS = frozenset({"echo", "printf"})
+
+
+def _echo_line_is_data(text):
+    """Claude_Commandz issue 235: True when this logical line prints or stores text (echo or printf, with cat, tee ... after a pipe) and
+    nothing else: no interpreter, shell, curl or xargs, no substitution, no device or proc path, no redirect target built from a glob
+    or a variable. The text such a line prints is prose, not a send."""
+    if not _heredoc_line_is_data(text, ECHO_WORDS):
+        return False
+    for seg in split_segments(text):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if words and words[0] in ECHO_WORDS:
+            return True
+    return False
+
+
 def split_data_heredocs(cmd):
-    """Return (code, bodies): cmd with the bodies (and terminator lines) of data heredocs taken out, and those bodies.
-    Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, []), so nothing is loosened."""
+    """Return (code, bodies, opaque, send_code):
+      code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
+                for the token folder;
+      bodies    the bodies of data heredocs and the text of comments: searched for the token folder's name, never word-split;
+      opaque    the bodies of the other heredocs (an interpreter's, a shell's, curl's code): checked line by line on their own, so their
+                quotes cannot leak into the command lines around them (issue 234);
+      send_code code without the logical lines that only print or store text (echo/printf with cat, tee ...): the text checked for a send address (issue 235).
+    Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, [], [], cmd), so nothing is loosened."""
     n, i = len(cmd), 0
     code, bodies, line, pending = [], [], [], []
+    opaque, send = [], []
     q = None
+
+    def emit(text, to_send=True):
+        code.append(text)
+        if to_send:
+            send.append(text)
+
     while i < n:
         c = cmd[i]
         if q:
@@ -437,13 +480,13 @@ def split_data_heredocs(cmd):
             i += 2
             continue
         if c == "`" or (c == "$" and i + 1 < n and cmd[i + 1] in "('\"{"):
-            return cmd, []
+            return cmd, [], [], cmd
         if c in "'\"":
             q = c
         elif c == "#" and (not line or line[-1][-1:] in " \t;&|()\n"):
             j = cmd.find("\n", i)
             j = n if j < 0 else j
-            line.append(cmd[i:j])
+            bodies.append(cmd[i:j])  # a comment is not run, but one that names the token folder is still refused
             i = j
             continue
         elif c == "<" and cmd.startswith("<<<", i):
@@ -453,10 +496,10 @@ def split_data_heredocs(cmd):
         elif c == "<" and cmd.startswith("<<", i):
             m = HEREDOC_OP.match(cmd, i)
             if not m or (m.end() < n and cmd[m.end()] not in " \t\n;&|<>()"):
-                return cmd, []  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
+                return cmd, [], [], cmd  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
             word = m.group(2) or m.group(3) or m.group(4) or m.group(5)
             if "\\" in word or "$" in word:
-                return cmd, []  # bash's quote removal on such a delimiter is not reproduced here
+                return cmd, [], [], cmd  # bash's quote removal on such a delimiter is not reproduced here
             pending.append((word, bool(m.group(1)), bool(m.group(2) or m.group(3) or m.group(4)), m.group(0)))
             line.append(m.group(0))
             i = m.end()
@@ -466,10 +509,10 @@ def split_data_heredocs(cmd):
             line = []
             i += 1
             if not pending:
-                code.append(text)
+                emit(text, not _echo_line_is_data(text))
                 continue
             data_line = _heredoc_line_is_data(text)
-            code.append(text)
+            emit(text)
             for word, tabs, quoted, _op in pending:
                 body, found, term = [], False, ""
                 while i < n:
@@ -482,19 +525,20 @@ def split_data_heredocs(cmd):
                         break
                     body.append(row)
                 if not found:
-                    return cmd, []
+                    return cmd, [], [], cmd
                 if quoted and data_line:
                     bodies.append("\n".join(body))
                 else:
-                    code.append("".join(r + "\n" for r in body) + term + "\n")
+                    opaque.append("\n".join(body))
             pending = []
             continue
         line.append(c)
         i += 1
     if q or pending:
-        return cmd, []
-    code.append("".join(line))
-    return "".join(code), bodies
+        return cmd, [], [], cmd
+    last = "".join(line)
+    emit(last, not _echo_line_is_data(last))
+    return "".join(code), bodies, opaque, "".join(send)
 
 
 def gmail_credential_use(cmd):
@@ -502,18 +546,19 @@ def gmail_credential_use(cmd):
     whole = gmail_norm(cmd)
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
-    cmd, bodies = split_data_heredocs(cmd)
-    for body in bodies:  # a data body is not split into words, but a body that names the token folder is still refused
+    cmd, bodies, opaque, send_cmd = split_data_heredocs(cmd)
+    for body in bodies:  # a data body or a comment is not split into words, but one that names the token folder is still refused
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"
-    segs = split_segments(cmd)
-    for seg in segs:
-        norm = gmail_norm(seg)
-        if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
-                or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
-            return "folder"
-    for seg in split_segments(cmd):
+    body_segs = [s for body in opaque for row in body.split("\n") for s in split_segments(row)]  # each row on its own: no quote state carries over
+    for segs, tolerant in ((split_segments(cmd), False), (body_segs, True)):
+        for seg in segs:
+            norm = gmail_norm(seg)
+            if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
+                    or gmail_resolves_into_folder(seg, tolerant)) and not gmail_segment_ok(seg):
+                return "folder"
+    for seg in split_segments(send_cmd) + body_segs:
         if GMAIL_SEND.search(gmail_norm(seg)):
             words = gmail_words(seg) or []
             quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
