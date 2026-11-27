@@ -239,6 +239,10 @@ def split_segments(cmd):
     segs, cur, q, i = [], [], None, 0
     while i < len(cmd):
         c = cmd[i]
+        if c == "\\" and i + 1 < len(cmd) and cmd[i + 1] != "\n" and q != "'":
+            cur.append(c + cmd[i + 1])  # Claude_Commandz issue 234: an escaped \& \; \| \" is part of its word, not a separator or a quote
+            i += 2                      # (backslash-newline still ends the segment, so a path broken across lines is still cut apart)
+            continue
         if q:
             if c == q:
                 q = None
@@ -336,16 +340,33 @@ def gmail_segment_ok(seg):
     return False
 
 
-def gmail_resolves_into_folder(seg):
+def gmail_resolves_into_folder(seg, tolerant=False):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
-    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen."""
+    file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen.
+    tolerant is for a line of an interpreter's heredoc body, which is that interpreter's code and not shell: a line the shell
+    could not split (a lone apostrophe in a comment) is cut at quotes, brackets, commas and spaces, and every piece is still checked."""
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
     parents = {os.path.dirname(folder), os.path.dirname(os.path.dirname(folder))}
     try:
         words = shlex.split(seg, posix=True)
     except ValueError:
-        return True  # a segment that can't be split can't be checked
+        if not tolerant:
+            return True  # a segment that can't be split can't be checked
+        words = []
+        # a row with a lone apostrophe, usually in a trailing comment: split what comes before each # or quote that could start the unsplittable
+        # part, so a quoted glob in front (cat ~/.?on"f"ig/a?a/g?ail/token.json # it's) is still read as the shell reads it
+        marks = list(re.finditer(r"[#'\"]", seg))
+        if len(marks) > 64:
+            return True  # too many to check in the hook's time: refuse rather than guess
+        for m in marks:
+            try:
+                words += shlex.split(seg[:m.start()], posix=True)
+            except ValueError:
+                continue
+    if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
+        # also the row with its quotes and backslashes removed, as bash would join a quoted glob (~/.?on"f"ig) into one word
+        words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) + re.split(r"[\s(),;<>]+", re.sub(r"[\"'\\]", "", seg)) if w]
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
@@ -361,7 +382,9 @@ def gmail_resolves_into_folder(seg):
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
-        for cand in {c.lstrip("@") for c in (w, after_eq)}:
+        # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
+        # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
+        for cand in {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
@@ -384,8 +407,9 @@ HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
 
 
-def _heredoc_line_is_data(line):
-    """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
+def _heredoc_line_is_data(line, extra=()):
+    """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...);
+    extra names more bare commands that count (echo and printf, for a line that is not fed by a heredoc)."""
     if re.search(r">\|?[ \t]*[^\s;&|<>]*[*?\[{$]", line):
         return False  # a redirect target built from a glob or a variable can land on /dev/fd or /proc
     flat = re.sub(r"[\"'\\]", "", line)  # quotes and backslashes inside a redirect target do not hide its real path
@@ -404,7 +428,7 @@ def _heredoc_line_is_data(line):
         first = words[0]
         if first == "tee" and any(re.search(r"[*?\[{$]", w) for w in words[1:]):
             return False  # tee writes to the files it is given: a glob or a variable there can land on /dev/fd or /proc
-        if first in HEREDOC_DATA_WORDS:
+        if first in HEREDOC_DATA_WORDS or first in extra:
             continue
         if first == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH:
             continue
@@ -414,12 +438,94 @@ def _heredoc_line_is_data(line):
     return True
 
 
+ECHO_WORDS = frozenset({"echo", "printf"})
+# a command that defines a function or alias, or toggles builtins, can make echo or printf run anything: then no line counts as echo prose
+ECHO_SHADOW = re.compile(r"\b(?:echo|printf)\s*\(|\bfunction\b|\balias\b|\bunalias\b|\benable\b|\bdeclare\b|\btypeset\b|\bcommand\b|\bbuiltin\b"
+                         r"|\beval\b|\bsource\b|\bshopt\b|\btrap\b|\bexec\b|BASH_ALIASES|BASH_FUNC|BASH_ENV|(?:^|[\s;&|({])(?:set|\.)\s")
+
+
+def _echo_shadowed(cmd):
+    """True when the command could redefine echo or printf (a function, alias, eval, source, builtin toggle). Searched on the text with quotes
+    and backslashes removed, so al""ias, al\\ias and 'alias' are seen as alias."""
+    return bool(ECHO_SHADOW.search(cmd) or ECHO_SHADOW.search(re.sub(r"[\"'\\]", "", cmd)))
+
+
+def _echo_line_is_data(text):
+    """Claude_Commandz issue 235: True when this logical line prints or stores text (echo or printf, with cat, tee ... after a pipe) and
+    nothing else: no interpreter, shell, curl or xargs, no substitution, no device or proc path, no redirect target built from a glob
+    or a variable. The text such a line prints is prose, not a send."""
+    if not _heredoc_line_is_data(text, ECHO_WORDS):
+        return False
+    for seg in split_segments(text):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if words and words[0] == "printf" and any(w == "-v" or w.startswith("-v") and len(w) > 2 and w[2:3].isalpha() for w in words[1:3]):
+            return False  # printf -v NAME assigns a variable and prints nothing: its text can be run later
+        if words and words[0] in ECHO_WORDS:
+            return True
+    return False
+
+
+class ShellBody(str):
+    """The body of a heredoc that a shell may run (bash, sh, env bash, sudo sh, ssh, xargs, cat piped to bash ...): besides the row check it is
+    checked as one block, the way bash reads it, with quote state carried across rows and a body that cannot be split refused
+    (security review 27 Nov: row by row misreads a quote that opens on one row and closes on a later one)."""
+
+
+NONSHELL_FEEDERS = {"python", "pypy", "node", "nodejs", "deno", "perl", "ruby", "php", "curl", "wget", "jq", "grep", "egrep", "fgrep", "diff", "base64"}
+
+
+def _line_runs_no_shell(line):
+    """True when every command on the logical line is a known tool that does not run its input as shell (an interpreter other than a shell, curl,
+    jq, grep ... or a command that only stores or posts text). Anything unclear, a pipe to a shell, env, sudo, ssh, xargs, is not."""
+    if re.search(r"\$\(|`|[<>]\(|/dev/|/proc/|>&", line):
+        return False  # a substitution, process substitution, device or descriptor path can lead to a shell
+    segs = [s for s in split_segments(line) if s.strip()]
+    if not segs:
+        return False
+    for seg in segs:
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        words = [w for w in words if not re.match(r"^[A-Za-z_]\w*=", w)]
+        if not words:
+            return False
+        if "/" in words[0]:
+            return False  # a path-qualified name can be any file: not trusted as a known tool
+        name = words[0]
+        if re.fullmatch(r"(?:python|pypy)[\d.]*", name):
+            name = name.rstrip("0123456789.")
+        if name not in NONSHELL_FEEDERS and name not in HEREDOC_DATA_WORDS:
+            return False
+    return True
+
+
 def split_data_heredocs(cmd):
-    """Return (code, bodies): cmd with the bodies (and terminator lines) of data heredocs taken out, and those bodies.
-    Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, []), so nothing is loosened."""
+    """Return (code, bodies, opaque, send_code):
+      code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
+                for the token folder;
+      bodies    the bodies of data heredocs: searched for the token folder's name, never word-split;
+      opaque    the text of comments and the bodies of the other heredocs (an interpreter's, a shell's, curl's code): checked row by row on
+                their own with no allowlist, so their quotes cannot leak into the command lines around them (issue 234);
+      send_code code without the logical lines that only print or store text (echo/printf with cat, tee ...): the text checked for a send address (issue 235).
+    Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, [], [], cmd), so nothing is loosened."""
     n, i = len(cmd), 0
     code, bodies, line, pending = [], [], [], []
+    opaque, send = [], []
+    echo_ok = not _echo_shadowed(cmd)
+    all_data = [True]  # echo/printf prose is exempt only when EVERY logical line of the command is a data line (security review 27 Nov)
     q = None
+
+    def emit(text, echo_data=False):
+        """echo_data: this line is echo/printf prose; it is dropped from send_code at the end, if every line of the command is a data line."""
+        code.append(text)
+        send.append((text, echo_data))
+        if all_data[0] and text.strip() and not _heredoc_line_is_data(text, ECHO_WORDS):
+            all_data[0] = False  # a pipe at the end of a line, a { group, a for loop, xargs, eval, a variable: the echo may feed or become code
+
     while i < n:
         c = cmd[i]
         if q:
@@ -437,13 +543,27 @@ def split_data_heredocs(cmd):
             i += 2
             continue
         if c == "`" or (c == "$" and i + 1 < n and cmd[i + 1] in "('\"{"):
-            return cmd, []
+            return cmd, [], [], cmd
         if c in "'\"":
             q = c
-        elif c == "#" and (not line or line[-1][-1:] in " \t;&|()\n"):
+        elif c == "#" and (not line or (line[-1][-1:] in " \t;&|()\n" and not line[-1].startswith("\\")
+                                        and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
+            # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
+            # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
+            # (anywhere earlier in the command, not just on this line: a regex or pattern group may run over newlines, and bash drops a
+            # backslash-newline pair, so [\<newline>[ is [[)
+            # (also $[ ] legacy arithmetic, a =~ regex, and the keywords whose bodies bash reads in their own way: case, coproc, select, function)
+            # (and when an alias, eval, source or the like could be defined: an alias value may hold an open quote that bash carries over to the
+            # next lines, so a # there is inside a string; echo_ok is false exactly then)
+            if not echo_ok or re.search(r"[@?*+!<>]\(|\[\[|\(\(|\$\[|=~|(?<![\w.-])(?:case|coproc|select|function)(?![\w.-])", cmd[:i].replace("\\\n", "")):
+                # an extglob group, a [[ ]] test (a regex after =~ may hold a #) or a (( )) arithmetic open on this line: a # there is not
+                # necessarily a comment, so do not guess
+                return cmd, [], [], cmd
             j = cmd.find("\n", i)
             j = n if j < 0 else j
-            line.append(cmd[i:j])
+            if len(cmd[i:j]) - len(cmd[i:j].rstrip("\\")) & 1:
+                return cmd, [], [], cmd  # a real comment does not continue on the next line; a wrongly guessed one does, so do not guess
+            opaque.append(cmd[i:j])  # a comment is not run, but it is checked as strictly as an interpreter's code, so a wrong guess fails closed
             i = j
             continue
         elif c == "<" and cmd.startswith("<<<", i):
@@ -453,10 +573,10 @@ def split_data_heredocs(cmd):
         elif c == "<" and cmd.startswith("<<", i):
             m = HEREDOC_OP.match(cmd, i)
             if not m or (m.end() < n and cmd[m.end()] not in " \t\n;&|<>()"):
-                return cmd, []  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
+                return cmd, [], [], cmd  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
             word = m.group(2) or m.group(3) or m.group(4) or m.group(5)
             if "\\" in word or "$" in word:
-                return cmd, []  # bash's quote removal on such a delimiter is not reproduced here
+                return cmd, [], [], cmd  # bash's quote removal on such a delimiter is not reproduced here
             pending.append((word, bool(m.group(1)), bool(m.group(2) or m.group(3) or m.group(4)), m.group(0)))
             line.append(m.group(0))
             i = m.end()
@@ -466,10 +586,11 @@ def split_data_heredocs(cmd):
             line = []
             i += 1
             if not pending:
-                code.append(text)
+                emit(text, echo_ok and _echo_line_is_data(text))
                 continue
             data_line = _heredoc_line_is_data(text)
-            code.append(text)
+            no_shell = _line_runs_no_shell(text)
+            emit(text)
             for word, tabs, quoted, _op in pending:
                 body, found, term = [], False, ""
                 while i < n:
@@ -482,19 +603,88 @@ def split_data_heredocs(cmd):
                         break
                     body.append(row)
                 if not found:
-                    return cmd, []
+                    return cmd, [], [], cmd
                 if quoted and data_line:
                     bodies.append("\n".join(body))
                 else:
-                    code.append("".join(r + "\n" for r in body) + term + "\n")
+                    text_body = "\n".join(body)
+                    # a body a shell may run (or that bash expands, when the heredoc is not quoted and holds a substitution) is also read as one block
+                    runs = not no_shell or (not quoted and ("$(" in text_body or "`" in text_body))
+                    opaque.append(ShellBody(text_body) if runs else text_body)
             pending = []
             continue
         line.append(c)
         i += 1
     if q or pending:
-        return cmd, []
-    code.append("".join(line))
-    return "".join(code), bodies
+        return cmd, [], [], cmd
+    last = "".join(line)
+    emit(last, echo_ok and _echo_line_is_data(last))
+    return "".join(code), bodies, opaque, "".join(t for t, e in send if not (e and all_data[0]))
+
+
+def _body_rows(body):
+    """The rows of an interpreter's heredoc body, each checked on its own: the rows as written, and again with every row that ends in an
+    odd number of backslashes joined to the next (bash and a python string join them, so a path or an address can be split across rows)."""
+    rows = body.split("\n")
+    joined, cur = [], ""
+    for row in rows:
+        cur += row
+        if (len(cur) - len(cur.rstrip("\\"))) % 2 == 1:
+            cur = cur[:-1]
+            continue
+        joined.append(cur)
+        cur = ""
+    if cur:
+        joined.append(cur)
+    return rows + joined
+
+
+def _opaque_use(opaque):
+    """"folder", "send" or None for comments and heredoc bodies that are not data: each row on its own (no quote state carries over, so one
+    unsplittable row cannot hide the others), and a ShellBody also as one block."""
+    for body in opaque:
+        for row in _body_rows(body):
+            for seg in split_segments(row):
+                norm = gmail_norm(seg)
+                if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
+                    return "folder"
+                if GMAIL_SEND.search(norm):
+                    return "send"
+        if _body_path_runs_hit(body):
+            return "folder"
+        if isinstance(body, ShellBody):
+            hit = _shell_body_use(body)
+            if hit:
+                return hit
+    return None
+
+
+def _body_path_runs_hit(body):
+    """True when a path-like run of the whole body, read across rows with its quotes and backslashes removed and a [...] group kept whole
+    (commas and spaces inside it included), resolves into the token folder. Whatever runs the body (a shell, or python with os.system on a
+    string that spans rows), quote state and word splitting cannot hide a glob from this scan. It refuses only a real hit on the folder."""
+    flat = re.sub(r"[\"'\\]", "", str(body))
+    for run in re.findall(r"(?:\[[^\]\n]*\]|[^\s;<>()|&`\[])+", flat):
+        if ("/" in run or run.startswith(("~", "."))) and gmail_resolves_into_folder(shlex.quote(run)):
+            return True
+    return False
+
+
+def _shell_body_use(body):
+    """A body that bash may run, read the way bash reads it: its own comments and heredocs split out, quote state carried across rows, a segment
+    that cannot be split refused, no allowlist."""
+    code, bodies, opaque, _send = split_data_heredocs(str(body))
+    for b in bodies:
+        norm = gmail_norm(b)
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
+            return "folder"
+    for seg in split_segments(code):
+        norm = gmail_norm(seg)
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg):
+            return "folder"
+        if GMAIL_SEND.search(norm):
+            return "send"
+    return _opaque_use(opaque)
 
 
 def gmail_credential_use(cmd):
@@ -502,18 +692,20 @@ def gmail_credential_use(cmd):
     whole = gmail_norm(cmd)
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
-    cmd, bodies = split_data_heredocs(cmd)
-    for body in bodies:  # a data body is not split into words, but a body that names the token folder is still refused
+    cmd, bodies, opaque, send_cmd = split_data_heredocs(cmd)
+    for body in bodies:  # a data body is not split into words, but one that names the token folder is still refused
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"
-    segs = split_segments(cmd)
-    for seg in segs:
+    for seg in split_segments(cmd):
         norm = gmail_norm(seg)
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
-    for seg in split_segments(cmd):
+    hit = _opaque_use(opaque)  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
+    if hit:
+        return hit
+    for seg in split_segments(send_cmd):
         if GMAIL_SEND.search(gmail_norm(seg)):
             words = gmail_words(seg) or []
             quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
