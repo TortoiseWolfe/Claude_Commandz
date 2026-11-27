@@ -225,8 +225,23 @@ if [ -r "$CONF/peers" ]; then
   done <"$CONF/peers"
 fi
 
+# Claude_Commandz issue 184 (25 Nov 2026): this script runs from a Windows task with no SSH_AUTH_SOCK, so it must find an unlocked agent itself: a socket in
+# $SSH_AGENT_SCAN_DIR (default /tmp) matching ssh-*/agent.*, owned by this user, that answers ssh-add -l with a key; the first is exported. Same function as
+# ssh_agent_ok in lane.sh. With none, the dead lanes are written to $STATE/fleet-up.pending and every later full run retries them (quietly, with no new record) until an agent is unlocked.
+ssh_agent_ok() {
+  command -v ssh-add >/dev/null 2>&1 || return 1
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
+  local s
+  for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
+    [ -S "$s" ] && [ -O "$s" ] || continue
+    if SSH_AUTH_SOCK="$s" ssh-add -l >/dev/null 2>&1; then export SSH_AUTH_SOCK="$s"; return 0; fi
+  done
+  return 1
+}
+
 incident=0
 { [ -n "$down_epoch" ] || [ "$booted" = 1 ] || [ "$lanes_gone" = 1 ]; } && incident=1
+pending_file="$STATE/fleet-up.pending"
 
 remember() {   # keep what the next run compares against
   [ "$dry" = 1 ] && return 0
@@ -242,6 +257,12 @@ inbox_add() {  # <text>: one line in this machine's inbox
   if [ "$dry" = 1 ]; then echo "would add to $inbox: $line"; return 0; fi
   ( flock -w 30 7 && printf '%s\n' "$line" >>"$inbox" ) 7>>"$STATE/hub-inbox.lock"
 }
+
+# Lanes an earlier run could not restart for want of an unlocked agent (issue 184): retry them on this run, but stay silent (no record, no
+# inbox line) while there is still no agent, so a locked key does not write a record every run.
+if [ "$incident" = 0 ] && [ -s "$pending_file" ] && [ "$dry" != 1 ]; then
+  if ssh_agent_ok; then incident=1; else remember; exit 0; fi
+fi
 
 if [ "$incident" = 0 ]; then
   remember
@@ -308,13 +329,23 @@ if [ -s "$LANES/live.tsv" ]; then
   have=" $(lane_windows | tr '\n' ' ')"
   while read -r l; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && dead+=("$l"); done <"$LANES/live.tsv"
 fi
+if [ -s "$pending_file" ] && [ "$dry" != 1 ]; then   # earlier skipped lanes that are still not in a window
+  have=" $(lane_windows | tr '\n' ' ')"
+  while read -r l; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && [[ " ${dead[*]:-} " != *" $l "* ]] && dead+=("$l"); done <"$pending_file"
+fi
+[ "$dry" = 1 ] || rm -f "$pending_file"
+if [ "${#dead[@]}" -gt 0 ] && [ "$dry" != 1 ] && ! ssh_agent_ok; then
+  printf '%s\n' "${dead[@]}" >"$pending_file"
+  note_back "STEP FOR JONATHAN: no unlocked ssh agent on this machine (ssh-add -l exits non-zero in every agent socket). ${#dead[@]} dead lane(s) (${dead[*]}) were NOT restarted, because each new window would stop at the key's passphrase prompt. Open a terminal and run: ssh-add. The next run restarts them."
+  dead=()
+fi
 for l in "${dead[@]:-}"; do [ -n "$l" ] && restart_lane "$l"; done
 
 if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
   note_back "tmux session $SESSION is up ($(( ${#dead[@]} )) dead lane(s) found)"
 elif [ "$dry" = 1 ]; then echo "would create tmux session $SESSION at ${SIZE_X}x${SIZE_Y}"
 else
-  envopt=(); [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1 && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  envopt=(); ssh_agent_ok && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
   "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" ${envopt[@]+"${envopt[@]}"} 8>&- 9>&- \
     && "$TMUX_BIN" set-option -t "$SESSION" window-size manual \
     && "$TMUX_BIN" set-option -t "$SESSION" default-size "${SIZE_X}x${SIZE_Y}" \

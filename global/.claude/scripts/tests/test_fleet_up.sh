@@ -28,11 +28,19 @@ SH
 cat >"$T/bin/lane.sh" <<'SH'
 #!/usr/bin/env bash
 echo "lane.sh $*" >>"$FAKE_DIR/lane.log"
+echo "${SSH_AUTH_SOCK:-}" >>"$FAKE_DIR/lane.env"
 ls -l /proc/$$/fd 2>/dev/null | grep -qE 'fleet-up.run.lock|openclaw-status' && echo "lane.sh" >>"$FAKE_DIR/lock-leak.log"
 [ -n "${FAKE_LANE_FAIL:-}" ] && [ "$FAKE_LANE_FAIL" = "$(printf '%s\n' "$@" | grep -m1 '^2026' )" ] && { echo "refusing: client repo" >&2; exit 1; }
 exit 0
 SH
+cat >"$T/bin/ssh-add" <<'SH'
+#!/usr/bin/env bash
+# stub ssh-add -l: FAKE_SSH_GOOD=<socket> answers 0 only for that SSH_AUTH_SOCK; unset, every agent answers 0
+[ -z "${FAKE_SSH_GOOD:-}" ] || [ "${SSH_AUTH_SOCK:-}" = "$FAKE_SSH_GOOD" ]
+SH
 chmod +x "$T/bin/"*
+export PATH="$T/bin:$PATH"
+export SSH_AUTH_SOCK="$T/caller-agent"   # the caller's agent; the stub answers 0 for every agent unless FAKE_SSH_GOOD names one
 
 setup() {  # <machine>
   export HOME="$T/home-$1-$RANDOM"; export FAKE_DIR="$T/fake-$RANDOM"; export FAKE_WIN="$FAKE_DIR/win"
@@ -240,6 +248,27 @@ check "a service start command has the run lock closed" '[ "$(cat $HOME/work/svc
 rm -f "$S/fleet-up.seen"; printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; rm -rf "$S/recovery"
 run
 check "a second full run is not blocked by the first" '[ -n "$(ls $S/recovery 2>/dev/null)" ]'
+
+# 6c. Claude_Commandz issue 184: the recovery task has no SSH_AUTH_SOCK. It finds an unlocked agent itself, and with none it leaves the lanes for a later run.
+mksock() { python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+SCAN="$T/scan"; mkdir -p "$SCAN/ssh-aaa" "$SCAN/ssh-bbb"; mksock "$SCAN/ssh-aaa/agent.1"; mksock "$SCAN/ssh-bbb/agent.2"
+export SSH_AGENT_SCAN_DIR="$SCAN"; saved_sock=$SSH_AUTH_SOCK; unset SSH_AUTH_SOCK
+FAKE_SSH_GOOD="$SCAN/ssh-bbb/agent.2" reboot sa    # (a) no SSH_AUTH_SOCK, a locked agent first and an unlocked one second
+check "no SSH_AUTH_SOCK: the unlocked agent is found and the lane restarts" 'grep -q -- "--restart.* sa " $FAKE_DIR/lane.log'
+check "the restart runs with the unlocked agent's socket" '[ "$(tail -1 $FAKE_DIR/lane.env)" = "$SCAN/ssh-bbb/agent.2" ]'
+check "an unlocked agent leaves no pending file" '[ ! -e $S/fleet-up.pending ]'
+FAKE_SSH_GOOD=/nowhere reboot sb                   # (b) every agent is locked
+check "no unlocked agent: no lane is restarted" '! grep -q -- "--restart" $FAKE_DIR/lane.log'
+check "no unlocked agent: the record carries the one step for Jonathan" 'grep -q "STEP FOR JONATHAN: no unlocked ssh agent.*ssh-add" "$rec"'
+check "no unlocked agent: the lane is kept for a later run" 'grep -qx sb $S/fleet-up.pending'
+nrec=$(ls $S/recovery | wc -l); : >"$FAKE_DIR/lane.log"
+FAKE_SSH_GOOD=/nowhere run
+check "still no agent: a later run is silent and keeps the lane" '[ "$(ls $S/recovery | wc -l)" = "$nrec" ] && [ ! -s $FAKE_DIR/lane.log ] && grep -qx sb $S/fleet-up.pending'
+FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
+check "the agent is unlocked: the next run restarts the lane" 'grep -q -- "--restart.* sb " $FAKE_DIR/lane.log && [ ! -e $S/fleet-up.pending ]'
+FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
+check "and once restarted nothing is retried again" '[ "$(grep -c -- "--restart.* sb " $FAKE_DIR/lane.log)" = 1 ]'
+unset SSH_AGENT_SCAN_DIR; export SSH_AUTH_SOCK=$saved_sock
 
 # 7. bad flag
 bash "$HERE/fleet-up.sh" --nope >/dev/null 2>&1; check "unknown flag exits 2" '[ $? = 2 ]'
