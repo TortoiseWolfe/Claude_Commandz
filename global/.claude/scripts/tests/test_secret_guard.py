@@ -1023,6 +1023,9 @@ class RuleGAliasQuoteState(Base):
         self.home()
         self.blocked("alias ls=cat\nls ~/.config/afa/gmail/token.json", "G")
         self.blocked("alias python3=cat\npython3 ~/.claude/scripts/gmail_api.py ~/.config/afa/gmail/token.json", "G")
+        self.blocked("ls() { cat \"$@\"; }\nls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("PATH=/tmp/x:$PATH ls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("export -f ls; ls ~/.config/afa/gmail/token.json", "G")
         self.allowed("ls ~/.config/afa/gmail")  # no alias in the command: the plain existence check is as before
 
     def test_a_single_quote_alias_is_refused_too(self):

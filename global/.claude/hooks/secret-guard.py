@@ -301,6 +301,8 @@ ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand
 # a command word that starts with a variable ($a$b x=...) can build the word alias at run time. The dot-source alternative also matches
 # find . -name x: that only widens the quote-blind pass, which refuses any piece that names or globs into the token folder.
 VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n({!]|(?<![\w.-])(?:then|do|else|elif|time))[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*\$")
+# Security scan of the 241 fix: a function (ls() { cat "$@"; }), hash, export and a changed PATH or ENV also make a command word run something else.
+NAME_SHADOW = re.compile(r"[\w.-]+[ \t]*\([ \t]*\)|(?<![\w.-])(?:hash|export|enable|unalias)(?![\w-])|(?<![\w-])(?:PATH|ENV|BASH_FUNC\w*)=")
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
 
@@ -731,7 +733,8 @@ def gmail_credential_use(cmd):
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
     bare = re.sub(r"[\"'\\]", "", cmd)
-    if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare):
+    if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare) \
+            or NAME_SHADOW.search(bare):
         # Claude_Commandz issue 241: an alias (or BASH_ALIASES, eval, source, a startup file) can hold an open quote, so bash's quote state
         # then differs from the one split_segments read from the text and a quoted-looking glob runs as a command. Such a command is read
         # quote-blind: cut at every ; & | and newline whatever the quotes, each piece checked as a row of an interpreter's heredoc is. There is
