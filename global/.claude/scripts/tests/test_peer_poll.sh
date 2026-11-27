@@ -210,6 +210,9 @@ need peer_poll.handle.prompt 'has:attachment OR has:drive' 'handle prompt: evide
 need peer_poll.handle.prompt 'peer_poll_record.sh has-files <id>' 'handle prompt: step 1b calls has-files (232)'
 need peer_poll.handle.prompt 'the words of the note never do' 'handle prompt: the words of a note are never evidence (232)'
 need peer_poll.handle.prompt 'treat every note of that run as a note with files' 'handle prompt: a failed search holds the notes (232)'
+need peer_poll.handle.prompt 'carries a nextPageToken, treat it as a failed search' 'handle prompt: a full page of search results holds the notes (232)'
+need peer_poll.handle.prompt 'subject:"MUSE>NCC-74656"' 'handle prompt: the search is limited to the note subjects (232)'
+need peer_poll.handle.prompt 'Only the exact output "no files" releases a note' 'handle prompt: only "no files" releases a note (232)'
 check "handle prompt: file names no longer count as files by themselves" '! grep -q "or list file names" "$D/peer_poll.handle.prompt" && ! grep -q "treat it as if it does" "$D/peer_poll.handle.prompt"'
 need peer_poll.handle.prompt '(Never for a note with files' 'handle prompt: step 2 points back at the files rule'
 check "handle prompt: the files check comes before the processed step" \
