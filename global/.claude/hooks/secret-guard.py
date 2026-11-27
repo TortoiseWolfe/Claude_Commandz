@@ -727,7 +727,8 @@ def _line_runs_no_shell(line):
     return True
 
 
-NAME_CHANGERS = re.compile(r"(?:^|[\s;&|({])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LIBRARY_PATH|SHELLOPTS|BASHOPTS|BASH_CMDS)=|\bhash\b|\bunset\b"
+NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LIBRARY_PATH|SHELLOPTS|BASHOPTS|BASH_CMDS)(?![\w-])"  # as a word anywhere: PATH=, BASH_CMDS[cat]=, printf -v PATH
+                           r"|(?<![\w.-])(?:read|mapfile|readarray|printf\s+-v|hash|unset)(?![\w-])"
                            r"|[\w.-]+\s*\(\s*\)|\b(?:coproc|select|case|for|while|until)\b"  # a loop that began earlier could run a later redefinition
                            r"|[(){}]|(?<![\w.-])(?:if|then|else|elif|fi|do|done|esac)(?![\w.-])")
 # the last row: a group, subshell, process substitution or compound command that opens before the heredoc can send its output on after the
@@ -736,9 +737,20 @@ NAME_CHANGERS = re.compile(r"(?:^|[\s;&|({])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|
 
 def _names_cannot_change(cmd):
     """True when no part of the command can redefine a command name: no alias, function, eval, source, builtin toggle, search-path or hash change
-    (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup). Searched with quotes and backslashes removed too."""
+    (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup), and no earlier command that names one of the
+    storing tools as an argument or a path (cp /bin/sh ~/.local/bin/cat, ln -s ... cat: a file planted under that name). Searched with quotes and
+    backslashes removed too."""
     flat = re.sub(r"[\"'\\]", "", cmd)
-    return not (_echo_shadowed(cmd) or NAME_CHANGERS.search(cmd) or NAME_CHANGERS.search(flat))
+    if _echo_shadowed(cmd) or NAME_CHANGERS.search(cmd) or NAME_CHANGERS.search(flat):
+        return False
+    for seg in split_segments(cmd):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if any(os.path.basename(w) in HEREDOC_DATA_WORDS | {"gh", "git"} for w in words[1:]):
+            return False
+    return True
 
 
 def _own_heredoc_segment(text, op):
@@ -748,6 +760,8 @@ def _own_heredoc_segment(text, op):
     at = text.find(op)
     if at < 0 or text[at + len(op):].strip():
         return None
+    if re.search(r">\||&>|[<>]&(?!\d+-?(?:[\s;&|)]|$)|-)|\\\n", text):
+        return None  # >| and >& word and &> are redirects (a descriptor copy such as 2>&1 or >&2 is not one) the segment split cuts in two (bash >| cat <<'EOF'); a backslash-newline joins this line to the one before (bash -s \ then cat <<'EOF')
     segs = [s for s in split_segments(text) if op in s]
     return segs[0] if len(segs) == 1 else None
 

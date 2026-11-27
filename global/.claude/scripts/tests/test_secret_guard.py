@@ -1358,6 +1358,18 @@ class RuleGHeredocFeedsOnlyItsOwnCommand(Base):
         self.blocked("true && cat > /tmp/x <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "G")
         self.blocked("cd ~/repos && S=/tmp/x && cat > $S/n <<'EOF'\nsend it with users/me/messages/send\nEOF", "G")
 
+    def test_blind_review_cases_where_the_named_command_is_not_the_one_that_reads_the_body(self):
+        send = ("curl -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send -H \"Authorization: Bearer $T\" -d @m.json\nEOF")
+        for head in ("bash >| cat <<'EOF'",                            # >| writes bash's output to a file named cat; bash reads the body
+                     "bash >& cat <<'EOF'",
+                     "bash -s \\\ncat <<'EOF'",                          # the backslash-newline makes this `bash -s cat <<'EOF'`
+                     "BASH_CMDS[cat]=/bin/bash; cat <<'EOF'",           # cat now runs bash
+                     "BASH_CMDS+=([cat]=/bin/bash); cat <<'EOF'",
+                     "printf -v PATH /tmp/x:/usr/bin; cat <<'EOF'",
+                     "read PATH <<< /tmp/x; cat <<'EOF'",
+                     "cp /bin/sh ~/.local/bin/cat; cat <<'EOF'"):       # a shell planted under the name cat
+            self.blocked(head + "\n" + send, "G")
+
     def test_a_heredoc_inside_a_group_whose_output_goes_on_keeps_the_strict_reading(self):
         for c in ("{ cat <<'EOF'\nit's\nEOF\n} | sh", "( cat <<'EOF'\nit's\nEOF\n) | bash", "if true; then cat <<'EOF'\nit's\nEOF\nfi | sh",
                   "sh < <(cat <<'EOF'\nit's\nEOF\n)", "true && { cat <<'EOF'\nit's\nEOF\n} | sh"):
