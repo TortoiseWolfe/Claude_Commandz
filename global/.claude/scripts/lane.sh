@@ -577,7 +577,7 @@ SESSION_SIZE_X=200; SESSION_SIZE_Y=50
 ssh_agent_ok() {
   command -v ssh-add >/dev/null 2>&1 || return 1
   if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
-  local s
+  local s d
   for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
     d=${s%/*}   # only a real, user-owned folder nobody else can write to, and a real socket in it (no symlink, nothing planted in /tmp)
     [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ -S "$s" ] && [ ! -L "$s" ] && [ -O "$s" ] || continue

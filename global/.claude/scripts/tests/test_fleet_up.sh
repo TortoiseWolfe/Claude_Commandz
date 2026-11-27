@@ -259,14 +259,14 @@ check "no SSH_AUTH_SOCK: the unlocked agent is found and the lane restarts" 'gre
 check "the restart runs with the unlocked agent's socket" '[ "$(tail -1 $FAKE_DIR/lane.env)" = "$SCAN/ssh-bbb/agent.2" ]'
 check "an unlocked agent leaves no pending file" '[ ! -e $S/fleet-up.pending ]'
 FAKE_SSH_GOOD="$SCAN/ssh-ccc/agent.3" reboot sc    # (a2) the only unlocked agent sits in a folder others can write to: not used
-check "an agent in a world-writable folder is not used" '! grep -q -- "--restart" $FAKE_DIR/lane.log && grep -qx sc $S/fleet-up.pending'
+check "an agent in a world-writable folder is not used" '! grep -q -- "--restart" $FAKE_DIR/lane.log && cut -f1 $S/fleet-up.pending | grep -qx sc'
 FAKE_SSH_GOOD=/nowhere reboot sb                   # (b) every agent is locked
 check "no unlocked agent: no lane is restarted" '! grep -q -- "--restart" $FAKE_DIR/lane.log'
 check "no unlocked agent: the record carries the one step for Jonathan" 'grep -q "STEP FOR JONATHAN: no unlocked ssh agent.*ssh-add" "$rec"'
-check "no unlocked agent: the lane is kept for a later run" 'grep -qx sb $S/fleet-up.pending'
+check "no unlocked agent: the lane is kept for a later run" 'cut -f1 $S/fleet-up.pending | grep -qx sb'
 nrec=$(ls $S/recovery | wc -l); : >"$FAKE_DIR/lane.log"
 FAKE_SSH_GOOD=/nowhere run
-check "still no agent: a later run is silent and keeps the lane" '[ "$(ls $S/recovery | wc -l)" = "$nrec" ] && [ ! -s $FAKE_DIR/lane.log ] && grep -qx sb $S/fleet-up.pending'
+check "still no agent: a later run is silent and keeps the lane" '[ "$(ls $S/recovery | wc -l)" = "$nrec" ] && [ ! -s $FAKE_DIR/lane.log ] && cut -f1 $S/fleet-up.pending | grep -qx sb'
 FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
 check "the agent is unlocked: the next run restarts the lane" 'grep -q -- "--restart.* sb " $FAKE_DIR/lane.log && [ ! -e $S/fleet-up.pending ]'
 FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
@@ -278,11 +278,27 @@ HAND_AT=$((NOW - 39600 - 3600)) addlane ov handoff; touch "$FAKE_DIR/session"; e
 printf '%s\n' "$((NOW - 39600))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
 printf '%s\n' "BOOT=2026-10-28T14:30:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
 : >"$FAKE_DIR/lane.log"; FAKE_SSH_GOOD=/nowhere run
-check "overnight outage, no agent: the lane is parked with the stop time" 'grep -qx ov $S/fleet-up.pending && grep -qx "#stop $((NOW - 39600))" $S/fleet-up.pending && [ ! -s $FAKE_DIR/lane.log ]'
+check "overnight outage, no agent: the lane is parked with the stop time" '[ "$(cat $S/fleet-up.pending)" = "$(printf "ov\t%s" $((NOW - 39600)))" ] && [ ! -s $FAKE_DIR/lane.log ]'
 printf '%s\n' "$((NOW + 870))" >"$S/heartbeat"; : >"$FAKE_DIR/lane.log"
 FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" NOW=$((NOW + 900)) run
 check "the retry restarts a hand-off that was fresh at the stop, 11 hours earlier" 'grep -q -- "--restart.* ov " $FAKE_DIR/lane.log && [ ! -e $S/fleet-up.pending ]'
-check "the retry record says what it is" 'grep -q "^- Retry: the machine went down at" $(ls -t $S/recovery/*.md | head -1)'
+check "the retry record says what it is" 'grep -q "^- Retry: lanes parked on an earlier run" $(ls -t $S/recovery/*.md | head -1)'
+# (d) a lane parked on an old outage keeps its own stop; a lane from a later outage is judged against the later one, not the old stop
+setup NCC-74656
+HAND_AT=$((NOW - 3000 - 3600)) addlane pk handoff; HAND_AT=$((NOW - 3000 - 4 * 3600)) addlane nw handoff
+touch "$FAKE_DIR/session"; echo other >"$FAKE_DIR/windows"; printf '%s\n' nw >"$S/lanes/live.tsv"
+printf 'pk\t%s\n' "$((NOW - 3000 - 5 * 86400))" >"$S/fleet-up.pending"   # parked five days ago
+printf '%s\n' "$((NOW - 3000))" >"$S/heartbeat.gap"; printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"
+printf '%s\n' "BOOT=2026-10-28T14:30:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
+: >"$FAKE_DIR/lane.log"; FAKE_SSH_GOOD="$SCAN/ssh-aaa/agent.1" run
+check "a lane from this outage is judged against this outage, not a parked lane's old stop" '! grep -q -- "--restart.* nw " $FAKE_DIR/lane.log && grep -q "lane nw: not restarted: handoff from" $(ls -t $S/recovery/*.md | head -1)'
+check "the old parked lane is judged against its own stop (hand-off 5 days newer than that stop is fresh)" 'grep -q -- "--restart.* pk " $FAKE_DIR/lane.log'
+# (e) parked lanes that already have a window are dropped quietly and the file goes away
+setup NCC-74656; addlane pw
+touch "$FAKE_DIR/session"; echo pw >"$FAKE_DIR/windows"; printf '%s\n' pw >"$S/lanes/live.tsv"; printf 'pw\t%s\n' "$((NOW - 100))" >"$S/fleet-up.pending"
+printf '%s\n' "$((NOW - 30))" >"$S/heartbeat"; printf '%s\n' "BOOT=2026-10-28T08:00:00" >"$FAKE_WIN"; printf '%s\n' "2026-10-28T08:00:00" >"$S/fleet-up.boot"
+FAKE_SSH_GOOD=/nowhere run
+check "a parked lane that is already in a window is dropped, the file removed, no record" '[ ! -e $S/fleet-up.pending ] && { [ ! -d $S/recovery ] || [ -z "$(ls $S/recovery)" ]; }'
 unset SSH_AGENT_SCAN_DIR; export SSH_AUTH_SOCK=$saved_sock
 
 # 7. bad flag
