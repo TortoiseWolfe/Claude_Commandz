@@ -138,6 +138,22 @@ mkdir -p "$T/own5/home/.config/afa"; seed own5 120 40
 run_poll own5 FAKE_CHECK="$(printf 'SUBJECT r-111 "%s"\nNEW r-111' "$OWN")"
 check "a quoted subject is still recognised as ours" '[ "$(wc -l <"$T/own5/calls")" = 1 ]'
 
+for v in "indent:  SUBJECT r-111 $OWN" "bullet:- SUBJECT r-111 $OWN" "backtick:\`SUBJECT r-111 $OWN\`" "tab:SUBJECT	r-111	$OWN" "twospace:SUBJECT  r-111  $OWN" \
+         "singlequote:SUBJECT r-111 '$OWN'"; do
+  n=own_${v%%:*}; mkdir -p "$T/$n/home/.config/afa"; seed "$n" 120 40
+  run_poll "$n" FAKE_CHECK="$(printf '%s\nNEW r-111' "${v#*:}")"
+  check "a SUBJECT line written with a $n is still read: own note dropped, no handler" '[ "$(wc -l <"$T/$n/calls")" = 1 ]'
+done
+mkdir -p "$T/own6/home/.config/afa"; seed own6 120 40
+run_poll own6 FAKE_CHECK="$(printf 'NEW r-111 cc:r-222\nSUBJECT r-111 %s\nSUBJECT r-222 %s' "$OWN" "$OWN")"
+check "SUBJECT lines after the NEW line count, and a cc: item of ours is dropped too" '[ "$(wc -l <"$T/own6/calls")" = 1 ] && grep -q "NONE (skipped our own outgoing: r-111 r-222)" "$T/own6/home/.claude/state/peer-poll.log"'
+mkdir -p "$T/own7/home/.config/afa"; seed own7 120 40
+run_poll own7 FAKE_CHECK="$(printf 'SUBJECT 1000 %s\nSUBJECT 1e3 [MUSE>NCC-74656] real\nNEW 1e3' "$OWN")"
+check "ids are compared as strings: 1000 does not stand for 1e3" '[ "$(wc -l <"$T/own7/calls")" = 2 ]'
+mkdir -p "$T/own8/home/.config/afa"; seed own8 120 40
+run_poll own8 FAKE_CHECK="$(printf 'SUBJECT r-111 %s\nNEW *' "$OWN")"
+check "an item that looks like a glob is kept as an id, not expanded" '[ "$(wc -l <"$T/own8/calls")" = 2 ] && grep -q "check (.*): NEW \*" "$T/own8/home/.claude/state/peer-poll.log"'
+
 mkdir -p "$T/k/home/.config/afa"; seed k 120 40
 run_poll k FAKE_CHECK=NONE
 check "NONE runs only the check" '[ "$(wc -l <"$T/k/calls")" = 1 ]'

@@ -108,9 +108,18 @@ check=$(printf '%s\n' "$raw" | grep -E '^(NEW|NONE)( |$)' | tail -1)
 own=""
 if [[ "$check" == NEW* ]]; then
   kept=""
+  set -f   # an item is an id, never a glob
   for item in ${check#NEW}; do
-    subj=$(printf '%s\n' "$raw" | awk -v id="${item#cc:}" '$1 == "SUBJECT" && $2 == id { s = $0; sub(/^SUBJECT [^ ]+ */, "", s); print s; exit }')
-    subj=${subj#"${subj%%[![:space:]]*}"}; subj=${subj#\"}
+    # A SUBJECT line is read the way a model may write it: an indent, a list bullet or a backtick in front, tabs or several spaces between the
+    # words. The id is compared as a string (awk would compare two number-looking ids as numbers).
+    subj=$(printf '%s\n' "$raw" | awk -v id="${item#cc:}" '
+      { s = $0; sub(/^[ \t>*`-]+/, "", s)
+        if (s !~ /^SUBJECT[ \t]/) next
+        sub(/^SUBJECT[ \t]+/, "", s)
+        if (!match(s, /^[^ \t]+/)) next
+        tok = substr(s, 1, RLENGTH); rest = substr(s, RLENGTH + 1); gsub(/`/, "", tok); sub(/^[ \t]+/, "", rest)
+        if ((tok "") == (id "")) { print rest; exit } }')
+    subj=${subj#"${subj%%[![:space:]]*}"}; subj=${subj#[\"\'\`]}
     case "$subj" in
       "[CC>MUSE] NCC-74656:"*|"[NCC-74656>"*) own="$own ${item#cc:}" ;;
       *) kept="$kept $item" ;;
