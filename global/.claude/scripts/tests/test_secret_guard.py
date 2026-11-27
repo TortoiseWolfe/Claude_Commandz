@@ -1311,12 +1311,33 @@ EOF
 gh issue edit 1 -R o/r --body-file $S/body.md >/dev/null && echo edited || echo "NOT edited (issue moved or error)"'''
 
 
+HUB_ISSUE_CMD = r'''S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000001/scratchpad; mkdir -p $S; cat > $S/issue-poll.md <<'EOF'
+## What happens
+
+The tower's mail poller (`scripts/notes_check.py --poll`) lists this machine's own outgoing notes to Hatch as new notes to handle. Three times on 27 Nov (peer inbox lines 258, 259, 263; drafts r1246708431698755466), each subject starting `[CC>MUSE] NCC-74656:`.
+
+## Cause
+
+`POLL_SKIP_SUBJECT_PREFIXES` (line 54) holds only `"[NX-01>"` and `"Re: [CC>MUSE] NCC-74656:"`. A note this machine writes starts `[CC>MUSE] NCC-74656:` with no `Re: `, so it passes the filter.
+
+## Fix
+
+Add `"[CC>MUSE] NCC-74656:"` to the tuple, with a test that a draft with that subject is dropped in poll mode and a `[MUSE>NCC-74656]` note from Hatch is still listed.
+
+Recording these as processed is not the fix: NX-01's sweep could then delete a note before Hatch reads it.
+EOF
+gh issue create -R o/r --title "Mail poller lists the tower's own drafts as new notes" --body-file $S/issue-poll.md'''
+
+
 class RuleGHeredocFeedsOnlyItsOwnCommand(Base):
     """Issue 260 (the hub's second case): a heredoc feeds only the command it is written on, so other commands on the same line (cd, a variable
     assignment, a script run, head) do not turn a text-storing heredoc into a shell body. The words in its text are still searched for the folder."""
 
     def test_the_hubs_note_command_passes(self):
         self.allowed(HUB_NOTE_CMD)
+
+    def test_the_hubs_issue_body_command_passes(self):
+        self.allowed(HUB_ISSUE_CMD)  # a variable, mkdir -p, a cat heredoc with "machine's" in it, then gh issue create --body-file
 
     def test_the_hubs_earlier_python_body_command_passes(self):
         self.allowed(HUB_BODY_CMD)
