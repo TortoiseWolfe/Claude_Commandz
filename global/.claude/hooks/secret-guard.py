@@ -383,7 +383,8 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
         # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
-        for cand in {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>]+&?", c)}:
+        # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
+        for cand in {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
@@ -467,6 +468,37 @@ def _echo_line_is_data(text):
     return False
 
 
+class ShellBody(str):
+    """The body of a heredoc that a shell may run (bash, sh, env bash, sudo sh, ssh, xargs, cat piped to bash ...): besides the row check it is
+    checked as one block, the way bash reads it, with quote state carried across rows and a body that cannot be split refused
+    (security review 27 Nov: row by row misreads a quote that opens on one row and closes on a later one)."""
+
+
+NONSHELL_FEEDERS = {"python", "pypy", "node", "nodejs", "deno", "perl", "ruby", "php", "curl", "wget", "jq", "grep", "egrep", "fgrep", "diff", "base64"}
+
+
+def _line_runs_no_shell(line):
+    """True when every command on the logical line is a known tool that does not run its input as shell (an interpreter other than a shell, curl,
+    jq, grep ... or a command that only stores or posts text). Anything unclear, a pipe to a shell, env, sudo, ssh, xargs, is not."""
+    segs = [s for s in split_segments(line) if s.strip()]
+    if not segs:
+        return False
+    for seg in segs:
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        words = [w for w in words if not re.match(r"^[A-Za-z_]\w*=", w)]
+        if not words:
+            return False
+        name = os.path.basename(words[0])
+        if re.fullmatch(r"(?:python|pypy)[\d.]*", name):
+            name = name.rstrip("0123456789.")
+        if name not in NONSHELL_FEEDERS and name not in HEREDOC_DATA_WORDS:
+            return False
+    return True
+
+
 def split_data_heredocs(cmd):
     """Return (code, bodies, opaque, send_code):
       code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
@@ -544,6 +576,7 @@ def split_data_heredocs(cmd):
                 emit(text, echo_ok and _echo_line_is_data(text))
                 continue
             data_line = _heredoc_line_is_data(text)
+            no_shell = _line_runs_no_shell(text)
             emit(text)
             for word, tabs, quoted, _op in pending:
                 body, found, term = [], False, ""
@@ -561,7 +594,10 @@ def split_data_heredocs(cmd):
                 if quoted and data_line:
                     bodies.append("\n".join(body))
                 else:
-                    opaque.append("\n".join(body))
+                    text_body = "\n".join(body)
+                    # a body a shell may run (or that bash expands, when the heredoc is not quoted and holds a substitution) is also read as one block
+                    runs = not no_shell or (not quoted and ("$(" in text_body or "`" in text_body))
+                    opaque.append(ShellBody(text_body) if runs else text_body)
             pending = []
             continue
         line.append(c)
@@ -590,6 +626,41 @@ def _body_rows(body):
     return rows + joined
 
 
+def _opaque_use(opaque):
+    """"folder", "send" or None for comments and heredoc bodies that are not data: each row on its own (no quote state carries over, so one
+    unsplittable row cannot hide the others), and a ShellBody also as one block."""
+    for body in opaque:
+        for row in _body_rows(body):
+            for seg in split_segments(row):
+                norm = gmail_norm(seg)
+                if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
+                    return "folder"
+                if GMAIL_SEND.search(norm):
+                    return "send"
+        if isinstance(body, ShellBody):
+            hit = _shell_body_use(body)
+            if hit:
+                return hit
+    return None
+
+
+def _shell_body_use(body):
+    """A body that bash may run, read the way bash reads it: its own comments and heredocs split out, quote state carried across rows, a segment
+    that cannot be split refused, no allowlist."""
+    code, bodies, opaque, _send = split_data_heredocs(str(body))
+    for b in bodies:
+        norm = gmail_norm(b)
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
+            return "folder"
+    for seg in split_segments(code):
+        norm = gmail_norm(seg)
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg):
+            return "folder"
+        if GMAIL_SEND.search(norm):
+            return "send"
+    return _opaque_use(opaque)
+
+
 def gmail_credential_use(cmd):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
     whole = gmail_norm(cmd)
@@ -600,18 +671,14 @@ def gmail_credential_use(cmd):
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"
-    body_segs = [s for body in opaque for row in _body_rows(body) for s in split_segments(row)]  # each row on its own: no quote state carries over
     for seg in split_segments(cmd):
         norm = gmail_norm(seg)
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
-    for seg in body_segs:  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
-        norm = gmail_norm(seg)
-        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
-            return "folder"
-        if GMAIL_SEND.search(norm):
-            return "send"
+    hit = _opaque_use(opaque)  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
+    if hit:
+        return hit
     for seg in split_segments(send_cmd):
         if GMAIL_SEND.search(gmail_norm(seg)):
             words = gmail_words(seg) or []

@@ -790,6 +790,20 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("bash <<'EOF'\necho 'x\n'; cat ~/.?on\"f\"ig/a?a/g?ail/token.json\nEOF", "G")
                 self.blocked("bash <<'EOF'\necho \"a\n\"; cat ~/.?on\"f\"ig/a?a/g?ail/token.json\nEOF", "G")
                 self.blocked("bash <<'EOF'\necho 'x\n'; cp -r ~/.?on\"f\"ig/a?a/g?ail /tmp/x\nEOF", "G")
+                # fifth review: a glob with a comma, a space or a bracket survives the quote-stripping, so a shell body is read as one block
+                self.blocked("bash <<'EOF'\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("bash <<'EOF'\necho 'x\n'; cp -r ~/.?onfig/a[,f]a/g?ail /tmp/x\nEOF", "G")
+                self.blocked("bash <<'EOF'\necho 'x\n'; cat ~/.?onfig/a[\\ f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("bash <<'EOF'\necho \"x\n\"; cat ~/.?onfig/a[\" \"f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("cat <<'EOF' | bash\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("env bash <<'EOF'\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("sudo sh <<EOF\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                self.blocked("(cat ~/.?onfig/a?a/g?ail/token.json)", "G")
+                self.blocked("echo $(cat ~/.?onfig/a?a/g?ail/token.json)", "G")
+                # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
+                self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
+                # and a shell body that is only prose and comments, with a comment apostrophe, still passes
+                self.allowed("bash <<'EOF'\n# it's fine\necho done\nEOF")
             finally:
                 if old is None:
                     del os.environ["HOME"]
