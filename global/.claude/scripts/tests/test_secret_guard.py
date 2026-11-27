@@ -1144,6 +1144,62 @@ class RuleGSubstitutionAndAnsiQuotes(Base):
         self.allowed('ls "$(dirname ~/docs/x)"')
 
 
+class RuleGPythonClientSend(Base):
+    """Issue 258: a Python Google client call to messages().send( or drafts().send( has no REST path in it, so it is a send by its own
+    spelling. An interpreter body or -c string that calls it is refused; a mention in text that is only written to a file still passes."""
+    CALL = "svc.users().messages().send(userId='me', body={}).execute()"
+
+    def test_a_heredoc_interpreter_call_is_refused(self):
+        for tag in ("'EOF'", '"EOF"', "EOF"):
+            for interp in ("python3 -I -", "python3 -", "python -", "python3.13 -I -"):
+                self.blocked("%s <<%s\n%s\nEOF" % (interp, tag, self.CALL), "G")
+
+    def test_the_call_spelled_other_ways_is_refused(self):
+        for call in ("svc.users().drafts().send(userId='me', body={'id': 'x'}).execute()",
+                     "svc . users ( ) . messages ( ) . send ( userId='me' )",
+                     "svc.users().messages()\\\n  .send(userId='me')",
+                     "(svc.users().messages()\n   .send(userId='me'))",
+                     "m = svc.users().messages()\nm.send(userId='me', body={}).execute()",
+                     "f = svc.users().messages().send\nf(userId='me')",
+                     "getattr(svc.users().messages(), 'send')(userId='me')",
+                     "svc.users().DRAFTS().Send(userId='me')"):
+            self.blocked("python3 -I - <<'EOF'\n%s\nEOF" % call, "G")
+
+    def test_dash_c_string_calls_are_refused(self):
+        self.blocked("python3 -c \"svc.users().messages().send(userId='me').execute()\"", "G")
+        self.blocked("python3 -c 'svc.users().drafts().send(body={})'", "G")
+        self.blocked("python3 -c \"m = svc.users().messages()\nm.send(userId='me')\"", "G")
+
+    def test_other_interpreters_and_pipes_are_refused(self):
+        self.blocked("node - <<'EOF'\n%s\nEOF" % self.CALL, "G")
+        self.blocked("bash <<'EOF'\n%s\nEOF" % self.CALL, "G")
+        self.blocked("echo \"%s\" | python3 -" % self.CALL, "G")
+
+    def test_a_mention_in_text_that_is_only_stored_passes(self):
+        self.allowed("cat > /tmp/notes.md <<'EOF'\nThe tool never calls gmail.users.messages.send or svc.users().messages().send( itself.\nEOF")
+        self.allowed("gh issue create -R o/r --title t --body-file - <<'EOF'\nIt's refused when python calls .messages().send( or .drafts().send(.\nEOF")
+        self.allowed("git commit -F - <<'EOF'\nrule G: refuse the call svc.users().messages().send(\nEOF")
+        self.allowed("grep -n 'messages().send(' notes.md")
+
+    def test_ordinary_client_code_passes(self):
+        self.allowed("python3 -I - <<'EOF'\nprint(svc.users().messages().list(userId='me').execute())\nEOF")
+        self.allowed("python3 -I - <<'EOF'\nsvc.users().drafts().create(userId='me', body={}).execute()\nsock.sendall(b'x')\nEOF")
+        self.allowed("python3 -I - <<'EOF'\nsock.send(b'x')\nprint(svc.users().labels().list(userId='me').execute())\nEOF")
+        self.allowed("python3 -c 'print(1)'")
+
+    def test_a_messages_resource_and_a_send_in_one_body_is_refused_as_unclear(self):
+        # the call may be split over a variable the text check cannot follow, so a messages() or drafts() resource plus any .send( is refused
+        self.blocked("python3 -I - <<'EOF'\nsvc.users().drafts().create(userId='me', body={}).execute()\nsock.send(b'x')\nEOF", "G")
+
+    def test_the_old_refusals_still_hold(self):
+        for cmd in ("python3 -I - <<'EOF'\nrequests.post('https://gmail.googleapis.com/gmail/v1/users/me/messages/send')\nEOF",
+                    "bash <<EOF\ncurl -X POST https://gmail.googleapis.com/gmail/v1/users/me/drafts/send\nEOF",
+                    "curl --data @- https://gmail.googleapis.com/gmail/v1/users/me/messages/send <<EOF\n{}\nEOF",
+                    "python3 -I - <<'EOF'\nopen('/home/u/.config/afa/gmail/token.json').read()\nEOF",
+                    "cat ~/.config/afa/gmail/token.json"):
+            self.blocked(cmd, "G")
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})
