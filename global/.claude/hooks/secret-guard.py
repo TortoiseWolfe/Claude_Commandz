@@ -728,7 +728,10 @@ def _line_runs_no_shell(line):
 
 
 NAME_CHANGERS = re.compile(r"(?:^|[\s;&|({])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LIBRARY_PATH|SHELLOPTS|BASHOPTS|BASH_CMDS)=|\bhash\b|\bunset\b"
-                           r"|[\w.-]+\s*\(\s*\)|\b(?:coproc|select|case|for|while|until)\b")  # a loop that began earlier could run a later redefinition
+                           r"|[\w.-]+\s*\(\s*\)|\b(?:coproc|select|case|for|while|until)\b"  # a loop that began earlier could run a later redefinition
+                           r"|[(){}]|(?<![\w.-])(?:if|then|else|elif|fi|do|done|esac)(?![\w.-])")
+# the last row: a group, subshell, process substitution or compound command that opens before the heredoc can send its output on after the
+# body (`{ cat <<'EOF'` ... `} | sh`, `sh < <(cat <<'EOF'` ... `)`), which the line holding the operator does not show; such a command keeps the strict reading
 
 
 def _names_cannot_change(cmd):

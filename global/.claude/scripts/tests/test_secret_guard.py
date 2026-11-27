@@ -1358,6 +1358,11 @@ class RuleGHeredocFeedsOnlyItsOwnCommand(Base):
         self.blocked("true && cat > /tmp/x <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "G")
         self.blocked("cd ~/repos && S=/tmp/x && cat > $S/n <<'EOF'\nsend it with users/me/messages/send\nEOF", "G")
 
+    def test_a_heredoc_inside_a_group_whose_output_goes_on_keeps_the_strict_reading(self):
+        for c in ("{ cat <<'EOF'\nit's\nEOF\n} | sh", "( cat <<'EOF'\nit's\nEOF\n) | bash", "if true; then cat <<'EOF'\nit's\nEOF\nfi | sh",
+                  "sh < <(cat <<'EOF'\nit's\nEOF\n)", "true && { cat <<'EOF'\nit's\nEOF\n} | sh"):
+            self.blocked(c, "G")
+
     def test_a_command_name_that_may_be_redefined_keeps_the_strict_reading(self):
         for c in ("cat() { bash; }; true && cat <<'EOF'\nit's\nEOF", "alias cat=bash; true && cat <<'EOF'\nit's\nEOF",
                   "PATH=/tmp/evil:$PATH; true && cat <<'EOF'\nit's\nEOF", "hash -p /tmp/evil/sh cat; true && cat <<'EOF'\nit's\nEOF",
