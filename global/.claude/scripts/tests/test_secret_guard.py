@@ -1165,6 +1165,18 @@ class RuleGPythonClientSend(Base):
                      "svc.users().DRAFTS().Send(userId='me')"):
             self.blocked("python3 -I - <<'EOF'\n%s\nEOF" % call, "G")
 
+    def test_getattr_unicode_and_node_spellings_are_refused(self):
+        # blind review of PR 259: the resource fetched by getattr, getattr on a split variable, a fullwidth letter, a Node call, a call built by name
+        for call in ("getattr(svc.users(), 'messages')().send(userId='me')",
+                     "getattr(svc.users(), \"drafts\")().send(userId='me')",
+                     "m = svc.users().messages()\ngetattr(m, 'send')(userId='me')",
+                     "svc.users().messages().ｓend(userId='me')",
+                     "svc.users().messages().ＳEND(userId='me')",
+                     "gmail.users.messages.send({userId: 'me'})",
+                     "from googleapiclient.discovery import build\nsvc = build('gmail', 'v1')\nr = getattr(svc.users(), 'mess' + 'ages')\ngetattr(r(), 'se' + 'nd')\nmessages = 1; send = 2"):
+            self.blocked("python3 -I - <<'EOF'\n%s\nEOF" % call, "G")
+        self.blocked("node - <<'EOF'\ngmail.users.drafts.send({userId: 'me'})\nEOF", "G")
+
     def test_dash_c_string_calls_are_refused(self):
         self.blocked("python3 -c \"svc.users().messages().send(userId='me').execute()\"", "G")
         self.blocked("python3 -c 'svc.users().drafts().send(body={})'", "G")
