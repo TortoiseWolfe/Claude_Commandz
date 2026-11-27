@@ -366,7 +366,7 @@ def gmail_segment_ok(seg):
 # Claude_Commandz issue 238: Python's glob does not expand what bash expands before it globs: brace lists ({c,x}, {1..3}) and POSIX classes
 # ([[:alpha:]]). bash_glob does both, bounded, and yields None (the caller refuses) for any form it does not understand.
 POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "lower": "a-z", "upper": "A-Z", "xdigit": "0-9a-fA-F",
-                 "word": "a-zA-Z0-9_", "punct": "!-/:-@{-~_^", "space": " \t\n", "blank": " \t", "print": " -~", "graph": "!-~", "cntrl": "\x00-\x1f"}
+                 "word": "a-zA-Z0-9_", "punct": ":-@{-~_^!-/", "space": " \t\n", "blank": " \t", "print": " -~", "graph": "\"-~!", "cntrl": "\x00-\x1f"}
 BRACE_LIMIT = 256
 
 
@@ -432,13 +432,58 @@ def bash_glob(pattern):
         yield None
         return
     for w in words:
-        def cls(m):
-            return POSIX_CLASSES.get(m.group(1), "\x00")
-        if re.search(r"\[:(\w+):\]", w) and any(m.group(1) not in POSIX_CLASSES for m in re.finditer(r"\[:(\w+):\]", w)):
+        w = os.path.expanduser(gmail_norm(w))  # bash does tilde and $HOME after the braces: {~,x}/... and $HO{M,x}E/... are the home folder
+        w = _bracket_translate(w)
+        if w is None:
             yield None
             return
-        for m in glob.iglob(re.sub(r"\[:(\w+):\]", cls, w)):
+        for m in glob.iglob(w):
             yield m
+
+
+def _bracket_translate(w):
+    """w with every bracket expression written the way Python's glob reads it (a ^ first is !, a POSIX class is its characters), or None
+    for a form not translated exactly: an equivalence class [=x=], a collating symbol [.x.] or an unknown class name. A [:name:] outside
+    a bracket is just an ordinary bracket and stays as it is."""
+    out, i, n = [], 0, len(w)
+    while i < n:
+        c = w[i]
+        if c != "[":
+            out.append(c)
+            i += 1
+            continue
+        j = i + 1
+        neg = j < n and w[j] in "!^"
+        if neg:
+            j += 1
+        body = []
+        if j < n and w[j] == "]":  # a ] first is a letter
+            body.append("]")
+            j += 1
+        while j < n and w[j] != "]":
+            if w[j] == "[" and j + 1 < n and w[j + 1] in "=.":
+                return None
+            if w[j] == "[" and j + 1 < n and w[j + 1] == ":":
+                end = w.find(":]", j + 2)
+                if end < 0:
+                    body.append(w[j])
+                    j += 1
+                    continue
+                name = w[j + 2:end]
+                if name not in POSIX_CLASSES:
+                    return None
+                body.append(POSIX_CLASSES[name])
+                j = end + 2
+                continue
+            body.append(w[j])
+            j += 1
+        if j >= n:  # no closing ]: the [ is an ordinary letter
+            out.append("[")
+            i += 1
+            continue
+        out.append("[" + ("!" if neg else "") + "".join(body) + "]")
+        i = j + 1
+    return "".join(out)
 
 
 def gmail_resolves_into_folder(seg, tolerant=False):

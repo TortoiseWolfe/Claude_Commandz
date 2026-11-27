@@ -1009,7 +1009,10 @@ class RuleGBraceListsAndPosixClasses(Base):
         for c in ("cat ~/.?onfig/a[![:digit:]]a/g?ail/token.json", "cat ~/.config/afa/g[[:lower:]][[:lower:]]il/token.json",
                   "cat ~/.config/{afa,x}/gmail/token.json", "cat ~/.config/afa/gmail/{token,x}.json", "cat ~/.config/afa/{a..z}mail/t*.json",
                   "cat ~/.config/afa/gmail/{token,{x,y}}.json", "cat ~/.config/afa/gmail/{a..z..2}.json",
-                  "cat ~/.config/afa/gmail/{token,x}{.json,.y}", "cat ~/.config/afa/gmail/[[:nosuchclass:]]*"):
+                  "cat ~/.config/afa/gmail/{token,x}{.json,.y}", "cat ~/.[^x]onfig/a[^x]a/g[^x]ail/token.json",
+                  "cat ~/.config/afa/g[^[:digit:]]ail/token.json", "cat ~/.[:punct:]onfig/a?a/g?ail/token.json", "cat ~/.config/afa/gmail/[[:punct:][:alpha:]]oken.json",
+                  "cat {~,x}/.?onfig/a?a/g?ail/token.json", "cat $HO{M,x}E/.?onfig/a?a/g?ail/token.json", "cat ~/.?onfig/a[[=f=]]a/g?ail/token.json",
+                  "cat ~/.config/afa/gmail/[[=t=]]oken.json", "cat ~/.config/afa/gmail/[[.t.]]oken.json", "cat ~/.config/afa/gmail/[[:nosuchclass:]]*"):
             self.blocked(c, "G")
 
     def test_too_many_words_are_refused(self):
