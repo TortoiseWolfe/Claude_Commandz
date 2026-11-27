@@ -1115,7 +1115,7 @@ class RuleGSubstitutionAndAnsiQuotes(Base):
         self.home()
         for c in ('echo "$(cat ~/.?onfig/a?a/g?ail/token.json)"', 'echo "`cat ~/.?onfig/a?a/g?ail/token.json`"',
                   'echo "$(echo "$(cat ~/.?onfig/a?a/g?ail/token.json)")"', 'x="$(cat ~/.?onfig/a?a/g?ail/token.json)"',
-                  'echo "a $(true; cat ~/.?onfig/a?a/g?ail/token.json) b"', 'echo "$( cat ~/.?onfig/a?a/g?ail/token.json )"',
+                  'echo "a $(true; cat ~/.?onfig/a?a/g?ail/token.json) b"', 'echo "$( cat ~/.?onfig/a?a/g?ail/token.json )"', 'echo "$( cat ~/.{c,x}onfig/a?a/g?ail/token.json )"',
                   'echo "`echo \\`cat ~/.?onfig/a?a/g?ail/token.json\\``"', 'echo "${x:-$(cat ~/.?onfig/a?a/g?ail/token.json)}"'):
             self.blocked(c, "G")
 
