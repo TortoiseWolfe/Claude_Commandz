@@ -634,6 +634,14 @@ class RuleGTextTheShellDoesNotRead(Base):
                      "gh api repos/o/r/issues?state=all\\&per_page=1 --jq '.[0].number'")
         self.allowed("gh api repos/o/r/issues?state=all\\&per_page=1 --jq '.[0].number'")
 
+    def test_a_curl_grep_gh_run_list_call_that_was_refused_passes(self):
+        # the sh-band-page lane's call, 27 Nov: no mail or token path anywhere in it
+        self.allowed("cd /home/u/repos/.worktrees/App--band-page; curl -s https://example.com/data/band-ranking.json | head -c 1500; echo; "
+                     "curl -s https://example.com/band/ | grep -o -i -E \"base44[^\\\"<]{0,80}|game album[^<]{0,80}\" | head; "
+                     "gh run list -R o/r --workflow deploy.yml -L 5 --json databaseId,conclusion,createdAt,headSha,event; "
+                     "gh run list -R o/r --workflow apply-migration-section.yml -L 5 --json databaseId,conclusion,createdAt,displayTitle")
+        self.allowed("curl -s https://example.com/band/ | grep -o -i -E \"base44[^\\\"<]{0,80}|game album[^<]{0,80}\" | head")
+
     def test_an_escaped_separator_is_one_word(self):
         self.allowed("echo a\\;b\\|c\\&d")
         self.allowed("ls /tmp/a\\&b")
