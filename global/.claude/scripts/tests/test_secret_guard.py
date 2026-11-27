@@ -1015,6 +1015,15 @@ class RuleGBraceListsAndPosixClasses(Base):
                   "cat ~/.config/afa/gmail/[[=t=]]oken.json", "cat ~/.config/afa/gmail/[[.t.]]oken.json", "cat ~/.config/afa/gmail/[[:nosuchclass:]]*"):
             self.blocked(c, "G")
 
+    def test_long_and_odd_words_are_refused_quickly(self):
+        self.home()
+        import time
+        t = time.time()
+        self.blocked("cat /{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p}{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p}" + "[" * 3000 + " ~/.?onfig/a?a/g?ail/token.json", "G")
+        self.assertLess(time.time() - t, 2)
+        self.blocked("cat ~/.config/afa/g[e-[:alpha:]]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/g[[:alpha:]-z]ail/token.json", "G")
+
     def test_too_many_words_are_refused(self):
         self.home()
         self.blocked("cat ~/docs/{1..999}/{1..999}", "G")

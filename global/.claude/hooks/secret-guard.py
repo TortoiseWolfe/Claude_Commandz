@@ -433,7 +433,7 @@ def bash_glob(pattern):
         return
     for w in words:
         w = os.path.expanduser(gmail_norm(w))  # bash does tilde and $HOME after the braces: {~,x}/... and $HO{M,x}E/... are the home folder
-        w = _bracket_translate(w)
+        w = None if len(w) > 2000 or w.count("[") > 64 else _bracket_translate(w)  # a word this long is not a path to read: refuse, and keep the hook inside its time limit
         if w is None:
             yield None
             return
@@ -470,8 +470,8 @@ def _bracket_translate(w):
                     j += 1
                     continue
                 name = w[j + 2:end]
-                if name not in POSIX_CLASSES:
-                    return None
+                if name not in POSIX_CLASSES or (body and body[-1] == "-") or w[end + 2:end + 3] == "-":
+                    return None  # an unknown name, or a class standing at the end of a range: not translated exactly
                 body.append(POSIX_CLASSES[name])
                 j = end + 2
                 continue
