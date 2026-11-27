@@ -68,7 +68,14 @@ class RuleGCdGlobAndWrappers(Base):
                "sh -c 'cat ~/.?onfig/a?a/g?ail/token.json'",
                "bash -ec 'cd ~/.?onfig/a?a/g?ail && cat token.json'",
                "bash <<< 'cat ~/.?onfig/a?a/g?ail/token.json'",
-               "sh <<< \"cat ~/.?onfig/a?a/g?ail/token.json\"")
+               "sh <<< \"cat ~/.?onfig/a?a/g?ail/token.json\"",
+               "cat ${x:-~/.?onfig/a?a}/g?ail/token.json",
+               "cat ${x:-~/.?onfig}/a?a/g?ail/token.json",
+               "cat ~/${x:-.?onfig/a?a}/g?ail/token.json",
+               "cd ~/.config && cd ?fa/g?ail && cat token.json",
+               "cd ~ && cd .?onfig/a?a/g?ail && cat token.json",
+               "echo hi <(cat ~/.?onfig/a?a/g?ail/token.json)",
+               "echo $(bash -c 'cat ~/.?onfig/a?a/g?ail/token.json')")
 
     def with_home(self, run):
         with tempfile.TemporaryDirectory() as home:

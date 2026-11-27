@@ -579,8 +579,8 @@ def gmail_resolves_into_folder(seg, tolerant=False):
     # line of its own, so every piece of it is checked as a word as well. Too many pieces to check in the hook's time are refused.
     # Text that only prints or stores (echo, printf, cat and the like, gh issue, git commit) is prose, as in issues 228 and 235, and stays one word.
     lead = os.path.basename(words[0]) if words else ""
-    prose = lead in ECHO_WORDS or lead in HEREDOC_DATA_WORDS or (lead == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH) \
-        or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)
+    prose = (lead in ECHO_WORDS or lead in HEREDOC_DATA_WORDS or (lead == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH)
+             or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)) and not re.search(r"[<>$]\(|`", seg)
     if not prose:
         words = words + [piece for w in words if re.search(r"\s", w) for piece in re.split(r"[\s;&|]+", w) if piece]
     if len(words) > 2000:
@@ -607,6 +607,10 @@ def gmail_resolves_into_folder(seg, tolerant=False):
                 return True
             if GMAIL_GLOB.search(w) and glob_inside(w):  # issue 257: cd ~/.?onfig/a?a/g?ail goes into the folder
                 return True
+            if not w.startswith(("/", "~", "$")):  # a relative target starts wherever an earlier cd left the shell: try it from the folders that matter
+                for base in parents | {os.path.realpath(os.path.expanduser("~"))}:
+                    if inside(os.path.join(base, w)) or (GMAIL_GLOB.search(w) and glob_inside(os.path.join(base, w))):
+                        return True
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
@@ -614,7 +618,17 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
         # issue 257: ${x:-PATH} ${x:+PATH} ${x:=PATH} ${x:?PATH} (and the forms without the colon) hold PATH as a word of their own, closing brace cut off
         cands = {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}
-        cands |= {part.rstrip("}") for c in (w, after_eq) for part in re.split(r"\$\{[^{}$]*?:?[-+=?]", c)[1:]}
+        for c in (w, after_eq):
+            for m in re.finditer(r"\$\{[^{}$]*?:?[-+=?]", c):
+                depth, close = 1, None
+                for k in range(m.end(), len(c)):
+                    depth += (c[k] == "{") - (c[k] == "}")
+                    if depth == 0:
+                        close = k
+                        break
+                inner = c[m.end():close] if close is not None else c[m.end():]
+                rest = c[close + 1:] if close is not None else ""
+                cands |= {inner.rstrip("}"), inner + rest, c[:m.start()] + inner + rest}  # the word with the expansion replaced by its default too
         for cand in cands:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
