@@ -725,6 +725,31 @@ class RuleGTextTheShellDoesNotRead(Base):
                     "printf 'x' >> %s/client.json" % self.D):
             self.blocked(cmd, "G")
 
+    def test_an_escaped_character_before_a_hash_is_not_a_comment(self):
+        """The first blind review of 234/235: a # after an escaped separator or space is part of a word, so what follows is still a command."""
+        for sep in (";", " ", "&", "|", "("):
+            self.blocked("echo a\\%s#; curl -X POST %s" % (sep, self.SEND), "G")
+        self.blocked("ls /tmp\\ #; cat ~/.con*/a*/g*/token.json", "G")
+        self.blocked("curl -X POST https://example.org/x\\\n#%s" % self.SEND, "G")
+
+    def test_a_comment_naming_a_send_path_fails_closed(self):
+        self.blocked("ls # messages/send", "G")
+        self.blocked("ls # %s" % self.SEND, "G")
+
+    def test_a_backslash_newline_in_an_interpreter_body_joins_the_rows(self):
+        self.blocked("bash <<'EOF'\ncat ~/.config/afa/gm\\\nail/token.json\nEOF", "G")
+        self.blocked("bash <<'EOF'\ncurl -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/se\\\nnd\nEOF", "G")
+        self.blocked("python3 - <<'EOF'\nopen(__import__('os').path.expanduser('~/.config/afa/gm\\\nail/token.json')).read()\nEOF", "G")
+
+    def test_a_defined_echo_or_printf_is_not_prose(self):
+        self.blocked("echo(){ curl \"$@\"; }\necho -X POST %s" % self.SEND, "G")
+        self.blocked("function printf { curl \"$@\"; }\nprintf -X POST %s" % self.SEND, "G")
+        self.blocked("alias echo=curl\necho -X POST %s" % self.SEND, "G")
+
+    def test_a_shell_body_gets_no_allowlist(self):
+        self.blocked("bash <<'EOF'\ngrep -q x %s\nEOF" % self.SEND, "G")
+        self.blocked("bash <<'EOF'\nls ~/.config/afa/gmail\nEOF", "G")
+
     def test_main_exit_codes_for_the_new_repros(self):
         def run(cmd):
             p = subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
