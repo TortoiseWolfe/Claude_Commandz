@@ -75,7 +75,7 @@
 # minutes while it stays idle (idle_remind_check; 6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke breaks"). Before, the
 # "ended a turn without a new report" line came once per ended turn and a lane with a backlog could then sit idle for hours. The standing rule
 # every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
-# Also left alone (line1_rests): a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
+# Also left alone (line1_rests): WAITING ON at the start (issue 230), a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Every wake prints WAKE-REASON <code> as its first line (the existing lines follow unchanged) and appends one tab-separated row (ISO time from
 # date -Is, code, lane or -) to $LANE_WATCH_WAKE_LOG (default: wake.log in the lane state folder, $LANE_RECYCLE_DIR); a log that cannot be written
@@ -370,6 +370,10 @@ orphan_check() {
 #            with out givng me the url to do it, again"); step_url_check asks for it.
 #   waiting  a first word with HUB or JONATHAN as one hyphen-joined part (HUB-ACT, NEED-HUB, READY-FOR-HUB), other than step. The hub is woken once
 #            by the report itself; naming the lane every 20 minutes woke it for nothing (8 Nov 2026, "HUB-ACT 3:23 AM | ...").
+#            Also WAITING ON at the start (capitals, one space, then a character that is not a letter, digit, underscore or hyphen, or the end): the lane says what it waits on, like BLOCKED
+#            (issue 230: stream-push "WAITING ON NX-01" on 26 Nov and album-studio "WAITING ON ear_eval2 part 2" on 27 Nov were named every
+#            20 minutes). Only the idle reminder reads it; job_idle_check looks at the pane and the job, never at line 1, so a stuck job is
+#            still named once. "WAITING UNTIL ...", a bare WAITING, "WAITING ONE" and lowercase "waiting on" stay other.
 #   done     DONE as the whole first word, unless DONE is followed by BY, UNTIL, TILL, DEADLINE, DUE, BEFORE or ETA (stamp_ahead_check's target
 #            words): that says when the lane WILL be done, so it is other. 6 Nov 2026: two finished lanes wrote DONE and were named, one after
 #            197 minutes, and the hub had to ask each to rewrite the line as QUEUE EMPTY.
@@ -379,6 +383,7 @@ line1_class() {
   case "$first" in "QUEUE EMPTY"*|"EMPTY"|"EMPTY "*|"EMPTY:"*|"EMPTY|"*) echo empty; return 0 ;; esac
   case "$first" in "BLOCKED"*) echo blocked; return 0 ;; esac
   [[ $first =~ ^STEP-FOR-JONATHAN([^A-Za-z0-9_-]|$) ]] && { echo step; return 0; }
+  [[ $first =~ ^WAITING\ ON([^A-Za-z0-9_-]|$) ]] && { echo waiting; return 0; }
   if [[ $first =~ ^([A-Z]+(-[A-Z]+)*)([^A-Za-z0-9_-]|$) ]]; then
     w=${BASH_REMATCH[1]}
     case "-$w-" in *-HUB-*|*-JONATHAN-*) echo waiting; return 0 ;; esac
@@ -563,9 +568,10 @@ job_idle_check() {
 # no spinner, no recycle under way, and a "· done H:MM" line that old. The mark .idleremind-<lane> holds "<done epoch> <last named epoch>",
 # so a re-armed watcher keeps the spacing and a new turn (new done time) starts a new stretch. LANE_WATCH_IDLE_REMIND_MIN=0 turns it off.
 #
-# line1_rests <report line 1>: true when the line says the lane has nothing to start, so the idle reminder leaves it alone. Four kinds:
+# line1_rests <report line 1>: true when the line says the lane has nothing to start, so the idle reminder leaves it alone. Five kinds:
 #   QUEUE EMPTY or BLOCKED at the start (the standing rule's two endings);
 #   EMPTY <time> | ..., what the lane prompts have always asked for as the end-of-queue line (6 Nov: six lanes wrote it and were named every 20 min);
+#   WAITING ON at the start (the lane names what it waits on, issue 230), treated like BLOCKED;
 #   a first word that names who the lane waits on: HUB or JONATHAN as one hyphen-joined part of it (HUB-ACT, NEED-HUB, READY-FOR-HUB,
 #     STEP-FOR-JONATHAN). The hub is woken once by the report itself; naming the lane again every 20 minutes woke it for nothing (8 Nov,
 #     a lane waiting on "HUB-ACT 3:23 AM | ..." was named at 24 minutes and after);
