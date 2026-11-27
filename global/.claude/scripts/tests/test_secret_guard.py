@@ -1017,6 +1017,7 @@ class RuleGAliasQuoteState(Base):
                      "a=ali b=as\n\"$a$b\" x='echo \"'\n", "a=ali b=as; { $a$b x='echo \"'; }\n", "a=ali b=as; if true; then $a$b x='echo \"'; fi\n",
                      "a=ali b=as; time $a$b x='echo \"'\n", "b=as; al$b x='echo \"'\n", "`echo alias` x='echo \"'\n", "{alias,x} x='echo \"'\n",
                      "touch ./ali$1as\nali[a]s x='echo \"'\n", "touch ./alias\nali?s x='echo \"'\n", "touch ./alias\nali* x='echo \"'\n",
+                     "a=ali b=as; 2>/dev/null $a$b x='echo \"'\n", "a=ali b=as; >/dev/null $a$b x='echo \"'\n",
                      "a=ali b=as; if $a$b x='echo \"'; then :; fi\n", "a=ali b=as; while $a$b x='echo \"'; do break; done\n"):
             self.blocked(head + tail, "G")
 
