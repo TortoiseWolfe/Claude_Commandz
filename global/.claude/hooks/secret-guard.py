@@ -499,13 +499,19 @@ def _bracket_translate(w):
         if j < n and w[j] == "]":  # a ] first is a letter
             body.append("]")
             j += 1
+        literal_outer = False
         while j < n and w[j] != "]":
             if w[j] == "[" and j + 1 < n and w[j + 1] in "=.":
                 # Issue 260: [. and [= start a collating symbol or an equivalence class only when the matching .] or =] closes it; a bare [.name]
                 # (a jq filter in a gh -q word) is an ordinary bracket. The search starts at the character after the [, so [.] is also refused.
                 if w.find(w[j + 1] + "]", j + 1) >= 0:
                     return None
-                body.append(w[j])
+                if w[j + 1] == ".":
+                    # bash 5.2 (checked): an unclosed [. makes the OUTER [ a literal letter and carries on just after it, so h[[.a] matches only the
+                    # file named h[a. Python's glob would read one bracket, so the outer [ is written as [[] and the rest is read again from there.
+                    literal_outer = True
+                    break
+                body.append(w[j])  # an unclosed [= is an ordinary letter of the bracket
                 j += 1
                 continue
             if w[j] == "[" and j + 1 < n and w[j + 1] == ":":
@@ -524,6 +530,10 @@ def _bracket_translate(w):
                 continue
             body.append(w[j])
             j += 1
+        if literal_outer:
+            out.append("[[]")
+            i += 1
+            continue
         if j >= n:  # no closing ]: the [ is an ordinary letter
             out.append("[")
             i += 1

@@ -1,6 +1,8 @@
+import glob
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1175,10 +1177,46 @@ class RuleGJqFilterBrackets(Base):
             self.allowed(c)
 
     def test_real_collating_symbols_and_classes_still_refuse(self):
+        # globbed spellings, so the refusal comes from the translation and not from the folder's name being written out
         self.home()
-        for c in ("cat ~/.config/afa/gmail/[[.t.]]oken.json", "cat ~/.config/afa/gmail/[[=t=]]oken.json", "cat ~/.config/afa/gmail/[[.]]oken.json",
-                  "cat ~/.config/afa/gmail/[.t]oken.json", "cat ~/.config/afa/gmail/[[.t.]o]ken.json", "cat ~/.config/afa/gmail/t[=o=]ken.json"):
+        for c in ("cat ~/.?onfig/a?a/g?ail/[[.t.]]oken.json", "cat ~/.?onfig/a?a/g?ail/[[=t=]]oken.json", "cat ~/.?onfig/a?a/g?ail/[[.]]oken.json",
+                  "cat ~/.?onfig/a?a/g?ail/[[.t.]o]ken.json", "cat ~/.?onfig/a?a/g?ail/t[=o=]ken.json"):
             self.blocked(c, "G")
+
+    def test_an_unclosed_bracket_that_really_matches_the_folder_refuses(self):
+        self.home()
+        for c in ("cat ~/.?onfig/a?a/g?ail/[.t]oken.json", "cat ~/.?onfig/a?a/g?ail/[t.]oken.json", "cat ~/.?onfig/a?a/g?ail/[=t]oken.json"):
+            self.blocked(c, "G")
+
+    def test_an_unclosed_collating_start_makes_the_outer_bracket_a_letter(self):
+        """Reviewer's case: bash reads h[[.a] as the letters h[ and the bracket [.a], so it matches only a name h[a. A symlink with that
+        name reaches the home folder, and the guard must follow the same reading (the old code refused every [. as unknown)."""
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
+        os.symlink(home, os.path.join(t.name, "h[a"))
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+        self.assertEqual(sg._bracket_translate("h[[.a]"), "h[[][.a]")
+        path = "%s/h[[.a]/.?onfig/a?a/g?ail/token.json" % t.name
+        self.assertEqual(subprocess.run(["bash", "-c", "ls " + path], capture_output=True).returncode, 0)  # bash reaches the token through the link
+        self.blocked("cat " + path, "G")
+
+    def test_translation_agrees_with_bash_for_unclosed_collating_starts(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        for name in ("h[a", "h.", "ha", "h[", "h[.a", "h=", "x.", "xn", "xe", ".x", "[.name]", "n"):
+            open(os.path.join(t.name, name), "w").close()
+        for pat in ("h[[.a]", "h[[=a]", "h[.a]", "x[.name]", "[.name]", "x[[.n]", "[]|[.name]", "x[a[.a]"):
+            got = sg._bracket_translate(pat)
+            self.assertIsNotNone(got, pat)
+            ours = {os.path.relpath(m, t.name) for m in glob.glob(os.path.join(glob.escape(t.name), got))}
+            r = subprocess.run(["bash", "-c", "cd %s && shopt -s nullglob && for f in %s; do printf '%%s\\n' \"$f\"; done" % (shlex.quote(t.name), pat)],
+                               capture_output=True, text=True)
+            self.assertEqual(ours, set(r.stdout.split("\n")) - {""}, pat)
 
 
 class WriteAndEdit(unittest.TestCase):
