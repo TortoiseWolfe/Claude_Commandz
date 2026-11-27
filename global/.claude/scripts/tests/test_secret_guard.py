@@ -568,6 +568,19 @@ class RuleGQuotedHeredocBodies(Base):
                     "eval \"$(cat <<'EOF'\ncat %s/token.json\nEOF\n)\"" % self.D):
             self.blocked(cmd, "G")
 
+    def test_the_blind_review_cases_are_refused(self):
+        """A terminator glued to the closing quote (bash ends the body at EOFx, not EOF), process substitution, a high file descriptor, sort."""
+        for cmd in ("cat <<'EOF'x\nEOFx\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<\"EOF\"x\nEOFx\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EO'F\nEOF\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<\\EO\\F\nEOF\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF'x\nEOFx\ntar czf /tmp/c.tgz ~/.config\nEOF",
+                    "cat <<'EOF' > >(bash)\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' | tee >(sh)\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' 2>&3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "sort --compress-program=sh -S 1K <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND):
+            self.blocked(cmd, "G")
+
     def test_the_unclear_cases_are_refused(self):
         for cmd in ("cat <<'EOF'\ncurl -X POST %s" % self.SEND,                 # no terminator
                     "echo \"<<'EOF'\"; cat %s/token.json\nEOF" % self.D,          # the operator sits inside a quote

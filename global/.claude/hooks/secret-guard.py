@@ -379,14 +379,14 @@ def gmail_resolves_into_folder(seg):
 # split), and a send path in a sentence was read as a send. Such a body is taken out of the text that is word-split and checked for a send address;
 # it is still searched for the token folder's name. The command it feeds stays checked in full whenever ANY command on its line is not on this short
 # list (an interpreter, a shell, curl, xargs, eval, a path-qualified name, a variable assignment in front), and whenever anything is unclear.
-HEREDOC_DATA_WORDS = {"cat", "tee", "wc", "sort", "uniq", "head", "tail", "tr", "cut"}
+HEREDOC_DATA_WORDS = {"cat", "tee", "wc", "uniq", "head", "tail", "tr", "cut"}  # not sort: --compress-program=sh pipes its input through a shell
 HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
 
 
 def _heredoc_line_is_data(line):
     """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
-    if "$(" in line or "`" in line:
+    if "$(" in line or "`" in line or ">(" in line or "<(" in line or re.search(r">&\s*[3-9]", line):  # a substitution, or a file descriptor that may lead to a shell
         return False
     segs = [s for s in split_segments(line) if s.strip()]
     if not segs:
@@ -447,8 +447,8 @@ def split_data_heredocs(cmd):
             continue
         elif c == "<" and cmd.startswith("<<", i):
             m = HEREDOC_OP.match(cmd, i)
-            if not m:
-                return cmd, []
+            if not m or (m.end() < n and cmd[m.end()] not in " \t\n;&|<>()"):
+                return cmd, []  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
             word = m.group(2) or m.group(3) or m.group(4) or m.group(5)
             pending.append((word, bool(m.group(1)), bool(m.group(2) or m.group(3) or m.group(4)), m.group(0)))
             line.append(m.group(0))
