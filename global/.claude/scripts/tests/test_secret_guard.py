@@ -1146,6 +1146,74 @@ class RuleGSubstitutionAndAnsiQuotes(Base):
         self.allowed('ls "$(dirname ~/docs/x)"')
 
 
+class RuleGPythonClientSend(Base):
+    """Issue 258: a Python Google client call to messages().send( or drafts().send( has no REST path in it, so it is a send by its own
+    spelling. An interpreter body or -c string that calls it is refused; a mention in text that is only written to a file still passes."""
+    CALL = "svc.users().messages().send(userId='me', body={}).execute()"
+
+    def test_a_heredoc_interpreter_call_is_refused(self):
+        for tag in ("'EOF'", '"EOF"', "EOF"):
+            for interp in ("python3 -I -", "python3 -", "python -", "python3.13 -I -"):
+                self.blocked("%s <<%s\n%s\nEOF" % (interp, tag, self.CALL), "G")
+
+    def test_the_call_spelled_other_ways_is_refused(self):
+        for call in ("svc.users().drafts().send(userId='me', body={'id': 'x'}).execute()",
+                     "svc . users ( ) . messages ( ) . send ( userId='me' )",
+                     "svc.users().messages()\\\n  .send(userId='me')",
+                     "(svc.users().messages()\n   .send(userId='me'))",
+                     "m = svc.users().messages()\nm.send(userId='me', body={}).execute()",
+                     "f = svc.users().messages().send\nf(userId='me')",
+                     "getattr(svc.users().messages(), 'send')(userId='me')",
+                     "svc.users().DRAFTS().Send(userId='me')"):
+            self.blocked("python3 -I - <<'EOF'\n%s\nEOF" % call, "G")
+
+    def test_getattr_unicode_and_node_spellings_are_refused(self):
+        # blind review of PR 259: the resource fetched by getattr, getattr on a split variable, a fullwidth letter, a Node call, a call built by name
+        for call in ("getattr(svc.users(), 'messages')().send(userId='me')",
+                     "getattr(svc.users(), \"drafts\")().send(userId='me')",
+                     "m = svc.users().messages()\ngetattr(m, 'send')(userId='me')",
+                     "svc.users().messages().ｓend(userId='me')",
+                     "svc.users().messages().ＳEND(userId='me')",
+                     "gmail.users.messages.send({userId: 'me'})",
+                     "from googleapiclient.discovery import build\nsvc = build('gmail', 'v1')\nr = getattr(svc.users(), 'mess' + 'ages')\ngetattr(r(), 'se' + 'nd')\nmessages = 1; send = 2"):
+            self.blocked("python3 -I - <<'EOF'\n%s\nEOF" % call, "G")
+        self.blocked("node - <<'EOF'\ngmail.users.drafts.send({userId: 'me'})\nEOF", "G")
+
+    def test_dash_c_string_calls_are_refused(self):
+        self.blocked("python3 -c \"svc.users().messages().send(userId='me').execute()\"", "G")
+        self.blocked("python3 -c 'svc.users().drafts().send(body={})'", "G")
+        self.blocked("python3 -c \"m = svc.users().messages()\nm.send(userId='me')\"", "G")
+
+    def test_other_interpreters_and_pipes_are_refused(self):
+        self.blocked("node - <<'EOF'\n%s\nEOF" % self.CALL, "G")
+        self.blocked("bash <<'EOF'\n%s\nEOF" % self.CALL, "G")
+        self.blocked("echo \"%s\" | python3 -" % self.CALL, "G")
+
+    def test_a_mention_in_text_that_is_only_stored_passes(self):
+        self.allowed("cat > /tmp/notes.md <<'EOF'\nThe tool never calls gmail.users.messages.send or svc.users().messages().send( itself.\nEOF")
+        self.allowed("gh issue create -R o/r --title t --body-file - <<'EOF'\nIt's refused when python calls .messages().send( or .drafts().send(.\nEOF")
+        self.allowed("git commit -F - <<'EOF'\nrule G: refuse the call svc.users().messages().send(\nEOF")
+        self.allowed("grep -n 'messages().send(' notes.md")
+
+    def test_ordinary_client_code_passes(self):
+        self.allowed("python3 -I - <<'EOF'\nprint(svc.users().messages().list(userId='me').execute())\nEOF")
+        self.allowed("python3 -I - <<'EOF'\nsvc.users().drafts().create(userId='me', body={}).execute()\nsock.sendall(b'x')\nEOF")
+        self.allowed("python3 -I - <<'EOF'\nsock.send(b'x')\nprint(svc.users().labels().list(userId='me').execute())\nEOF")
+        self.allowed("python3 -c 'print(1)'")
+
+    def test_a_messages_resource_and_a_send_in_one_body_is_refused_as_unclear(self):
+        # the call may be split over a variable the text check cannot follow, so a messages() or drafts() resource plus any .send( is refused
+        self.blocked("python3 -I - <<'EOF'\nsvc.users().drafts().create(userId='me', body={}).execute()\nsock.send(b'x')\nEOF", "G")
+
+    def test_the_old_refusals_still_hold(self):
+        for cmd in ("python3 -I - <<'EOF'\nrequests.post('https://gmail.googleapis.com/gmail/v1/users/me/messages/send')\nEOF",
+                    "bash <<EOF\ncurl -X POST https://gmail.googleapis.com/gmail/v1/users/me/drafts/send\nEOF",
+                    "curl --data @- https://gmail.googleapis.com/gmail/v1/users/me/messages/send <<EOF\n{}\nEOF",
+                    "python3 -I - <<'EOF'\nopen('/home/u/.config/afa/gmail/token.json').read()\nEOF",
+                    "cat ~/.config/afa/gmail/token.json"):
+            self.blocked(cmd, "G")
+
+
 class RuleGJqFilterBrackets(Base):
     """Issue 260: a gh -q jq filter such as '.[]|[.name]|@tsv' starts with a dot and holds [. (not a collating symbol), and was refused as a glob
     the guard could not translate. A real collating symbol or equivalence class is still refused, and so is a bracket that really reaches the folder."""
@@ -1217,6 +1285,63 @@ class RuleGJqFilterBrackets(Base):
             r = subprocess.run(["bash", "-c", "cd %s && shopt -s nullglob && for f in %s; do printf '%%s\\n' \"$f\"; done" % (shlex.quote(t.name), pat)],
                                capture_output=True, text=True)
             self.assertEqual(ours, set(r.stdout.split("\n")) - {""}, pat)
+
+
+HUB_NOTE_CMD = r'''cd ~/repos && S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000000/scratchpad && python3 ~/.claude/scripts/session_prime_facts.py > $S/facts2.txt 2>&1; head -2 $S/facts2.txt | cut -c1-120; cat > $S/note.md <<'EOF'
+**Tower follow-ups (NCC-74656)**
+- ScriptHammer 1517, 1518 and 1525 merged on 24/24 green with 0 skipped; 1526, 1509 and 1513 queued 10 minutes apart; 1515 and 1522 wait for Sunday afternoon.
+- #1532 item 3: Jonathan picked all rights reserved; beatboard PR 37 merged. #1532 stays open for item 2 (Hatch).
+- openclaw PR 7 merged: the receptionist model runs CPU only; the music studio has the graphics card to itself.
+- On Jonathan's word, the two model releases (tower-bandwagon-meshy7-glb-2026-11-20, tower-robot-horses-glb-2026-11-20) and their tags were deleted after the tower copies passed sha256sum -c.
+- Boss theme: no join passes the CLAP bar yet; album-studio runs up to 3 more rounds, bar unchanged.
+EOF
+python3 ~/.claude/scripts/session_prime_facts.py --post --note $S/note.md 2>&1 | tail -3 | cut -c1-200'''
+
+HUB_BODY_CMD = r'''cd ~/repos && S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000000/scratchpad && u=$(gh issue view 1 -R o/r --json updatedAt -q .updatedAt) && [ "$u" = "2026-11-27T14:44:26Z" ] && gh issue view 1 -R o/r --json body -q .body > $S/body.md && python3 - "$S/body.md" <<'EOF'
+import sys
+p=sys.argv[1]; s=open(p).read()
+old_start="Open ~/.claude/state/hub-handoff-2026-11-27-0922.md first."
+i=s.index(old_start); j=s.index("\n",i)
+new=("Open ~/.claude/state/hub-handoff-2026-11-27-1018.md first. Merge the next green PRs as it lists them (1526, 1509, 1513, 10 minutes apart), "
+     "give Jonathan the listen card only when a join passes all five checks, then type \"STUDIO FREE, resume batch 2\" into sung-jingle, "
+     "and when rule-g says the fix is installed, tell sh-band-page to rerun its Pages read.")
+s=s[:i]+new+s[j:]
+open(p,'w').write(s)
+EOF
+gh issue edit 1 -R o/r --body-file $S/body.md >/dev/null && echo edited || echo "NOT edited (issue moved or error)"'''
+
+
+class RuleGHeredocFeedsOnlyItsOwnCommand(Base):
+    """Issue 260 (the hub's second case): a heredoc feeds only the command it is written on, so other commands on the same line (cd, a variable
+    assignment, a script run, head) do not turn a text-storing heredoc into a shell body. The words in its text are still searched for the folder."""
+
+    def test_the_hubs_note_command_passes(self):
+        self.allowed(HUB_NOTE_CMD)
+
+    def test_the_hubs_earlier_python_body_command_passes(self):
+        self.allowed(HUB_BODY_CMD)
+
+    def test_a_storing_heredoc_after_other_commands_with_an_apostrophe_passes(self):
+        for c in ("true && cat > /tmp/x <<'EOF'\nJonathan's word\nEOF", "echo hi; cat > /tmp/x <<'EOF'\nJonathan's word\nEOF",
+                  "S=/tmp/x && cat > $S/n <<'EOF'\nJonathan's word\nEOF\nls /tmp",
+                  "cd ~/repos && git commit -q -F - <<'EOF'\nthe owner's fix\nEOF"):
+            self.allowed(c)
+
+    def test_a_heredoc_that_feeds_a_shell_is_still_read_as_shell(self):
+        for c in ("true && bash <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "cd /tmp && sh <<EOF\ncat ~/.config/afa/gmail/token.json\nEOF",
+                  "true && python3 - <<'EOF'\nopen('/home/u/.config/afa/gmail/token.json').read()\nEOF",
+                  "x=1; bash <<'EOF'\nit's\nEOF"):
+            self.blocked(c, "G")
+
+    def test_the_folder_name_in_stored_text_after_other_commands_is_still_refused(self):
+        self.blocked("true && cat > /tmp/x <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "G")
+        self.blocked("cd ~/repos && S=/tmp/x && cat > $S/n <<'EOF'\nsend it with users/me/messages/send\nEOF", "G")
+
+    def test_a_command_name_that_may_be_redefined_keeps_the_strict_reading(self):
+        for c in ("cat() { bash; }; true && cat <<'EOF'\nit's\nEOF", "alias cat=bash; true && cat <<'EOF'\nit's\nEOF",
+                  "PATH=/tmp/evil:$PATH; true && cat <<'EOF'\nit's\nEOF", "hash -p /tmp/evil/sh cat; true && cat <<'EOF'\nit's\nEOF",
+                  "for i in 1 2; do true && cat <<'EOF'\nit's\nEOF\ncat() { bash; }\ndone"):
+            self.blocked(c, "G")
 
 
 class WriteAndEdit(unittest.TestCase):

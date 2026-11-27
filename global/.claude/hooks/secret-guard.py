@@ -14,6 +14,7 @@ import shlex
 import stat
 import sys
 import time
+import unicodedata
 
 WORD = (r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|apikey|auth(?!or(?!iz))"
         r"|credential|private[_-]?key|client[_-]?secret|session[_-]?(?:id|key|token|secret|cookie)|cookie|bearer|webhook)")
@@ -289,6 +290,19 @@ def split_segments(cmd):
 # viewer or a plain existence check), and a send address is refused wherever it is written out.
 GMAIL_DIR = re.compile(r"(?<![\w-])afa/gmail(?![\w-])|(?<![\w-])gmail/(?:token|client|calendar-token)[\w.-]*\.json")
 GMAIL_SEND = re.compile(r"(?:messages|drafts)/(?:[\w-]+/)?send(?![\w-])|(?:messages|drafts)(?:/[\w-]+)?:send(?![\w-])", re.I)
+# Claude_Commandz issue 258: a Python Google client spells the same action as svc.users().messages().send(...) (or .drafts().send), a Node one
+# as gmail.users.messages.send(...), with no REST path in it. GMAIL_SEND_CALL is the call across spaces and rows (the resource fetched by getattr
+# too, the method held as a reference or fetched by getattr). A messages() or drafts() resource and a .send somewhere in the same text
+# (GMAIL_RESOURCE_CALL, GMAIL_SEND_NAME), or a Google client marker with the words messages (or drafts) and send (GMAIL_CLIENT, GMAIL_RESOURCE_WORD,
+# GMAIL_SEND_WORD), cover the call split over a variable or built by name; all of those refuse as unclear. Letters are NFKC-folded first, as Python
+# does for identifiers (a fullwidth s in .send runs as .send).
+GMAIL_SEND_CALL = re.compile(r"(?<![\w-])(?:messages|drafts)\s*\)?\s*(?:\(\s*\))?\s*\.\s*send(?![\w-])|"
+                             r"(?<![\w-])(?:messages|drafts)\s*\)?\s*\(\s*\)\s*,\s*send(?![\w-])", re.I)
+GMAIL_RESOURCE_CALL = re.compile(r"(?<![\w-])(?:messages|drafts)\s*\)?\s*\(\s*\)", re.I)
+GMAIL_SEND_NAME = re.compile(r"[.,]\s*send(?![\w-])", re.I)
+GMAIL_CLIENT = re.compile(r"googleapiclient|googleapis|users\s*\(|build\s*\(\s*gmail", re.I)
+GMAIL_RESOURCE_WORD = re.compile(r"(?<![\w-])(?:messages|drafts)(?![\w-])", re.I)
+GMAIL_SEND_WORD = re.compile(r"(?<![\w-])send(?![\w-])", re.I)
 GMAIL_PLAIN = {"ls", "stat", "test", "[", "[[", "realpath", "readlink"}  # none of these reads a file's content (wc, du and file can)
 GMAIL_SCRIPTS = ("~/.claude/scripts/redact_view.py", "~/.claude/scripts/gmail_api.py")  # the only scripts that may run against the folder
 GMAIL_QUOTE_WORDS = {"grep", "rg", "git"}  # a quoted mention (a search pattern, a commit message) is not a call
@@ -334,6 +348,13 @@ def _ansi_c_decode(m):
             out.append(_ANSI_ESC.get(d, d))
             i += 2
     return "".join(out)
+
+
+def names_send(norm):
+    """True when text (already through gmail_norm) writes a Gmail send address, or calls a Google client's send (issue 258)."""
+    norm = unicodedata.normalize("NFKC", norm)
+    return bool(GMAIL_SEND.search(norm) or GMAIL_SEND_CALL.search(norm) or (GMAIL_RESOURCE_CALL.search(norm) and GMAIL_SEND_NAME.search(norm))
+                or (GMAIL_CLIENT.search(norm) and GMAIL_RESOURCE_WORD.search(norm) and GMAIL_SEND_WORD.search(norm)))
 
 
 def gmail_norm(text):
@@ -706,6 +727,28 @@ def _line_runs_no_shell(line):
     return True
 
 
+NAME_CHANGERS = re.compile(r"(?:^|[\s;&|({])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LIBRARY_PATH|SHELLOPTS|BASHOPTS|BASH_CMDS)=|\bhash\b|\bunset\b"
+                           r"|[\w.-]+\s*\(\s*\)|\b(?:coproc|select|case|for|while|until)\b")  # a loop that began earlier could run a later redefinition
+
+
+def _names_cannot_change(cmd):
+    """True when no part of the command can redefine a command name: no alias, function, eval, source, builtin toggle, search-path or hash change
+    (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup). Searched with quotes and backslashes removed too."""
+    flat = re.sub(r"[\"'\\]", "", cmd)
+    return not (_echo_shadowed(cmd) or NAME_CHANGERS.search(cmd) or NAME_CHANGERS.search(flat))
+
+
+def _own_heredoc_segment(text, op):
+    """The one command segment of this logical line that holds the heredoc operator `op`, or None when it is not exactly one, or when anything
+    follows `op` on the line: a pipe (`cat <<'EOF' | sh` feeds a shell), a descriptor redirect (`2>&3`, which the segment split cuts in two)
+    or another command. Only a heredoc that ends its line is read by the command it is written on alone."""
+    at = text.find(op)
+    if at < 0 or text[at + len(op):].strip():
+        return None
+    segs = [s for s in split_segments(text) if op in s]
+    return segs[0] if len(segs) == 1 else None
+
+
 def split_data_heredocs(cmd):
     """Return (code, bodies, opaque, send_code):
       code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
@@ -791,10 +834,20 @@ def split_data_heredocs(cmd):
             if not pending:
                 emit(text, echo_ok and _echo_line_is_data(text))
                 continue
-            data_line = _heredoc_line_is_data(text)
-            no_shell = _line_runs_no_shell(text)
+            line_data = _heredoc_line_is_data(text)
+            line_no_shell = _line_runs_no_shell(text)
             emit(text)
-            for word, tabs, quoted, _op in pending:
+            for word, tabs, quoted, op in pending:
+                data_line, no_shell = line_data, line_no_shell
+                if not (data_line and no_shell):
+                    # Issue 260: a heredoc feeds only the command it is written on, so `cd x && S=y && python3 a.py > f; cat > $S/n <<'EOF'` is
+                    # judged by `cat > $S/n <<'EOF'` alone. The other commands on the line are still checked as code. Only when nothing in the
+                    # command lines so far (heredoc bodies left out) could make cat (or any name) something else: no alias, function, eval, PATH
+                    # or hash change. A name changed on a later line cannot reach a command that already ran.
+                    own = _own_heredoc_segment(text, op) if _names_cannot_change("".join(code)) else None
+                    if own is not None:
+                        data_line = data_line or _heredoc_line_is_data(own)
+                        no_shell = no_shell or _line_runs_no_shell(own)
                 body, found, term = [], False, ""
                 while i < n:
                     j = cmd.find("\n", i)
@@ -851,10 +904,12 @@ def _opaque_use(opaque):
                 norm = gmail_norm(seg)
                 if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
                     return "folder"
-                if GMAIL_SEND.search(norm):
+                if names_send(norm):
                     return "send"
         if _body_path_runs_hit(body):
             return "folder"
+        if names_send(gmail_norm(str(body))):  # the whole body at once: a call split over rows (a chain inside parentheses) is one call
+            return "send"
         if isinstance(body, ShellBody):
             hit = _shell_body_use(body)
             if hit:
@@ -885,7 +940,7 @@ def _shell_body_use(body):
         norm = gmail_norm(seg)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg):
             return "folder"
-        if GMAIL_SEND.search(norm):
+        if names_send(norm):
             return "send"
     return _opaque_use(opaque)
 
@@ -926,7 +981,7 @@ def gmail_credential_use(cmd):
     if hit:
         return hit
     for seg in split_segments(send_cmd):
-        if GMAIL_SEND.search(gmail_norm(seg)):
+        if names_send(gmail_norm(seg)):
             words = gmail_words(seg) or []
             quoted = bool(words and os.path.basename(words[0]) in GMAIL_QUOTE_WORDS and "$(" not in seg and "`" not in seg)
             if quoted and os.path.basename(words[0]) == "git":  # git runs aliases and config: only a read-only subcommand counts, never with -c or GIT_ variables
