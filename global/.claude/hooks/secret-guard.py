@@ -374,12 +374,140 @@ def gmail_resolves_into_folder(seg):
     return False
 
 
+# Claude_Commandz issue 228: the body of a quoted heredoc (<<'EOF', <<"EOF", <<\EOF) is not read by the shell, so it is data, not commands, when the
+# command line it feeds only stores or posts text. Word-splitting it as shell failed on any lone apostrophe (and the guard refuses what it can't
+# split), and a send path in a sentence was read as a send. Such a body is taken out of the text that is word-split and checked for a send address;
+# it is still searched for the token folder's name. The command it feeds stays checked in full whenever ANY command on its line is not on this short
+# list (an interpreter, a shell, curl, xargs, eval, a path-qualified name, a variable assignment in front), and whenever anything is unclear.
+HEREDOC_DATA_WORDS = {"cat", "tee", "wc", "uniq", "head", "tail", "tr", "cut"}  # not sort: --compress-program=sh pipes its input through a shell
+HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
+HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
+
+
+def _heredoc_line_is_data(line):
+    """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
+    if re.search(r">\|?[ \t]*[^\s;&|<>]*[*?\[{$]", line):
+        return False  # a redirect target built from a glob or a variable can land on /dev/fd or /proc
+    flat = re.sub(r"[\"'\\]", "", line)  # quotes and backslashes inside a redirect target do not hide its real path
+    if "$(" in line or "`" in line or ">(" in flat or "<(" in flat or re.search(r">&\s*(?![12](?![\w$]))|&>|\{\w+\}\s*[<>]|/dev/|/proc/", flat):
+        return False  # a substitution, or a file descriptor, device or proc path that may lead to a shell
+    segs = [s for s in split_segments(line) if s.strip()]
+    if not segs:
+        return False
+    for seg in segs:
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if not words or re.match(r"^[A-Za-z_]\w*=", words[0]) or "/" in words[0]:
+            return False
+        first = words[0]
+        if first == "tee" and any(re.search(r"[*?\[{$]", w) for w in words[1:]):
+            return False  # tee writes to the files it is given: a glob or a variable there can land on /dev/fd or /proc
+        if first in HEREDOC_DATA_WORDS:
+            continue
+        if first == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH:
+            continue
+        if first == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING and not GMAIL_ENV_INJECT.search(seg):
+            continue
+        return False
+    return True
+
+
+def split_data_heredocs(cmd):
+    """Return (code, bodies): cmd with the bodies (and terminator lines) of data heredocs taken out, and those bodies.
+    Any doubt (an unclosed quote, a substitution, a heredoc with no terminator, $'...') returns (cmd, []), so nothing is loosened."""
+    n, i = len(cmd), 0
+    code, bodies, line, pending = [], [], [], []
+    q = None
+    while i < n:
+        c = cmd[i]
+        if q:
+            line.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                line.append(cmd[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            line.append(c + cmd[i + 1])
+            i += 2
+            continue
+        if c == "`" or (c == "$" and i + 1 < n and cmd[i + 1] in "('\"{"):
+            return cmd, []
+        if c in "'\"":
+            q = c
+        elif c == "#" and (not line or line[-1][-1:] in " \t;&|()\n"):
+            j = cmd.find("\n", i)
+            j = n if j < 0 else j
+            line.append(cmd[i:j])
+            i = j
+            continue
+        elif c == "<" and cmd.startswith("<<<", i):
+            line.append("<<<")
+            i += 3
+            continue
+        elif c == "<" and cmd.startswith("<<", i):
+            m = HEREDOC_OP.match(cmd, i)
+            if not m or (m.end() < n and cmd[m.end()] not in " \t\n;&|<>()"):
+                return cmd, []  # a word glued to the closing quote (<<'EOF'x) is one terminator word for bash, not EOF
+            word = m.group(2) or m.group(3) or m.group(4) or m.group(5)
+            if "\\" in word or "$" in word:
+                return cmd, []  # bash's quote removal on such a delimiter is not reproduced here
+            pending.append((word, bool(m.group(1)), bool(m.group(2) or m.group(3) or m.group(4)), m.group(0)))
+            line.append(m.group(0))
+            i = m.end()
+            continue
+        elif c == "\n":
+            text = "".join(line) + "\n"
+            line = []
+            i += 1
+            if not pending:
+                code.append(text)
+                continue
+            data_line = _heredoc_line_is_data(text)
+            code.append(text)
+            for word, tabs, quoted, _op in pending:
+                body, found, term = [], False, ""
+                while i < n:
+                    j = cmd.find("\n", i)
+                    j = n if j < 0 else j
+                    row = cmd[i:j]
+                    i = min(j + 1, n)
+                    if (row.lstrip("\t") if tabs else row) == word:
+                        found, term = True, row
+                        break
+                    body.append(row)
+                if not found:
+                    return cmd, []
+                if quoted and data_line:
+                    bodies.append("\n".join(body))
+                else:
+                    code.append("".join(r + "\n" for r in body) + term + "\n")
+            pending = []
+            continue
+        line.append(c)
+        i += 1
+    if q or pending:
+        return cmd, []
+    code.append("".join(line))
+    return "".join(code), bodies
+
+
 def gmail_credential_use(cmd):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
-    segs = split_segments(cmd)
     whole = gmail_norm(cmd)
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
+    cmd, bodies = split_data_heredocs(cmd)
+    for body in bodies:  # a data body is not split into words, but a body that names the token folder is still refused
+        norm = gmail_norm(body)
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
+            return "folder"
+    segs = split_segments(cmd)
     for seg in segs:
         norm = gmail_norm(seg)
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)

