@@ -372,6 +372,131 @@ def gmail_segment_ok(seg):
     return False
 
 
+# Claude_Commandz issue 238: Python's glob does not expand what bash expands before it globs: brace lists ({c,x}, {1..3}) and POSIX classes
+# ([[:alpha:]]). bash_glob does both, bounded, and yields None (the caller refuses) for any form it does not understand.
+POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "lower": "a-z", "upper": "A-Z", "xdigit": "0-9a-fA-F",
+                 "word": "a-zA-Z0-9_", "punct": ":-@{-~_^!-/", "space": " \t\n", "blank": " \t", "print": " -~", "graph": "\"-~!", "cntrl": "\x00-\x1f"}
+BRACE_LIMIT = 256
+
+
+def _brace_expand(s, budget):
+    """The bash brace expansion of s as a list, or None when it holds a form not understood or yields more than budget words."""
+    depth, start = 0, None
+    for i, c in enumerate(s):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                inner = s[start + 1:i]
+                parts, d, cur = [], 0, []
+                for ch in inner:
+                    if ch == "{":
+                        d += 1
+                    elif ch == "}":
+                        d -= 1
+                    if ch == "," and d == 0:
+                        parts.append("".join(cur))
+                        cur = []
+                    else:
+                        cur.append(ch)
+                parts.append("".join(cur))
+                if len(parts) == 1:
+                    seq = re.fullmatch(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])", inner)
+                    if seq:
+                        if seq.group(1) is not None:
+                            a, b = int(seq.group(1)), int(seq.group(2))
+                            if abs(b - a) >= budget:
+                                return None
+                            parts = [str(n) for n in (range(a, b + 1) if a <= b else range(a, b - 1, -1))]
+                        else:
+                            a, b = ord(seq.group(3)), ord(seq.group(4))
+                            parts = [chr(n) for n in (range(a, b + 1) if a <= b else range(a, b - 1, -1))]
+                    elif ".." in inner:
+                        return None  # a sequence with a step or padding: not understood
+                    else:
+                        rest = _brace_expand(s[i + 1:], budget)  # a lone {word} is literal text in bash
+                        return None if rest is None else [s[:i + 1] + r for r in rest]
+                tails = _brace_expand(s[i + 1:], budget)
+                if tails is None:
+                    return None
+                heads = []
+                for p in parts:
+                    sub = _brace_expand(p, budget)
+                    if sub is None:
+                        return None
+                    heads += sub
+                if len(heads) * len(tails) > budget:
+                    return None
+                return [s[:start] + h + t for h in heads for t in tails]
+    return [s]
+
+
+def bash_glob(pattern):
+    """Yield every file the shell's glob would give for pattern after brace expansion and POSIX classes, and None once for a form not understood."""
+    words = _brace_expand(pattern, BRACE_LIMIT)
+    if words is None:
+        yield None
+        return
+    for w in words:
+        w = os.path.expanduser(gmail_norm(w))  # bash does tilde and $HOME after the braces: {~,x}/... and $HO{M,x}E/... are the home folder
+        w = None if len(w) > 2000 or w.count("[") > 64 else _bracket_translate(w)  # a word this long is not a path to read: refuse, and keep the hook inside its time limit
+        if w is None:
+            yield None
+            return
+        for m in glob.iglob(w):
+            yield m
+
+
+def _bracket_translate(w):
+    """w with every bracket expression written the way Python's glob reads it (a ^ first is !, a POSIX class is its characters), or None
+    for a form not translated exactly: an equivalence class [=x=], a collating symbol [.x.] or an unknown class name. A [:name:] outside
+    a bracket is just an ordinary bracket and stays as it is."""
+    out, i, n = [], 0, len(w)
+    while i < n:
+        c = w[i]
+        if c != "[":
+            out.append(c)
+            i += 1
+            continue
+        j = i + 1
+        neg = j < n and w[j] in "!^"
+        if neg:
+            j += 1
+        body, wide = [], False
+        if j < n and w[j] == "]":  # a ] first is a letter
+            body.append("]")
+            j += 1
+        while j < n and w[j] != "]":
+            if w[j] == "[" and j + 1 < n and w[j + 1] in "=.":
+                return None
+            if w[j] == "[" and j + 1 < n and w[j + 1] == ":":
+                end = w.find(":]", j + 2)
+                if end < 0:
+                    body.append(w[j])
+                    j += 1
+                    continue
+                name = w[j + 2:end]
+                if name not in POSIX_CLASSES or (body and body[-1] == "-") or w[end + 2:end + 3] == "-":
+                    return None  # an unknown name, or a class standing at the end of a range: not translated exactly
+                body.append(POSIX_CLASSES[name])
+                if name in ("punct", "graph", "print", "cntrl"):
+                    wide = True  # these hold characters a Python bracket cannot spell ( ] \ ` and control bytes ): the whole bracket becomes ?, which can only match more
+                j = end + 2
+                continue
+            body.append(w[j])
+            j += 1
+        if j >= n:  # no closing ]: the [ is an ordinary letter
+            out.append("[")
+            i += 1
+            continue
+        out.append("?" if wide else "[" + ("!" if neg else "") + "".join(body) + "]")
+        i = j + 1
+    return "".join(out)
+
+
 def gmail_resolves_into_folder(seg, tolerant=False):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
@@ -422,9 +547,9 @@ def gmail_resolves_into_folder(seg, tolerant=False):
                     return True
                 if GMAIL_GLOB.search(cand):
                     n = 0
-                    for m in glob.iglob(os.path.expanduser(gmail_norm(cand))):
+                    for m in bash_glob(os.path.expanduser(gmail_norm(cand))):
                         n += 1
-                        if n > 500 or inside(m):  # too many matches to check in the hook's time: refuse rather than guess
+                        if m is None or n > 500 or inside(m):  # too many matches to check in the hook's time, or a form not understood: refuse rather than guess
                             return True
     return False
 
