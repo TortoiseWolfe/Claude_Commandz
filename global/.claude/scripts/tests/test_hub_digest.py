@@ -1146,7 +1146,11 @@ class LiveState(unittest.TestCase):
         page = self.page()
         for line in ("sh-secret: WORKING (fix pushed, review running)", "x-token: DONE items 1 (all proved)",
                      "sh-password: BLOCKED (waits on the hub)", "my-api-key: STEP-FOR-JONATHAN https://example.test/x",
-                     "web-api-key: QUEUE EMPTY items 3"):
+                     "web-api-key: QUEUE EMPTY items 3",
+                     # the Lanes running line, a failed lane, a fresh hand-off and the empty-report fallback
+                     "sh-secret: working, report written", "sh-secret: idle, report stale", "sh-token: FAILED 3:00 PM | tests red",
+                     "sh-secret: (Done: merged it | Next: open the PR) WORKING (x)", "sh-secret: report written",
+                     "x-token: MORNING FILE READY", "x-token: TOWER-STEP see the card", "sh-password: STEP-FOR-JONATHAN https://example.test/x"):
             probs = hd.live_problems(ROADMAP, page + "\n- 10:00 AM " + line + "\n")
             self.assertEqual([p for p in probs if "secret" in p], [], line)
             self.assertEqual(hd.scrub(line), line)
@@ -1155,7 +1159,9 @@ class LiveState(unittest.TestCase):
         page = self.page()
         value = "".join(["hunter", "2abc"])  # built at run time: a made-up value
         for line in (f"password: {value}", f"secret={value}", f"api_key: {value}", f"my-secret: {value}", f"x-token: {value}",
-                     f"sh-secret: WORKING{value}", f"sh-password: {value} WORKING", "see https://example.test/page?token=" + value):
+                     f"sh-secret: WORKING{value}", f"sh-password: {value} WORKING", "see https://example.test/page?token=" + value,
+                     f"x-secret: DONE-{value}", f"x-token: DONE={value}", f"x-api-key: QUEUE_{value}", f"x-token: WORKING.{value}",
+                     "x-secret: correcthorsebatterystaple"):
             probs = hd.live_problems(ROADMAP, page + "\n" + line + "\n")
             self.assertTrue(any("secret" in p for p in probs), line)
             self.assertNotIn(value, hd.scrub(line), line)
