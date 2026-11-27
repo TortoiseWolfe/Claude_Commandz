@@ -153,7 +153,7 @@ need peer_poll.handle.prompt 'Never call label_message' 'handle prompt: no label
 check "check prompt no longer says to never look for [MUSE>CC]" '! grep -q "Never look for" "$D/peer_poll.check.prompt"'
 
 # Issue 143: a note with attached files is never recorded as processed (NX-01's sweep deletes from that record, and the files
-# go with the note: 19 and 23 Nov 2026). The tower cannot see attachments, so it queues the note for NX-01 instead.
+# go with the note: 19 and 23 Nov 2026). The draft read leaves attachments out, so it queues the note for NX-01 instead.
 rec files r-9208119623742241727
 check "files: records the id in peer-files-waiting.txt" 'grep -qxF r-9208119623742241727 "$R/peer-files-waiting.txt"'
 check "files: does NOT touch the processed record" '! grep -q r-9208119623742241727 "$R/peer-notes-processed.txt"'
@@ -198,13 +198,18 @@ check "usage names the files verb" '[ -n "$(rec nonsense 2>&1 | grep "files <id>
 need peer_poll.handle.prompt 'peer_poll_record.sh files <id>' 'handle prompt: a note with files is recorded with the files verb'
 need peer_poll.handle.prompt 'files waiting: ask NX-01 to pull' 'handle prompt: and queued as "files waiting: ask NX-01 to pull"'
 need peer_poll.handle.prompt 'Do NOT run peer_poll_record.sh processed for this note' 'handle prompt: never processed for a note with files'
-# Issue 232: a note that only talks about files (a status ask naming clip.mp4) is not a note with files; only an attachment field, a Drive link or
-# a sentence saying files are attached counts.
-need peer_poll.handle.prompt 'never because its text talks about files' 'handle prompt: talk about files is not evidence (232)'
-need peer_poll.handle.prompt 'a status ask that lists file names is not a note with files' 'handle prompt: a status ask that names files is not a note with files (232)'
-need peer_poll.handle.prompt 'non-empty attachments or attachmentIds field' 'handle prompt: a real attachment is evidence (232)'
-need peer_poll.handle.prompt 'drive.google.com' 'handle prompt: a Drive link is evidence (232)'
-need peer_poll.handle.prompt 'handled like any other note (steps 2 and 3), however many files it mentions' 'handle prompt: no evidence means an ordinary note (232)'
+# Issue 232: a note is a note with files only when Gmail's own search (has:attachment / has:drive) returned it, never because its text talks
+# about files. The draft read leaves attachments out (proved 27 Nov 2026), so has-files takes the search result's ids.
+S=r-1803834663756677428   # the 26 Nov status ask: body names Brass-turntable.mp4 and Brass-still.png, no attachment
+check "has-files: the 232 note (talks about files, not in the has:attachment result) gets no files label" '[ "$(rec has-files $S r-111111111111 r-222222222222)" = "no files" ] && ! rec has-files $S r-111111111111 >/dev/null'
+check "has-files: an empty search result means no files" '! rec has-files $S >/dev/null'
+check "has-files: the same note found by the has:attachment search gets the files label" '[ "$(rec has-files $S r-111111111111 $S)" = "files" ] && rec has-files $S $S >/dev/null'
+check "has-files: an id that only contains the note id is not a match" '! rec has-files r-1803834663756677428 r-18038346637566774289 >/dev/null'
+check "has-files: refuses a bad id" '! rec has-files "bad id;rm" x 2>/dev/null'
+need peer_poll.handle.prompt 'has:attachment OR has:drive' 'handle prompt: evidence is the has:attachment / has:drive search (232)'
+need peer_poll.handle.prompt 'peer_poll_record.sh has-files <id>' 'handle prompt: step 1b calls has-files (232)'
+need peer_poll.handle.prompt 'the words of the note never do' 'handle prompt: the words of a note are never evidence (232)'
+need peer_poll.handle.prompt 'treat every note of that run as a note with files' 'handle prompt: a failed search holds the notes (232)'
 check "handle prompt: file names no longer count as files by themselves" '! grep -q "or list file names" "$D/peer_poll.handle.prompt" && ! grep -q "treat it as if it does" "$D/peer_poll.handle.prompt"'
 need peer_poll.handle.prompt '(Never for a note with files' 'handle prompt: step 2 points back at the files rule'
 check "handle prompt: the files check comes before the processed step" \
