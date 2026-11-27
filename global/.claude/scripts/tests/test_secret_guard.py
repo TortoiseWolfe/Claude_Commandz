@@ -139,6 +139,8 @@ class RuleAClosingQuote(Base):
                   'python3 -c \'print(open("settings.txt").read().count("API_TOKEN="))\' ; echo "x y"',
                   'if [ "$l" = "SECRET_TOKEN=" ]; then echo "same line"; fi',
                   'x = "MY_TEST_PASSWORD="+value_here; echo "a b"',
+                  'x = "MY_TEST_PASSWORD=".join(parts); echo "a b"',
+                  'echo ' + "y" * 60 + ' "MY_TEST_PASSWORD=" ; echo "a b"',
                   'grep -e "export MY_TEST_PASSWORD=" settings.txt && echo "done now"']:
             self.allowed(c)
 
@@ -150,7 +152,11 @@ class RuleAClosingQuote(Base):
     def test_a_value_glued_to_the_closing_quote_still_blocks(self):
         for c in ['export "MY_TEST_PASSWORD="hunter2pass', 'export "MY_TEST_PASSWORD=""hunter2pass"',
                   "export 'MY_TEST_PASSWORD='hunter2pass", "export \"MY_TEST_PASSWORD=\"'hunter2pass'",
-                  'echo "a"MY_TEST_PASSWORD="hunter2pass"', 'echo "a"MY_TEST_PASSWORD=" hunter2pass"']:
+                  'echo "a"MY_TEST_PASSWORD="hunter2pass"', 'echo "a"MY_TEST_PASSWORD=" hunter2pass"',
+                  'export "MY_TEST_PASSWORD="_s3cretValue && echo "ok"', 'docker run -e "API_KEY="-k3yValue99 app "x"',
+                  'export "MY_TEST_PASSWORD="*hunter2pass && echo "ok"', 'echo "ok"; ' + "x" * 60 + ' "MY_TEST_PASSWORD="hunter2pass',
+                  'export "MY_TEST_PASSWORD="!hunter2pass', 'export "MY_TEST_PASSWORD="@hunter2pass', 'export "MY_TEST_PASSWORD="#hunter2pass',
+                  'export "MY_TEST_PASSWORD="%hunter2pass', 'export "MY_TEST_PASSWORD="=hunter2pass']:
             self.blocked(c, "A")
 
     def test_a_real_assignment_after_the_skipped_name_still_blocks(self):
