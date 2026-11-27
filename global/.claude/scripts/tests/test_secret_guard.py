@@ -1015,7 +1015,8 @@ class RuleGAliasQuoteState(Base):
         for head in ("shopt -s expand_alia\"\"ses\nal\"\"ias x='echo \"'\n", "al\\ias x='echo \"'\n", "al''ias x='echo \"'\n",
                      "set -o posix\nal\"\"ias x='echo \"'\n", "set -o posix\na=ali b=as; $a$b x='echo \"'\n", "a=alias\n$a x='echo \"'\n",
                      "a=ali b=as\n\"$a$b\" x='echo \"'\n", "a=ali b=as; { $a$b x='echo \"'; }\n", "a=ali b=as; if true; then $a$b x='echo \"'; fi\n",
-                     "a=ali b=as; time $a$b x='echo \"'\n"):
+                     "a=ali b=as; time $a$b x='echo \"'\n", "b=as; al$b x='echo \"'\n", "`echo alias` x='echo \"'\n", "{alias,x} x='echo \"'\n",
+                     "a=ali b=as; if $a$b x='echo \"'; then :; fi\n", "a=ali b=as; while $a$b x='echo \"'; do break; done\n"):
             self.blocked(head + tail, "G")
 
     def test_an_allowlisted_word_is_no_exemption_when_an_alias_can_exist(self):

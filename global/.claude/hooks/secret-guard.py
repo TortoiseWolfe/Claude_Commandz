@@ -300,7 +300,8 @@ ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand
 # ALIAS_DEFINER is also searched with quotes and backslashes removed (al""ias), and with _echo_shadowed (set -o posix, shopt, builtin, command);
 # a command word that starts with a variable ($a$b x=...) can build the word alias at run time. The dot-source alternative also matches
 # find . -name x: that only widens the quote-blind pass, which refuses any piece that names or globs into the token folder.
-VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n({!]|(?<![\w.-])(?:then|do|else|elif|time))[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*\$")
+VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n({!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*[\w.-]*[$`{]")
+# the same, widened after the second security scan: any command word that holds a $, a backtick or a brace (al$b, `echo alias`, {ali,as}) can build the word alias
 # Security scan of the 241 fix: a function (ls() { cat "$@"; }), hash, export and a changed PATH or ENV also make a command word run something else.
 NAME_SHADOW = re.compile(r"[\w.-]+[ \t]*\([ \t]*\)|(?<![\w.-])(?:hash|export|enable|unalias)(?![\w-])|(?<![\w-])(?:PATH|ENV|BASH_FUNC\w*)=")
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
