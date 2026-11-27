@@ -1150,7 +1150,10 @@ class LiveState(unittest.TestCase):
                      # the Lanes running line, a failed lane, a fresh hand-off and the empty-report fallback
                      "sh-secret: working, report written", "sh-secret: idle, report stale", "sh-token: FAILED 3:00 PM | tests red",
                      "sh-secret: (Done: merged it | Next: open the PR) WORKING (x)", "sh-secret: report written",
-                     "x-token: MORNING FILE READY", "x-token: TOWER-STEP see the card", "sh-password: STEP-FOR-JONATHAN https://example.test/x"):
+                     "x-token: MORNING FILE READY", "x-token: TOWER-STEP see the card", "sh-password: STEP-FOR-JONATHAN https://example.test/x",
+                     # lines the digest builds itself: a hand-off summary, a state word then ":" or "|", a heading fallback
+                     "sh-secret: (Next: open the PR) WORKING", "sh-secret: WORKING: fixing tests", "x-token: DONE | merged",
+                     "x-token: FAILED: exit 1", "x-token: Summary of changes", "sh-secret: Report"):
             probs = hd.live_problems(ROADMAP, page + "\n- 10:00 AM " + line + "\n")
             self.assertEqual([p for p in probs if "secret" in p], [], line)
             self.assertEqual(hd.scrub(line), line)
@@ -1165,6 +1168,35 @@ class LiveState(unittest.TestCase):
             probs = hd.live_problems(ROADMAP, page + "\n" + line + "\n")
             self.assertTrue(any("secret" in p for p in probs), line)
             self.assertNotIn(value, hd.scrub(line), line)
+
+    def test_a_short_all_letter_secret_after_a_hyphenated_label_is_redacted(self):
+        # issue 244: "db-password: sunshine" passed because its value has no digit and is under 12 letters
+        for line, value in (("db-password: sunshine", "sunshine"), ("admin-password: sunshine", "sunshine"),
+                            ("admin-token: letmeinplease", "letmeinplease"), ("x-secret=hunter", "hunter"),
+                            ("x-token: Workings", "Workings"), ("x-token: reporting", "reporting")):
+            self.assertNotIn(value, hd.scrub(line), line)
+            self.assertTrue(any("secret" in p for p in hd.live_problems(ROADMAP, self.page() + "\n" + line + "\n")), line)
+
+    def test_a_secret_with_an_underscore_name_is_redacted_and_a_placeholder_or_underscore_lane_passes(self):
+        # issue 245: \b gave no boundary inside DB_PASSWORD, so the underscore forms were never matched
+        v1, v2, v3 = "".join(["sunshine", "99"]), "".join(["abcdefghij", "1"]), "".join(["abcdef", "123456"])  # made-up values, built at run time
+        for line, value in ((f"DB_PASSWORD={v1}", v1), (f"DB_PASSWORD: {v1}", v1), (f"MY_API_KEY={v2}", v2), (f"STRIPE_SECRET={v3}", v3),
+                            (f"AUTH_TOKEN={v3}", v3), ("db_password: sunshine", "sunshine")):
+            self.assertNotIn(value, hd.scrub(line), line)
+        # a placeholder passes only as the whole value, and a status word only after a colon (security review of the first version)
+        w1, w2 = "".join(["$uper", "S3cret1"]), "".join(["hunter", "2abc"])
+        for line, value in ((f"DB_PASSWORD={w1}", w1), (f"DB_PASSWORD=<redacted{w2}", w2), (f"DB_PASSWORD=[redacted]{w2}", w2),
+                            (f"DB_PASSWORD=${{DB_PASSWORD}}{w2}", w2), (f"DB_PASSWORD=$DB_PASSWORD{w2}", w2),
+                            (f"x-token: WORKING:{w2}", w2), (f"x-token: DONE|{w2}", w2), (f"x-token: (Next:{w2}", w2), (f"x-token: Summary{w2}", w2),
+                            (f"x-token: WORKING,{w2}", w2),(f"DB_PASSWORD=$DB_PASSWORD,{w2}", w2), (f"x-token: idle,{w2}", w2),
+                            (f"x-token=WORKING{w2}", w2), ("x-token=WORKING", "WORKING"), (f"x-token:  ${w2}", w2)):
+            self.assertNotIn(value, hd.scrub(line), line)
+        for line in ("DB_PASSWORD=${DB_PASSWORD}", "DB_PASSWORD=$DB_PASSWORD, next", "DB_PASSWORD=$DB_PASSWORD,", "sh-secret:   WORKING (two spaces)",
+                     "sh_secret: WORKING (fix pushed, review running)", "sh_secret: working, report written", "x_token: DONE items 1",
+                     "DB_PASSWORD=$DB_PASSWORD", "DB_PASSWORD=<redacted>", "DB_PASSWORD=[redacted]", "db-password: idle, report 3h ago",
+                     "sh-secret: WORKING", "sh-secret: working, report written", "sh-token: FAILED (tests red)",
+                     "sh-password: idle, report 3h ago", "x-token: QUEUE EMPTY items 3"):
+            self.assertEqual(hd.scrub(line), line)
 
     def test_live_problems_names_each_way_the_roadmap_can_stop_parsing(self):
         cases = {

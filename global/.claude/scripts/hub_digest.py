@@ -45,6 +45,7 @@ HOME = Path.home()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lane_handoff_summary import handoff_summary  # noqa: E402
 from lane_brief import line1_reading  # noqa: E402
+from report_line import STATES  # noqa: E402  (the one list of the fleet's status words)
 from big_output import emit  # noqa: E402
 from openclaw_status_digest import clock12, parse_lane_status, parse_roadmap  # noqa: E402
 
@@ -62,6 +63,17 @@ HUB_REPO = "TortoiseWolfe/workspace"
 # Scrubbing: nothing key-, token- or reset-link-shaped goes onto the page
 # ---------------------------------------------------------------------------------------------
 
+# What a lane line may open with after "<lane>: ": a status word from report_line.STATES (the one list of the fleet's words), the lane
+# status words lane.sh --status prints (working, idle), the empty-report fallback (report written) or the hand-off summary (Done: ...).
+# Case matters, so a pass phrase that happens to spell a lowercase status word is still redacted only when it is not one of these.
+# A status word counts only after a colon (the lane line "<lane>: <status>"), never after "=" (the .env form). A placeholder counts only as
+# the whole value: an upper-case variable reference ($NAME, ${NAME}) or a redaction marker, never "$" or "<redacted" with more glued on.
+_END = r"(?=\s|,\s|,?$)"  # a comma ends the word only when a space or the end follows it: "WORKING,secret" is one value
+_STATE_END = r"(?=\s|,\s|[:|]\s|,?$)"  # report_line.split_state also takes ":" or "|" after a state word; a secret glued to it still is one value
+STATUS_VALUE_RX = (r"(?-i:(?:" + "|".join(re.escape(s) for s in sorted(STATES, key=len, reverse=True)) + r"|working|idle|report|Report|Summary)"
+                   + _STATE_END + r"|\((?:Done|Next):(?=\s))")
+PLACEHOLDER_RX = r"(?:(?-i:\$\{?[A-Z_][A-Z0-9_]*\}?)|<redacted>|\[redacted\])" + _END
+
 SECRETS = [
     re.compile(r"https?://\S*(?:reset|recover|token|verify|magic|invite|unsubscribe)\S*", re.I),
     re.compile(r"\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}"),
@@ -71,11 +83,14 @@ SECRETS = [
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"),
     re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}"),
     re.compile(r"(?i)[?&;](?:token|key|code|secret|apikey|api_key|password|passwd|auth|sig)=[^\s&]+"),
-    # a key word that is the tail of a hyphenated name is usually a lane called sh-secret, and the page prints "<lane>: <status or line 1>"
-    # ("sh-secret: WORKING", "sh-secret: working, report written", "sh-secret: (Done: ...) FAILED ..."). Such a value counts only when its
-    # first word carries a digit or is a plain run of 12 or more letters (a pass phrase); a key word that stands alone always counts
+    # a key word that is the tail of a hyphenated or underscored name is either a lane called sh-secret (the page prints "<lane>: <status or
+    # line 1>": "sh-secret: WORKING", "sh-secret: working, report written", "sh-secret: (Done: ...) FAILED ...") or a secret written the way a
+    # .env file writes it (DB_PASSWORD=value, db-password: value; issues 244 and 245). Such a value passes only when it opens with a word the
+    # digest itself prints after a colon (STATUS_VALUE_RX, built from report_line.STATES) followed by a space, ", ", ": ", "| " or the end (or opens "(Done: " / "(Next: "), or is a whole
+    # placeholder (PLACEHOLDER_RX); every other value is redacted. A key word that stands alone always counts
     re.compile(r"(?i)(?<![A-Za-z0-9]-)\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S{6,}"),
-    re.compile(r"(?i)(?<=[A-Za-z0-9]-)(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*(?:(?=\S*\d)\S{6,}|[A-Za-z]{12,})"),
+    re.compile(r"(?i)(?<=\w[-_])(?:password|passwd|secret|token|api[_-]?key)\s*(?:=\s*(?!" + PLACEHOLDER_RX + r")|:\s*(?!" + STATUS_VALUE_RX + "|"
+               + PLACEHOLDER_RX + r"))\S{6,}"),
     re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9])"),
 ]
 
@@ -1321,7 +1336,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
 
     # Lanes
     live, dead = parse_lane_status(lane_status or "")
-    lines = [f"- {n}: {st}, report {REPORT_WORD.get(rep, 'not yet')}" for n, rep, st in live]
+    lines = [scrub(f"- {n}: {st}, report {REPORT_WORD.get(rep, 'not yet')}") for n, rep, st in live]
     if dead:
         lines.append(f"- {dead} older lanes have ended")
     sections.append(("Lanes running", lines or ["- none"]))
@@ -1330,7 +1345,7 @@ def build_sections(*, roadmap_body, lane_status, lanes_dir, inbox_text, git_log,
     sections.append(spend_section(spend))
 
     reps = lane_reports(lanes_dir, now, report_hours)
-    rl = [f"- {mt.strftime('%a %-I:%M %p')} {name}: {one_line(first, 105) or 'report written'}" for mt, name, first in reps[:8]]
+    rl = [scrub(f"- {mt.strftime('%a %-I:%M %p')} {name}: {one_line(first, 105) or 'report written'}") for mt, name, first in reps[:8]]
     if len(reps) > 8:
         rl.append(f"- and {len(reps) - 8} more reports in the last {report_hours} h")
     sections.append((f"Lane reports, last {report_hours} h (first line; the file has the rest)", rl or ["- none"]))
