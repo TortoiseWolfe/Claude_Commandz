@@ -11,6 +11,8 @@ Skip a note written by this machine: one whose subject starts with "[NCC-74656>"
 
 A note is NEW if it is a draft whose "id" is in neither of those two files AND whose labelIds do not include Label_32, or a thread message whose labelIds do not include Label_32 and whose "id" is in neither file.
 
+Before your final line, print one line for every draft or thread message that steps 1 to 5 listed and that is not in one of the files of step 4, written exactly "SUBJECT <id> <subject>" (the note's "id", one space, its subject copied as written, nothing added). Print the line even for a note you would skip as written by this machine: a script reads these lines and drops this machine's own outgoing notes itself, so a copied subject is all it needs from you.
+
 Your final line must be exactly one of:
 NEW <space-separated items>
 NONE

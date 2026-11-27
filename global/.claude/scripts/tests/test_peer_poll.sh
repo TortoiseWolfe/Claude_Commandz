@@ -111,6 +111,33 @@ run_poll j FAKE_CHECK="NEW cc:r789012"
 check "a cc-only NEW still starts the handler" '[ "$(wc -l <"$T/j/calls")" = 2 ]'
 check "a cc-only NEW does not speed the poll up" '[ "$(stat -c %Y "$T/j/home/.claude/state/peer-active.stamp")" -lt "$(date -d "60 minutes ago" +%s)" ]'
 
+# Issue 249: our own outgoing notes are dropped in code, whatever the model did with the prompt's skip rule.
+OWN='[CC>MUSE] NCC-74656: Re game set'
+mkdir -p "$T/own1/home/.config/afa"; seed own1 120 40
+run_poll own1 FAKE_CHECK="$(printf 'SUBJECT r-111 %s\nSUBJECT r222 [NCC-74656>NX-01] Re: x\nNEW r-111 r222' "$OWN")"
+check "own outgoing notes alone: no handler call (check only)" '[ "$(wc -l <"$T/own1/calls")" = 1 ]'
+check "own outgoing notes alone: the log says NONE and names the skipped ids" 'grep -q "check (.*): NONE (skipped our own outgoing: r-111 r222)" "$T/own1/home/.claude/state/peer-poll.log"'
+check "own outgoing notes alone: the exchange is not marked live" '[ ! -e "$T/own1/home/.claude/state/peer-active.stamp" ] || [ "$(stat -c %Y "$T/own1/home/.claude/state/peer-active.stamp")" -lt "$(date -d "60 minutes ago" +%s)" ]'
+
+mkdir -p "$T/own2/home/.config/afa"; seed own2 120 40
+run_poll own2 FAKE_CHECK="$(printf 'SUBJECT r-111 %s\nSUBJECT r333 [MUSE>NCC-74656] Question\nSUBJECT r444 Re: [CC>MUSE] NCC-74656: Re game set\nSUBJECT r555 [CC>MUSE] NCC-74656:no space after the colon\nNEW r-111 r333 r444 r555 r666 cc:r777' "$OWN")"
+check "a mix: the handler runs once" '[ "$(wc -l <"$T/own2/calls")" = 2 ]'
+check "a mix: only our own outgoing id is dropped (a Hatch note, a Re: answer, an id with no SUBJECT line and a cc: item stay)" \
+  '[ "$(grep -- "--model sonnet" "$T/own2/calls" | grep -c "CHECK RESULT[^:]*: NEW r333 r444 r666 cc:r777 ")" = 1 ] && ! grep -- "--model sonnet" "$T/own2/calls" | grep -q "r-111"'
+check "a mix: the subject that starts our own tag with no space is still ours" '! grep -- "--model sonnet" "$T/own2/calls" | grep -q "r555"'
+
+mkdir -p "$T/own3/home/.config/afa"; seed own3 120 40
+run_poll own3 FAKE_CHECK="$(printf 'Looking at drafts...\nSUBJECT r-111 %s\nNEW r-111' "$OWN")"
+check "chatter before the result line is ignored: own note dropped, no handler" '[ "$(wc -l <"$T/own3/calls")" = 1 ]'
+
+mkdir -p "$T/own4/home/.config/afa"; seed own4 120 40
+run_poll own4 FAKE_CHECK="NEW r-111"
+check "no SUBJECT line: the id is kept and handled as before" '[ "$(wc -l <"$T/own4/calls")" = 2 ]'
+
+mkdir -p "$T/own5/home/.config/afa"; seed own5 120 40
+run_poll own5 FAKE_CHECK="$(printf 'SUBJECT r-111 "%s"\nNEW r-111' "$OWN")"
+check "a quoted subject is still recognised as ours" '[ "$(wc -l <"$T/own5/calls")" = 1 ]'
+
 mkdir -p "$T/k/home/.config/afa"; seed k 120 40
 run_poll k FAKE_CHECK=NONE
 check "NONE runs only the check" '[ "$(wc -l <"$T/k/calls")" = 1 ]'

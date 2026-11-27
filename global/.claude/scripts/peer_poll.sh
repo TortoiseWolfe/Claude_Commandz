@@ -95,10 +95,32 @@ mcp__claude_ai_Gmail__update_draft,mcp__claude_ai_Gmail__mark_message_spam,mcp__
 mcp__claude_ai_Gmail__send_message,mcp__claude_ai_Gmail__reply,mcp__claude_ai_Gmail__forward,\
 NotebookEdit,WebFetch,WebSearch,Agent,Workflow"
 
-check=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --name peer-poll-check --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
+raw=$(timeout 300 "$CLAUDE" -p "$(cat "$S/peer_poll.check.prompt")" --name peer-poll-check --model haiku --max-turns 12 "${LEANFLAGS[@]}" \
   --permission-mode default --disallowedTools "$DENY" \
-  --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG" | tail -1)
-echo "$(ts) check ($mode): ${check:-<no output>}" >>"$LOG"
+  --allowedTools "mcp__claude_ai_Gmail__list_drafts,mcp__claude_ai_Gmail__search_threads,Read" 2>>"$LOG")
+# The result is the last NEW or NONE line (the old reading, the last line, when there is none).
+check=$(printf '%s\n' "$raw" | grep -E '^(NEW|NONE)( |$)' | tail -1)
+[[ -n "$check" ]] || check=$(printf '%s\n' "$raw" | tail -1)
+# Issue 249: the model does not reliably skip this machine's own outgoing notes ("[CC>MUSE] NCC-74656: ..." to Hatch, "[NCC-74656>..." to NX-01), so
+# the same five drafts came back as NEW all night and the handler queued a line each time. The check prints "SUBJECT <id> <subject>" for each
+# note it listed; an id whose subject starts that way is dropped here, in code. An id with no SUBJECT line stays (we cannot tell). "Re: [CC>MUSE]
+# NCC-74656: ..." is Hatch answering us and starts with "Re:", so it stays.
+own=""
+if [[ "$check" == NEW* ]]; then
+  kept=""
+  for item in ${check#NEW}; do
+    subj=$(printf '%s\n' "$raw" | awk -v id="${item#cc:}" '$1 == "SUBJECT" && $2 == id { s = $0; sub(/^SUBJECT [^ ]+ */, "", s); print s; exit }')
+    subj=${subj#"${subj%%[![:space:]]*}"}; subj=${subj#\"}
+    case "$subj" in
+      "[CC>MUSE] NCC-74656:"*|"[NCC-74656>"*) own="$own ${item#cc:}" ;;
+      *) kept="$kept $item" ;;
+    esac
+  done
+  if [[ -n "$own" ]]; then
+    [[ -n "$kept" ]] && check="NEW$kept" || check=NONE
+  fi
+fi
+echo "$(ts) check ($mode): ${check:-<no output>}${own:+ (skipped our own outgoing:$own)}" >>"$LOG"
 # One heartbeat line a day (fleet review C8): write it, then publish it the way the read record is published, so NX-01's hub page can say
 # whether this tower is idle. It runs on every due poll, not only when a note arrived (the read record block below is reached only then).
 # The write skips a line under 20 hours old; a failure is logged and never stops the poller.
