@@ -198,8 +198,14 @@ check "usage names the files verb" '[ -n "$(rec nonsense 2>&1 | grep "files <id>
 need peer_poll.handle.prompt 'peer_poll_record.sh files <id>' 'handle prompt: a note with files is recorded with the files verb'
 need peer_poll.handle.prompt 'files waiting: ask NX-01 to pull' 'handle prompt: and queued as "files waiting: ask NX-01 to pull"'
 need peer_poll.handle.prompt 'Do NOT run peer_poll_record.sh processed for this note' 'handle prompt: never processed for a note with files'
-need peer_poll.handle.prompt 'list file names' 'handle prompt: file names in the note count as files'
-need peer_poll.handle.prompt 'treat it as if it does' 'handle prompt: unsure means files'
+# Issue 232: a note that only talks about files (a status ask naming clip.mp4) is not a note with files; only an attachment field, a Drive link or
+# a sentence saying files are attached counts.
+need peer_poll.handle.prompt 'never because its text talks about files' 'handle prompt: talk about files is not evidence (232)'
+need peer_poll.handle.prompt 'a status ask that lists file names is not a note with files' 'handle prompt: a status ask that names files is not a note with files (232)'
+need peer_poll.handle.prompt 'non-empty attachments or attachmentIds field' 'handle prompt: a real attachment is evidence (232)'
+need peer_poll.handle.prompt 'drive.google.com' 'handle prompt: a Drive link is evidence (232)'
+need peer_poll.handle.prompt 'handled like any other note (steps 2 and 3), however many files it mentions' 'handle prompt: no evidence means an ordinary note (232)'
+check "handle prompt: file names no longer count as files by themselves" '! grep -q "or list file names" "$D/peer_poll.handle.prompt" && ! grep -q "treat it as if it does" "$D/peer_poll.handle.prompt"'
 need peer_poll.handle.prompt '(Never for a note with files' 'handle prompt: step 2 points back at the files rule'
 check "handle prompt: the files check comes before the processed step" \
   '[ "$(grep -n "^1b. FILES CHECK" "$D/peer_poll.handle.prompt" | cut -d: -f1)" -lt "$(grep -n "^2. Record it" "$D/peer_poll.handle.prompt" | cut -d: -f1)" ]'
