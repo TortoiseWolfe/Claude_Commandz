@@ -822,6 +822,10 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("[[ x =~ (\n#) ]]; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 self.blocked("(( 1 +\n#)) ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 self.blocked("shopt -s extglob; echo @(a|\n#) ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                # ninth review: legacy $[ ] arithmetic reads a # as part of the group; the other grouping forms stay strict too
+                self.blocked("echo $[ 1 +\n#] ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                self.blocked("echo $[ 1 + # ] ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                self.blocked("case x in\n#) ;; esac; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
                 self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
                 # and a shell body that is only prose and comments, with a comment apostrophe, still passes

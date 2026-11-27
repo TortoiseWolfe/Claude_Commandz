@@ -552,7 +552,8 @@ def split_data_heredocs(cmd):
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
             # (anywhere earlier in the command, not just on this line: a regex or pattern group may run over newlines, and bash drops a
             # backslash-newline pair, so [\<newline>[ is [[)
-            if re.search(r"[@?*+!<>]\(|\[\[|\(\(", cmd[:i].replace("\\\n", "")):
+            # (also $[ ] legacy arithmetic, a =~ regex, and the keywords whose bodies bash reads in their own way: case, coproc, select, function)
+            if re.search(r"[@?*+!<>]\(|\[\[|\(\(|\$\[|=~|(?<![\w.-])(?:case|coproc|select|function)(?![\w.-])", cmd[:i].replace("\\\n", "")):
                 # an extglob group, a [[ ]] test (a regex after =~ may hold a #) or a (( )) arithmetic open on this line: a # there is not
                 # necessarily a comment, so do not guess
                 return cmd, [], [], cmd
