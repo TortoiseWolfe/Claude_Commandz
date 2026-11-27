@@ -616,6 +616,14 @@ waiting|n|y|HUB-ACT 3:23 AM x
 waiting|n|y|NEED-HUB: x
 waiting|n|y|READY-FOR-HUB
 waiting|n|y|WAIT-JONATHAN 2 PM
+waiting|n|y|WAITING ON NX-01
+waiting|n|y|WAITING ON
+waiting|n|y|WAITING ON: the hub's merge
+other|n|n|WAITING ONE more
+other|n|n|WAITING ON-DECK
+other|n|n|WAITING UNTIL 7:00 PM
+other|n|n|WAITING
+other|n|n|waiting on NX-01
 done|y|y|DONE
 done|y|y|DONE 4:00 PM items 3
 done|y|y|DONE needs hub 0

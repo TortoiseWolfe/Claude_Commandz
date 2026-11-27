@@ -75,7 +75,7 @@
 # minutes while it stays idle (idle_remind_check; 6 Nov 2026, Jonathan: "we have to big of a backlog to idle on smoke breaks"). Before, the
 # "ended a turn without a new report" line came once per ended turn and a lane with a backlog could then sit idle for hours. The standing rule
 # every lane is given (lane.sh): finish a step, start the next item; end a turn only with QUEUE EMPTY or BLOCKED (who/what) on line 1.
-# Also left alone (line1_rests): a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
+# Also left alone (line1_rests): WAITING ON at the start (issue 230), a first word that names who the lane waits on (HUB-ACT, NEED-HUB, STEP-FOR-JONATHAN) and DONE with no counted ask.
 # Every new or changed report is also recorded by the dispatcher's post-reports (nothing goes to his chat; the hub reads the report when this wakes it).
 # Every wake prints WAKE-REASON <code> as its first line (the existing lines follow unchanged) and appends one tab-separated row (ISO time from
 # date -Is, code, lane or -) to $LANE_WATCH_WAKE_LOG (default: wake.log in the lane state folder, $LANE_RECYCLE_DIR); a log that cannot be written
@@ -370,7 +370,7 @@ orphan_check() {
 #            with out givng me the url to do it, again"); step_url_check asks for it.
 #   waiting  a first word with HUB or JONATHAN as one hyphen-joined part (HUB-ACT, NEED-HUB, READY-FOR-HUB), other than step. The hub is woken once
 #            by the report itself; naming the lane every 20 minutes woke it for nothing (8 Nov 2026, "HUB-ACT 3:23 AM | ...").
-#            Also WAITING ON at the start (capitals, one space, then a non-word character or the end): the lane says what it waits on, like BLOCKED
+#            Also WAITING ON at the start (capitals, one space, then a character that is not a letter, digit, underscore or hyphen, or the end): the lane says what it waits on, like BLOCKED
 #            (issue 230: stream-push "WAITING ON NX-01" on 26 Nov and album-studio "WAITING ON ear_eval2 part 2" on 27 Nov were named every
 #            20 minutes). Only the idle reminder reads it; job_idle_check looks at the pane and the job, never at line 1, so a stuck job is
 #            still named once. "WAITING UNTIL ...", a bare WAITING, "WAITING ONE" and lowercase "waiting on" stay other.
