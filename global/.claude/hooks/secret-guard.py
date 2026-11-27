@@ -575,7 +575,25 @@ def gmail_resolves_into_folder(seg, tolerant=False):
     if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
         # also the row with its quotes and backslashes removed, as bash would join a quoted glob (~/.?on"f"ig) into one word
         words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) + re.split(r"[\s(),;<>]+", re.sub(r"[\"'\\]", "", seg)) if w]
+    # Issue 257: a word that holds spaces is the text of a bash -c or sh -c argument or of a here-string (bash <<< 'cat ~/.?onfig/..'): it is a command
+    # line of its own, so every piece of it is checked as a word as well. Too many pieces to check in the hook's time are refused.
+    # Text that only prints or stores (echo, printf, cat and the like, gh issue, git commit) is prose, as in issues 228 and 235, and stays one word.
+    lead = os.path.basename(words[0]) if words else ""
+    prose = lead in ECHO_WORDS or lead in HEREDOC_DATA_WORDS or (lead == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH) \
+        or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)
+    if not prose:
+        words = words + [piece for w in words if re.search(r"\s", w) for piece in re.split(r"[\s;&|]+", w) if piece]
+    if len(words) > 2000:
+        return True
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
+
+    def glob_inside(cand):  # every file a glob word can match, expanded as bash would, is checked; a form not understood or too many matches is refused
+        n = 0
+        for m in bash_glob(os.path.expanduser(gmail_norm(cand))):
+            n += 1
+            if m is None or n > 500 or inside(m):
+                return True
+        return False
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
         real = os.path.realpath(os.path.expanduser(gmail_norm(path)))
@@ -587,21 +605,22 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         if cd and i > 0 and not w.startswith("-"):
             if inside(w):
                 return True
+            if GMAIL_GLOB.search(w) and glob_inside(w):  # issue 257: cd ~/.?onfig/a?a/g?ail goes into the folder
+                return True
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
         # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
         # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
-        for cand in {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}:
+        # issue 257: ${x:-PATH} ${x:+PATH} ${x:=PATH} ${x:?PATH} (and the forms without the colon) hold PATH as a word of their own, closing brace cut off
+        cands = {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}
+        cands |= {part.rstrip("}") for c in (w, after_eq) for part in re.split(r"\$\{[^{}$]*?:?[-+=?]", c)[1:]}
+        for cand in cands:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
-                if GMAIL_GLOB.search(cand):
-                    n = 0
-                    for m in bash_glob(os.path.expanduser(gmail_norm(cand))):
-                        n += 1
-                        if m is None or n > 500 or inside(m):  # too many matches to check in the hook's time, or a form not understood: refuse rather than guess
-                            return True
+                if GMAIL_GLOB.search(cand) and glob_inside(cand):
+                    return True
     return False
 
 

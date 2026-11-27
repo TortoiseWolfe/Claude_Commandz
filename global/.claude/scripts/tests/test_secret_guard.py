@@ -52,6 +52,68 @@ class CredentialsWord(Base):
         self.blocked("head -3 /root/.config/x/credentials.yml")
 
 
+class RuleGCdGlobAndWrappers(Base):
+    """Issue 257: a cd into a glob, a ${x:-path} word, bash -c, sh -c and a here-string that holds a glob are followed to the token folder."""
+    TOK = "~/.?onfig/a?a/g?ail/token.json"
+    REFUSED = ("cd ~/.?onfig/a?a/g?ail && cat token.json",
+               "cd ~/.?onfig/a?a/g?ail; cat token.json",
+               "pushd ~/.?onfig/a?a/g?ail",
+               "cat ${x:-~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:+~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:=~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:?~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x-~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:-${y:-~/.?onfig/a?a/g?ail/token.json}}",
+               "bash -c 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "sh -c 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "bash -ec 'cd ~/.?onfig/a?a/g?ail && cat token.json'",
+               "bash <<< 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "sh <<< \"cat ~/.?onfig/a?a/g?ail/token.json\"")
+
+    def with_home(self, run):
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".config", "afa", "gmail")
+            os.makedirs(folder)
+            open(os.path.join(folder, "token.json"), "w").close()
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                run(home)
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_bash_really_reaches_the_token_with_each_of_these(self):
+        def run(home):
+            for cmd in self.REFUSED:
+                if ":?" in cmd:
+                    continue  # ${x:?word} only prints word as an error message; the guard still refuses it
+                r = subprocess.run(["bash", "-c", cmd.replace("cat ", "ls ")], env={"HOME": home, "PATH": os.environ["PATH"]}, capture_output=True, text=True, cwd="/tmp")
+                self.assertEqual(r.returncode, 0, (cmd, r.stderr))
+                self.assertTrue(r.stdout.strip(), cmd)  # the glob matched a real file or folder and listed it
+        self.with_home(run)
+
+    def test_each_is_refused(self):
+        def run(home):
+            for cmd in self.REFUSED:
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_the_same_shapes_without_the_token_folder_pass(self):
+        def run(home):
+            os.makedirs(os.path.join(home, "docs"))
+            for cmd in ("cd ~/d?cs && ls",
+                        "cat ${x:-~/docs/*.md}",
+                        "bash -c 'ls ~/docs/*.md'",
+                        "sh -c 'echo hello world'",
+                        "bash <<< 'ls ~/docs'",
+                        "cat <<< 'a note with spaces'"):
+                self.allowed(cmd)
+        self.with_home(run)
+
+
 class RuleA(Base):
     def test_blocks(self):
         for c in [
