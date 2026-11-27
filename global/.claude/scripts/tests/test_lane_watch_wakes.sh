@@ -490,7 +490,7 @@ if ! grep -q 'under the fake HOME' "$cu_log"; then echo "ok   the lane.sh under 
 else echo "FAIL the HOME lane.sh was called: $(cat "$cu_log")"; failures=$((failures + 1)); fi
 lane_sh="$cu_save_lane_sh"; recycle_dir="$cu_save_dir"
 
-# Issue 128: a lane whose fresh session already holds more than LANE_WATCH_START_K (30) at its first message is named once per session. lane.sh
+# Issue 128: a lane whose fresh session already holds more than LANE_WATCH_START_K (40 by default; these tests pass an explicit 30) at its first message is named once per session. lane.sh
 # --start-load prints "<K> <session id>" (or "?" / "n/a"); start_load_check keeps the session it named in .startload-<lane>.
 sl_dir="$TMP/sl-state"; mkdir -p "$sl_dir"; sl_ans="$TMP/sl-answer"; sl_lane_sh="$TMP/sl-lane.sh"
 cat > "$sl_lane_sh" <<'SH'
@@ -515,8 +515,24 @@ sl_name "39 sess-a"; sl_expect "the same session is not named twice" 0
 # Issue 226: when lane.sh --start-parts has an answer, the wake carries it in place of the advice to shrink the lane's own files.
 rm -f "$sl_dir"/.startload-*; echo "its own files (handoff.md, prompt.md) total 7.6 KB, too small to be the cause; the load is the session's own setup" > "$TMP/sl-parts"
 sl_name "52 sess-p"
-if [ "$sl_said" = "start load: sl-lane (its fresh session held 52K at its first message, over the 30K mark: its own files (handoff.md, prompt.md) total 7.6 KB, too small to be the cause; the load is the session's own setup)" ]; then echo "ok   the wake carries the parts line"
-else echo "FAIL parts line in the wake: said '$sl_said'"; failures=$((failures + 1)); fi
+# Issue 226 (27 Nov): the lane's own files are too small to be the cause, so no lane and no hub is woken; one row goes to start-load.log.
+sl_expect "a load its own files cannot explain wakes nobody" 0
+if [ "$hit" = 0 ] && [ "$other" = 0 ] && [ "$(wc -l < "$sl_dir/start-load.log")" = 1 ] && grep -q "sl-lane.*52K.*too small to be the cause" "$sl_dir/start-load.log"; then echo "ok   the quiet start load is written to start-load.log"
+else echo "FAIL start-load.log row missing or hit set (hit=$hit other=$other)"; failures=$((failures + 1)); fi
+sl_name "52 sess-p"; sl_expect "the same session is not logged twice" 0
+[ "$(wc -l < "$sl_dir/start-load.log")" = 1 ] && echo "ok   one log row a session" || { echo "FAIL a second log row for the same session"; failures=$((failures + 1)); }
+# When the lane's own files are the bulk, the wake still names the lane and carries the line.
+rm -f "$sl_dir"/.startload-*; echo "its own files are the bulk: 120 KB together (about 30K tokens of the 52K), prompt.md the biggest at 90 KB; archive or shrink that one" > "$TMP/sl-parts"
+sl_name "52 sess-q"
+if [ "$sl_said" = "start load: sl-lane (its fresh session held 52K at its first message, over the 30K mark: its own files are the bulk: 120 KB together (about 30K tokens of the 52K), prompt.md the biggest at 90 KB; archive or shrink that one)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   the wake names a lane whose own files are the bulk"
+else echo "FAIL bulk wake: said '$sl_said' hit=$hit other=$other"; failures=$((failures + 1)); fi
+# The default mark is 40K: a 33K lane outside a repo and a 39K one are not named, a 41K one is.
+rm -f "$sl_dir"/.startload-*; rm -f "$TMP/sl-parts"
+for sl_k in 33 39 41; do
+  rm -f "$sl_dir"/.startload-*; echo "$sl_k sess-d" > "$sl_ans"; hit=0; other=0
+  sl_def=$(unset LANE_WATCH_START_K; start_load_check sl-lane)
+  case "$sl_k:$sl_def" in 41:?*|33:|39:) echo "ok   default mark: ${sl_k}K is $([ -n "$sl_def" ] && echo named || echo not named)" ;; *) echo "FAIL default mark at ${sl_k}K said '$sl_def'"; failures=$((failures + 1)) ;; esac
+done
 case "$sl_said" in *"archive or shrink report.md"*) echo "FAIL the old shrink-your-files advice is still in the wake"; failures=$((failures + 1)) ;; *) echo "ok   the wake no longer tells a lane to shrink its files by default" ;; esac
 rm -f "$TMP/sl-parts"; rm -f "$sl_dir"/.startload-*
 sl_name "41 sess-b"; sl_expect "a new session over the mark is named again" 1

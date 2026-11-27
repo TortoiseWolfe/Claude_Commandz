@@ -46,6 +46,7 @@
 #   - a turn that ends within LANE_WATCH_TURN_GRACE (default 300) seconds of a report.md change: the report is the news, the turn end is the
 #     same turn. (PR 175 fixed the pane-redraw repeat; this is the report-then-turn-end double wake.)
 #   - a report whose line 1 starts HOURLY or STATUS: routine status. Lanes are told to keep it in status.md, so line 1 changes only when the hub must act.
+#   - a fresh session over the start-load mark (LANE_WATCH_START_K, default 40) whose own files are too small to be the cause (issue 226): one row in recycle/start-load.log, no wake.
 # A report that lands between a wake and the hub's re-arm is still news: each wake that names a report writes .reportseen-<lane> (the stamp the
 # hub was shown) in the lane state folder, and a new watcher starts from it (when it is under LANE_WATCH_SEEN_MAX_SECS, default 1800, old) instead
 # of from the moment it starts.
@@ -283,12 +284,13 @@ ctx_unknown_check() {
   hit=1; other=1
 }
 # Start load (issue 128). start_load_check <lane> (no subshell: it sets hit and other) names a lane whose fresh session already held more than
-# LANE_WATCH_START_K (default 30) thousand tokens at its first message, once per session: a lane that starts that full is back at its recycle
+# LANE_WATCH_START_K (default 40, above what a lane with nothing of its own loads: 24K in the workspace folder, 33K outside a repo) thousand tokens at its first message, once per session: a lane that starts that full is back at its recycle
 # line within minutes however often it is cleared. The wake says what that load was made of (lane.sh --start-parts, issue 226): the lane's own four
-# files only when they are the bulk, otherwise the session's own setup. lane.sh --start-load prints "<K> <session id>", or "?" or "n/a" when there is no reading. The session it named is kept in
+# files only when they are the bulk. When --start-parts says the files are too small to be the cause the lane can do nothing about the load, so nobody is
+# woken: the line goes to $recycle_dir/start-load.log (one row a session: date, lane, K, the parts line) for the hub to read (issue 226). lane.sh --start-load prints "<K> <session id>", or "?" or "n/a" when there is no reading. The session it named is kept in
 # .startload-<lane>. 0 or "off" turns the check off.
 start_load_check() {
-  local l=$1 lim=${LANE_WATCH_START_K:-30} ans k sess parts mark="$recycle_dir/.startload-$1"
+  local l=$1 lim=${LANE_WATCH_START_K:-40} ans k sess parts mark="$recycle_dir/.startload-$1"
   [[ "$lim" =~ ^[0-9]+$ ]] && [ "$lim" -gt 0 ] || return 0
   ans=$("$lane_sh" --start-load "$l" 2>/dev/null) || return 0
   k=${ans%% *}; sess=${ans#* }
@@ -297,6 +299,9 @@ start_load_check() {
   printf '%s' "$sess" > "$mark"
   parts=$("$lane_sh" --start-parts "$l" 2>/dev/null | head -c 600) || parts=""
   [ -n "$parts" ] || parts="run lane.sh --start-parts $l to see what it loads"
+  case "$parts" in *"too small to be the cause"*)
+    printf '%s\t%s\t%sK\t%s\n' "$(date '+%F %T')" "$l" "$k" "$parts" >> "$recycle_dir/start-load.log"; return 0 ;;
+  esac
   echo "start load: $l (its fresh session held ${k}K at its first message, over the ${lim}K mark: $parts)"
   hit=1; other=1
 }

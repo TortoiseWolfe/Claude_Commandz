@@ -113,7 +113,7 @@
 #                                       refuses) for lanes with no window left; fleet-up.sh --heartbeat runs it every minute.
 #   lane.sh --ctx <name>                the lane's context in K tokens (a bare number, n/a for an engine lane, ? if unknown)
 #   lane.sh --start-load <name>         "<K> <session id>": what the lane's live session held at its first message (? if unknown, n/a for an engine
-#                                       lane); --status shows it as start:<K>. lane_watch.sh names a lane over LANE_WATCH_START_K (30) once a session.
+#                                       lane); --status shows it as start:<K>. lane_watch.sh names a lane over LANE_WATCH_START_K (40) once a session, unless its own files are too small to be the cause (the line goes to start-load.log).
 #                                       --recycle also moves each finished round of report.md and status.md to report-archive.md and status-archive.md.
 #   lane.sh --start-parts <name>        one line saying what the lane's session loaded before its first answer (skill listing, CLAUDE.md files,
 #                                       tool names...) and whether its own four files are the cause (issue 226; lane_start_parts.py); empty if unknown.

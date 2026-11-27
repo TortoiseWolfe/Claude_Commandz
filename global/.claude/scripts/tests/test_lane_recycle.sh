@@ -1200,7 +1200,7 @@ HOME="$OLD_HOME"
 sed -n '/start_epoch=\$lane_t0/,/index_append "\$(printf/p' "$SCRIPT" | grep -q clear_recycle_stop || fail 'the start/restart index row is preceded by clear_recycle_stop'; ok
 
 # Issue 128 (19 Nov, 47 recycles in a day): the notes a lane re-reads at its start grew by a section a round and nothing was archived.
-# --start-load prints the fresh session's start load and its session id (lane_watch.sh names a lane over 30K once); --status shows it beside the
+# --start-load prints the fresh session's start load and its session id (lane_watch.sh names a lane over its mark once (LANE_WATCH_START_K, default 40)); --status shows it beside the
 # context; a recycle moves every finished round of report.md and status.md to an archive file before it clears the lane, and the re-prime
 # says where they went and to keep long tool output out of the conversation.
 add_row sl-lane subscription sl-sess; usage_rec 95000 45000 >"$PROJ/sl-sess.jsonl"
