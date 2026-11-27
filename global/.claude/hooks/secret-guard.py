@@ -300,7 +300,7 @@ ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand
 # ALIAS_DEFINER is also searched with quotes and backslashes removed (al""ias), and with _echo_shadowed (set -o posix, shopt, builtin, command);
 # a command word that starts with a variable ($a$b x=...) can build the word alias at run time. The dot-source alternative also matches
 # find . -name x: that only widens the quote-blind pass, which refuses any piece that names or globs into the token folder.
-VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n(])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*\$")
+VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n({!]|(?<![\w.-])(?:then|do|else|elif|time))[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*\$")
 GMAIL_CD_CONFIG = re.compile(r"(?:^|[\s;&|])(?:cd|pushd)\s+[^\s;&|]*\.config(?:/afa)?/?(?=\s|;|&|\||$)")  # a cd into the folder's parents
 
 
@@ -730,13 +730,14 @@ def gmail_credential_use(cmd):
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
                 or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
             return "folder"
-    if (ALIAS_DEFINER.search(cmd) or ALIAS_DEFINER.search(re.sub(r"[\"'\\]", "", cmd)) or _echo_shadowed(cmd)
-            or VARIABLE_COMMAND_WORD.search(cmd)):
+    bare = re.sub(r"[\"'\\]", "", cmd)
+    if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare):
         # Claude_Commandz issue 241: an alias (or BASH_ALIASES, eval, source, a startup file) can hold an open quote, so bash's quote state
         # then differs from the one split_segments read from the text and a quoted-looking glob runs as a command. Such a command is read
         # quote-blind: cut at every ; & | and newline whatever the quotes, each piece checked as a row of an interpreter's heredoc is. There is
         # no allowlist here (ls, the mail tool, the masked viewer): an alias can make any of those words run something else, so a piece that
-        # names or globs into the token folder is refused.
+        # names or globs into the token folder is refused. That fails closed: set -e; ls ~/.config/afa/gmail, or the mail tool run with the
+        # folder named and the word eval, source, set or command anywhere in the command, is refused too.
         for seg in re.split(r"[;&|\n]", cmd):
             norm = gmail_norm(seg)
             if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)

@@ -1013,7 +1013,9 @@ class RuleGAliasQuoteState(Base):
         self.home()
         tail = "x\n\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\""
         for head in ("shopt -s expand_alia\"\"ses\nal\"\"ias x='echo \"'\n", "al\\ias x='echo \"'\n", "al''ias x='echo \"'\n",
-                     "set -o posix\nal\"\"ias x='echo \"'\n", "set -o posix\na=ali b=as; $a$b x='echo \"'\n", "a=alias\n$a x='echo \"'\n"):
+                     "set -o posix\nal\"\"ias x='echo \"'\n", "set -o posix\na=ali b=as; $a$b x='echo \"'\n", "a=alias\n$a x='echo \"'\n",
+                     "a=ali b=as\n\"$a$b\" x='echo \"'\n", "a=ali b=as; { $a$b x='echo \"'; }\n", "a=ali b=as; if true; then $a$b x='echo \"'; fi\n",
+                     "a=ali b=as; time $a$b x='echo \"'\n"):
             self.blocked(head + tail, "G")
 
     def test_an_allowlisted_word_is_no_exemption_when_an_alias_can_exist(self):
