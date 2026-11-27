@@ -1008,6 +1008,21 @@ class RuleGAliasQuoteState(Base):
         for head in ("BASH_ALIASES[x]='echo \"'\nx\n", "eval \"alias x='echo \\\"'\"\nx\n", "source ./defs.sh\nx\n", ". ./defs.sh\nx\n"):
             self.blocked(head + tail, "G")
 
+    def test_the_word_alias_split_by_quotes_or_built_from_variables_is_refused(self):
+        """Blind review: bash removes quotes and backslashes before it runs a word, and posix mode expands aliases without expand_aliases."""
+        self.home()
+        tail = "x\n\"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\""
+        for head in ("shopt -s expand_alia\"\"ses\nal\"\"ias x='echo \"'\n", "al\\ias x='echo \"'\n", "al''ias x='echo \"'\n",
+                     "set -o posix\nal\"\"ias x='echo \"'\n", "set -o posix\na=ali b=as; $a$b x='echo \"'\n", "a=alias\n$a x='echo \"'\n"):
+            self.blocked(head + tail, "G")
+
+    def test_an_allowlisted_word_is_no_exemption_when_an_alias_can_exist(self):
+        """Security review: an alias can make ls or the mail tool's name run something else, so the allowlist does not apply."""
+        self.home()
+        self.blocked("alias ls=cat\nls ~/.config/afa/gmail/token.json", "G")
+        self.blocked("alias python3=cat\npython3 ~/.claude/scripts/gmail_api.py ~/.config/afa/gmail/token.json", "G")
+        self.allowed("ls ~/.config/afa/gmail")  # no alias in the command: the plain existence check is as before
+
     def test_a_single_quote_alias_is_refused_too(self):
         self.home()
         self.blocked("alias x=\"echo '\"\nx\n'; cat ~/.?onfig/a?a/g?ail/token.json; x\n'", "G")
