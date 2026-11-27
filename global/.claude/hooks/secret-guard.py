@@ -356,7 +356,10 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         words = []
         # a row with a lone apostrophe, usually in a trailing comment: split what comes before each # or quote that could start the unsplittable
         # part, so a quoted glob in front (cat ~/.?on"f"ig/a?a/g?ail/token.json # it's) is still read as the shell reads it
-        for m in list(re.finditer(r"[#'\"]", seg))[:64]:
+        marks = list(re.finditer(r"[#'\"]", seg))
+        if len(marks) > 64:
+            return True  # too many to check in the hook's time: refuse rather than guess
+        for m in marks:
             try:
                 words += shlex.split(seg[:m.start()], posix=True)
             except ValueError:
@@ -510,6 +513,8 @@ def split_data_heredocs(cmd):
                                         and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
             # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
+            if re.search(r"[@?*+!]\(", "".join(line)):
+                return cmd, [], [], cmd  # an extglob group open on this line, however deep: a # in it is not a comment, so do not guess
             j = cmd.find("\n", i)
             j = n if j < 0 else j
             opaque.append(cmd[i:j])  # a comment is not run, but it is checked as strictly as an interpreter's code, so a wrong guess fails closed

