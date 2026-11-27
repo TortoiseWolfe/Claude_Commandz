@@ -818,6 +818,10 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("[[ x =~ (#) ]] || bash -c 'cat \\\nls ~/.config/afa/gmail/token.json\n#'", "G")
                 self.blocked("[\\\n[ x =~ (#) ]] || cat ~/.config/afa/gm\\\nail/token.json", "G")
                 self.blocked("(\\\n( 1 == 2 || 16#f )) || cat ~/.config/afa/gm\\\nail/token.json", "G")
+                # eighth review: the open group may be on an earlier line
+                self.blocked("[[ x =~ (\n#) ]]; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                self.blocked("(( 1 +\n#)) ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
+                self.blocked("shopt -s extglob; echo @(a|\n#) ; echo \"\n' \"\ncat ~/.?onfig/a?a/g?ail/token.json\n#'", "G")
                 # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
                 self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
                 # and a shell body that is only prose and comments, with a comment apostrophe, still passes

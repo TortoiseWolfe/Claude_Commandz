@@ -550,7 +550,9 @@ def split_data_heredocs(cmd):
                                         and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
             # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
-            if re.search(r"[@?*+!]\(|\[\[|\(\(", "".join(line).replace("\\\n", "")):  # bash drops a backslash-newline pair, so [\<newline>[ is [[
+            # (anywhere earlier in the command, not just on this line: a regex or pattern group may run over newlines, and bash drops a
+            # backslash-newline pair, so [\<newline>[ is [[)
+            if re.search(r"[@?*+!<>]\(|\[\[|\(\(", cmd[:i].replace("\\\n", "")):
                 # an extglob group, a [[ ]] test (a regex after =~ may hold a #) or a (( )) arithmetic open on this line: a # there is not
                 # necessarily a comment, so do not guess
                 return cmd, [], [], cmd
