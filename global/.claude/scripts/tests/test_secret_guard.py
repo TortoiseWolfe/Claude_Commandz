@@ -1144,6 +1144,43 @@ class RuleGSubstitutionAndAnsiQuotes(Base):
         self.allowed('ls "$(dirname ~/docs/x)"')
 
 
+class RuleGJqFilterBrackets(Base):
+    """Issue 260: a gh -q jq filter such as '.[]|[.name]|@tsv' starts with a dot and holds [. (not a collating symbol), and was refused as a glob
+    the guard could not translate. A real collating symbol or equivalence class is still refused, and so is a bracket that really reaches the folder."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    # the exact command of lane sh-band-page, 27 Nov 2026
+    LANE = ("gh run list -R TortoiseWolfe/beatboard --limit 4 --json status,conclusion,name,headSha,event "
+            "-q '.[]|[.name,.event,.status,.conclusion,.headSha[0:8]]|@tsv'; "
+            "curl -sS -w \"\\n%{http_code}\\n\" https://tortoisewolfe.github.io/beatboard/CREDITS.md | sed -n '20p;22p;$p' | cut -c1-200")
+
+    def test_the_lane_command_passes(self):
+        self.home()
+        self.allowed(self.LANE)
+        self.allowed("sleep 60; " + self.LANE)
+
+    def test_gh_and_jq_filters_with_brackets_pass(self):
+        self.home()
+        for c in ("gh run list -R o/r -q '.[]|[.name]|@tsv'", "gh run list -R o/r --json headSha -q '.[]|.headSha[0:8]'",
+                  "gh pr list -R o/r --json number,title -q '.[] | \"\\(.number) \\(.title)\"'", "jq '.[]|[.a,.b]|@tsv' out.json",
+                  "gh api repos/o/r/issues -q '.[].labels[].name'"):
+            self.allowed(c)
+
+    def test_real_collating_symbols_and_classes_still_refuse(self):
+        self.home()
+        for c in ("cat ~/.config/afa/gmail/[[.t.]]oken.json", "cat ~/.config/afa/gmail/[[=t=]]oken.json", "cat ~/.config/afa/gmail/[[.]]oken.json",
+                  "cat ~/.config/afa/gmail/[.t]oken.json", "cat ~/.config/afa/gmail/[[.t.]o]ken.json", "cat ~/.config/afa/gmail/t[=o=]ken.json"):
+            self.blocked(c, "G")
+
+
 class WriteAndEdit(unittest.TestCase):
     def ev(self, tool, **ti):
         return sg.evaluate({"tool_name": tool, "tool_input": ti})

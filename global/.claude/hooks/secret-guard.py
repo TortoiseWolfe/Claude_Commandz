@@ -501,7 +501,13 @@ def _bracket_translate(w):
             j += 1
         while j < n and w[j] != "]":
             if w[j] == "[" and j + 1 < n and w[j + 1] in "=.":
-                return None
+                # Issue 260: [. and [= start a collating symbol or an equivalence class only when the matching .] or =] closes it; a bare [.name]
+                # (a jq filter in a gh -q word) is an ordinary bracket. The search starts at the character after the [, so [.] is also refused.
+                if w.find(w[j + 1] + "]", j + 1) >= 0:
+                    return None
+                body.append(w[j])
+                j += 1
+                continue
             if w[j] == "[" and j + 1 < n and w[j + 1] == ":":
                 end = w.find(":]", j + 2)
                 if end < 0:
