@@ -371,7 +371,8 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
-        for cand in {c.lstrip("@<>") for c in (w, after_eq)}:  # a redirect glued to its path (<./lnk/token.json) is that path
+        # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
+        for cand in {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>]+&?", c)}:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True

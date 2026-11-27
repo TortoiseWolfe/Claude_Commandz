@@ -699,6 +699,9 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("bash <<'EOF'\n# it's\ncat %s/token.json\nEOF" % os.path.join(t, "lnk"), "G")
                 self.blocked("bash <<'EOF'\ncat <%s/token.json # it's\nEOF" % os.path.join(t, "lnk"), "G")  # a redirect glued to the path
                 self.blocked("cat <%s/token.json" % os.path.join(t, "lnk"), "G")
+                for glued in ("0<", "3<", "2>", "x>", "<", ">>"):  # security review: an fd number or a word in front of the operator
+                    self.blocked("cat %s%s/token.json" % (glued, os.path.join(t, "lnk")), "G")
+                    self.blocked("bash <<'EOF'\ncat %s%s/token.json # it's\nEOF" % (glued, os.path.join(t, "lnk")), "G")
                 self.blocked("python3 - <<'EOF'\ns = it's\nopen(%s/token.json)\nEOF" % os.path.join(t, "lnk"), "G")  # a line the shell can't split
             finally:
                 if old is None:
