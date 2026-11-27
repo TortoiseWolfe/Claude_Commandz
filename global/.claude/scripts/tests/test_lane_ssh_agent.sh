@@ -61,12 +61,18 @@ assert_not_contains "$(cat "$CALLS")" 'SSH_AUTH_SOCK' 'no agent: nothing is pass
 
 # 2b. Claude_Commandz issue 184: a caller with no SSH_AUTH_SOCK (the recovery task) finds an unlocked agent in ssh-*/agent.* itself, skips a locked one,
 # and passes it to the new session; a window opened from it runs ssh-add -l with exit 0 and no prompt.
-SCAN="$TMP/scan"; mkdir -p "$SCAN/ssh-aaa" "$SCAN/ssh-bbb"
-python3 -c 'import socket,sys; [socket.socket(socket.AF_UNIX).bind(p) for p in sys.argv[1:]]' "$SCAN/ssh-aaa/agent.1" "$SCAN/ssh-bbb/agent.2"
+SCAN="$TMP/scan"; mkdir -p "$SCAN/ssh-aaa" "$SCAN/ssh-bbb" "$SCAN/ssh-ccc" "$SCAN/ssh-ddd"; chmod 700 "$SCAN/ssh-aaa" "$SCAN/ssh-bbb" "$SCAN/ssh-ccc"; chmod 777 "$SCAN/ssh-ddd"
+python3 -c 'import socket,sys; [socket.socket(socket.AF_UNIX).bind(p) for p in sys.argv[1:]]' "$SCAN/ssh-aaa/agent.1" "$SCAN/ssh-bbb/agent.2" "$SCAN/ssh-ddd/agent.4"
+ln -s "$SCAN/ssh-bbb/agent.2" "$SCAN/ssh-ccc/agent.3"   # a symlink to a good socket, and a socket in a world-writable folder: neither is used
 : >"$CALLS"
 env -u SSH_AUTH_SOCK SSH_AGENT_SCAN_DIR="$SCAN" SSH_GOOD="$SCAN/ssh-bbb/agent.2" TMUX_HAS_SESSION=0 HOME="$HOME_T" TMUX_CALLS="$CALLS" PATH="$BIN:$PATH" bash "$SCRIPT" --claude-because "test" ssh-found "$REPO" haiku "$TMP/prompt.md" >/dev/null 2>&1 || true
 assert_contains "$(cat "$CALLS")" "-e SSH_AUTH_SOCK=$SCAN/ssh-bbb/agent.2" 'no SSH_AUTH_SOCK: the unlocked agent in the scan folder goes to the new session'
 assert_not_contains "$(cat "$CALLS")" "ssh-aaa" 'the locked agent is not used'
+for bad in ssh-ccc/agent.3 ssh-ddd/agent.4; do
+  : >"$CALLS"
+  env -u SSH_AUTH_SOCK SSH_AGENT_SCAN_DIR="$SCAN" SSH_GOOD="$SCAN/$bad" TMUX_HAS_SESSION=0 HOME="$HOME_T" TMUX_CALLS="$CALLS" PATH="$BIN:$PATH" bash "$SCRIPT" --claude-because "test" ssh-bad "$REPO" haiku "$TMP/prompt.md" >/dev/null 2>&1 || true
+  assert_not_contains "$(cat "$CALLS")" 'SSH_AUTH_SOCK' "an agent at $bad (a symlink, or in a folder others can write) is not used"
+done
 : >"$CALLS"
 env -u SSH_AUTH_SOCK SSH_AGENT_SCAN_DIR="$SCAN" SSH_GOOD="$SCAN/nowhere" TMUX_HAS_SESSION=0 HOME="$HOME_T" TMUX_CALLS="$CALLS" PATH="$BIN:$PATH" bash "$SCRIPT" --claude-because "test" ssh-locked "$REPO" haiku "$TMP/prompt.md" >/dev/null 2>&1 || true
 assert_not_contains "$(cat "$CALLS")" 'SSH_AUTH_SOCK' 'every agent locked: nothing is passed'

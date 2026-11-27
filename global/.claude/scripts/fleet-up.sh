@@ -233,7 +233,9 @@ ssh_agent_ok() {
   if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
   local s
   for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
-    [ -S "$s" ] && [ -O "$s" ] || continue
+    d=${s%/*}   # only a real, user-owned folder nobody else can write to, and a real socket in it (no symlink, nothing planted in /tmp)
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ -S "$s" ] && [ ! -L "$s" ] && [ -O "$s" ] || continue
+    [ $(( 8#$(stat -c %a "$d" 2>/dev/null || echo 777) & 8#022 )) -eq 0 ] || continue
     if SSH_AUTH_SOCK="$s" ssh-add -l >/dev/null 2>&1; then export SSH_AUTH_SOCK="$s"; return 0; fi
   done
   return 1

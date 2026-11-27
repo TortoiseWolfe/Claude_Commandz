@@ -251,12 +251,15 @@ check "a second full run is not blocked by the first" '[ -n "$(ls $S/recovery 2>
 
 # 6c. Claude_Commandz issue 184: the recovery task has no SSH_AUTH_SOCK. It finds an unlocked agent itself, and with none it leaves the lanes for a later run.
 mksock() { python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
-SCAN="$T/scan"; mkdir -p "$SCAN/ssh-aaa" "$SCAN/ssh-bbb"; mksock "$SCAN/ssh-aaa/agent.1"; mksock "$SCAN/ssh-bbb/agent.2"
+SCAN="$T/scan"; mkdir -p "$SCAN/ssh-aaa" "$SCAN/ssh-bbb" "$SCAN/ssh-ccc"; chmod 700 "$SCAN/ssh-aaa" "$SCAN/ssh-bbb"; chmod 777 "$SCAN/ssh-ccc"
+mksock "$SCAN/ssh-aaa/agent.1"; mksock "$SCAN/ssh-bbb/agent.2"; mksock "$SCAN/ssh-ccc/agent.3"
 export SSH_AGENT_SCAN_DIR="$SCAN"; saved_sock=$SSH_AUTH_SOCK; unset SSH_AUTH_SOCK
 FAKE_SSH_GOOD="$SCAN/ssh-bbb/agent.2" reboot sa    # (a) no SSH_AUTH_SOCK, a locked agent first and an unlocked one second
 check "no SSH_AUTH_SOCK: the unlocked agent is found and the lane restarts" 'grep -q -- "--restart.* sa " $FAKE_DIR/lane.log'
 check "the restart runs with the unlocked agent's socket" '[ "$(tail -1 $FAKE_DIR/lane.env)" = "$SCAN/ssh-bbb/agent.2" ]'
 check "an unlocked agent leaves no pending file" '[ ! -e $S/fleet-up.pending ]'
+FAKE_SSH_GOOD="$SCAN/ssh-ccc/agent.3" reboot sc    # (a2) the only unlocked agent sits in a folder others can write to: not used
+check "an agent in a world-writable folder is not used" '! grep -q -- "--restart" $FAKE_DIR/lane.log && grep -qx sc $S/fleet-up.pending'
 FAKE_SSH_GOOD=/nowhere reboot sb                   # (b) every agent is locked
 check "no unlocked agent: no lane is restarted" '! grep -q -- "--restart" $FAKE_DIR/lane.log'
 check "no unlocked agent: the record carries the one step for Jonathan" 'grep -q "STEP FOR JONATHAN: no unlocked ssh agent.*ssh-add" "$rec"'
