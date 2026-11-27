@@ -125,6 +125,54 @@ class RuleA(Base):
             self.assertNotIn(GHO, self.blocked(c)[1])
 
 
+class RuleAClosingQuote(Base):
+    """Claude_Commandz issue 239: the quote after = in startswith("NAME=") closes a string; it does not open a value."""
+    # The hub's script opened a dotenv file; this file name keeps rule B (a credential-bearing file) out of the way of what rule A is tested on.
+    PY = "cat > /tmp/x.py <<'EOF'\nfor line in open('settings.txt'):\n    if line.startswith(\"MY_TEST_PASSWORD=\"):\n        print(\"found\", line.split('=')[0])\nEOF\npython3 /tmp/x.py"
+
+    def test_the_hub_repro_passes(self):
+        self.allowed(self.PY)
+
+    def test_a_quoted_name_equals_with_no_value_passes(self):
+        for c in ['grep "^MY_TEST_PASSWORD=" settings.txt && echo "done now"',
+                  "grep '^MY_TEST_PASSWORD=' settings.txt && echo 'done now'",
+                  'python3 -c \'print(open("settings.txt").read().count("API_TOKEN="))\' ; echo "x y"',
+                  'if [ "$l" = "SECRET_TOKEN=" ]; then echo "same line"; fi',
+                  'x = "MY_TEST_PASSWORD="+value_here; echo "a b"',
+                  'x = "MY_TEST_PASSWORD=".join(parts); echo "a b"',
+                  'echo ' + "y" * 60 + ' "MY_TEST_PASSWORD=" ; echo "a b"',
+                  'grep -e "export MY_TEST_PASSWORD=" settings.txt && echo "done now"']:
+            self.allowed(c)
+
+    def test_a_real_assignment_still_blocks(self):
+        for c in ['MY_TEST_PASSWORD="hunter2pass" ./run.sh', "export MY_TEST_PASSWORD='hunter2pass'",
+                  "export MY_TEST_PASSWORD=hunter2pass", 'x="a"; MY_TEST_PASSWORD="hunter2pass"']:
+            self.blocked(c, "A")
+
+    def test_a_value_glued_to_the_closing_quote_still_blocks(self):
+        for c in ['export "MY_TEST_PASSWORD="hunter2pass', 'export "MY_TEST_PASSWORD=""hunter2pass"',
+                  "export 'MY_TEST_PASSWORD='hunter2pass", "export \"MY_TEST_PASSWORD=\"'hunter2pass'",
+                  'echo "a"MY_TEST_PASSWORD="hunter2pass"', 'echo "a"MY_TEST_PASSWORD=" hunter2pass"',
+                  'export "MY_TEST_PASSWORD="_s3cretValue && echo "ok"', 'docker run -e "API_KEY="-k3yValue99 app "x"',
+                  'export "MY_TEST_PASSWORD="*hunter2pass && echo "ok"', 'echo "ok"; ' + "x" * 60 + ' "MY_TEST_PASSWORD="hunter2pass',
+                  'export "MY_TEST_PASSWORD="!hunter2pass', 'export "MY_TEST_PASSWORD="@hunter2pass', 'export "MY_TEST_PASSWORD="#hunter2pass',
+                  'export "MY_TEST_PASSWORD="%hunter2pass', 'export "MY_TEST_PASSWORD="=hunter2pass',
+                  # round 2: the ^, export and set that CLOSES_STRING skips over must not hide a glued value from GLUED
+                  'ssh host "export MY_TEST_TOKEN="hunter2pass" && ./deploy"', 'cmd.exe /c "set MY_TEST_TOKEN="hunter2pass" && run"',
+                  'grep "^MY_TEST_TOKEN="hunter2pass settings.txt && echo "found"']:
+            self.blocked(c, "A")
+
+    def test_an_assignment_on_the_line_after_a_closing_quote_still_blocks(self):
+        # round 3: "$" matched before a trailing newline, so a quote that closes a multi-line string looked like one opening a name's string
+        self.blocked('python3 -c "\nprint(1)\n"\nMY_TEST_TOKEN="hunter2pass" ./run.sh', "A")
+        self.blocked("node -e '\nx()\n'\nMY_TEST_TOKEN='hunter2pass' ./run.sh", "A")
+        self.blocked('echo "Result: "\nMY_TEST_TOKEN="hunter2pass" cmd', "A")
+
+    def test_a_real_assignment_after_the_skipped_name_still_blocks(self):
+        self.blocked('grep "^MY_TEST_PASSWORD=" settings.txt; MY_TEST_PASSWORD="hunter2pass" ./run.sh', "A")
+        self.blocked('line.startswith("MY_TEST_PASSWORD=") and "x" ; OTHER_TOKEN=hunter2pass ./run.sh', "A")
+
+
 class RuleB(Base):
     def test_blocks(self):
         for c in [
