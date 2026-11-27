@@ -386,7 +386,7 @@ HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|
 
 def _heredoc_line_is_data(line):
     """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
-    if re.search(r">[ \t]*[^\s;&|<>]*[*?\[{$]", line):
+    if re.search(r">\|?[ \t]*[^\s;&|<>]*[*?\[{$]", line):
         return False  # a redirect target built from a glob or a variable can land on /dev/fd or /proc
     flat = re.sub(r"[\"'\\]", "", line)  # quotes and backslashes inside a redirect target do not hide its real path
     if "$(" in line or "`" in line or ">(" in flat or "<(" in flat or re.search(r">&\s*(?![12](?![\w$]))|&>|\{\w+\}\s*[<>]|/dev/|/proc/", flat):
@@ -402,6 +402,8 @@ def _heredoc_line_is_data(line):
         if not words or re.match(r"^[A-Za-z_]\w*=", words[0]) or "/" in words[0]:
             return False
         first = words[0]
+        if first == "tee" and any(re.search(r"[*?\[{$]", w) for w in words[1:]):
+            return False  # tee writes to the files it is given: a glob or a variable there can land on /dev/fd or /proc
         if first in HEREDOC_DATA_WORDS:
             continue
         if first == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH:
