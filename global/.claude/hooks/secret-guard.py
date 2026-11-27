@@ -34,7 +34,7 @@ VAL = r"""(?:"[^"]*"|'[^']*'|[^\s"';&|)]+)"""
 ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<val>" + VAL + ")", re.I)
 # A quote that opens a word (start, or after whitespace ( [ , { = : ; | & < >), then an optional ^, "export " or "set ", right before a name:
 # the quote that follows that name's = closes this string. A quote glued to a word before it (a"NAME=") does not open one.
-CLOSES_STRING = re.compile(r"""(?:^|[\s(\[,{=:;|&<>])(["'])[\^]*(?:(?:export|set)\s+)?$""")
+CLOSES_STRING = re.compile(r"""(?:^|[\s(\[,{=:;|&<>])(["'])[\^]*(?:(?:export|set)\s+)?\Z""")
 GLUED = re.compile(r"""(?P<q>["'])[\^]*(?:(?:export|set)\s+)?(?P<name>[A-Za-z0-9_.-]*""" + WORD + r"""[A-Za-z0-9_.-]*)=(?P=q)(?P<val>(?![\s+.)\],;&|}:<>])""" + VAL + ")", re.I)
 NAME_NOT_SECRET = re.compile(r"(?:file|path|dir|url|uri|name|type|mode|host|port|header|endpoint"
                              r"|enabled|ttl|expiry|expires)$", re.I)

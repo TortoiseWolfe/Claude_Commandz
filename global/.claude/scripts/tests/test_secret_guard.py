@@ -162,6 +162,12 @@ class RuleAClosingQuote(Base):
                   'grep "^MY_TEST_TOKEN="hunter2pass settings.txt && echo "found"']:
             self.blocked(c, "A")
 
+    def test_an_assignment_on_the_line_after_a_closing_quote_still_blocks(self):
+        # round 3: "$" matched before a trailing newline, so a quote that closes a multi-line string looked like one opening a name's string
+        self.blocked('python3 -c "\nprint(1)\n"\nMY_TEST_TOKEN="hunter2pass" ./run.sh', "A")
+        self.blocked("node -e '\nx()\n'\nMY_TEST_TOKEN='hunter2pass' ./run.sh", "A")
+        self.blocked('echo "Result: "\nMY_TEST_TOKEN="hunter2pass" cmd', "A")
+
     def test_a_real_assignment_after_the_skipped_name_still_blocks(self):
         self.blocked('grep "^MY_TEST_PASSWORD=" settings.txt; MY_TEST_PASSWORD="hunter2pass" ./run.sh', "A")
         self.blocked('line.startswith("MY_TEST_PASSWORD=") and "x" ; OTHER_TOKEN=hunter2pass ./run.sh', "A")
