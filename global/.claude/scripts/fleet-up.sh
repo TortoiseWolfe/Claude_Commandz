@@ -23,6 +23,10 @@
 #                                 other dead lane is recorded as "not restarted: handoff from <date>; the hub decides": 4 Nov 2026, a
 #                                 reboot would have restarted 16 lanes at once, most from hand-offs of 29 Oct to 2 Nov (cost, and finished
 #                                 work done twice); only the hand-offs the hub asked for before the stop are meant to come back by themselves.
+#                                 With no unlocked ssh agent (ssh-add -l fails in every agent socket) a dead lane is NOT restarted: its new window
+#                                 would stop at the key's passphrase prompt (issue 184). The lanes go to state/fleet-up.pending (a line a lane: name, TAB, the epoch
+#                                 the machine went down, so a retry judges that lane's hand-off against its own outage), the record carries a STEP FOR
+#                                 JONATHAN line ("run: ssh-add"), and every later run retries them quietly (no record, no inbox line) until an agent works.
 #                               - long jobs in ~/.config/afa/services.tsv (see examples/services.tsv.example)
 #                             It adds one line to this machine's inbox (peer-inbox.md off NX-01, hub-inbox.md on NX-01) so /prep shows it.
 #                             The record reaches the other machine only through the notes route, which here makes Gmail drafts and never
@@ -225,8 +229,25 @@ if [ -r "$CONF/peers" ]; then
   done <"$CONF/peers"
 fi
 
+# Claude_Commandz issue 184 (25 Nov 2026): this script runs from a Windows task with no SSH_AUTH_SOCK, so it must find an unlocked agent itself: a socket in
+# $SSH_AGENT_SCAN_DIR (default /tmp) matching ssh-*/agent.*, owned by this user, that answers ssh-add -l with a key; the first is exported. Same function as
+# ssh_agent_ok in lane.sh. With none, the dead lanes are written to $STATE/fleet-up.pending and every later full run retries them (quietly, with no new record) until an agent is unlocked.
+ssh_agent_ok() {
+  command -v ssh-add >/dev/null 2>&1 || return 1
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
+  local s d
+  for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
+    d=${s%/*}   # only a real, user-owned folder nobody else can write to, and a real socket in it (no symlink, nothing planted in /tmp)
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ -S "$s" ] && [ ! -L "$s" ] && [ -O "$s" ] || continue
+    [ $(( 8#$(stat -c %a "$d" 2>/dev/null || echo 777) & 8#022 )) -eq 0 ] || continue
+    if SSH_AUTH_SOCK="$s" ssh-add -l >/dev/null 2>&1; then export SSH_AUTH_SOCK="$s"; return 0; fi
+  done
+  return 1
+}
+
 incident=0
 { [ -n "$down_epoch" ] || [ "$booted" = 1 ] || [ "$lanes_gone" = 1 ]; } && incident=1
+pending_file="$STATE/fleet-up.pending"
 
 remember() {   # keep what the next run compares against
   [ "$dry" = 1 ] && return 0
@@ -242,6 +263,32 @@ inbox_add() {  # <text>: one line in this machine's inbox
   if [ "$dry" = 1 ]; then echo "would add to $inbox: $line"; return 0; fi
   ( flock -w 30 7 && printf '%s\n' "$line" >>"$inbox" ) 7>>"$STATE/hub-inbox.lock"
 }
+
+# Lanes an earlier run could not restart for want of an unlocked agent (issue 184): retry them on this run, but stay silent (no record, no
+# inbox line) while there is still no agent, so a locked key does not write a record every run.
+# The pending file has one line a lane: <name><TAB><epoch the machine went down when the lane was parked>. Each lane keeps its own stop, so a hand-off
+# is judged against the outage it belongs to and never against a later one.
+pending_prune() {   # drop parked lanes that already have a window (started by hand); remove the file when none are left
+  [ -s "$pending_file" ] || return 0
+  local have l t keep=""
+  have=" $(lane_windows | tr '\n' ' ')"
+  while IFS=$'\t' read -r l t; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && keep+="$l"$'\t'"$t"$'\n'; done <"$pending_file"
+  if [ -n "$keep" ]; then printf '%s' "$keep" >"$pending_file"; else rm -f "$pending_file"; fi
+}
+pure_retry=0   # this run exists only to retry parked lanes: no boot, no stale heartbeat, no missing session
+if [ "$incident" = 0 ] && [ "$dry" != 1 ]; then pending_prune; fi
+if [ "$incident" = 0 ] && [ -s "$pending_file" ] && [ "$dry" != 1 ]; then
+  if ssh_agent_ok; then incident=1; pure_retry=1
+  else
+    remember
+    if [ -n "${peer_changed:-}" ]; then inbox_add "Fleet: $peer_changed (read over the home network by fleet-up.sh)"; fi
+    exit 0
+  fi
+fi
+declare -A pstop=()   # lane name -> the stop epoch it was parked with
+if [ -s "$pending_file" ]; then
+  while IFS=$'\t' read -r l t; do [ -n "$l" ] && [[ "$t" =~ ^[0-9]+$ ]] && pstop[$l]=$t; done <"$pending_file"
+fi
 
 if [ "$incident" = 0 ]; then
   remember
@@ -274,7 +321,8 @@ restart_lane() {  # <name>: start it fresh from its hand-off, when the hand-off 
   [ -s "$hand/handoff.md" ] || { note_back "lane $name: not restarted, no handoff.md in $hand"; return; }
   hm=$(mtime "$hand/handoff.md"); hm=${hm:-0}
   rm_=$(mtime "$hand/report.md"); rm_=${rm_:-0}
-  if ((hm < stop_epoch - fresh_secs)); then
+  # a lane parked for want of an ssh agent is judged against the stop it was parked with (an overnight outage is over 3 hours); every other lane against this run's
+  if ((hm < ${pstop[$name]:-$stop_epoch} - fresh_secs)); then
     note_back "lane $name: not restarted: handoff from $(pretty "$hm"); the hub decides"; return
   fi
   if ((rm_ > hm + 600)); then
@@ -303,18 +351,29 @@ restart_lane() {  # <name>: start it fresh from its hand-off, when the hand-off 
   rm -f "$note"
 }
 
-dead=()
+dead=(); parked=0
 if [ -s "$LANES/live.tsv" ]; then
   have=" $(lane_windows | tr '\n' ' ')"
   while read -r l; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && dead+=("$l"); done <"$LANES/live.tsv"
 fi
+if [ -s "$pending_file" ] && [ "$dry" != 1 ]; then   # earlier skipped lanes that are still not in a window
+  have=" $(lane_windows | tr '\n' ' ')"
+  while IFS=$'\t' read -r l _; do [ -n "$l" ] && [[ "$have" != *" $l "* ]] && [[ " ${dead[*]:-} " != *" $l "* ]] && dead+=("$l"); done <"$pending_file"
+fi
+[ "$dry" = 1 ] || rm -f "$pending_file"
+if [ "${#dead[@]}" -gt 0 ] && [ "$dry" != 1 ] && ! ssh_agent_ok; then
+  for l in "${dead[@]}"; do printf '%s\t%s\n' "$l" "${pstop[$l]:-$stop_epoch}"; done >"$pending_file"
+  parked=${#dead[@]}
+  note_back "STEP FOR JONATHAN: no unlocked ssh agent on this machine (ssh-add -l exits non-zero in every agent socket). ${#dead[@]} dead lane(s) (${dead[*]}) were NOT restarted, because each new window would stop at the key's passphrase prompt. Open a terminal and run: ssh-add. The next run restarts them."
+  dead=()
+fi
 for l in "${dead[@]:-}"; do [ -n "$l" ] && restart_lane "$l"; done
 
 if "$TMUX_BIN" has-session -t "$SESSION" 2>/dev/null; then
-  note_back "tmux session $SESSION is up ($(( ${#dead[@]} )) dead lane(s) found)"
+  note_back "tmux session $SESSION is up ($(( ${#dead[@]} + parked )) dead lane(s) found$([ "$parked" -gt 0 ] && echo ", $parked parked for want of an ssh agent"))"
 elif [ "$dry" = 1 ]; then echo "would create tmux session $SESSION at ${SIZE_X}x${SIZE_Y}"
 else
-  envopt=(); [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1 && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  envopt=(); ssh_agent_ok && envopt=(-e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
   "$TMUX_BIN" new-session -d -x "$SIZE_X" -y "$SIZE_Y" -s "$SESSION" -n fleet -c "$HOME" ${envopt[@]+"${envopt[@]}"} 8>&- 9>&- \
     && "$TMUX_BIN" set-option -t "$SESSION" window-size manual \
     && "$TMUX_BIN" set-option -t "$SESSION" default-size "${SIZE_X}x${SIZE_Y}" \
@@ -347,6 +406,7 @@ battery_txt=$(printf '%s\n' "$win" | sed -n 's/^BATT=//p' | head -1)
   echo "# Recovery on $machine, $(pretty "$now")"
   echo
   if [ -n "$down_epoch" ]; then echo "- Went down: last heartbeat $(pretty "$down_epoch")."
+  elif [ "$pure_retry" = 1 ]; then echo "- Retry: lanes parked on an earlier run for want of an unlocked ssh agent were retried on this run; nothing new went down."
   else echo "- Went down: the heartbeat was not stale; a boot or a missing lanes session was found instead."; fi
   if [ -n "$boot_iso" ]; then be=$(iso_epoch "$boot_iso"); echo "- Windows started: $( [ -n "$be" ] && pretty "$be" || echo "$boot_iso" )."; fi
   if [ -n "$logon_iso" ]; then le=$(iso_epoch "$logon_iso"); echo "- Signed in (desktop shell started): $( [ -n "$le" ] && pretty "$le" || echo "$logon_iso" )."
@@ -365,6 +425,6 @@ if [ "$dry" = 1 ]; then cat "$rec.tmp"; rm -f "$rec.tmp"; exit 0; fi
 mv -f "$rec.tmp" "$rec"
 rm -f "$STATE/heartbeat.gap"
 remember
-if [ -n "$down_epoch" ]; then down_txt="down since $(pretty "$down_epoch")"; else down_txt="restart found"; fi
+if [ -n "$down_epoch" ]; then down_txt="down since $(pretty "$down_epoch")"; elif [ "$pure_retry" = 1 ]; then down_txt="retry of lanes parked for want of an ssh agent"; else down_txt="restart found"; fi
 inbox_add "Recovery on $machine: $down_txt, ${#back[@]} thing(s) checked or brought back | record: $rec"
 exit 0

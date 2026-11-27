@@ -570,7 +570,22 @@ SESSION_SIZE_X=200; SESSION_SIZE_Y=50
 # for the key's passphrase; a session made from a Windows task (fleet-up.sh at sign-in) has no agent, so on 4 Nov 2026 the first lane windows sat at that
 # prompt and the start command was typed into it ("Bad passphrase, try again"). When the caller's agent works (ssh-add -l exits 0), the session (-e on
 # a new one) and the server's global environment (for the windows that follow) carry its socket before any window opens.
-ssh_agent_ok() { [ -n "${SSH_AUTH_SOCK:-}" ] && command -v ssh-add >/dev/null 2>&1 && ssh-add -l >/dev/null 2>&1; }
+# Claude_Commandz issue 184 (25 Nov 2026): the recovery script's own shell had no SSH_AUTH_SOCK, so the session was made without one and every window stopped
+# at the passphrase prompt, while an unlocked agent was running in the hub's terminal. A caller with no working agent now looks for one: a socket in
+# $SSH_AGENT_SCAN_DIR (default /tmp) matching ssh-*/agent.*, owned by this user, that answers ssh-add -l with a key. The first one found is exported.
+# fleet-up.sh carries the same function; tests/test_lane_ssh_agent.sh and tests/test_fleet_up.sh check each.
+ssh_agent_ok() {
+  command -v ssh-add >/dev/null 2>&1 || return 1
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1; then return 0; fi
+  local s d
+  for s in "${SSH_AGENT_SCAN_DIR:-/tmp}"/ssh-*/agent.*; do
+    d=${s%/*}   # only a real, user-owned folder nobody else can write to, and a real socket in it (no symlink, nothing planted in /tmp)
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] && [ -S "$s" ] && [ ! -L "$s" ] && [ -O "$s" ] || continue
+    [ $(( 8#$(stat -c %a "$d" 2>/dev/null || echo 777) & 8#022 )) -eq 0 ] || continue
+    if SSH_AUTH_SOCK="$s" ssh-add -l >/dev/null 2>&1; then export SSH_AUTH_SOCK="$s"; return 0; fi
+  done
+  return 1
+}
 share_ssh_agent() {  # needs a running tmux server
   if [ "$dry" = 1 ]; then echo "# if SSH_AUTH_SOCK works (ssh-add -l exits 0): tmux set-environment -g SSH_AUTH_SOCK <it>"; return 0; fi
   ssh_agent_ok || return 0
