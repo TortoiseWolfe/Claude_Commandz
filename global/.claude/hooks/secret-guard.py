@@ -365,7 +365,8 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             except ValueError:
                 continue
     if tolerant:  # the pieces too, so open('/a/link/x') and a line the shell can't split are both followed to the real path
-        words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) if w]
+        # also the row with its quotes and backslashes removed, as bash would join a quoted glob (~/.?on"f"ig) into one word
+        words = words + [w for w in re.split(r"[\s'\"(),;<>]+", seg) + re.split(r"[\s(),;<>]+", re.sub(r"[\"'\\]", "", seg)) if w]
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)

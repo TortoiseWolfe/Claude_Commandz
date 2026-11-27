@@ -786,6 +786,10 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("bash <<'EOF'\ncat ~/.?on\"f\"ig/a?a/g?ail/token.json # it's\nEOF", "G")
                 self.blocked("bash <<'EOF'\ncat ~/.?onfig/a[\\ f]a/g?ail/token.json # it's\nEOF", "G")
                 self.blocked("bash <<'EOF'\ncat ~/.?onfig/a?a/g?ail/token.json it's\nEOF", "G")
+                # fourth review: a quoted string that runs across rows leaves row 2 unsplittable, with a quoted glob in it
+                self.blocked("bash <<'EOF'\necho 'x\n'; cat ~/.?on\"f\"ig/a?a/g?ail/token.json\nEOF", "G")
+                self.blocked("bash <<'EOF'\necho \"a\n\"; cat ~/.?on\"f\"ig/a?a/g?ail/token.json\nEOF", "G")
+                self.blocked("bash <<'EOF'\necho 'x\n'; cp -r ~/.?on\"f\"ig/a?a/g?ail /tmp/x\nEOF", "G")
             finally:
                 if old is None:
                     del os.environ["HOME"]
