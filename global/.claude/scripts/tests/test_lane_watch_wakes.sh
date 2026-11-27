@@ -522,9 +522,9 @@ else echo "FAIL start-load.log row missing or hit set (hit=$hit other=$other)"; 
 sl_name "52 sess-p"; sl_expect "the same session is not logged twice" 0
 [ "$(wc -l < "$sl_dir/start-load.log")" = 1 ] && echo "ok   one log row a session" || { echo "FAIL a second log row for the same session"; failures=$((failures + 1)); }
 # When the lane's own files are the bulk, the wake still names the lane and carries the line.
-rm -f "$sl_dir"/.startload-*; echo "its own files are the bulk: 40 KB together (about 10K tokens of the 52K), prompt.md the biggest at 30 KB; archive or shrink that one" > "$TMP/sl-parts"
+rm -f "$sl_dir"/.startload-*; echo "its own files are the bulk: 120 KB together (about 30K tokens of the 52K), prompt.md the biggest at 90 KB; archive or shrink that one" > "$TMP/sl-parts"
 sl_name "52 sess-q"
-if [ "$sl_said" = "start load: sl-lane (its fresh session held 52K at its first message, over the 30K mark: its own files are the bulk: 40 KB together (about 10K tokens of the 52K), prompt.md the biggest at 30 KB; archive or shrink that one)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   the wake names a lane whose own files are the bulk"
+if [ "$sl_said" = "start load: sl-lane (its fresh session held 52K at its first message, over the 30K mark: its own files are the bulk: 120 KB together (about 30K tokens of the 52K), prompt.md the biggest at 90 KB; archive or shrink that one)" ] && [ "$hit" = 1 ] && [ "$other" = 1 ]; then echo "ok   the wake names a lane whose own files are the bulk"
 else echo "FAIL bulk wake: said '$sl_said' hit=$hit other=$other"; failures=$((failures + 1)); fi
 # The default mark is 40K: a 33K lane outside a repo and a 39K one are not named, a 41K one is.
 rm -f "$sl_dir"/.startload-*; rm -f "$TMP/sl-parts"

@@ -46,6 +46,7 @@
 #   - a turn that ends within LANE_WATCH_TURN_GRACE (default 300) seconds of a report.md change: the report is the news, the turn end is the
 #     same turn. (PR 175 fixed the pane-redraw repeat; this is the report-then-turn-end double wake.)
 #   - a report whose line 1 starts HOURLY or STATUS: routine status. Lanes are told to keep it in status.md, so line 1 changes only when the hub must act.
+#   - a fresh session over the start-load mark (LANE_WATCH_START_K, default 40) whose own files are too small to be the cause (issue 226): one row in recycle/start-load.log, no wake.
 # A report that lands between a wake and the hub's re-arm is still news: each wake that names a report writes .reportseen-<lane> (the stamp the
 # hub was shown) in the lane state folder, and a new watcher starts from it (when it is under LANE_WATCH_SEEN_MAX_SECS, default 1800, old) instead
 # of from the moment it starts.
