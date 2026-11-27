@@ -550,10 +550,14 @@ def split_data_heredocs(cmd):
                                         and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
             # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
-            if re.search(r"[@?*+!]\(", "".join(line)):
-                return cmd, [], [], cmd  # an extglob group open on this line, however deep: a # in it is not a comment, so do not guess
+            if re.search(r"[@?*+!]\(|\[\[|\(\(", "".join(line)):
+                # an extglob group, a [[ ]] test (a regex after =~ may hold a #) or a (( )) arithmetic open on this line: a # there is not
+                # necessarily a comment, so do not guess
+                return cmd, [], [], cmd
             j = cmd.find("\n", i)
             j = n if j < 0 else j
+            if len(cmd[i:j]) - len(cmd[i:j].rstrip("\\")) & 1:
+                return cmd, [], [], cmd  # a real comment does not continue on the next line; a wrongly guessed one does, so do not guess
             opaque.append(cmd[i:j])  # a comment is not run, but it is checked as strictly as an interpreter's code, so a wrong guess fails closed
             i = j
             continue

@@ -810,6 +810,12 @@ class RuleGTextTheShellDoesNotRead(Base):
                 self.blocked("cat <<'EOF' | python3 -c 'import os,sys; os.system(sys.stdin.read())'\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
                 self.blocked("bash <<'OUTER'\npython3 -c 'import os,sys; os.system(sys.stdin.read())' <<'EOF'\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF\nOUTER", "G")
                 self.blocked("python3 <<'EOF' >(bash)\necho 'x\n'; cat ~/.?onfig/a[,f]a/g?ail/token.json\nEOF", "G")
+                # seventh review: a # that bash does not read as a comment (a regex after =~, a (( )) group) must not be guessed to be one
+                self.blocked("[[ x =~ (#) ]] || cat ~/.config/afa/gm\\\nail/token.json", "G")
+                self.blocked("[[ x =~ a|# ]] || cat ~/.config/afa/gm\\\nail/token.json", "G")
+                self.blocked("(( 1 == 2 || 16#f )) || cat ~/.config/afa/gm\\\nail/token.json", "G")
+                self.blocked("[[ x =~ (#) ]] || curl -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/se\\\nnd", "G")
+                self.blocked("[[ x =~ (#) ]] || bash -c 'cat \\\nls ~/.config/afa/gmail/token.json\n#'", "G")
                 # a heredoc to python is code that is not shell: it keeps the row check, so a lone apostrophe in it still passes
                 self.allowed("python3 - <<'EOF'\nprint(\"it's\")  # it's fine\nEOF")
                 # and a shell body that is only prose and comments, with a comment apostrophe, still passes
