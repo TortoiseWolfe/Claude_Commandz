@@ -386,7 +386,10 @@ HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|
 
 def _heredoc_line_is_data(line):
     """True when every command on this logical line only stores or posts its input (cat, tee, gh issue ..., git commit ...)."""
-    if "$(" in line or "`" in line or ">(" in line or "<(" in line or re.search(r">&\s*(?![12](?![\w$]))|&>|\{\w+\}\s*[<>]|/dev/|/proc/", line):
+    if re.search(r">[ \t]*[^\s;&|<>]*[*?\[{$]", line):
+        return False  # a redirect target built from a glob or a variable can land on /dev/fd or /proc
+    flat = re.sub(r"[\"'\\]", "", line)  # quotes and backslashes inside a redirect target do not hide its real path
+    if "$(" in line or "`" in line or ">(" in flat or "<(" in flat or re.search(r">&\s*(?![12](?![\w$]))|&>|\{\w+\}\s*[<>]|/dev/|/proc/", flat):
         return False  # a substitution, or a file descriptor, device or proc path that may lead to a shell
     segs = [s for s in split_segments(line) if s.strip()]
     if not segs:
