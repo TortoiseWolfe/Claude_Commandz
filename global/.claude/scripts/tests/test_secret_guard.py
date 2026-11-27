@@ -986,6 +986,57 @@ class IssueNinetyThreeF7(Base):
             self.allowed(cmd)
 
 
+class RuleGBraceListsAndPosixClasses(Base):
+    """Issue 238: bash expands brace lists and POSIX classes before it globs; Python's glob does not."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()  # a glob only resolves to a file that exists
+        os.makedirs(os.path.join(home, "docs"))
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    def test_the_two_repros_are_refused(self):
+        self.home()
+        self.blocked("cat ~/.?onfig/a[[:alpha:]]a/g?ail/token.json", "G")
+        self.blocked("cat ~/.{c,x}onfig/a{f,x}a/g{m,x}ail/token.json", "G")
+
+    def test_other_spellings_are_refused(self):
+        self.home()
+        for c in ("cat ~/.?onfig/a[![:digit:]]a/g?ail/token.json", "cat ~/.config/afa/g[[:lower:]][[:lower:]]il/token.json",
+                  "cat ~/.config/{afa,x}/gmail/token.json", "cat ~/.config/afa/gmail/{token,x}.json", "cat ~/.config/afa/{a..z}mail/t*.json",
+                  "cat ~/.config/afa/gmail/{token,{x,y}}.json", "cat ~/.config/afa/gmail/{a..z..2}.json",
+                  "cat ~/.config/afa/gmail/{token,x}{.json,.y}", "cat ~/.[^x]onfig/a[^x]a/g[^x]ail/token.json",
+                  "cat ~/.config/afa/g[^[:digit:]]ail/token.json", "cat ~/.[:punct:]onfig/a?a/g?ail/token.json", "cat ~/.config/afa/gmail/[[:punct:][:alpha:]]oken.json",
+                  "cat {~,x}/.?onfig/a?a/g?ail/token.json", "cat $HO{M,x}E/.?onfig/a?a/g?ail/token.json", "cat ~/.?onfig/a[[=f=]]a/g?ail/token.json",
+                  "cat ~/.config/afa/gmail/[[=t=]]oken.json", "cat ~/.config/afa/gmail/[[.t.]]oken.json", "cat ~/.config/afa/gmail/[[:nosuchclass:]]*"):
+            self.blocked(c, "G")
+
+    def test_long_and_odd_words_are_refused_quickly(self):
+        self.home()
+        import time
+        t = time.time()
+        self.blocked("cat /{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p}{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p}" + "[" * 3000 + " ~/.?onfig/a?a/g?ail/token.json", "G")
+        self.assertLess(time.time() - t, 2)
+        self.blocked("cat ~/.config/afa/g[e-[:alpha:]]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/g[[:alpha:]-z]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/g[![:cntrl:]]ail/token.json", "G")
+        self.blocked("cat ~/.config/afa/gmail/[[:graph:]]oken.json", "G")
+
+    def test_too_many_words_are_refused(self):
+        self.home()
+        self.blocked("cat ~/docs/{1..999}/{1..999}", "G")
+
+    def test_ordinary_brace_and_class_globs_pass(self):
+        self.home()
+        self.allowed("ls ~/docs/{a,b}.md ~/docs/[[:alpha:]]*.txt")
+        self.allowed("echo ~/docs/{1..3}/x")
+        self.allowed("echo ~/docs/{x}")
+
+
 class RuleGAliasQuoteState(Base):
     """Issue 241: an alias whose value holds an open quote moves bash's quote state away from the one the guard reads from the text."""
     def home(self):
