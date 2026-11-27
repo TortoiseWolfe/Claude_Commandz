@@ -35,7 +35,7 @@ ASSIGN = re.compile(r"(?P<name>[A-Za-z0-9_.-]*" + WORD + r"[A-Za-z0-9_.-]*)=(?P<
 # A quote that opens a word (start, or after whitespace ( [ , { = : ; | & < >), then an optional ^, "export " or "set ", right before a name:
 # the quote that follows that name's = closes this string. A quote glued to a word before it (a"NAME=") does not open one.
 CLOSES_STRING = re.compile(r"""(?:^|[\s(\[,{=:;|&<>])(["'])[\^]*(?:(?:export|set)\s+)?$""")
-GLUED = re.compile(r"""(?P<q>["'])(?P<name>[A-Za-z0-9_.-]*""" + WORD + r"""[A-Za-z0-9_.-]*)=(?P=q)(?P<val>(?![\s+.)\],;&|}:<>])""" + VAL + ")", re.I)
+GLUED = re.compile(r"""(?P<q>["'])[\^]*(?:(?:export|set)\s+)?(?P<name>[A-Za-z0-9_.-]*""" + WORD + r"""[A-Za-z0-9_.-]*)=(?P=q)(?P<val>(?![\s+.)\],;&|}:<>])""" + VAL + ")", re.I)
 NAME_NOT_SECRET = re.compile(r"(?:file|path|dir|url|uri|name|type|mode|host|port|header|endpoint"
                              r"|enabled|ttl|expiry|expires)$", re.I)
 FLAG_SP = re.compile(r"(?<![\w-])--(?:password|passwd|token|secret|api-?key|auth-token|access-token"
@@ -249,6 +249,7 @@ def find_secret(cmd):
     for m in GLUED.finditer(cmd):
         # export "NAME="abc: bash joins the quoted name= to the word after it, so that word is the value (the quoted ASSIGN match above
         # needs a quoted value to close, and this one has none). A space, +, ., ), ], comma, ; & | } : < or > after the closing quote is code or text, not a value; any other character starts one.
+        # Known limit: a password that itself starts with one of those characters, glued to a quoted NAME=, is not caught (main caught it only by accident).
         if not NAME_NOT_SECRET.search(m.group("name")) and literal_value(m.group("val")):
             return "literal value assigned to %s" % m.group("name").lstrip("-")[:40]
     for m in FLAG_SP.finditer(cmd):

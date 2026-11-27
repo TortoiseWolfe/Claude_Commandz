@@ -156,7 +156,10 @@ class RuleAClosingQuote(Base):
                   'export "MY_TEST_PASSWORD="_s3cretValue && echo "ok"', 'docker run -e "API_KEY="-k3yValue99 app "x"',
                   'export "MY_TEST_PASSWORD="*hunter2pass && echo "ok"', 'echo "ok"; ' + "x" * 60 + ' "MY_TEST_PASSWORD="hunter2pass',
                   'export "MY_TEST_PASSWORD="!hunter2pass', 'export "MY_TEST_PASSWORD="@hunter2pass', 'export "MY_TEST_PASSWORD="#hunter2pass',
-                  'export "MY_TEST_PASSWORD="%hunter2pass', 'export "MY_TEST_PASSWORD="=hunter2pass']:
+                  'export "MY_TEST_PASSWORD="%hunter2pass', 'export "MY_TEST_PASSWORD="=hunter2pass',
+                  # round 2: the ^, export and set that CLOSES_STRING skips over must not hide a glued value from GLUED
+                  'ssh host "export MY_TEST_TOKEN="hunter2pass" && ./deploy"', 'cmd.exe /c "set MY_TEST_TOKEN="hunter2pass" && run"',
+                  'grep "^MY_TEST_TOKEN="hunter2pass settings.txt && echo "found"']:
             self.blocked(c, "A")
 
     def test_a_real_assignment_after_the_skipped_name_still_blocks(self):
