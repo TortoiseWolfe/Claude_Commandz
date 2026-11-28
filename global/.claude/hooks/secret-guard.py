@@ -1016,7 +1016,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue
             comps = word.split("/")
-            if ".." in comps:
+            # sixth review: an extglob group can match .. (@(..)/@(..)/?config/..), so a part that holds .. beside a ( or ) counts as .. itself
+            if any(c == ".." or (".." in c and ("(" in c or ")" in c)) for c in comps):
                 return True
             if skipdots and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
                 return True  # with globskipdots off a .* or .? component anywhere matches ..

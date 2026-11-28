@@ -243,6 +243,23 @@ class RuleGGlobOptions(Base):
             self.assertIsNone(r)
         self.with_home(run)
 
+    def test_an_extglob_group_that_matches_dotdot_is_refused(self):
+        """Sixth review of PR 264: @(..) matches .. in bash, so two groups climb from a folder two below home to home."""
+        def run(home):
+            deep = os.path.join(home, "a", "b")
+            os.makedirs(deep)
+            for tok in ("@(..)/@(..)/?config/a?a/g?ail/token.json", "?(..)/@(..)/?config/a?a/g?ail/token.json",
+                        "@(x|..)/@(..)/?config/a?a/g?ail/token.json"):
+                cmd = "shopt -s extglob dotglob\ncat " + tok
+                real = subprocess.run(["bash", "-c", cmd.replace("cat ", "ls ", 1)], env={"HOME": home, "PATH": os.environ["PATH"]},
+                                      capture_output=True, text=True, cwd=deep).stdout
+                if "token.json" in real:  # bash itself must reach the token for the row to count
+                    r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": cmd}})
+                    self.assertEqual(r[0], "G", cmd)
+            r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": "shopt -s extglob dotglob\ncat @(..)/@(..)/?config/a?a/g?ail/token.json"}})
+            self.assertEqual(r[0], "G")
+        self.with_home(run)
+
     def test_the_same_options_elsewhere_are_allowed(self):
         def run(home):
             for cmd in ("shopt -s nullglob; ls ~/docs/*.md",
