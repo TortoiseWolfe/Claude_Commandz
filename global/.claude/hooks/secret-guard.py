@@ -907,9 +907,9 @@ def _shell_body_use(body):
 # Second blind review of PR 264: the bare word IFS anywhere counts (for IFS in q, read IFS, printf -v IFS q, ${IFS}, IFS=,); only IFS= and IFS='' (empty) and an
 # IFS=value that is a prefix of read, mapfile or readarray (it lasts for that one command and bash splits that command's words before it applies) are ordinary
 # Security review of the third round: IFS=q read a b <<< "q/home/*/.." makes /home/*/.. a word the text never shows, so the read prefix is ordinary only for a value
-# that holds nothing but characters the word splitter already cuts at (space, tab, newline, comma, colon, bar, semicolon); in the text with quotes and backslashes
-# removed, $'\t' reads as $t, so t, n and r are allowed there (the raw text, which is searched too, shows the real letter)
-IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$?'(?:\\[tnr]|[ ,:|;])*'|"(?:\\[tnr]|[ ,:|;])*"|[$tnr,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
+# that holds nothing but separator characters: unquoted only , : | (no letters, no $), in plain quotes only space , : | ;, and the \t \n \r escapes only inside $'..'
+# (a tab written IFS=$'\t' reads as $t in the text with quotes removed, which is then a variable and counts as a set IFS: a harmless extra look, never a miss)
+IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$'(?:\\[tnr]|[ ,:|;])*'|'[ ,:|;]*'|"[ ,:|;]*"|[,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
 # a variable name built at run time in a declare, typeset, local, export, readonly or env assignment, or in printf -v or read: declare ${x}IGNORE=x
 BUILT_NAME = r"(?<![\w.-])(?:(?:declare|typeset|local|export|readonly|env)\b(?:[ \t]+-\S+)*[ \t]+[\w]*[$`{][^\s=;&|]*=|printf[ \t]+-v[ \t]*\S*[$`{]|(?:read|mapfile|readarray)\b(?:[ \t]+-\S+)*[ \t]+\S*[$`{])"
 GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots)(?![\w-])",
@@ -918,6 +918,12 @@ GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|glo
                                    r"(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]",
                                    r"(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")))
 EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
+# In the text with quotes and backslashes removed, a tab written IFS=$'\t' reads as IFS=$t; there (and only there) a $ and t, n or r are the escape, so that
+# ordinary line is not flagged. The raw text is searched with the strict pattern, so a real IFS=$t or IFS=t is still caught.
+_TAB_SPELLING = "|[,:|]*)[ \\t]+"
+GLOB_OPTION_BARE = re.compile(GLOB_OPTION.pattern.replace(_TAB_SPELLING, "|[,:|]*|\\$[tnr]+)[ \\t]+"))
+IFS_SET_BARE = re.compile(IFS_SET.pattern.replace(_TAB_SPELLING, "|[,:|]*|\\$[tnr]+)[ \\t]+"))
+assert GLOB_OPTION_BARE.pattern != GLOB_OPTION.pattern and IFS_SET_BARE.pattern != IFS_SET.pattern
 # What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
 # BASH_ENV or an rc file, a function or alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
 OPTION_SETTER = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*"
@@ -960,10 +966,10 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     # an option name spelled around an expansion that is empty (GLOB${e}IGNORE=x, dot${e}glob) is read with every expansion removed too
     # (taken from the raw text, so GLOB"$e"IGNORE is GLOBIGNORE and not the variable $eIGNORE)
     emptied = re.sub(r"[\"'\\]", "", re.sub(r"\$\{[^{}]*\}|\$\w+", "", cmd))
-    if not (GLOB_OPTION.search(bare) or GLOB_OPTION.search(decoded) or GLOB_OPTION.search(emptied) or GLOB_OPTION.search(cmd)
+    if not (GLOB_OPTION_BARE.search(bare) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd)
             or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
-    ifs = bool(IFS_SET.search(cmd) or IFS_SET.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
+    ifs = bool(IFS_SET.search(cmd) or IFS_SET_BARE.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
     skipdots = True  # globskipdots can be turned off by a name built at run time ($eskipdots, a brace, a quote shift): while any glob option is named or possible, a .* or .? component may match ..
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
 

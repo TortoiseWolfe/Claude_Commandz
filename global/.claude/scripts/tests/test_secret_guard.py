@@ -169,7 +169,12 @@ class RuleGGlobOptions(Base):
                         # security review: an IFS prefix of read with a separator that makes a new path, IFS set apart from it, and HOME reassigned
                         "shopt -s dotglob; IFS=q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
                         "shopt -s dotglob; IFS=q; read a b <<< \"q/home/*/%s\"; cat $b" % tok,
-                        "shopt -s dotglob; HOME=/home; cat \"$HOME\"/*/%s" % tok):
+                        "shopt -s dotglob; HOME=/home; cat \"$HOME\"/*/%s" % tok,
+                        # fourth security review: letters and $ are not separators, and \t inside plain quotes is a backslash and a t
+                        "shopt -s dotglob; IFS=t read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS='\\t' read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=\"\\t\" read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; t=q; IFS=$t read a b <<< \"q/home/*/%s\"; cat $b" % tok):
                 self.blocked(cmd, "G")
             for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
                 r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})
