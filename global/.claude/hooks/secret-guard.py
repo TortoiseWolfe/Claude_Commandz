@@ -1014,8 +1014,8 @@ NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LI
 
 
 # commands whose arguments are never run as a program (not env, command, exec, time, nohup, xargs, find, sort, tar, git, a shell or an interpreter)
-SUBST_SAFE_COMMANDS = {"mkdir", "rmdir", "touch", "rm", "cp", "mv", "ls", "cat", "echo", "dirname", "basename", "date", "pwd", "cd", "head", "tail", "wc",
-                       "grep", "readlink", "realpath", "stat", "chmod", "test"}
+SUBST_SAFE_COMMANDS = {"mkdir", "rmdir", "touch", "rm", "ls", "cat", "echo", "dirname", "basename", "date", "pwd", "cd", "head", "tail", "wc",
+                       "grep", "readlink", "realpath", "stat", "test"}
 
 
 def _names_cannot_change(cmd):
@@ -1027,18 +1027,23 @@ def _names_cannot_change(cmd):
     plain, flat_plain = SIMPLE_SUBST.sub("$S", cmd), SIMPLE_SUBST.sub("$S", flat)  # a closed plain $(..) is a subshell: it changes no name here
     if _echo_shadowed(cmd) or NAME_CHANGERS.search(plain) or NAME_CHANGERS.search(flat_plain):
         return False
+    has_subst = "$(" in cmd or "`" in cmd
     for seg in split_segments(cmd):
-        if "$(" in seg or "`" in seg:
-            # a substitution's output is text the checks above never see: as the command word, or after env/command/time/xargs and the like, it could
-            # be hash, export or read. So a segment that holds one is trusted only when it is bare assignments, or its command is a plain one whose
-            # arguments cannot be run (SUBST_SAFE_COMMANDS); anything else keeps the strict reading main had for every $( (fifth review, security scan)
+        if has_subst:
+            # a substitution's output is text the checks above never see: as the command word (also through a variable it was stored in, x=$(..) then
+            # $x), or after env/command/time/xargs and the like, it could be hash, export or read, or build the name of a file a redirect or a copy
+            # places. So once the command holds one, each segment is trusted only when it is bare assignments, or its command word is a plain name
+            # whose arguments cannot be run (SUBST_SAFE_COMMANDS) and it has no redirect aimed at a built name; anything else keeps the strict
+            # reading main had for every $( (fifth review and its follow-ups)
             try:
                 sw = shlex.split(SIMPLE_SUBST.sub("$S", seg), posix=True)
             except ValueError:
                 return False
-            while sw and re.match(r"\w+=", sw[0]):
+            while sw and re.match(r"[A-Za-z_]\w*=", sw[0]):
                 sw.pop(0)
-            if sw and ("`" in sw[0] or "$" in sw[0] or os.path.basename(sw[0]) not in SUBST_SAFE_COMMANDS):
+            if sw and sw[0] not in SUBST_SAFE_COMMANDS:
+                return False
+            if re.search(r">[^\n]*\$", SIMPLE_SUBST.sub("$S", seg)):
                 return False
         try:
             words = shlex.split(re.sub(r"[()]", " ", seg), posix=True)  # a word at the end of a $(..) keeps its ")": ln -sf /bin/bash ~/.local/bin/cat)

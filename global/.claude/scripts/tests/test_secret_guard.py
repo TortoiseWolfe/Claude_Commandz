@@ -1948,12 +1948,22 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         # a prefix word, an assignment before it or a backtick does not hide the command word (security scan of the first version)
         for bad in ("x=1 $(echo hash) -p /bin/sh cat; cat", "command $(echo hash) -p /bin/sh cat; cat", "env $(echo hash) -r; cat",
                     "time $(echo export) PATH=/tmp; cat", "xargs $(echo read) <x; cat", "`echo hash` -r; cat", "x=1 `echo hash` -r; cat",
-                    "sort $(echo --compress-program=sh) f; cat", "find . -exec $(echo sh) -c x ';'; cat", "$S2=$(echo hash) $(echo hash); cat"):
+                    "sort $(echo --compress-program=sh) f; cat", "find . -exec $(echo sh) -c x ';'; cat", "$S2=$(echo hash) $(echo hash); cat",
+                    # a stored substitution used as the command word later, a copy or move that builds a name, a redirect aimed at a built name, a path-qualified word
+                    "x=$(echo hash); $x -r; cat", "cp /bin/sh /tmp/ca$(echo t); cat", "mv a /tmp/ca$(echo t); cat", "chmod +x $(echo f); cat",
+                    "echo hi > /tmp/ca$(echo t); cat", "./mkdir $(echo x); cat"):
             self.assertFalse(sg._names_cannot_change(bad), bad)
         self.assertTrue(sg._names_cannot_change("mkdir -p $(dirname /tmp/x) && cat"))
         self.assertTrue(sg._names_cannot_change("N=$(dirname /tmp/x); cat"))
         self.assertTrue(sg._names_cannot_change("A=1 B=$(date +%F) ls"))
-        self.assertTrue(sg._names_cannot_change("cp a $(dirname /tmp/x)/b && ls $(pwd); cat"))
+        self.assertTrue(sg._names_cannot_change("ls $(dirname /tmp/x)/b && ls $(pwd); cat"))
+
+    def test_a_name_built_by_a_substitution_does_not_make_the_heredoc_data(self):
+        send = "svc.users().messages().send(userId='me', body=b).execute()"
+        self.blocked("cp /bin/sh /tmp/ca$(echo t); cat <<'EOF'\n%s\nEOF" % send)
+        self.blocked("x=$(echo hash); $x -r; cat <<'EOF'\n%s\nEOF" % send)
+        self.blocked("echo hi > /tmp/ca$(echo t); cat <<'EOF'\n%s\nEOF" % send)
+        self.blocked("env $(echo hash) -r; cat <<'EOF'\n%s\nEOF" % send)
 
     def test_a_hash_straight_after_a_substitution_is_part_of_the_word(self):
         # echo $(echo a)#b prints a#b: no comment, so the ; and the heredoc operator after it are real and the body is code
