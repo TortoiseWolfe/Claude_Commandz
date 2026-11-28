@@ -906,7 +906,10 @@ def _shell_body_use(body):
 # (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
 # Second blind review of PR 264: the bare word IFS anywhere counts (for IFS in q, read IFS, printf -v IFS q, ${IFS}, IFS=,); only IFS= and IFS='' (empty) and an
 # IFS=value that is a prefix of read, mapfile or readarray (it lasts for that one command and bash splits that command's words before it applies) are ordinary
-IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$?'[^']*'|"[^"]*"|[^\s;&|)'"]*)[ \t]+(?:read|mapfile|readarray)\b)""")
+# Security review of the third round: IFS=q read a b <<< "q/home/*/.." makes /home/*/.. a word the text never shows, so the read prefix is ordinary only for a value
+# that holds nothing but characters the word splitter already cuts at (space, tab, newline, comma, colon, bar, semicolon); in the text with quotes and backslashes
+# removed, $'\t' reads as $t, so t, n and r are allowed there (the raw text, which is searched too, shows the real letter)
+IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$?'(?:\\[tnr]|[ ,:|;])*'|"(?:\\[tnr]|[ ,:|;])*"|[$tnr,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
 # a variable name built at run time in a declare, typeset, local, export, readonly or env assignment, or in printf -v or read: declare ${x}IGNORE=x
 BUILT_NAME = r"(?<![\w.-])(?:(?:declare|typeset|local|export|readonly|env)\b(?:[ \t]+-\S+)*[ \t]+[\w]*[$`{][^\s=;&|]*=|printf[ \t]+-v[ \t]*\S*[$`{]|(?:read|mapfile|readarray)\b(?:[ \t]+-\S+)*[ \t]+\S*[$`{])"
 GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots)(?![\w-])",
@@ -979,6 +982,7 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
         base = os.path.realpath(cwd if isinstance(cwd, str) and cwd else os.getcwd())
     except OSError:
         return True
+    home_trusted = not (re.search(r"(?<![$\w{])HOME(?!\w)", bare) or re.search(BUILT_NAME, bare))  # HOME= or export HOME or a built name: $HOME is not the folder it was
     budget = 1000000  # characters of words and expanded forms for the whole call: a call that costs more than this is refused, never left to run out the hook's time
     # a $(..) or backtick span is cut where it holds spaces, so it is also read as one marker word ($S): $(echo /home)/*/?config/.. is $S/*/?config/..
     masked = _mask_substitutions(bare)
@@ -989,12 +993,13 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
         # (a path list x=a:~/... is split at its colons too: bash expands the ~ after each one in an assignment)
         # with IFS set, bash splits the result of an expansion or of an assignment's value on any character, so /home/... after a q is a word of its own
         # (literal text on the command line is never split by IFS)
-        starts = {i + 1 for i, ch in enumerate(tok) if ch in "=(:,"} | ({i for i, ch in enumerate(tok) if ch in "/~"} if ifs and ("=" in tok or "$" in tok) else set())
+        starts = {i + 1 for i, ch in enumerate(tok) if ch in "=(:,"} | ({i for i, ch in enumerate(tok) if ch in "/~"} if ifs else set())
         budget -= len(tok) * (len(starts) + 1)
         if budget < 0:
             return True
         for word in {tok} | {tok[i:] for i in starts}:
-            word = re.sub(r"^\$\{?HOME\}?(?=/|$)", "~", word)  # "$HOME"/repos/*/x is the home folder, as ~ is
+            if home_trusted:
+                word = re.sub(r"^\$\{?HOME\}?(?=/|$)", "~", word)  # "$HOME"/repos/*/x is the home folder, as ~ is (unless the command names HOME in some other way)
             # a word with a $ or a backtick counts too (issue 255 review): bash globs an unquoted expansion, so /home/$b is a glob when b holds one
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue

@@ -165,7 +165,11 @@ class RuleGGlobOptions(Base):
                         "shopt -s dotglob; x=q/home/*/%s; printf -v IFS q; cat $x" % tok,
                         "x=GLOB; declare ${x}IGNORE=x; cat ~/%s" % tok,
                         "declare GLOB\"$e\"IGNORE=x; cat ~/%s" % tok,
-                        "a=BASH b=dot; env ${a}OPTS=${b}glob bash -c 'cat ~/%s'" % tok):
+                        "a=BASH b=dot; env ${a}OPTS=${b}glob bash -c 'cat ~/%s'" % tok,
+                        # security review: an IFS prefix of read with a separator that makes a new path, IFS set apart from it, and HOME reassigned
+                        "shopt -s dotglob; IFS=q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=q; read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; HOME=/home; cat \"$HOME\"/*/%s" % tok):
                 self.blocked(cmd, "G")
             for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
                 r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})
