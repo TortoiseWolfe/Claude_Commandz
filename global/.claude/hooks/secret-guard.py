@@ -977,6 +977,8 @@ def _could_be_dotdot(c):
         return True  # an opener or closer left over that was not understood
     if re.search(r"[A-Za-z0-9_-]", stripped):
         return False
+    if "." in stripped:
+        return True  # dots beside a group that can be empty (.?(x). , .*(a).) are .. when the group matches nothing
     # a bracket or group body is safe only when it is plain letters and digits (and ranges between them, none of which can include a dot); anything else, a !, ^, a
     # class such as [:alpha:], a | list holding a dot or glob character, may match ..
     return any(neg or not re.fullmatch(r"[A-Za-z0-9_|]*(?:[A-Za-z0-9_]-[A-Za-z0-9_][A-Za-z0-9_|]*)*", body) for body, neg in inner)
