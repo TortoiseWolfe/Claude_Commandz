@@ -260,7 +260,13 @@ def find_secret(cmd):
 
 
 def split_segments(cmd):
-    segs, cur, q, i = [], [], None, 0
+    return split_segments_ops(cmd)[0]
+
+
+def split_segments_ops(cmd):
+    """The segments of split_segments, and for each one the separator character that stood in front of it ("" for the first)."""
+    segs, ops, cur, q, i = [], [], [], None, 0
+    last = ""
     while i < len(cmd):
         c = cmd[i]
         if c == "\\" and i + 1 < len(cmd) and cmd[i + 1] != "\n" and q != "'":
@@ -274,13 +280,16 @@ def split_segments(cmd):
             q = c
         elif c in ";&|\n":
             segs.append("".join(cur))
+            ops.append(last)
+            last = c
             cur = []
             i += 1
             continue
         cur.append(c)
         i += 1
     segs.append("".join(cur))
-    return segs
+    ops.append(last)
+    return segs, ops
 
 
 # Workspace issue 93: the mail tool's token (~/.config/afa/gmail/token.json) holds gmail.modify, a scope Google lets
@@ -1484,8 +1493,59 @@ def is_viewer_segment(seg):
     return script == os.path.realpath(os.path.expanduser("~/.claude/scripts/redact_view.py"))
 
 
+NAMES_PRODUCERS = {"ls", "find"}  # print file names and never a file's content (find only without an action that runs or writes)
+FIND_ACTIONS = re.compile(r"^-(?:exec|execdir|ok|okdir|fprint\w*|fls|delete)$")
+NAME_GREPS = {"grep", "egrep", "fgrep", "rg"}
+NAME_GREP_FLAGS = re.compile(r"^-[EFGivwxonhHsq]+$|^--(?:ignore-case|extended-regexp|fixed-strings|word-regexp|line-regexp|invert-match|only-matching|quiet|no-filename|with-filename)$")
+
+
+def _names_producer(seg):
+    """Claude_Commandz issue 267: True for a plain ls or find that only prints file names (no substitution, redirect or find action)."""
+    if re.search(r"[$`<>(){}\\#\n]", seg):  # # and a newline can hide a quote that makes the splitter read a later command as part of this one
+        return False
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] not in NAMES_PRODUCERS or "=" in words[0]:
+        return False
+    return not (words[0] == "find" and any(FIND_ACTIONS.match(w) for w in words[1:]))
+
+
+def _names_pattern_grep(seg):
+    """Issue 267: True for a grep or rg with flags from a short safe list and exactly one other word, its pattern: it reads its standard
+    input and no file, so a credential file's name in the pattern is a search for a name and not a read. -r, -f, -e, a file operand,
+    a second word, a substitution and a redirect are not in the list, so any of them leaves the segment checked as before.
+    The pattern may hold $ and \\ only inside single quotes (the shell reads nothing there); anywhere else they refuse."""
+    q = None
+    for c in seg:  # quote-aware: nothing is active inside single quotes; a $, backtick, redirect, bracket or backslash anywhere else refuses
+        if q == "'":
+            q = None if c == "'" else q
+        elif c == "'" and q is None:
+            q = "'"
+        elif c == '"':
+            q = None if q == '"' else '"'
+        elif c in "$`<>(){}\\":
+            return False
+        elif q is None and c in "*?[~=":
+            return False  # an unquoted glob, ~ or = word is expanded by the shell into file names that grep would then open
+    if q:
+        return False
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return False
+    if len(words) < 2 or words[0] not in NAME_GREPS:
+        return False
+    flags = [w for w in words[1:] if w.startswith("-")]
+    rest = [w for w in words[1:] if not w.startswith("-")]
+    if len(rest) != 1 or rest[0] == "" or not all(NAME_GREP_FLAGS.match(w) for w in flags):
+        return False
+    return True
+
+
 def prints_sensitive(cmd):
-    all_segs = split_segments(cmd)
+    all_segs, all_ops = split_segments_ops(cmd)
     # The viewer's exemption holds only when EVERY part of the command is a run of the viewer: any other part (a cd, an
     # export, an alias, a function, a changed PATH) could change what "python" or the script is, and a list of such
     # words is never complete. Mixed with anything else, the whole command is checked as if there were no viewer.
@@ -1496,9 +1556,15 @@ def prints_sensitive(cmd):
         return None
     if INTERP.search(blank_quotes(rest)) and INTERP_EVAL.search(rest):
         return whole
-    for seg in segs:
+    for k, seg in enumerate(segs):
         label = sensitive_in(seg)
         if not label:
+            continue
+        # issue 267: a pattern-only grep fed by one plain ls or find over a single pipe searches names, it does not read the credential file
+        # only when the whole command is exactly that one pipe of two commands: an earlier function, alias, PATH change or other
+        # segment could make ls or grep run something else (security review of PR 268)
+        if (k > 0 and all_ops[k] == "|" and len([s for s in all_segs if s.strip()]) == 2
+                and _names_producer(segs[k - 1]) and _names_pattern_grep(seg)):
             continue
         scan = seg if SHELL_C.search(seg) else blank_quotes(seg)
         if GIT_PRINT.search(scan) or REDIR_IN.search(scan) or "redact_view.py" in seg:
