@@ -145,14 +145,21 @@ class RuleGCdGlobAndWrappers(Base):
                         "echo 'cat ~/%s' | stdbuf -o0 bash" % t, "echo 'cat ~/%s' | setsid bash" % t, "echo 'cat ~/%s' | busybox sh" % t,
                         "echo 'cat ~/%s' | (bash)" % t, "echo 'cat ~/%s' | { bash; }" % t, "cat <<< 'cat ~/%s' | timeout 9 sh" % t,
                         "echo 'cat ~/%s' > /tmp/x.sh; sh /tmp/x.sh" % t,
-                        "cat $x$HOME/%s" % t, "cat${IFS}$HOME/%s" % t, "cat ${HOME:0}/%s" % t, "cat ${HOME%%x}/%s" % t):
+                        "cat $x$HOME/%s" % t, "cat${IFS}$HOME/%s" % t, "cat ${HOME:0}/%s" % t, "cat ${HOME%%x}/%s" % t,
+                        # security review of PR 266: bash's bracket spellings, which Python's fnmatch reads differently
+                        "cd ~ && cat .c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[:lower:]]nfig/a[[:lower:]]a/g[[:lower:]]ail/token.json",
+                        "cd ~/repos && cat ../.c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[=o=]]nfig/a?a/g?ail/token.json"):
+                self.blocked(cmd, "G")
+            # a symlink that leads into the folder is followed by a glob after a cd
+            os.symlink(os.path.join(home, ".config", "afa"), os.path.join(home, "lnk"))
+            for cmd in ("cd ~ && cat l*/g*/t*", "cd ~ && cat l?k/g?ail/token.json"):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
     def test_broad_relative_globs_after_a_cd_pass(self):
         def run(home):
             for cmd in ("cd src && wc -l */*/*", "cd src && git add */*/*", "cd src && rm -f */*/*", "cd src && cat */*/*.py",
-                        "cd && wc -l */*/*", "echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
+                        "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
                 self.allowed(cmd)
         self.with_home(run)
 

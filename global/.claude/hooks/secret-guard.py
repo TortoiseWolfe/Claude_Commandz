@@ -641,7 +641,18 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
             return True
         if below_only and len(parts) < len(fparts):
             continue  # a pattern that stops above the folder lands on a parent, which below_only does not count
-        if parts and all(i >= len(fparts) or ((not fparts[i].startswith(".") or c.startswith((".", "[", "{"))) and fnmatch.fnmatchcase(fparts[i], c)) for i, c in enumerate(parts)):
+        # security review of PR 266: each part is written the way Python's fnmatch reads a bracket ([^x] is [!x], a POSIX class is its characters) first;
+        # a part that cannot be translated exactly is a hit. An unclosed [. is read both ways, as bash_glob does.
+        readings = []
+        for c in parts:
+            first = _bracket_translate(c)
+            if first is None:
+                return True
+            readings.append([first] + ([_bracket_translate(c, outer_literal=False)] if "[." in c else []))
+        if any(r is None for rs in readings for r in rs):
+            return True
+        if parts and all(i >= len(fparts) or ((not fparts[i].startswith(".") or c.startswith((".", "[", "{"))) and any(fnmatch.fnmatchcase(fparts[i], r) for r in readings[i]))
+                         for i, c in enumerate(parts)):
             return True
     return False
 
@@ -724,25 +735,34 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
         up = os.path.dirname(up)
         bases.add(up)
 
-    def glob_inside(cand):  # every file a glob word can match, expanded as bash would, is checked; a form not understood or too many matches is refused
-        n = 0
+    def glob_inside(cand, cap_hit=True, below=False):  # every file a glob word can match, expanded as bash would, is checked; a form not understood is refused,
+        n = 0                                          # and so are too many matches unless cap_hit is False (then the first 500 are checked, the rest left alone)
         for m in bash_glob(os.path.expanduser(gmail_norm(cand))):
             n += 1
-            if m is None or n > 500 or inside(m):
+            if m is None or inside(m, below):
                 return True
+            if n > 500:
+                return cap_hit
         return False
 
-    def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
+    def inside(path, below=False):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it); below: not the parents
         real = os.path.realpath(os.path.expanduser(gmail_norm(path)))
-        return real == folder or (real in parents and not strict) or real.startswith(folder + os.sep)
+        return real == folder or (real in parents and not (strict or below)) or real.startswith(folder + os.sep)
 
-    def from_bases(word):  # a relative word (and the same without its leading ../ parts) tried from every folder the shell may stand in
+    def from_bases(word, below=False):  # a relative word (and the same without its leading ../ parts) tried from every folder the shell may stand in
+        # below: a glob that lands on a parent (*/* from /) is not a hit; a relative word after a cd is tried that way, since the shell stands in an unknown base
+        below = below or strict
         for variant in _rel_variants(word):
             if variant.startswith(("/", "~")):
                 continue
             for base in bases:
-                if inside(os.path.join(base, variant)) or (GMAIL_GLOB.search(variant) and _pattern_reaches(folder, base, variant, strict)):
+                if inside(os.path.join(base, variant), below):
                     return True
+                if GMAIL_GLOB.search(variant):
+                    # the parts are matched against the folder's real parts (nothing walked), and, outside prose, the files the glob really matches under
+                    # base are checked too, so a symlink that leads into the folder is followed (a broad glob is checked as far as its first 500 matches)
+                    if _pattern_reaches(folder, base, variant, below) or (not strict and glob_inside(os.path.join(base, variant), False, below)):
+                        return True
         return False
 
     for i, w in enumerate(words):
@@ -802,9 +822,9 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                 if GMAIL_GLOB.search(cand) and glob_inside(cand):
                     return True
                 # after a cd (any, a bare cd goes home) a relative path starts wherever the shell then stands: tried from home, every ancestor of it and /
-                if rel and not cand.startswith(("/", "~", "$")) and from_bases(cand):
+                if rel and not cand.startswith(("/", "~", "$")) and from_bases(cand, True):
                     return True
-        if any(from_bases(r) for r in unknown_rest):
+        if any(from_bases(r, True) for r in unknown_rest):
             return True
     return False
 
