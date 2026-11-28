@@ -174,7 +174,15 @@ class RuleGGlobOptions(Base):
                         "shopt -s dotglob; IFS=t read a b <<< \"t/home/*/%s\"; cat $b" % tok,
                         "shopt -s dotglob; IFS='\\t' read a b <<< \"t/home/*/%s\"; cat $b" % tok,
                         "shopt -s dotglob; IFS=\"\\t\" read a b <<< \"t/home/*/%s\"; cat $b" % tok,
-                        "shopt -s dotglob; t=q; IFS=$t read a b <<< \"q/home/*/%s\"; cat $b" % tok):
+                        "shopt -s dotglob; t=q; IFS=$t read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        # fifth blind review: .. or the whole front from a variable, find -execdir, globasciiranges, zsh spellings
+                        "shopt -s dotglob; u=..; cat /tmp/$u/home/*/%s" % tok,
+                        "shopt -s dotglob; H=/home; p='*/%s'; cat $H/$p" % tok,
+                        "shopt -s dotglob; p='*/%s'; cat $(printf /home)/$p" % tok,
+                        "find ~ -maxdepth 1 -name .config -execdir bash -O dotglob -c 'cat ?config/a?a/g?ail/token.json' \\;",
+                        "LC_ALL=en_US.UTF-8; shopt -u globasciiranges; cat ~/.[A-Z]onfig/a[A-Z]a/g[A-Z]ail/token.json",
+                        "unsetopt caseglob; cat ~/.CONFI?/A?A/G?AIL/token.json",
+                        "setopt GLOB_DOTS; cat ~/?config/a?a/g?ail/token.json"):
                 self.blocked(cmd, "G")
             for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
                 r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})
@@ -190,7 +198,9 @@ class RuleGGlobOptions(Base):
         def run(home):
             for cmd in ('IFS=, read -r a b <<< "$l"; ls src/*.py',
                         "while IFS=$'\\t' read -r id p; do ls \"$p\"/*.json; done < f.tsv",
-                        'shopt -s extglob; ls "$HOME"/repos/*/package.json'):
+                        'shopt -s extglob; ls "$HOME"/repos/*/package.json',
+                        'shopt -s globstar; for f in **/*.py; do wc -l "$f"; done',
+                        'shopt -s nullglob; rm -f "$OUT"/*.tmp'):
                 self.allowed(cmd)
         self.with_home(run)
 

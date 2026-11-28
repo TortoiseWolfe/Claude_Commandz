@@ -912,7 +912,10 @@ def _shell_body_use(body):
 IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$'(?:\\[tnr]|[ ,:|;])*'|'[ ,:|;]*'|"[ ,:|;]*"|[,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
 # a variable name built at run time in a declare, typeset, local, export, readonly or env assignment, or in printf -v or read: declare ${x}IGNORE=x
 BUILT_NAME = r"(?<![\w.-])(?:(?:declare|typeset|local|export|readonly|env)\b(?:[ \t]+-\S+)*[ \t]+[\w]*[$`{][^\s=;&|]*=|printf[ \t]+-v[ \t]*\S*[$`{]|(?:read|mapfile|readarray)\b(?:[ \t]+-\S+)*[ \t]+\S*[$`{])"
-GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots)(?![\w-])",
+GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|unsetopt|globskipdots|globasciiranges)(?![\w-])",
+                                   # fifth blind review: zsh reads option names without regard to case or underscores (GLOB_DOTS, NO_CASE_GLOB), and globasciiranges off
+                                   # makes [A-Z] follow the locale's order
+                                   r"(?i:(?<![\w-])(?:no_?)?(?:glob_?dots|case_?glob|extended_?glob|ksh_?glob|glob_?skip_?dots)(?![\w-]))",
                                    IFS_SET.pattern,  # an IFS set to something (or ${IFS} used as a separator) splits words on other characters; while IFS= read -r is ordinary
                                    BUILT_NAME,
                                    r"(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]",
@@ -925,7 +928,8 @@ GLOB_OPTION_BARE = re.compile(GLOB_OPTION.pattern.replace(_TAB_SPELLING, "|[,:|]
 IFS_SET_BARE = re.compile(IFS_SET.pattern.replace(_TAB_SPELLING, "|[,:|]*|\\$[tnr]+)[ \\t]+"))
 assert GLOB_OPTION_BARE.pattern != GLOB_OPTION.pattern and IFS_SET_BARE.pattern != IFS_SET.pattern
 # What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
-# BASH_ENV or an rc file, a function or alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
+# BASH_ENV or an rc file named in the text (.bashrc, --rcfile; an rc file an earlier call already changed is not seen: filed on issue 265), a function or
+# alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
 OPTION_SETTER = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*"
                            r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+)[ \t]+)*[\w.-]*(?:[$`]|\w\{)"
                            r"|(?<![\w.-])(?:--rcfile|--init-file)(?![\w-])|[\w.-]+[ \t]*\([ \t]*\)")
@@ -983,7 +987,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
 
     # cd, pushd, popd, and the commands that start another process in another working folder (env -C, sudo -D, ssh, su -, runuser -l, nsenter -w ..):
     # a relative glob word then starts somewhere the payload's cwd does not say
-    moves = bool(re.search(r"(?<![\w.-])(?:cd|pushd|popd|env|sudo|doas|su|runuser|ssh|nsenter|chroot|systemd-run|setpriv|machinectl)(?![\w-])|--chdir|--cwd", bare))
+    # (fifth blind review: find -execdir, chdir and cwd= in an interpreter's code, tmux and screen start a process in another folder too)
+    moves = bool(re.search(r"(?<![\w.-])(?:cd|pushd|popd|env|sudo|doas|su|runuser|ssh|nsenter|chroot|systemd-run|setpriv|machinectl|tmux|screen)(?![\w-])|--chdir|--cwd|-execdir|chdir|cwd", bare))
     try:
         base = os.path.realpath(cwd if isinstance(cwd, str) and cwd else os.getcwd())
     except OSError:
@@ -1014,9 +1019,15 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
                 return True
             if skipdots and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
                 return True  # with globskipdots off a .* or .? component anywhere matches ..
-            if ("$" in comps[0] or "`" in comps[0]) and any(GMAIL_GLOB.search(c) or EXT_GLOB_GROUP.search(c) for c in comps[1:-1]):
-                return True  # a variable can hold the home folder or any parent of the token folder: $d/*/?config/... is refused while an option is named;
-                #              only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
+            # a variable can hold the home folder, any parent of the token folder or ..: $d/*/?config/... and /tmp/$u/home/*/?config/... are refused while an
+            # option is named, a glob after a variable anywhere in the front; only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
+            if any(("$" in c or "`" in c) and any(GMAIL_GLOB.search(d) or EXT_GLOB_GROUP.search(d) for d in comps[i + 1:-1]) for i, c in enumerate(comps)):
+                return True
+            # the glob may come from a variable's value instead (p='*/?config/a?a/g?ail/token.json'; cat $H/$p): a relative word with nothing fixed in front and a
+            # glob before its last part, taken from an assignment or a read, is a start nothing here can place
+            if ((word != tok or re.search(r"\b(?:read|mapfile|readarray)\b|<<<", bare)) and re.search(r"\$[\w{@*(]", bare)
+                    and (GMAIL_GLOB.search(comps[0]) or EXT_GLOB_GROUP.search(comps[0])) and len(comps) > 1):
+                return True
             expanded = _brace_expand(word, BRACE_LIMIT)
             if expanded is None:
                 return True
