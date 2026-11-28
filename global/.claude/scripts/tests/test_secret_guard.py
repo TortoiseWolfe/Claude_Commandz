@@ -245,6 +245,20 @@ class RuleGGlobOptions(Base):
             self.assertIsNone(r)
         self.with_home(run)
 
+    def test_a_word_with_a_variable_is_read_as_a_path_only_for_a_literal_absolute_assignment(self):
+        # security review of the commit after 36d3160: words holding $ must keep being judged; only a variable assigned once to a literal absolute path is read as it
+        for c in ("shopt -s dotglob; x=..; y=.config; z=afa; w=gmail; cd ~/docs && cat $x/$y/$z/$w/token.json",
+                  "shopt -s dotglob; x=.; cd ~ && cat `echo $x`$x/$x/token.json",
+                  "$s; x='.?onfig'; y=afa; z=gmail; cd ~ && cat $x/$y/$z/token.json",
+                  "$s; x=/home/u; cd ~ && cat $x/.?onfig/afa/gmail/token.json",
+                  "$s; x=/home/u; x+=/.config; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u; read x; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u; x=/home/u/.config; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u/.config; y=afa; z=gmail; cd ~ && cat $x/$y/$z/token.json"):
+            self.blocked(c, "G")
+        for c in ("cd ~ && S=/tmp/x && cat $S/body.md", "cd ~/repos && S=/tmp/x && u=$(gh issue view 1) && python3 - $S/b.md"):
+            self.allowed(c)
+
     def test_an_extglob_group_that_matches_dotdot_is_refused(self):
         """Sixth review of PR 264: @(..) matches .. in bash, so two groups climb from a folder two below home to home."""
         def run(home):

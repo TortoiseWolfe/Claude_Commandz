@@ -1056,6 +1056,31 @@ def _could_be_dotdot(c):
     return any(neg or not re.fullmatch(r"[A-Za-z0-9_|]*(?:[A-Za-z0-9_]-[A-Za-z0-9_][A-Za-z0-9_|]*)*", body) for body, neg in inner)
 
 
+_LITERAL_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def _literal_path_vars(bare):
+    """Variables that the command assigns exactly once, to a literal absolute path (no glob character, no expansion, no ~, no . or .. part, not HOME),
+    and never changes another way (+=, read, for, mapfile, printf -v, declare -n, unset, export -n). bare is the command without its quotes."""
+    values = {}
+    counts = {}
+    for m in re.finditer(r"(?:^|[\s;&|(])(?:(?:export|declare|local|readonly|typeset)\s+(?:-\w+\s+)*)?([A-Za-z_]\w*)=([^\s;&|<>()]*)", bare):
+        name = m.group(1)
+        counts[name] = counts.get(name, 0) + 1
+        values[name] = m.group(2)
+    result = {}
+    for name, value in values.items():
+        if counts[name] != 1 or name == "HOME" or not value.startswith("/") or re.search(r"[*?\[\]{}$`~\\!]", value):
+            continue
+        if any(part in (".", "..") for part in value.split("/")):
+            continue
+        n = re.escape(name)
+        if re.search(rf"(?<!\w){n}\+=|\b(?:read|mapfile|readarray|getopts|for|select|unset)\b[^;&|\n]*(?<!\w){n}(?!\w)|-v\s*{n}(?!\w)|declare\s+-\w*n|typeset\s+-\w*n|export\s+-\w*n", bare):
+            continue
+        result[name] = value
+    return result
+
+
 def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     """True when cmd sets (or could set) a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob
     character) is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's
@@ -1097,7 +1122,12 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     budget = 1000000  # characters of words and expanded forms for the whole call: a call that costs more than this is refused, never left to run out the hook's time
     # a $(..) or backtick span is cut where it holds spaces, so it is also read as one marker word ($S): $(echo /home)/*/?config/.. is $S/*/?config/..
     masked = _mask_substitutions(bare)
-    for tok in re.split(r"[\s;&|<>`]+", bare) + (re.split(r"[\s;&|<>`]+", masked) if masked != bare else []):
+    literal_vars = _literal_path_vars(bare)
+    # (a word of the masked text may carry the marker $S for a whole $(..): that is not the variable S, so a word that is only in the masked text never has its
+    # variables read as literal paths)
+    bare_toks = re.split(r"[\s;&|<>`]+", bare)
+    bare_set = set(bare_toks)
+    for tok, from_masked in [(t, False) for t in bare_toks] + ([(t, t not in bare_set) for t in re.split(r"[\s;&|<>`]+", masked)] if masked != bare else []):
         if len(tok) > 2000:
             return True  # one very long word is refused rather than expanded in the hook's time
         # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
@@ -1111,14 +1141,18 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
         for word in {tok} | {tok[i:] for i in starts}:
             if home_trusted:
                 word = re.sub(r"^\$\{?HOME\}?(?=/|$)", "~", word)  # "$HOME"/repos/*/x is the home folder, as ~ is (unless the command names HOME in some other way)
+            # a variable that is assigned once in this command to a literal absolute path ($S/body.md after S=/tmp/x/scratchpad, the hub's body command, PR 261's test)
+            # is read as that path; every other word with a $ or a backtick counts as it did (security review of the commit after 36d3160)
+            substituted = False
+            # (a word that also holds a glob is not read this way: its glob can match what the variable's value does not say)
+            if "$" in word and "`" not in word and literal_vars and not from_masked and not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
+                swapped = _LITERAL_VAR.sub(lambda m: literal_vars.get(m.group(1) or m.group(2), m.group(0)), word)
+                if swapped != word and "$" not in swapped:
+                    word, substituted = swapped, True
             # a word with a $ or a backtick counts too (issue 255 review): bash globs an unquoted expansion, so /home/$b is a glob when b holds one
-            if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
+            if not word or not (substituted or GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue
             comps = word.split("/")
-            # a word with no glob character and no extglob group ($S/body.md) is the same path with or without a glob option: not judged here (the false refusal of the hub's
-            # body command, PR 261's test). A variable that holds a glob is caught where it is assigned or read.
-            if not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
-                continue
             # sixth review: an extglob group can match .. (@(..)/@(..)/?config/..), so a part that holds .. beside a ( or ) counts as .. itself
             if any(c == ".." or (".." in c and ("(" in c or ")" in c)) for c in comps):
                 return True
