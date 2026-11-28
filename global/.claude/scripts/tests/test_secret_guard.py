@@ -1945,8 +1945,15 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         # its output could be a name changer (hash, export, read), which the text checks never see
         self.assertFalse(sg._names_cannot_change("$(echo hash) -p /bin/sh cat; cat"))
         self.assertFalse(sg._names_cannot_change("x$(echo ash) -r; cat"))
+        # a prefix word, an assignment before it or a backtick does not hide the command word (security scan of the first version)
+        for bad in ("x=1 $(echo hash) -p /bin/sh cat; cat", "command $(echo hash) -p /bin/sh cat; cat", "env $(echo hash) -r; cat",
+                    "time $(echo export) PATH=/tmp; cat", "xargs $(echo read) <x; cat", "`echo hash` -r; cat", "x=1 `echo hash` -r; cat",
+                    "sort $(echo --compress-program=sh) f; cat", "find . -exec $(echo sh) -c x ';'; cat", "$S2=$(echo hash) $(echo hash); cat"):
+            self.assertFalse(sg._names_cannot_change(bad), bad)
         self.assertTrue(sg._names_cannot_change("mkdir -p $(dirname /tmp/x) && cat"))
         self.assertTrue(sg._names_cannot_change("N=$(dirname /tmp/x); cat"))
+        self.assertTrue(sg._names_cannot_change("A=1 B=$(date +%F) ls"))
+        self.assertTrue(sg._names_cannot_change("cp a $(dirname /tmp/x)/b && ls $(pwd); cat"))
 
     def test_a_hash_straight_after_a_substitution_is_part_of_the_word(self):
         # echo $(echo a)#b prints a#b: no comment, so the ; and the heredoc operator after it are real and the body is code

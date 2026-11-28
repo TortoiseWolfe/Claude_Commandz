@@ -1013,6 +1013,11 @@ NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LI
 # body (`{ cat <<'EOF'` ... `} | sh`, `sh < <(cat <<'EOF'` ... `)`), which the line holding the operator does not show; such a command keeps the strict reading
 
 
+# commands whose arguments are never run as a program (not env, command, exec, time, nohup, xargs, find, sort, tar, git, a shell or an interpreter)
+SUBST_SAFE_COMMANDS = {"mkdir", "rmdir", "touch", "rm", "cp", "mv", "ls", "cat", "echo", "dirname", "basename", "date", "pwd", "cd", "head", "tail", "wc",
+                       "grep", "readlink", "realpath", "stat", "chmod", "test"}
+
+
 def _names_cannot_change(cmd):
     """True when no part of the command can redefine a command name: no alias, function, eval, source, builtin toggle, search-path or hash change
     (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup), and no earlier command that names one of the
@@ -1023,9 +1028,18 @@ def _names_cannot_change(cmd):
     if _echo_shadowed(cmd) or NAME_CHANGERS.search(plain) or NAME_CHANGERS.search(flat_plain):
         return False
     for seg in split_segments(cmd):
-        first = re.match(r"\s*([^\s;&|]*)", seg).group(1)
-        if "$(" in first and not re.match(r"\w+=", first):
-            return False  # a substitution makes the command word itself (its output could be hash, export, read ...); an assignment x=$(..) runs nothing
+        if "$(" in seg or "`" in seg:
+            # a substitution's output is text the checks above never see: as the command word, or after env/command/time/xargs and the like, it could
+            # be hash, export or read. So a segment that holds one is trusted only when it is bare assignments, or its command is a plain one whose
+            # arguments cannot be run (SUBST_SAFE_COMMANDS); anything else keeps the strict reading main had for every $( (fifth review, security scan)
+            try:
+                sw = shlex.split(SIMPLE_SUBST.sub("$S", seg), posix=True)
+            except ValueError:
+                return False
+            while sw and re.match(r"\w+=", sw[0]):
+                sw.pop(0)
+            if sw and ("`" in sw[0] or "$" in sw[0] or os.path.basename(sw[0]) not in SUBST_SAFE_COMMANDS):
+                return False
         try:
             words = shlex.split(re.sub(r"[()]", " ", seg), posix=True)  # a word at the end of a $(..) keeps its ")": ln -sf /bin/bash ~/.local/bin/cat)
         except ValueError:
