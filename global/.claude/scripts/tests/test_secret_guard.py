@@ -153,6 +153,38 @@ class RuleGGlobOptions(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_fifth_review_cases_are_refused(self):
+        """Blind review of PR 264, third round: a substitution in front of a glob, IFS changed without IFS=, an option variable's name built at run time,
+        a working folder moved by env -C or sudo -D, and a call that would cost more than the hook's budget."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -s dotglob; cat $(echo /home)/*/%s" % tok,
+                        "shopt -s dotglob; cat `echo /`home/*/%s" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; for IFS in q; do cat $x; done" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; read IFS <<< q; cat $x" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; printf -v IFS q; cat $x" % tok,
+                        "x=GLOB; declare ${x}IGNORE=x; cat ~/%s" % tok,
+                        "declare GLOB\"$e\"IGNORE=x; cat ~/%s" % tok,
+                        "a=BASH b=dot; env ${a}OPTS=${b}glob bash -c 'cat ~/%s'" % tok):
+                self.blocked(cmd, "G")
+            for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
+                r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})
+                self.assertEqual(r[0], "G", cmd)
+            import time
+            t = time.time()
+            word = ":t/" * 600 + "{a,b}" * 8
+            self.blocked("shopt -s dotglob; : " + " ".join([word] * 5) + "; cat ~/%s" % tok, "G")
+            self.assertLess(time.time() - t, 5)
+        self.with_home(run)
+
+    def test_ordinary_ifs_and_home_variable_commands_are_allowed(self):
+        def run(home):
+            for cmd in ('IFS=, read -r a b <<< "$l"; ls src/*.py',
+                        "while IFS=$'\\t' read -r id p; do ls \"$p\"/*.json; done < f.tsv",
+                        'shopt -s extglob; ls "$HOME"/repos/*/package.json'):
+                self.allowed(cmd)
+        self.with_home(run)
+
     def test_options_spelled_without_naming_the_folder_are_refused_by_the_option_check(self):
         """Each of these is refused by the glob-option check itself, not by an older check that sees the folder's name in the text."""
         def run(home):
