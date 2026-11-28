@@ -958,6 +958,22 @@ def _mask_substitutions(text):
     return "".join(out)
 
 
+def _could_be_dotdot(c):
+    """True for a path part that is only extglob groups and bracket expressions (no letter or digit outside them) and could match ..: an inside that holds a
+    dot, a * ? or [, or a group that starts with !. A part with a literal letter outside (!(keep).log) is an ordinary pattern."""
+    stripped = c
+    inner = []
+    for _ in range(20):
+        m = re.search(r"[?*+@!]\(([^()]*)\)|\[([^\[\]]*)\]", stripped)
+        if not m:
+            break
+        inner.append(((m.group(1) if m.group(1) is not None else m.group(2)), m.group(0).startswith("!(")))
+        stripped = stripped[:m.start()] + stripped[m.end():]
+    if not inner or re.search(r"[A-Za-z0-9_-]", stripped):
+        return False
+    return any(neg or re.search(r"[.*?\[]", body) for body, neg in inner)
+
+
 def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     """True when cmd sets (or could set) a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob
     character) is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's
@@ -1018,6 +1034,9 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
             comps = word.split("/")
             # sixth review: an extglob group can match .. (@(..)/@(..)/?config/..), so a part that holds .. beside a ( or ) counts as .. itself
             if any(c == ".." or (".." in c and ("(" in c or ")" in c)) for c in comps):
+                return True
+            # seventh review: so can any part made only of groups and brackets whose insides hold a dot, a glob character or a leading ! ([.][.], ?(.)?(.), !(x))
+            if len(comps) > 1 and any(_could_be_dotdot(c) for c in comps):
                 return True
             if skipdots and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
                 return True  # with globskipdots off a .* or .? component anywhere matches ..

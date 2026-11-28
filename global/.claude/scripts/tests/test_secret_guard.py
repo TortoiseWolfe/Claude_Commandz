@@ -258,6 +258,16 @@ class RuleGGlobOptions(Base):
                     self.assertEqual(r[0], "G", cmd)
             r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": "shopt -s extglob dotglob\ncat @(..)/@(..)/?config/a?a/g?ail/token.json"}})
             self.assertEqual(r[0], "G")
+            # seventh review: other spellings of .. made only of groups and brackets, refused without asking bash (fail closed)
+            for tok in ("[.][.]/[.][.]/?config/a?a/g?ail/token.json", "@(.)@(.)/@(.)@(.)/?config/a?a/g?ail/token.json",
+                        "?(.)?(.)/?(.)?(.)/?config/a?a/g?ail/token.json", "@(.?)/@(.?)/?config/a?a/g?ail/token.json",
+                        "@(?)@(?)/@(?)@(?)/?config/a?a/g?ail/token.json", "!(x)/!(x)/?config/a?a/g?ail/token.json"):
+                cmd = "shopt -s extglob dotglob\ncat " + tok
+                r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": cmd}})
+                self.assertEqual(r[0], "G", cmd)
+            # a part with a letter outside its groups is an ordinary pattern
+            r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": "shopt -s extglob\nrm -f !(keep).log"}})
+            self.assertIsNone(r)
         self.with_home(run)
 
     def test_the_same_options_elsewhere_are_allowed(self):
