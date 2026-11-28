@@ -132,6 +132,30 @@ class RuleGCdGlobAndWrappers(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_second_blind_review_cases_are_refused(self):
+        """Second blind review of PR 266: a cd inside a group or keyword, .. climbing after a cd below home, the spellings of the current folder
+        (~+ $PWD ${PWD}), a wrapped or unusual shell fed by echoed text, and a path glued behind an expansion."""
+        def run(home):
+            t = ".c?nfig/a?a/g?ail/token.json"
+            for cmd in ("(cd ~ && cat %s)" % t, "{ cd ~; cat %s; }" % t, "if cd ~; then cat %s; fi" % t, "! cd ~ && cat %s" % t,
+                        "while cd ~; do cat %s; done" % t,
+                        "cd ~/repos && cat ../%s" % t, "cd ~/repos && cd ../.c?nfig/a?a/g?ail && cat token.json",
+                        "cd ~ && cat ~+/%s" % t, "cd ~ && cat $PWD/%s" % t, "cd ~ && cat ${PWD}/%s" % t, "cd ~ && cat $OLDPWD/%s" % t,
+                        "echo 'cat ~/%s' | timeout 9 bash" % t, "echo 'cat ~/%s' | nice bash" % t, "echo 'cat ~/%s' | nohup bash" % t,
+                        "echo 'cat ~/%s' | stdbuf -o0 bash" % t, "echo 'cat ~/%s' | setsid bash" % t, "echo 'cat ~/%s' | busybox sh" % t,
+                        "echo 'cat ~/%s' | (bash)" % t, "echo 'cat ~/%s' | { bash; }" % t, "cat <<< 'cat ~/%s' | timeout 9 sh" % t,
+                        "echo 'cat ~/%s' > /tmp/x.sh; sh /tmp/x.sh" % t,
+                        "cat $x$HOME/%s" % t, "cat${IFS}$HOME/%s" % t, "cat ${HOME:0}/%s" % t, "cat ${HOME%%x}/%s" % t):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_broad_relative_globs_after_a_cd_pass(self):
+        def run(home):
+            for cmd in ("cd src && wc -l */*/*", "cd src && git add */*/*", "cd src && rm -f */*/*", "cd src && cat */*/*.py",
+                        "cd && wc -l */*/*", "echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
+                self.allowed(cmd)
+        self.with_home(run)
+
     def test_the_same_shapes_without_the_token_folder_pass(self):
         def run(home):
             os.makedirs(os.path.join(home, "docs"))
@@ -1184,7 +1208,9 @@ class RuleGAliasQuoteState(Base):
 
     def test_the_same_commands_without_an_alias_behave_as_before(self):
         self.home()
-        self.allowed("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"")  # one quoted word: text, not a command
+        self.allowed("echo \"hi\"\necho \"; cat ~/notes/*.txt; x\n\"")  # one quoted word: text, not a command
+        # blind review of PR 266: text that spells the token folder by a glob is refused even when it is only echoed (it may be piped to any shell later)
+        self.blocked("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"", "G")
         self.blocked("echo x; cat ~/.?onfig/a?a/g?ail/token.json", "G")
 
     def test_an_ordinary_alias_passes(self):

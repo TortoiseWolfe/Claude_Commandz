@@ -5,6 +5,7 @@ stdin: {"tool_name": ..., "tool_input": {...}}
 block: reason on stderr, exit 2.  allow: exit 0.  internal error: allow + log.
 The reason never echoes a matched secret.
 """
+import fnmatch
 import glob
 import importlib.util
 import json
@@ -571,7 +572,8 @@ def _bracket_translate(w, outer_literal=True):
     return "".join(out)
 
 
-SHELLISH = {"bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "xargs", "env", "python", "python3", "perl", "node", "ruby", "exec", "command", "builtin"}
+SHELLISH = {"bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "xargs", "env", "python", "python3", "perl", "node", "ruby", "exec", "command", "builtin",
+            "timeout", "nice", "nohup", "stdbuf", "setsid", "busybox", "fish", "csh", "tcsh", "awk", "gawk", "php", "lua", "pwsh", "ssh", "sudo", "doas"}
 DEFAULT_EXPANSION = re.compile(r"\$\{[^{}$]*?:?[-+=?]([^{}]*)\}|\$\{\w+/[^{}/]*/([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
 
 
@@ -580,7 +582,8 @@ def _command_index(words):
     i = 0
     while i < len(words):
         w = words[i]
-        if re.match(r"^[A-Za-z_]\w*=", w) or w in ("command", "builtin", "exec") or (i > 0 and words[i - 1] in ("command", "builtin") and w.startswith("-")):
+        if (re.match(r"^[A-Za-z_]\w*=", w) or w in ("command", "builtin", "exec", "{", "(", "!", "if", "then", "do", "else", "elif", "while", "until", "time")
+                or (i > 0 and words[i - 1] in ("command", "builtin") and w.startswith("-"))):
             i += 1
             continue
         break
@@ -593,7 +596,8 @@ def _is_cd_segment(seg):
     except ValueError:
         return True  # unclear: counts as a cd, so later relative words are checked more widely
     i = _command_index(words)
-    return i < len(words) and os.path.basename(words[i]) in ("cd", "pushd")
+    # a cd inside a group or compound command ((cd ~ && ..), { cd ~; .. }, if cd ~; then ..) counts too, and so does any cd word anywhere in the text
+    return (i < len(words) and os.path.basename(words[i]).lstrip("({!") in ("cd", "pushd")) or bool(re.search(r"(?<![\w.-])(?:cd|pushd)(?![\w.-])", seg))
 
 
 def _feeds_shell(text):
@@ -621,7 +625,35 @@ def _defaults_applied(c, empty=False):
     return c
 
 
-def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, level=0):
+def _pattern_reaches(folder, base, pattern, below_only=False):
+    """True when a relative glob pattern, standing in base, can match the token folder, a folder above it or a path below it. The pattern's parts are
+    matched against the folder's real parts with fnmatch, a part that starts with a dot matching only a part that starts with a literal dot (or [ or {),
+    so nothing is walked on disk and */*/* from / is not a hit. Anything not understood is a hit."""
+    if not (folder + os.sep).startswith(base.rstrip(os.sep) + os.sep):
+        return False
+    fparts = [c for c in folder[len(base.rstrip(os.sep)):].split(os.sep) if c]
+    expanded = _brace_expand(pattern, BRACE_LIMIT)
+    if expanded is None:
+        return True
+    for one in expanded:
+        parts = [c for c in os.path.normpath(one).split(os.sep) if c not in ("", ".")]
+        if any(c == ".." for c in parts):
+            return True
+        if below_only and len(parts) < len(fparts):
+            continue  # a pattern that stops above the folder lands on a parent, which below_only does not count
+        if parts and all(i >= len(fparts) or ((not fparts[i].startswith(".") or c.startswith((".", "[", "{"))) and fnmatch.fnmatchcase(fparts[i], c)) for i, c in enumerate(parts)):
+            return True
+    return False
+
+
+def _rel_variants(w):
+    """A relative word and the same without its leading ../ parts: after a cd below home, ../.config is the home folder's .config."""
+    norm = os.path.normpath(w) if w else w
+    parts = [c for c in norm.split(os.sep) if c not in ("", ".", "..")]
+    return {w, norm, os.sep.join(parts)} - {""}
+
+
+def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, level=0, strict=False):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
     file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen.
@@ -670,10 +702,21 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                     if inner.strip() and gmail_resolves_into_folder(inner, True, inner_rel, prose_ok, level + 1):
                         return True
                     inner_rel = inner_rel or _is_cd_segment(inner)
+    elif level < 2:
+        # Blind review of PR 266: prose that is echoed, stored or posted may still be code later (piped to a wrapped shell, written to a file and run),
+        # whichever shell or wrapper that is, so the list of shells decides nothing here: a path-like glob piece of a spaced word that lands IN the
+        # token folder (or below it) is refused; a mention of a parent folder (~/.config) is still prose
+        paths = [piece for w in words if re.search(r"\s", w) for piece in re.split(r"[\s;&|]+", w)
+                 if piece and re.search(r"[*?\[{]", piece) and ("/" in piece or piece.startswith(("~", ".")))]
+        if len(paths) > 200:
+            return True
+        for piece in paths:
+            if gmail_resolves_into_folder(shlex.quote(piece), True, rel, False, level + 1, True):
+                return True
     if len(words) > 2000:
         return True
     ci = _command_index(words)  # past NAME=value words and command or builtin in front of cd
-    cd = ci < len(words) and os.path.basename(words[ci]) in ("cd", "pushd")
+    cd = ci < len(words) and os.path.basename(words[ci]).lstrip("({!") in ("cd", "pushd")
     home = os.path.realpath(os.path.expanduser("~"))
     bases = {home, os.sep}  # a relative cd target starts wherever an earlier cd left the shell: home, every ancestor of it and / (not the token folder's own parents: cd .. from there is ordinary)
     up = home
@@ -691,7 +734,16 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
 
     def inside(path):  # the folder, below it, or one of its parents (a find, grep -r, cp -r or tar of a parent walks into it)
         real = os.path.realpath(os.path.expanduser(gmail_norm(path)))
-        return real == folder or real in parents or real.startswith(folder + os.sep)
+        return real == folder or (real in parents and not strict) or real.startswith(folder + os.sep)
+
+    def from_bases(word):  # a relative word (and the same without its leading ../ parts) tried from every folder the shell may stand in
+        for variant in _rel_variants(word):
+            if variant.startswith(("/", "~")):
+                continue
+            for base in bases:
+                if inside(os.path.join(base, variant)) or (GMAIL_GLOB.search(variant) and _pattern_reaches(folder, base, variant, strict)):
+                    return True
+        return False
 
     for i, w in enumerate(words):
         if not w:
@@ -701,10 +753,8 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                 return True
             if GMAIL_GLOB.search(w) and glob_inside(w):  # issue 257: cd ~/.?onfig/a?a/g?ail goes into the folder
                 return True
-            if not w.startswith(("/", "~", "$")):  # a relative target starts wherever an earlier cd left the shell: try it from the folders that matter
-                for base in bases:
-                    if inside(os.path.join(base, w)) or (GMAIL_GLOB.search(w) and glob_inside(os.path.join(base, w))):
-                        return True
+            if not w.startswith(("/", "~", "$")) and from_bases(w):  # a relative target starts wherever an earlier cd left the shell: try it from the folders that matter
+                return True
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
@@ -728,18 +778,34 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                 cands |= {inner.rstrip("}"), inner + rest, c[:m.start()] + inner + rest}  # the word with the expansion replaced by its default too
             if "$" in c:  # every default applied at once (left to right), and with every other variable empty: ${x:-~}/${y:-.?onfig}/a?a/..., ${IFS}/path
                 cands |= {_defaults_applied(c), _defaults_applied(c, True)}
+        unknown_rest = set()
+        for c in (w, after_eq):
+            if "$" in c or "~" in c:
+                # blind review of PR 266: ~+ ~- $PWD ${PWD} $OLDPWD are the folder the shell stands in; ${HOME:0} ${HOME%x} are the home folder;
+                # a path glued behind an expansion (cat${IFS}$HOME/.., $x$HOME/..) starts right after it; the rest of $var/rest is tried from every base
+                same = re.sub(r"^(?:~[+-]|\$\{?(?:PWD|OLDPWD)\}?)(?=/|$)", ".", c)
+                if same != c:
+                    cands.add(same)
+                cands.add(re.sub(r"\$\{HOME[^{}]*\}", "~", c))
+                expansions = list(re.finditer(r"\$\{[^{}]*\}|\$\w+", c))
+                if len(expansions) > 40:
+                    return True
+                for m in expansions:
+                    cands.add(c[m.end():])
+                m = re.match(r"\$\{?\w+\}?/(.+)", c)
+                if m:
+                    unknown_rest.add(m.group(1))
         for cand in cands:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
                 if GMAIL_GLOB.search(cand) and glob_inside(cand):
                     return True
-                # Security review of PR 266: after a cd (any, a bare cd goes home) a relative path starts wherever the shell then stands: try a
-                # glob of three or more parts from home, every ancestor of it and /, as the cd targets are
-                if rel and GMAIL_GLOB.search(cand) and not cand.startswith(("/", "~", "$")) and cand.count("/") >= 2:
-                    for base in bases:
-                        if glob_inside(os.path.join(base, cand)):
-                            return True
+                # after a cd (any, a bare cd goes home) a relative path starts wherever the shell then stands: tried from home, every ancestor of it and /
+                if rel and not cand.startswith(("/", "~", "$")) and from_bases(cand):
+                    return True
+        if any(from_bases(r) for r in unknown_rest):
+            return True
     return False
 
 
