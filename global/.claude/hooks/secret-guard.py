@@ -643,8 +643,12 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
         return True
     for one in expanded:
         parts = [c for c in os.path.normpath(one).split(os.sep) if c not in ("", ".")]
-        if any(c == ".." for c in parts):
-            continue  # what is left after normpath is a leading ../: the caller tries the word without it from every base (_rel_variants), and ../*.md is ordinary
+        # what is left after normpath is a leading ../ (a brace form such as ..{,}/.?onfig or {..,x}/.?onfig expands to it here, where the caller's _rel_variants never saw it):
+        # the parts without it are tried from this base, as _rel_variants does for a plain word, so ../*.md is ordinary and ..{,}/.?onfig/a?a/g?ail is not (security review)
+        while parts and parts[0] == "..":
+            parts.pop(0)
+        if not parts or any(c == ".." for c in parts):
+            continue
         if len(parts) < len(fparts) - (0 if below_only else 2):
             continue  # a pattern that stops above ~/.config lands on an ordinary folder (*/ from /), and one above the folder lands on a parent, which below_only does not count
         # security review of PR 266: each part is written the way Python's fnmatch reads a bracket ([^x] is [!x], a POSIX class is its characters) first;
@@ -659,6 +663,23 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
             return True
         if parts and all(i >= len(fparts) or ((not fparts[i].startswith(".") or c.startswith((".", "[", "{"))) and any(fnmatch.fnmatchcase(fparts[i], r) for r in readings[i]))
                          for i, c in enumerate(parts)):
+            return True
+    return False
+
+
+def _glob_part_names_token_folder(c):
+    """True when a path part with a glob in it and a literal letter or digit (a?a, g?ail, .?onfig) can match afa, gmail or .config; one that cannot be
+    translated exactly counts as a hit. A bare * or ?* has no literal and is ordinary."""
+    if not GMAIL_GLOB.search(c) or not re.search(r"[A-Za-z0-9]", re.sub(r"\[[^\]]*\]", "", c)):
+        return False
+    forms = _brace_expand(c, BRACE_LIMIT)
+    if forms is None:
+        return True
+    for one in forms:
+        t = _bracket_translate(one)
+        if t is None:
+            return True
+        if any(fnmatch.fnmatchcase(name, t) for name in ("afa", "gmail") + ((".config",) if one.startswith((".", "[", "?")) else ())):
             return True
     return False
 
@@ -784,9 +805,18 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                 return True
             if not w.startswith(("/", "~", "$")) and from_bases(w):  # a relative target starts wherever an earlier cd left the shell: try it from the folders that matter
                 return True
-            continue
+            if "$" not in w and "~" not in w and "`" not in w:
+                continue
+            # fifth review: a target written as an expansion (cd ${x:-~/.?onfig/a?a/g?ail}, cd $PWD/.?onfig/.., cd ~+/..) goes through the general candidates below as well
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
+        # security review of PR 266: a variable earlier in the path can hold home or any parent, so a later part that is a glob able to match afa, gmail or .config
+        # ($x/$y/g?ail/token.json with y=a?a set in another word) is refused wherever the variable's value was set
+        for c in (w, after_eq):
+            cs = c.split("/")
+            var_at = next((j for j, p in enumerate(cs) if "$" in p), None)
+            if var_at is not None and any(_glob_part_names_token_folder(p) for p in cs[var_at + 1:][:60]):
+                return True
         # blind re-review of PR 266: x=.?onfig holds a glob that bash expands where $x is used (cat $x/a?a/g?ail/token.json), so the value of an assignment is judged
         # as a path on its own, parents included, from home and every folder above it, whether or not a cd came first
         if re.match(r"[A-Za-z_]\w*=", w) and after_eq and not after_eq.startswith(("/", "~", "$")) and GMAIL_GLOB.search(after_eq) and from_bases(after_eq):

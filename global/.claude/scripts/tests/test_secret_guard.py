@@ -158,6 +158,11 @@ class RuleGCdGlobAndWrappers(Base):
                         "cd ~ && tar czf /tmp/x .config/afa", "cd ~/repos && grep -r tok ../.config",
                         # fourth blind review: a glob held in a variable that stops at a parent folder
                         "cd ~ && x=.?onfig && cat $x/a?a/g?ail/token.json", "x=.?onfig; cat ~/$x/a?a/g?ail/token.json",
+                        # fifth review and security review: a cd target written as an expansion, a .. made by a brace list, a glob split over two variables
+                        "cd ${x:-~/.?onfig/a?a/g?ail} && cat token.json", "cd ~/${x:-.?onfig/a?a/g?ail} && cat token.json",
+                        "cd ~ && cd $PWD/.?onfig/a?a/g?ail && cat token.json", "cd ~ && cd ~+/.?onfig/a?a/g?ail && cat token.json",
+                        "cd ~/repos && cat ..{,}/.?onfig/a?a/g?ail/token.json", "cd ~/repos && cat {..,x}/.?onfig/a?a/g?ail/token.json",
+                        "cd ~ && x=.?onfig; y=a?a; cat $x/$y/g?ail/token.json", "cd ~ && y=a?a; cat $HOME/.config/$y/g?ail/token.json",
                         # security review: the indirect form ${!x:-w} and a replacement pattern with an escaped slash or a quote
                         "x=a; cat ${!x:-~/%s}" % t, "x=a; cat ${!x/a/~/%s}" % t,
                         "x=a; cat ${x/a\\/b/~/%s}" % t, "x=a; cat ${x/\"a/b\"/~/%s}" % t):
@@ -174,6 +179,7 @@ class RuleGCdGlobAndWrappers(Base):
                         "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*",
                         # third blind review: shallow globs after a cd stop above ~/.config
                         "cd ~/repos && for d in */; do git -C \"$d\" status -s; done", "cd src && du -sh */", "cd src && wc -l */*", "cd build && rm -rf */",
+                        "cd $HOME/docs && ls *.md", "cd ${DIR:-src} && ls ../*.md", "cd $PWD/src && cat $f/*.md", "for d in */; do ls $d/src*; done",
                         "cd docs && cat ../*.md", "cd src && wc -l ../*.py", "cd build && cp ../dist/*.js .", "cd src && cd ../lib*", "x=*.md; ls $x","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
                 self.allowed(cmd)
         self.with_home(run)
