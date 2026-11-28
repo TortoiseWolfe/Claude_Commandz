@@ -54,6 +54,152 @@ class CredentialsWord(Base):
         self.blocked("head -3 /root/.config/x/credentials.yml")
 
 
+class RuleGCdGlobAndWrappers(Base):
+    """Issue 257: a cd into a glob, a ${x:-path} word, bash -c, sh -c and a here-string that holds a glob are followed to the token folder."""
+    TOK = "~/.?onfig/a?a/g?ail/token.json"
+    REFUSED = ("cd ~/.?onfig/a?a/g?ail && cat token.json",
+               "cd ~/.?onfig/a?a/g?ail; cat token.json",
+               "pushd ~/.?onfig/a?a/g?ail",
+               "cat ${x:-~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:+~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:=~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:?~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x-~/.?onfig/a?a/g?ail/token.json}",
+               "cat ${x:-${y:-~/.?onfig/a?a/g?ail/token.json}}",
+               "bash -c 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "sh -c 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "bash -ec 'cd ~/.?onfig/a?a/g?ail && cat token.json'",
+               "bash <<< 'cat ~/.?onfig/a?a/g?ail/token.json'",
+               "sh <<< \"cat ~/.?onfig/a?a/g?ail/token.json\"",
+               "cat ${x:-~/.?onfig/a?a}/g?ail/token.json",
+               "cat ${x:-~/.?onfig}/a?a/g?ail/token.json",
+               "cat ~/${x:-.?onfig/a?a}/g?ail/token.json",
+               "cd ~/.config && cd ?fa/g?ail && cat token.json",
+               "cd ~ && cd .?onfig/a?a/g?ail && cat token.json",
+               # blind review of PR 266
+               "cd ~ && x=1 cd .?onfig/a?a/g?ail && cat token.json",
+               "cd ~ && command cd .?onfig/a?a/g?ail && cat token.json",
+               "cd ~ && builtin cd .?onfig/a?a/g?ail && cat token.json",
+               "bash -c 'cd; cd .?onfig/a?a/g?ail; cat token.json'",
+               "bash -c 'cd ~ && cd .?onfig/a?a/g?ail && cat token.json'",
+               "cat ${x:-~}/${y:-.?onfig}/a?a/g?ail/token.json",
+               "cat ${x:-$HOME}/${y:-.?onfig}/a?a/g?ail/token.json",
+               "echo 'cat ~/.?onfig/a?a/g?ail/token.json' | bash",
+               "cat <<< 'cat ~/.?onfig/a?a/g?ail/token.json' | sh",
+               "cd && cat .?onfig/a?a/g?ail/token.json",
+               "echo hi <(cat ~/.?onfig/a?a/g?ail/token.json)",
+               "echo $(bash -c 'cat ~/.?onfig/a?a/g?ail/token.json')")
+
+    def with_home(self, run):
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".config", "afa", "gmail")
+            os.makedirs(folder)
+            open(os.path.join(folder, "token.json"), "w").close()
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                run(home)
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_bash_really_reaches_the_token_with_each_of_these(self):
+        def run(home):
+            for cmd in self.REFUSED:
+                if ":?" in cmd:
+                    continue  # ${x:?word} only prints word as an error message; the guard still refuses it
+                r = subprocess.run(["bash", "-c", cmd.replace("cat <<<", "CATHERE").replace("cat ", "ls ").replace("CATHERE", "cat <<<")], env={"HOME": home, "PATH": os.environ["PATH"]}, capture_output=True, text=True, cwd="/tmp")
+                self.assertEqual(r.returncode, 0, (cmd, r.stderr))
+                self.assertTrue(r.stdout.strip(), cmd)  # the glob matched a real file or folder and listed it
+        self.with_home(run)
+
+    def test_each_is_refused(self):
+        def run(home):
+            for cmd in self.REFUSED:
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_security_review_cases_are_refused(self):
+        """Security review of PR 266: a ${ cmd; } substitution in a printing line, a relative cd from an ancestor of the home folder,
+        and a word of many ${x:-..} expansions (refused, never rebuilt quadratically)."""
+        def run(home):
+            for cmd in ("echo ${ cat ~/.?onfig/a?a/g?ail/token.json; }",
+                        "cd /tmp && cd %s/.?onfig/a?a/g?ail && cat token.json" % os.path.basename(home),
+                        "cd %s/.?onfig/a?a/g?ail" % os.path.basename(home),
+                        "cat " + "${x:-a}" * 50):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_second_blind_review_cases_are_refused(self):
+        """Second blind review of PR 266: a cd inside a group or keyword, .. climbing after a cd below home, the spellings of the current folder
+        (~+ $PWD ${PWD}), a wrapped or unusual shell fed by echoed text, and a path glued behind an expansion."""
+        def run(home):
+            t = ".c?nfig/a?a/g?ail/token.json"
+            for cmd in ("(cd ~ && cat %s)" % t, "{ cd ~; cat %s; }" % t, "if cd ~; then cat %s; fi" % t, "! cd ~ && cat %s" % t,
+                        "while cd ~; do cat %s; done" % t,
+                        "cd ~/repos && cat ../%s" % t, "cd ~/repos && cd ../.c?nfig/a?a/g?ail && cat token.json",
+                        "cd ~ && cat ~+/%s" % t, "cd ~ && cat $PWD/%s" % t, "cd ~ && cat ${PWD}/%s" % t, "cd ~ && cat $OLDPWD/%s" % t,
+                        "echo 'cat ~/%s' | timeout 9 bash" % t, "echo 'cat ~/%s' | nice bash" % t, "echo 'cat ~/%s' | nohup bash" % t,
+                        "echo 'cat ~/%s' | stdbuf -o0 bash" % t, "echo 'cat ~/%s' | setsid bash" % t, "echo 'cat ~/%s' | busybox sh" % t,
+                        "echo 'cat ~/%s' | (bash)" % t, "echo 'cat ~/%s' | { bash; }" % t, "cat <<< 'cat ~/%s' | timeout 9 sh" % t,
+                        "echo 'cat ~/%s' > /tmp/x.sh; sh /tmp/x.sh" % t,
+                        "cat $x$HOME/%s" % t, "cat${IFS}$HOME/%s" % t, "cat ${HOME:0}/%s" % t, "cat ${HOME%%x}/%s" % t,
+                        # security review of PR 266: bash's bracket spellings, which Python's fnmatch reads differently
+                        "cd ~ && cat .c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[:lower:]]nfig/a[[:lower:]]a/g[[:lower:]]ail/token.json",
+                        "cd ~/repos && cat ../.c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[=o=]]nfig/a?a/g?ail/token.json",
+                        # third blind review: a replacement word with a ? glob, and a cd three shells deep
+                        "x=a; cat ${x/a/~/.?onfig/a?a/g?ail/token.json}",
+                        "cat ${PWD/*/%s/.?onfig/a?a/g?ail/token.json}" % home,
+                        "x=a; cat ${x//a/~/.?onfig/a?a/g?ail/token.json}",
+                        "bash -c \"bash -c \\\"bash -c 'cd; cat .?onfig/a?a/g?ail/token.json'\\\"\"",
+                        # security review: a plain parent path after a cd is still a parent
+                        "cd ~ && tar czf /tmp/x .config/afa", "cd ~/repos && grep -r tok ../.config",
+                        # fourth blind review: a glob held in a variable that stops at a parent folder
+                        "cd ~ && x=.?onfig && cat $x/a?a/g?ail/token.json", "x=.?onfig; cat ~/$x/a?a/g?ail/token.json",
+                        # fifth review and security review: a cd target written as an expansion, a .. made by a brace list, a glob split over two variables
+                        "cd ${x:-~/.?onfig/a?a/g?ail} && cat token.json", "cd ~/${x:-.?onfig/a?a/g?ail} && cat token.json",
+                        "cd ~ && cd $PWD/.?onfig/a?a/g?ail && cat token.json", "cd ~ && cd ~+/.?onfig/a?a/g?ail && cat token.json",
+                        "cd ~/repos && cat ..{,}/.?onfig/a?a/g?ail/token.json", "cd ~/repos && cat {..,x}/.?onfig/a?a/g?ail/token.json",
+                        "cd ~ && x=.?onfig; y=a?a; cat $x/$y/g?ail/token.json", "cd ~ && y=a?a; cat $HOME/.config/$y/g?ail/token.json",
+                        "cd ~ && y=[a][f][a]; cat $HOME/.config/$y/g?ail/token.json", "cd ~ && cat $HOME/.config/[a][f][a]/g?ail/token.json",
+                        # security review: the indirect form ${!x:-w} and a replacement pattern with an escaped slash or a quote
+                        "x=a; cat ${!x:-~/%s}" % t, "x=a; cat ${!x/a/~/%s}" % t,
+                        "x=a; cat ${x/a\\/b/~/%s}" % t, "x=a; cat ${x/\"a/b\"/~/%s}" % t):
+                self.blocked(cmd, "G")
+            # a symlink that leads into the folder is followed by a glob after a cd
+            os.symlink(os.path.join(home, ".config", "afa"), os.path.join(home, "lnk"))
+            for cmd in ("cd ~ && cat l*/g*/t*", "cd ~ && cat l?k/g?ail/token.json"):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_broad_relative_globs_after_a_cd_pass(self):
+        def run(home):
+            for cmd in ("cd src && wc -l */*/*", "cd src && git add */*/*", "cd src && rm -f */*/*", "cd src && cat */*/*.py",
+                        "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*",
+                        # third blind review: shallow globs after a cd stop above ~/.config
+                        "cd ~/repos && for d in */; do git -C \"$d\" status -s; done", "cd src && du -sh */", "cd src && wc -l */*", "cd build && rm -rf */",
+                        "cd $HOME/docs && ls *.md", "cd ${DIR:-src} && ls ../*.md", "cd $PWD/src && cat $f/*.md", "for d in */; do ls $d/src*; done",
+                        "cd docs && cat ../*.md", "cd src && wc -l ../*.py", "cd build && cp ../dist/*.js .", "cd src && cd ../lib*", "x=*.md; ls $x","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
+                self.allowed(cmd)
+        self.with_home(run)
+
+    def test_the_same_shapes_without_the_token_folder_pass(self):
+        def run(home):
+            os.makedirs(os.path.join(home, "docs"))
+            for cmd in ("cd ~/d?cs && ls",
+                        "cat ${x:-~/docs/*.md}",
+                        "cd .. && ls", "cd . && ls", "cd ../ && ls", "pushd ..", "cd gmail", "cd afa",  # blind review of PR 266: ordinary cd words
+                        "cd src && ls */*/*.py", "cd docs && cat ${x:-~/docs/*.md}",
+                        "bash -c 'ls ~/docs/*.md'",
+                        "sh -c 'echo hello world'",
+                        "bash <<< 'ls ~/docs'",
+                        "cat <<< 'a note with spaces'"):
+                self.allowed(cmd)
+        self.with_home(run)
+
+
 class RuleGGlobOptions(Base):
     """Issue 255: dotglob, nocaseglob, extglob, globstar and GLOBIGNORE change what a glob matches, so the Python expansion no longer says what bash reaches."""
     REACHING = ("shopt -s dotglob; cat ~/?config/a?a/g?ail/token.json",
@@ -1339,7 +1485,9 @@ class RuleGAliasQuoteState(Base):
 
     def test_the_same_commands_without_an_alias_behave_as_before(self):
         self.home()
-        self.allowed("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"")  # one quoted word: text, not a command
+        self.allowed("echo \"hi\"\necho \"; cat ~/notes/*.txt; x\n\"")  # one quoted word: text, not a command
+        # blind review of PR 266: text that spells the token folder by a glob is refused even when it is only echoed (it may be piped to any shell later)
+        self.blocked("echo \"hi\"\necho \"; cat ~/.?onfig/a?a/g?ail/token.json; x\n\"", "G")
         self.blocked("echo x; cat ~/.?onfig/a?a/g?ail/token.json", "G")
 
     def test_an_ordinary_alias_passes(self):
