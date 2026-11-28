@@ -1094,6 +1094,7 @@ def split_data_heredocs(cmd):
         if c in "'\"":
             q = c
         elif c == "#" and (not line or (line[-1][-1:] in " \t;&|()\n" and not line[-1].startswith("\\")
+                                        and not line[-1].startswith("$(")  # $(..)# is one word: the # is not a comment (third review)
                                         and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
             # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one

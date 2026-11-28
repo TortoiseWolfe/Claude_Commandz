@@ -1941,6 +1941,17 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         self.assertIsNotNone(gsm_match("$(dirname /tmp/test-case)"))  # the word case inside a name is not the keyword
         self.assertIsNotNone(gsm_match("$(date +%F)"))
 
+    def test_a_hash_straight_after_a_substitution_is_part_of_the_word(self):
+        # echo $(echo a)#b prints a#b: no comment, so the ; and the heredoc operator after it are real and the body is code
+        send = "svc.users().messages().send(userId='me', body=b).execute()"
+        self.blocked("echo $(echo a)#b; python3 <<'EOF'\n%s\nEOF" % send)
+        self.blocked("echo $(echo a)#b; bash <<'EOF'\n%s\nEOF" % send)
+        # the heredoc operator after the glued # is seen (HEAD~ read it as a comment and lost the heredoc: the body was then taken as code lines)
+        code, bodies, opaque, _send = sg.split_data_heredocs("cat $(echo a)#b <<'EOF'\nline one\nEOF\necho done")
+        self.assertEqual(opaque, ["line one"])
+        self.assertNotIn("#b <<'EOF'", opaque)
+        self.allowed("echo $(echo a) # a real comment\nprintf x")
+
     def test_a_real_copy_or_source_in_the_same_loop_is_still_refused(self):
         self.blocked(self.LOOP + "cp -r ~/.config/afa/gmail /tmp/x", "G")
         self.blocked("cd ~/repos/x && . -- ./defs.sh; for f in a; do curl -s https://example.com/$f; done", "G")
