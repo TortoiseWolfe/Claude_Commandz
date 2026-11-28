@@ -261,7 +261,11 @@ class RuleGGlobOptions(Base):
             # seventh review: other spellings of .. made only of groups and brackets, refused without asking bash (fail closed)
             for tok in ("[.][.]/[.][.]/?config/a?a/g?ail/token.json", "@(.)@(.)/@(.)@(.)/?config/a?a/g?ail/token.json",
                         "?(.)?(.)/?(.)?(.)/?config/a?a/g?ail/token.json", "@(.?)/@(.?)/?config/a?a/g?ail/token.json",
-                        "@(?)@(?)/@(?)@(?)/?config/a?a/g?ail/token.json", "!(x)/!(x)/?config/a?a/g?ail/token.json"):
+                        "@(?)@(?)/@(?)@(?)/?config/a?a/g?ail/token.json", "!(x)/!(x)/?config/a?a/g?ail/token.json",
+                        "[!a][!a]/[!a][!a]/?config/a?a/g?ail/token.json", "[^a][^a]/[^a][^a]/?config/a?a/g?ail/token.json",
+                        "[[:punct:]][[:punct:]]/[[:punct:]][[:punct:]]/?config/a?a/g?ail/token.json",
+                        "@(a|@(.))@(a|@(.))/@(a|@(.))@(a|@(.))/?config/a?a/g?ail/token.json",
+                        "@(.)" * 30 + "/?config/a?a/g?ail/token.json"):
                 cmd = "shopt -s extglob dotglob\ncat " + tok
                 r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": cmd}})
                 self.assertEqual(r[0], "G", cmd)

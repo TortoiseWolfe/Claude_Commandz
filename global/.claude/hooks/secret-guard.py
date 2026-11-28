@@ -963,15 +963,23 @@ def _could_be_dotdot(c):
     dot, a * ? or [, or a group that starts with !. A part with a literal letter outside (!(keep).log) is an ordinary pattern."""
     stripped = c
     inner = []
-    for _ in range(20):
+    for _ in range(200):
         m = re.search(r"[?*+@!]\(([^()]*)\)|\[([^\[\]]*)\]", stripped)
         if not m:
             break
-        inner.append(((m.group(1) if m.group(1) is not None else m.group(2)), m.group(0).startswith("!(")))
+        inner.append((m.group(1) if m.group(1) is not None else m.group(2), m.group(0).startswith("!(")))
         stripped = stripped[:m.start()] + stripped[m.end():]
-    if not inner or re.search(r"[A-Za-z0-9_-]", stripped):
+    else:
+        return True  # more groups than the loop reads: refused
+    if not inner:
+        return False  # (a piece cut from a word at a ( or | has no whole group; the whole word is read as well)
+    if re.search(r"[()\[\]]", stripped):
+        return True  # an opener or closer left over that was not understood
+    if re.search(r"[A-Za-z0-9_-]", stripped):
         return False
-    return any(neg or re.search(r"[.*?\[]", body) for body, neg in inner)
+    # a bracket or group body is safe only when it is plain letters and digits (and ranges between them, none of which can include a dot); anything else, a !, ^, a
+    # class such as [:alpha:], a | list holding a dot or glob character, may match ..
+    return any(neg or not re.fullmatch(r"[A-Za-z0-9_|]*(?:[A-Za-z0-9_]-[A-Za-z0-9_][A-Za-z0-9_|]*)*", body) for body, neg in inner)
 
 
 def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
