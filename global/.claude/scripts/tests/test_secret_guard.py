@@ -155,7 +155,12 @@ class RuleGCdGlobAndWrappers(Base):
                         "x=a; cat ${x//a/~/.?onfig/a?a/g?ail/token.json}",
                         "bash -c \"bash -c \\\"bash -c 'cd; cat .?onfig/a?a/g?ail/token.json'\\\"\"",
                         # security review: a plain parent path after a cd is still a parent
-                        "cd ~ && tar czf /tmp/x .config/afa", "cd ~/repos && grep -r tok ../.config"):
+                        "cd ~ && tar czf /tmp/x .config/afa", "cd ~/repos && grep -r tok ../.config",
+                        # fourth blind review: a glob held in a variable that stops at a parent folder
+                        "cd ~ && x=.?onfig && cat $x/a?a/g?ail/token.json", "x=.?onfig; cat ~/$x/a?a/g?ail/token.json",
+                        # security review: the indirect form ${!x:-w} and a replacement pattern with an escaped slash or a quote
+                        "x=a; cat ${!x:-~/%s}" % t, "x=a; cat ${!x/a/~/%s}" % t,
+                        "x=a; cat ${x/a\\/b/~/%s}" % t, "x=a; cat ${x/\"a/b\"/~/%s}" % t):
                 self.blocked(cmd, "G")
             # a symlink that leads into the folder is followed by a glob after a cd
             os.symlink(os.path.join(home, ".config", "afa"), os.path.join(home, "lnk"))
@@ -168,7 +173,8 @@ class RuleGCdGlobAndWrappers(Base):
             for cmd in ("cd src && wc -l */*/*", "cd src && git add */*/*", "cd src && rm -f */*/*", "cd src && cat */*/*.py",
                         "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*",
                         # third blind review: shallow globs after a cd stop above ~/.config
-                        "cd ~/repos && for d in */; do git -C \"$d\" status -s; done", "cd src && du -sh */", "cd src && wc -l */*", "cd build && rm -rf */","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
+                        "cd ~/repos && for d in */; do git -C \"$d\" status -s; done", "cd src && du -sh */", "cd src && wc -l */*", "cd build && rm -rf */",
+                        "cd docs && cat ../*.md", "cd src && wc -l ../*.py", "cd build && cp ../dist/*.js .", "cd src && cd ../lib*", "x=*.md; ls $x","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
                 self.allowed(cmd)
         self.with_home(run)
 

@@ -576,9 +576,11 @@ SHELLISH = {"bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "xargs", 
             "timeout", "nice", "nohup", "stdbuf", "setsid", "busybox", "fish", "csh", "tcsh", "awk", "gawk", "php", "lua", "pwsh", "ssh", "sudo", "doas"}
 # Blind re-review of PR 266: the operator sits right after the parameter name (and a subscript); a lazy "anything up to ?" took the ? of a glob inside
 # ${x/a/~/.?onfig/..} for the ${x?word} operator and rebuilt the wrong word
-_EXPANSION_HEAD = r"\$\{(?:\w+|[@*#?$!-])(?:\[[^\]]*\])?"
-EXPANSION_START = re.compile(_EXPANSION_HEAD + r"(?::?[-+=?]|/[/#%]?[^{}/]*/)")  # ${x:-  ${x=  ${x?  ${x/pat/  ${x//pat/ : what follows is a word of its own
-DEFAULT_EXPANSION = re.compile(_EXPANSION_HEAD + r":?[-+=?]([^{}]*)\}|\$\{\w+/[/#%]?[^{}/]*/([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
+# (security review: ${!x:-w} is the indirect form, and a pattern may hold an escaped slash or a quote: ${x/a\/b/word}, ${x/"a/b"/word})
+_EXPANSION_HEAD = r"\$\{!?(?:\w+|[@*#?$!-])(?:\[[^\]]*\])?"
+_REPLACE_PAT = r"/[/#%]?(?:\\.|\"[^\"]*\"|'[^']*'|[^{}/\\\"'])*/"
+EXPANSION_START = re.compile(_EXPANSION_HEAD + r"(?::?[-+=?]|" + _REPLACE_PAT + ")")  # ${x:-  ${x=  ${x?  ${x/pat/  ${x//pat/ : what follows is a word of its own
+DEFAULT_EXPANSION = re.compile(_EXPANSION_HEAD + r":?[-+=?]([^{}]*)\}|" + _EXPANSION_HEAD + _REPLACE_PAT + r"([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
 
 
 def _command_index(words):
@@ -642,7 +644,7 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
     for one in expanded:
         parts = [c for c in os.path.normpath(one).split(os.sep) if c not in ("", ".")]
         if any(c == ".." for c in parts):
-            return True
+            continue  # what is left after normpath is a leading ../: the caller tries the word without it from every base (_rel_variants), and ../*.md is ordinary
         if len(parts) < len(fparts) - (0 if below_only else 2):
             continue  # a pattern that stops above ~/.config lands on an ordinary folder (*/ from /), and one above the folder lands on a parent, which below_only does not count
         # security review of PR 266: each part is written the way Python's fnmatch reads a bracket ([^x] is [!x], a POSIX class is its characters) first;
@@ -785,6 +787,10 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
             continue
         # an option's value (--file=PATH, -fPATH is not seen) and an @FILE word are paths too
         after_eq = w.split("=", 1)[1] if "=" in w else ""
+        # blind re-review of PR 266: x=.?onfig holds a glob that bash expands where $x is used (cat $x/a?a/g?ail/token.json), so the value of an assignment is judged
+        # as a path on its own, parents included, from home and every folder above it, whether or not a cd came first
+        if re.match(r"[A-Za-z_]\w*=", w) and after_eq and not after_eq.startswith(("/", "~", "$")) and GMAIL_GLOB.search(after_eq) and from_bases(after_eq):
+            return True
         # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
         # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
         # issue 257: ${x:-PATH} ${x:+PATH} ${x:=PATH} ${x:?PATH} (and the forms without the colon) hold PATH as a word of their own, closing brace cut off
@@ -803,6 +809,10 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                 inner = c[m.end():close] if close is not None else c[m.end():]
                 rest = c[close + 1:] if close is not None else ""
                 cands |= {inner.rstrip("}"), inner + rest, c[:m.start()] + inner + rest}  # the word with the expansion replaced by its default too
+                # the shell's own split of ${x/pat/word} may differ from this one's (a backslash or quote in pat was already taken out by the word split): the text after
+                # each slash of the body is tried as the word as well (security review)
+                for k in [j for j, ch in enumerate(inner) if ch == "/"][:40]:
+                    cands |= {inner[k + 1:].rstrip("}"), inner[k + 1:] + rest}
             if "$" in c:  # every default applied at once (left to right), and with every other variable empty: ${x:-~}/${y:-.?onfig}/a?a/..., ${IFS}/path
                 cands |= {_defaults_applied(c), _defaults_applied(c, True)}
         unknown_rest = set()
