@@ -1856,6 +1856,10 @@ class RuleBNamesOnlyGrep(Base):
             self.blocked(cmd)
 
 
+def gsm_match(text):
+    return sg.SIMPLE_SUBST.match(text)
+
+
 class RuleGOrdinaryWorkIsNotARead(Base):
     """Issue 269: three kinds of ordinary command that rule G refused with no token folder in them.
     1. awk's split($2,a,"=") or print($1): the ( after a word is a function call, not a subshell, so it does not turn on the wide glob scan.
@@ -1920,6 +1924,16 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         # ln -sf /bin/bash ~/.local/bin/cat) : the word at the end of the substitution keeps its ")"; the heredoc body would run as shell
         for body in ("svc.users().messages().send(userId='me', body=b).execute()", "plain prose with an apostrophe: it's fine"):
             self.blocked("mkdir -p /tmp/y$(ln -sf /bin/bash ~/.local/bin/cat) && cat > /tmp/x <<'EOF'\n%s\nEOF" % body)
+
+    def test_a_substitution_with_a_paren_of_its_own_is_not_a_plain_one(self):
+        # bash ends these at a later ) than the first, so the heredoc inside is not a data heredoc on the outer line
+        send = "svc.users().messages().send(userId='me', body=b).execute()"
+        self.blocked("x=$(case x in x) cat <<'EOF'\n%s\nEOF\nesac)" % send)
+        self.blocked("x=$(echo ${y:-)}; cat <<'EOF'\n%s\nEOF\n)" % send)
+        self.assertIsNone(gsm_match("$(case x in x) echo hi esac)"))
+        self.assertIsNone(gsm_match("$(echo ${y:-)})"))
+        self.assertIsNotNone(gsm_match("$(dirname /tmp/test-case)"))  # the word case inside a name is not the keyword
+        self.assertIsNotNone(gsm_match("$(date +%F)"))
 
     def test_a_real_copy_or_source_in_the_same_loop_is_still_refused(self):
         self.blocked(self.LOOP + "cp -r ~/.config/afa/gmail /tmp/x", "G")
