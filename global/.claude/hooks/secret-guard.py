@@ -1294,6 +1294,8 @@ def _names_pattern_grep(seg):
             q = None if q == '"' else '"'
         elif c in "$`<>(){}\\":
             return False
+        elif q is None and c in "*?[~=":
+            return False  # an unquoted glob, ~ or = word is expanded by the shell into file names that grep would then open
     if q:
         return False
     try:
@@ -1326,7 +1328,10 @@ def prints_sensitive(cmd):
         if not label:
             continue
         # issue 267: a pattern-only grep fed by one plain ls or find over a single pipe searches names, it does not read the credential file
-        if k > 0 and all_ops[k] == "|" and _names_producer(segs[k - 1]) and _names_pattern_grep(seg):
+        # only when the whole command is exactly that one pipe of two commands: an earlier function, alias, PATH change or other
+        # segment could make ls or grep run something else (security review of PR 268)
+        if (k > 0 and all_ops[k] == "|" and len([s for s in all_segs if s.strip()]) == 2
+                and _names_producer(segs[k - 1]) and _names_pattern_grep(seg)):
             continue
         scan = seg if SHELL_C.search(seg) else blank_quotes(seg)
         if GIT_PRINT.search(scan) or REDIR_IN.search(scan) or "redact_view.py" in seg:

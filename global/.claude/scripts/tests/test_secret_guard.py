@@ -1437,6 +1437,11 @@ class RuleBNamesOnlyGrep(Base):
                "find . -name '*.env' -exec grep KEY {} + | grep '\\.env'",
                "find . -name x -exec cat .env \\; | grep y",
                "ls -a | grep -e '\\.env'",
+               "ls -a | grep -v .env*",                  # security review of PR 268: the shell expands the glob into file operands
+               "ls -a | grep -v ~/.env",
+               "ls() { cat .env; }; ls | grep '\\.env'",  # an earlier segment can shadow ls or grep
+               "alias grep='cat'; ls -a | grep '\\.env'",
+               "cd x; ls -a | grep '\\.env'",
                "ls -a | grep $(cat .env)",
                "ls -a | grep \"x'$(cat .env)b'c\"",      # a command substitution inside double quotes runs
                "ls -a | grep \"^\\.env$\"",               # double quotes leave $ and \\ active: refused, single quotes are the way
