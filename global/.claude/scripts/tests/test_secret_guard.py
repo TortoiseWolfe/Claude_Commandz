@@ -1414,5 +1414,42 @@ class WriteAndEdit(unittest.TestCase):
         self.assertEqual(r[0], "G")
 
 
+class RuleBNamesOnlyGrep(Base):
+    """Issue 267: grep given a credential file's name as its pattern, fed by ls or find over a pipe, searches names; it reads no file."""
+    ENV = ".env"
+    ALLOWED = ("ls -a | grep -E '^\\.env$|docker-compose.override'",
+               "ls -a | grep -E '^\\.env$'",
+               "ls -a | grep -i '\\.env'",
+               "ls -a | rg '^\\.env$'",
+               "find . -maxdepth 1 | grep '\\.env'",
+               "ls -a ../ | grep -v '\\.env'")
+    REFUSED = ("cat .env | grep KEY",
+               "grep KEY .env",
+               "head .env",
+               "ls -a | grep -r KEY .env",             # a file operand after the pattern
+               "ls -a | grep -f .env x",                # the pattern file is a credential file
+               "ls -a | grep -r '\\.env'",              # -r reads the working folder's files
+               "ls -a | grep -E '^\\.env$' .env",
+               "ls -a | grep '\\.env' < .env",          # stdin is the credential file
+               "ls -a || grep '\\.env'",                # not a pipe: grep reads no ls output
+               "grep -E '^\\.env$'",                    # not fed by ls or find
+               "echo x | grep -E '^\\.env$'",
+               "find . -name '*.env' -exec grep KEY {} + | grep '\\.env'",
+               "find . -name x -exec cat .env \\; | grep y",
+               "ls -a | grep -e '\\.env'",
+               "ls -a | grep $(cat .env)",
+               "ls -a | grep \"x'$(cat .env)b'c\"",      # a command substitution inside double quotes runs
+               "ls -a | grep \"^\\.env$\"",               # double quotes leave $ and \\ active: refused, single quotes are the way
+               "ls -a | grep '\\.env' ; cat .env")
+
+    def test_names_searches_are_allowed(self):
+        for cmd in self.ALLOWED:
+            self.allowed(cmd)
+
+    def test_reads_are_still_refused(self):
+        for cmd in self.REFUSED:
+            self.blocked(cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
