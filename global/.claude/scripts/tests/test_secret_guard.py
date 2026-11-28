@@ -1747,6 +1747,32 @@ class RuleGOrdinaryWorkIsNotARead(Base):
                     "shopt -s dotglob; " + read):
             self.blocked(cmd, "G")
 
+    def test_a_subshell_with_a_name_built_at_run_time_is_still_refused(self):
+        # no option name is spelled out, so only the "( starts a subshell" reading can turn the wide scan on (blind review of the first commit)
+        pre = "s=shopt; g=glob; "
+        read = "cat ~/?config/a?a/g?ail/token.json"
+        for cmd in (pre + "($s -s dot$g; %s)" % read,
+                    pre + "time -p($s -s dot$g; %s)" % read,
+                    pre + "time --($s -s dot$g; %s)" % read,
+                    pre + "time -p -- ($s -s dot$g; %s)" % read,
+                    pre + "coproc x($s -s dot$g; %s)" % read,
+                    pre + "coproc ($s -s dot$g; %s)" % read,
+                    pre + "if($s -s dot$g); then %s; fi" % read):
+            self.blocked(cmd, "G")
+
+    def test_a_dot_that_can_still_source_is_refused(self):
+        read = "; cat ~/?config/a?a/g?ail/token.json"
+        self.blocked('y=" /tmp/e"; . --$y' + read, "G")  # the expansion splits into -- and a file
+        self.blocked(". -p /tmp e" + read, "G")           # bash 5.3: source -p PATH file
+        self.blocked(". -- ./e" + read, "G")
+        self.blocked(". ./e" + read, "G")
+        self.blocked(". -" + read, "G")
+
+    def test_a_planted_cat_inside_a_substitution_keeps_the_body_opaque(self):
+        # ln -sf /bin/bash ~/.local/bin/cat) : the word at the end of the substitution keeps its ")"; the heredoc body would run as shell
+        for body in ("svc.users().messages().send(userId='me', body=b).execute()", "plain prose with an apostrophe: it's fine"):
+            self.blocked("mkdir -p /tmp/y$(ln -sf /bin/bash ~/.local/bin/cat) && cat > /tmp/x <<'EOF'\n%s\nEOF" % body)
+
     def test_a_real_copy_or_source_in_the_same_loop_is_still_refused(self):
         self.blocked(self.LOOP + "cp -r ~/.config/afa/gmail /tmp/x", "G")
         self.blocked("cd ~/repos/x && . -- ./defs.sh; for f in a; do curl -s https://example.com/$f; done", "G")
