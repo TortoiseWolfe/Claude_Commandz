@@ -1023,6 +1023,9 @@ def _names_cannot_change(cmd):
     if _echo_shadowed(cmd) or NAME_CHANGERS.search(plain) or NAME_CHANGERS.search(flat_plain):
         return False
     for seg in split_segments(cmd):
+        first = re.match(r"\s*([^\s;&|]*)", seg).group(1)
+        if "$(" in first and not re.match(r"\w+=", first):
+            return False  # a substitution makes the command word itself (its output could be hash, export, read ...); an assignment x=$(..) runs nothing
         try:
             words = shlex.split(re.sub(r"[()]", " ", seg), posix=True)  # a word at the end of a $(..) keeps its ")": ln -sf /bin/bash ~/.local/bin/cat)
         except ValueError:

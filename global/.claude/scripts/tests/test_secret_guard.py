@@ -1941,6 +1941,13 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         self.assertIsNotNone(gsm_match("$(dirname /tmp/test-case)"))  # the word case inside a name is not the keyword
         self.assertIsNotNone(gsm_match("$(date +%F)"))
 
+    def test_a_substitution_as_the_command_word_is_not_trusted(self):
+        # its output could be a name changer (hash, export, read), which the text checks never see
+        self.assertFalse(sg._names_cannot_change("$(echo hash) -p /bin/sh cat; cat"))
+        self.assertFalse(sg._names_cannot_change("x$(echo ash) -r; cat"))
+        self.assertTrue(sg._names_cannot_change("mkdir -p $(dirname /tmp/x) && cat"))
+        self.assertTrue(sg._names_cannot_change("N=$(dirname /tmp/x); cat"))
+
     def test_a_hash_straight_after_a_substitution_is_part_of_the_word(self):
         # echo $(echo a)#b prints a#b: no comment, so the ; and the heredoc operator after it are real and the body is code
         send = "svc.users().messages().send(userId='me', body=b).execute()"
