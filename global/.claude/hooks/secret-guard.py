@@ -320,11 +320,14 @@ GMAIL_GIT_QUOTING = {"commit", "tag", "status"}  # git subcommands that take a m
 GMAIL_ENV_INJECT = re.compile(r"(?<![\w-])(?:PYTHON\w*|LD_\w+|BASH_ENV|GIT_\w+)=")  # variables that make an allowed script load other code
 GMAIL_GLOB = re.compile(r"[*?\[{]")
 GMAIL_AFA_GLOB = re.compile(r"\.con[^\s/]*[*?\[{][^\s/]*/|\.config/[^\s/]*[*?\[{][^\s/]*/|\.config/afa/[^\s]*[*?\[{]|\.config/af[^\s/]*[*?\[{]")  # a glob that can land on ~/.config/afa/gmail
-ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand_aliases|BASH_ENV)(?![\w-])|(?:^|[\s;&|(])\.\s+\S|\.(?:bashrc|bash_profile|bash_login|profile|zshrc|zshenv)(?![\w-])")  # a way to put text into the shell's alias table or its input
+ALIAS_DEFINER = re.compile(r"(?<![\w.-])(?:alias|BASH_ALIASES|eval|source|expand_aliases|BASH_ENV)(?![\w-])|(?:^|[\s;&|(])\.\s+(?:--(?![\w-])|-p(?!\w)|-(?![\w-])|[^\s-])|\.(?:bashrc|bash_profile|bash_login|profile|zshrc|zshenv)(?![\w-])")  # a way to put text into the shell's alias table or its input
 # ALIAS_DEFINER is also searched with quotes and backslashes removed (al""ias), and with _echo_shadowed (set -o posix, shopt, builtin, command);
 # a command word that starts with a variable ($a$b x=...) can build the word alias at run time. The dot-source alternative also matches
 # find . -name x: that only widens the quote-blind pass, which refuses any piece that names or globs into the token folder.
-VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc|in))[ \t]*"
+# A dot followed by an option word (. -x, . --no-banner, find . -name x, docker run image dir . --redact) is not a source: bash and dash both
+# refuse ". -x" as an invalid option (tested), so the alternative needs a file word that does not start like an option. These still count: ". -- x", ". --$y"
+# (the expansion may split into -- and a file), ". -p dir file" (bash 5.3 source -p), ". -" and every word that starts with a letter, a digit or a path.
+VARIABLE_COMMAND_WORD = re.compile(r"(?:^|[;&|\n){!]|(?<![\w.-])\(|(?<![\w.-])(?:then|do|else|elif|if|while|until|in)\(?|(?<![\w.-])time(?:[ \t]+-p)?(?:[ \t]+--)?[ \t]*\(?|(?<![\w.-])coproc(?:[ \t]+\w+)?[ \t]*\(?)[ \t]*"
                                    r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+|\{\w+\}[<>]+&?[ \t]*\S+|&>>?[ \t]*\S+)[ \t]+)*[\w.-]*[$`{*?\[]")  # assignments and redirects (a space before the target too) may stand in front
 # the same, widened after the second security scan: any command word that holds a $, a backtick or a brace (al$b, `echo alias`, {ali,as}) can build the word alias
 # Security scan of the 241 fix: a function (ls() { cat "$@"; }), hash, export and a changed PATH or ENV also make a command word run something else.
@@ -896,6 +899,13 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
 # list (an interpreter, a shell, curl, xargs, eval, a path-qualified name, a variable assignment in front), and whenever anything is unclear.
 HEREDOC_DATA_WORDS = {"cat", "tee", "wc", "uniq", "head", "tail", "tr", "cut"}  # not sort: --compress-program=sh pipes its input through a shell
 HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
+# A closed command substitution with a plain inside: one line, no nesting, no quote, backslash, comment mark, redirect or heredoc, no ; & | (so $(dirname "$f")
+# is not one, $(dirname $f) is). It runs in a subshell, so nothing in it can change a name or an option of the command that holds it, and it holds nothing
+# that bash would read as a quote, a heredoc or a comment: split_data_heredocs steps over it and _names_cannot_change reads the text without it
+# Bash ends a substitution at the ) its parser reaches, which is the first ) only when nothing inside holds a ) of its own: a case pattern (x) cmd) or a
+# ${..} word (${y:-)}). $[ ..] and name[..] pairs also swallow a ). So a { } [ ] or the word case keeps the text out of this pattern, and the whole call is read strictly as before.
+# (issue 269, the hub's note case: mkdir -p $(dirname $N) on the line before a quoted heredoc made the body "opaque", and its apostrophe refused the call).
+SIMPLE_SUBST = re.compile(r"\$\((?![^()`\"'\\\n<>;&|#{}\[\]]*(?<![\w.-])case(?![\w.-]))[^()`\"'\\\n<>;&|#{}\[\]]*\)")
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
 
 
@@ -1003,17 +1013,40 @@ NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LI
 # body (`{ cat <<'EOF'` ... `} | sh`, `sh < <(cat <<'EOF'` ... `)`), which the line holding the operator does not show; such a command keeps the strict reading
 
 
+# commands whose arguments are never run as a program (not env, command, exec, time, nohup, xargs, find, sort, tar, git, a shell or an interpreter)
+SUBST_SAFE_COMMANDS = {"mkdir", "rmdir", "touch", "rm", "ls", "cat", "echo", "dirname", "basename", "date", "pwd", "cd", "head", "tail", "wc",
+                       "grep", "readlink", "realpath", "stat"}
+
+
 def _names_cannot_change(cmd):
     """True when no part of the command can redefine a command name: no alias, function, eval, source, builtin toggle, search-path or hash change
     (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup), and no earlier command that names one of the
     storing tools as an argument or a path (cp /bin/sh ~/.local/bin/cat, ln -s ... cat: a file planted under that name). Searched with quotes and
     backslashes removed too."""
     flat = re.sub(r"[\"'\\]", "", cmd)
-    if _echo_shadowed(cmd) or NAME_CHANGERS.search(cmd) or NAME_CHANGERS.search(flat):
+    plain, flat_plain = SIMPLE_SUBST.sub("$S", cmd), SIMPLE_SUBST.sub("$S", flat)  # a closed plain $(..) is a subshell: it changes no name here
+    if _echo_shadowed(cmd) or NAME_CHANGERS.search(plain) or NAME_CHANGERS.search(flat_plain):
         return False
+    has_subst = "$(" in cmd or "`" in cmd
     for seg in split_segments(cmd):
+        if has_subst:
+            # a substitution's output is text the checks above never see: as the command word (also through a variable it was stored in, x=$(..) then
+            # $x), or after env/command/time/xargs and the like, it could be hash, export or read, or build the name of a file a redirect or a copy
+            # places. So once the command holds one, each segment is trusted only when it is bare assignments, or its command word is a plain name
+            # whose arguments cannot be run (SUBST_SAFE_COMMANDS) and it has no redirect aimed at a built name; anything else keeps the strict
+            # reading main had for every $( (fifth review and its follow-ups)
+            try:
+                sw = shlex.split(SIMPLE_SUBST.sub("$S", seg), posix=True)
+            except ValueError:
+                return False
+            while sw and re.match(r"[A-Za-z_]\w*=", sw[0]):
+                sw.pop(0)
+            if sw and sw[0] not in SUBST_SAFE_COMMANDS:
+                return False
+            if re.search(r">[^\n]*\$", SIMPLE_SUBST.sub("$S", seg)):
+                return False
         try:
-            words = shlex.split(seg, posix=True)
+            words = shlex.split(re.sub(r"[()]", " ", seg), posix=True)  # a word at the end of a $(..) keeps its ")": ln -sf /bin/bash ~/.local/bin/cat)
         except ValueError:
             return False
         if any(os.path.basename(w) in HEREDOC_DATA_WORDS | {"gh", "git"} for w in words[1:]):
@@ -1074,10 +1107,16 @@ def split_data_heredocs(cmd):
             i += 2
             continue
         if c == "`" or (c == "$" and i + 1 < n and cmd[i + 1] in "('\"{"):
-            return cmd, [], [], cmd
+            sub = SIMPLE_SUBST.match(cmd, i) if c == "$" and cmd[i + 1] == "(" else None
+            if not sub or not echo_ok:  # (an alias could stand for case or a quote: the strict reading stays when one can be defined)
+                return cmd, [], [], cmd
+            line.append(sub.group(0))  # kept in the code text, so it is still word-split and checked there
+            i = sub.end()
+            continue
         if c in "'\"":
             q = c
         elif c == "#" and (not line or (line[-1][-1:] in " \t;&|()\n" and not line[-1].startswith("\\")
+                                        and not line[-1].startswith("$(")  # $(..)# is one word: the # is not a comment (third review)
                                         and not (line[-1] == "(" and len(line) > 1 and line[-2][-1:] in tuple("@?*+!")))):
             # (not after an extglob opener @( ?( *( +( !( : there the # is part of a pattern word, and what follows is still a command)
             # a # after an escape pair (\<space>, \<newline>) is part of a word, not a comment; only a real word start begins one
@@ -1265,7 +1304,7 @@ assert GLOB_OPTION_BARE.pattern != GLOB_OPTION.pattern and IFS_SET_BARE.pattern 
 # What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
 # BASH_ENV or an rc file named in the text (.bashrc, --rcfile; an rc file an earlier call already changed is not seen: filed on issue 265), a function or
 # alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
-OPTION_SETTER = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*"
+OPTION_SETTER = re.compile(r"(?:^|[;&|\n){!]|(?<![\w.-])\(|(?<![\w.-])(?:then|do|else|elif|if|while|until)\(?|(?<![\w.-])time(?:[ \t]+-p)?(?:[ \t]+--)?[ \t]*\(?|(?<![\w.-])coproc(?:[ \t]+\w+)?[ \t]*\(?)[ \t]*"
                            r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+)[ \t]+)*[\w.-]*(?:[$`]|\w\{)"
                            r"|(?<![\w.-])(?:--rcfile|--init-file)(?![\w-])|[\w.-]+[ \t]*\([ \t]*\)")
 
