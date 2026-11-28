@@ -493,15 +493,22 @@ def bash_glob(pattern):
         return
     for w in words:
         w = os.path.expanduser(gmail_norm(w))  # bash does tilde and $HOME after the braces: {~,x}/... and $HO{M,x}E/... are the home folder
+        w0 = w
         w = None if len(w) > 2000 or w.count("[") > 64 else _bracket_translate(w)  # a word this long is not a path to read: refuse, and keep the hook inside its time limit
         if w is None:
             yield None
             return
+        # Issue 260: bash 5.2.15 and 5.2.37 read an unclosed [. differently (h[[.a] is the letters h[ plus a bracket, or one bracket holding
+        # [ . a), so both readings are followed and a file either one reaches counts.
+        other = _bracket_translate(w0, outer_literal=False) if "[." in w0 else None
         for m in glob.iglob(w):
             yield m
+        if other is not None and other != w:
+            for m in glob.iglob(other):
+                yield m
 
 
-def _bracket_translate(w):
+def _bracket_translate(w, outer_literal=True):
     """w with every bracket expression written the way Python's glob reads it (a ^ first is !, a POSIX class is its characters), or None
     for a form not translated exactly: an equivalence class [=x=], a collating symbol [.x.] or an unknown class name. A [:name:] outside
     a bracket is just an ordinary bracket and stays as it is."""
@@ -520,9 +527,21 @@ def _bracket_translate(w):
         if j < n and w[j] == "]":  # a ] first is a letter
             body.append("]")
             j += 1
+        literal_outer = False
         while j < n and w[j] != "]":
             if w[j] == "[" and j + 1 < n and w[j + 1] in "=.":
-                return None
+                # Issue 260: [. and [= start a collating symbol or an equivalence class only when the matching .] or =] closes it; a bare [.name]
+                # (a jq filter in a gh -q word) is an ordinary bracket. The search starts at the character after the [, so [.] is also refused.
+                if w.find(w[j + 1] + "]", j + 1) >= 0:
+                    return None
+                if w[j + 1] == "." and outer_literal:
+                    # bash 5.2.15 (checked): an unclosed [. makes the OUTER [ a literal letter and carries on just after it, so h[[.a] matches only the
+                    # file named h[a. Python's glob would read one bracket, so the outer [ is written as [[] and the rest is read again from there.
+                    literal_outer = True
+                    break
+                body.append(w[j])  # an unclosed [= is an ordinary letter of the bracket (and, with outer_literal False, an unclosed [. too: bash 5.2.37)
+                j += 1
+                continue
             if w[j] == "[" and j + 1 < n and w[j + 1] == ":":
                 end = w.find(":]", j + 2)
                 if end < 0:
@@ -539,6 +558,10 @@ def _bracket_translate(w):
                 continue
             body.append(w[j])
             j += 1
+        if literal_outer:
+            out.append("[[]")
+            i += 1
+            continue
         if j >= n:  # no closing ]: the [ is an ordinary letter
             out.append("[")
             i += 1
@@ -753,6 +776,45 @@ def _line_runs_no_shell(line):
     return True
 
 
+NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LIBRARY_PATH|SHELLOPTS|BASHOPTS|BASH_CMDS)(?![\w-])"  # as a word anywhere: PATH=, BASH_CMDS[cat]=, printf -v PATH
+                           r"|(?<![\w.-])(?:read|mapfile|readarray|printf\s+-v|hash|unset)(?![\w-])"
+                           r"|[\w.-]+\s*\(\s*\)|\b(?:coproc|select|case|for|while|until)\b"  # a loop that began earlier could run a later redefinition
+                           r"|[(){}]|(?<![\w.-])(?:if|then|else|elif|fi|do|done|esac)(?![\w.-])")
+# the last row: a group, subshell, process substitution or compound command that opens before the heredoc can send its output on after the
+# body (`{ cat <<'EOF'` ... `} | sh`, `sh < <(cat <<'EOF'` ... `)`), which the line holding the operator does not show; such a command keeps the strict reading
+
+
+def _names_cannot_change(cmd):
+    """True when no part of the command can redefine a command name: no alias, function, eval, source, builtin toggle, search-path or hash change
+    (the ECHO_SHADOW list, plus function definitions and the variables that steer name lookup), and no earlier command that names one of the
+    storing tools as an argument or a path (cp /bin/sh ~/.local/bin/cat, ln -s ... cat: a file planted under that name). Searched with quotes and
+    backslashes removed too."""
+    flat = re.sub(r"[\"'\\]", "", cmd)
+    if _echo_shadowed(cmd) or NAME_CHANGERS.search(cmd) or NAME_CHANGERS.search(flat):
+        return False
+    for seg in split_segments(cmd):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if any(os.path.basename(w) in HEREDOC_DATA_WORDS | {"gh", "git"} for w in words[1:]):
+            return False
+    return True
+
+
+def _own_heredoc_segment(text, op):
+    """The one command segment of this logical line that holds the heredoc operator `op`, or None when it is not exactly one, or when anything
+    follows `op` on the line: a pipe (`cat <<'EOF' | sh` feeds a shell), a descriptor redirect (`2>&3`, which the segment split cuts in two)
+    or another command. Only a heredoc that ends its line is read by the command it is written on alone."""
+    at = text.find(op)
+    if at < 0 or text[at + len(op):].strip():
+        return None
+    if re.search(r">\||&>|[<>]&(?!\d+-?(?:[\s;&|)]|$)|-)|\\\n", text):
+        return None  # >| and >& word and &> are redirects (a descriptor copy such as 2>&1 or >&2 is not one) the segment split cuts in two (bash >| cat <<'EOF'); a backslash-newline joins this line to the one before (bash -s \ then cat <<'EOF')
+    segs = [s for s in split_segments(text) if op in s]
+    return segs[0] if len(segs) == 1 else None
+
+
 def split_data_heredocs(cmd):
     """Return (code, bodies, opaque, send_code):
       code      cmd with every heredoc body (and its terminator line) and every comment taken out; this is what is word-split and checked
@@ -838,10 +900,20 @@ def split_data_heredocs(cmd):
             if not pending:
                 emit(text, echo_ok and _echo_line_is_data(text))
                 continue
-            data_line = _heredoc_line_is_data(text)
-            no_shell = _line_runs_no_shell(text)
+            line_data = _heredoc_line_is_data(text)
+            line_no_shell = _line_runs_no_shell(text)
             emit(text)
-            for word, tabs, quoted, _op in pending:
+            for word, tabs, quoted, op in pending:
+                data_line, no_shell = line_data, line_no_shell
+                if not (data_line and no_shell):
+                    # Issue 260: a heredoc feeds only the command it is written on, so `cd x && S=y && python3 a.py > f; cat > $S/n <<'EOF'` is
+                    # judged by `cat > $S/n <<'EOF'` alone. The other commands on the line are still checked as code. Only when nothing in the
+                    # command lines so far (heredoc bodies left out) could make cat (or any name) something else: no alias, function, eval, PATH
+                    # or hash change. A name changed on a later line cannot reach a command that already ran.
+                    own = _own_heredoc_segment(text, op) if _names_cannot_change("".join(code)) else None
+                    if own is not None:
+                        data_line = data_line or _heredoc_line_is_data(own)
+                        no_shell = no_shell or _line_runs_no_shell(own)
                 body, found, term = [], False, ""
                 while i < n:
                     j = cmd.find("\n", i)
