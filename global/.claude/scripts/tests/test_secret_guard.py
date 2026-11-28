@@ -176,6 +176,9 @@ class RuleGGlobOptions(Base):
                         "shopt -s dotglob; IFS=\"\\t\" read a b <<< \"t/home/*/%s\"; cat $b" % tok,
                         "shopt -s dotglob; t=q; IFS=$t read a b <<< \"q/home/*/%s\"; cat $b" % tok,
                         # fifth blind review: .. or the whole front from a variable, find -execdir, globasciiranges, zsh spellings
+                        # security review: an empty quote glued to a letter is not an empty value
+                        "shopt -s dotglob; IFS=''q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=\"\"q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
                         "shopt -s dotglob; u=..; cat /tmp/$u/home/*/%s" % tok,
                         "shopt -s dotglob; H=/home; p='*/%s'; cat $H/$p" % tok,
                         "shopt -s dotglob; p='*/%s'; cat $(printf /home)/$p" % tok,

@@ -909,7 +909,7 @@ def _shell_body_use(body):
 # Security review of the third round: IFS=q read a b <<< "q/home/*/.." makes /home/*/.. a word the text never shows, so the read prefix is ordinary only for a value
 # that holds nothing but separator characters: unquoted only , : | (no letters, no $), in plain quotes only space , : | ;, and the \t \n \r escapes only inside $'..'
 # (a tab written IFS=$'\t' reads as $t in the text with quotes removed, which is then a variable and counts as a set IFS: a harmless extra look, never a miss)
-IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''|"")|=(?:\$'(?:\\[tnr]|[ ,:|;])*'|'[ ,:|;]*'|"[ ,:|;]*"|[,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
+IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''(?=$|[\s;&|)])|""(?=$|[\s;&|)]))|=(?:\$'(?:\\[tnr]|[ ,:|;])*'|'[ ,:|;]*'|"[ ,:|;]*"|[,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
 # a variable name built at run time in a declare, typeset, local, export, readonly or env assignment, or in printf -v or read: declare ${x}IGNORE=x
 BUILT_NAME = r"(?<![\w.-])(?:(?:declare|typeset|local|export|readonly|env)\b(?:[ \t]+-\S+)*[ \t]+[\w]*[$`{][^\s=;&|]*=|printf[ \t]+-v[ \t]*\S*[$`{]|(?:read|mapfile|readarray)\b(?:[ \t]+-\S+)*[ \t]+\S*[$`{])"
 GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|unsetopt|globskipdots|globasciiranges)(?![\w-])",
