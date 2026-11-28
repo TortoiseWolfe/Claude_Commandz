@@ -185,7 +185,8 @@ class RuleGGlobOptions(Base):
                         "find ~ -maxdepth 1 -name .config -execdir bash -O dotglob -c 'cat ?config/a?a/g?ail/token.json' \\;",
                         "LC_ALL=en_US.UTF-8; shopt -u globasciiranges; cat ~/.[A-Z]onfig/a[A-Z]a/g[A-Z]ail/token.json",
                         "unsetopt caseglob; cat ~/.CONFI?/A?A/G?AIL/token.json",
-                        "setopt GLOB_DOTS; cat ~/?config/a?a/g?ail/token.json"):
+                        "setopt GLOB_DOTS; cat ~/?config/a?a/g?ail/token.json",
+                        "setopt G_LOB_DOTS; cat ~/?config/a?a/g?ail/token.json"):
                 self.blocked(cmd, "G")
             for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
                 r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})

@@ -970,7 +970,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     # an option name spelled around an expansion that is empty (GLOB${e}IGNORE=x, dot${e}glob) is read with every expansion removed too
     # (taken from the raw text, so GLOB"$e"IGNORE is GLOBIGNORE and not the variable $eIGNORE)
     emptied = re.sub(r"[\"'\\]", "", re.sub(r"\$\{[^{}]*\}|\$\w+", "", cmd))
-    if not (GLOB_OPTION_BARE.search(bare) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd)
+    # zsh ignores underscores anywhere in an option name (G_LOB_DOTS), so the text without them is read too (no zsh is installed on our machines; this is cheap insurance)
+    if not (GLOB_OPTION_BARE.search(bare) or GLOB_OPTION_BARE.search(bare.replace("_", "")) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd)
             or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
     ifs = bool(IFS_SET.search(cmd) or IFS_SET_BARE.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
@@ -1021,7 +1022,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
                 return True  # with globskipdots off a .* or .? component anywhere matches ..
             # a variable can hold the home folder, any parent of the token folder or ..: $d/*/?config/... and /tmp/$u/home/*/?config/... are refused while an
             # option is named, a glob after a variable anywhere in the front; only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
-            if any(("$" in c or "`" in c) and any(GMAIL_GLOB.search(d) or EXT_GLOB_GROUP.search(d) for d in comps[i + 1:-1]) for i, c in enumerate(comps)):
+            var_at = next((i for i, c in enumerate(comps) if "$" in c or "`" in c), None)  # (one pass: a long word is not checked part by part against every later part)
+            if var_at is not None and any(GMAIL_GLOB.search(d) or EXT_GLOB_GROUP.search(d) for d in comps[var_at + 1:-1]):
                 return True
             # the glob may come from a variable's value instead (p='*/?config/a?a/g?ail/token.json'; cat $H/$p): a relative word with nothing fixed in front and a
             # glob before its last part, taken from an assignment or a read, is a start nothing here can place
