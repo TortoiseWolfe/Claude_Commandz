@@ -163,6 +163,7 @@ class RuleGCdGlobAndWrappers(Base):
                         "cd ~ && cd $PWD/.?onfig/a?a/g?ail && cat token.json", "cd ~ && cd ~+/.?onfig/a?a/g?ail && cat token.json",
                         "cd ~/repos && cat ..{,}/.?onfig/a?a/g?ail/token.json", "cd ~/repos && cat {..,x}/.?onfig/a?a/g?ail/token.json",
                         "cd ~ && x=.?onfig; y=a?a; cat $x/$y/g?ail/token.json", "cd ~ && y=a?a; cat $HOME/.config/$y/g?ail/token.json",
+                        "cd ~ && y=[a][f][a]; cat $HOME/.config/$y/g?ail/token.json", "cd ~ && cat $HOME/.config/[a][f][a]/g?ail/token.json",
                         # security review: the indirect form ${!x:-w} and a replacement pattern with an escaped slash or a quote
                         "x=a; cat ${!x:-~/%s}" % t, "x=a; cat ${!x/a/~/%s}" % t,
                         "x=a; cat ${x/a\\/b/~/%s}" % t, "x=a; cat ${x/\"a/b\"/~/%s}" % t):

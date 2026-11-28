@@ -670,8 +670,8 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
 def _glob_part_names_token_folder(c):
     """True when a path part with a glob in it and a literal letter or digit (a?a, g?ail, .?onfig) can match afa, gmail or .config; one that cannot be
     translated exactly counts as a hit. A bare * or ?* has no literal and is ordinary."""
-    if not GMAIL_GLOB.search(c) or not re.search(r"[A-Za-z0-9]", re.sub(r"\[[^\]]*\]", "", c)):
-        return False
+    if not GMAIL_GLOB.search(c) or not re.search(r"[A-Za-z0-9]", c):
+        return False  # (letters inside a bracket count: [a][f][a] is afa)
     forms = _brace_expand(c, BRACE_LIMIT)
     if forms is None:
         return True
@@ -820,6 +820,10 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
         # blind re-review of PR 266: x=.?onfig holds a glob that bash expands where $x is used (cat $x/a?a/g?ail/token.json), so the value of an assignment is judged
         # as a path on its own, parents included, from home and every folder above it, whether or not a cd came first
         if re.match(r"[A-Za-z_]\w*=", w) and after_eq and not after_eq.startswith(("/", "~", "$")) and GMAIL_GLOB.search(after_eq) and from_bases(after_eq):
+            return True
+        # security review: a value split over several assignments (y=a?a; cat $x/$y/g?ail/...) is never rebuilt here, so an assignment whose value holds a glob part able
+        # to match afa, gmail or .config is refused on its own
+        if re.match(r"[A-Za-z_]\w*=", w) and any(_glob_part_names_token_folder(p) for p in after_eq.split("/")[:60]):
             return True
         # a redirect glued to its path (<./lnk/token.json, 0<path, 2>path, x>path) is that path: check every piece cut at the redirect operators
         # (and a path glued to a closing parenthesis or a backtick, as in $(cat ~/.?onfig/a?a/g?ail/token.json), is that path)
