@@ -54,6 +54,254 @@ class CredentialsWord(Base):
         self.blocked("head -3 /root/.config/x/credentials.yml")
 
 
+class RuleGGlobOptions(Base):
+    """Issue 255: dotglob, nocaseglob, extglob, globstar and GLOBIGNORE change what a glob matches, so the Python expansion no longer says what bash reaches."""
+    REACHING = ("shopt -s dotglob; cat ~/?config/a?a/g?ail/token.json",
+                "GLOBIGNORE=x; cat ~/?config/a?a/g?ail/token.json",
+                "shopt -s nocaseglob; cat ~/.CONFI*/afa/gmail/t*",  # case is ignored only in a component that holds a glob character
+                "shopt -s extglob\ncat ~/+(.c)onfig/afa/gmail/t*",  # bash parses a line before it runs it, so the pattern needs its own line
+                "shopt -s globstar dotglob; cat ~/**/token.json")
+
+    def with_home(self, run):
+        with tempfile.TemporaryDirectory() as home:
+            folder = os.path.join(home, ".config", "afa", "gmail")
+            os.makedirs(folder)
+            open(os.path.join(folder, "token.json"), "w").close()
+            os.makedirs(os.path.join(home, "docs"))
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                run(home)
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_bash_really_reaches_the_token_with_these_options(self):
+        def run(home):
+            for cmd in self.REACHING:
+                out = subprocess.run(["bash", "-c", cmd.replace("cat ", "ls ", 1)], env={"HOME": home, "PATH": os.environ["PATH"]},
+                                     capture_output=True, text=True, cwd="/tmp").stdout
+                self.assertIn("token.json", out, cmd)
+        self.with_home(run)
+
+    def test_a_glob_with_one_of_these_options_set_is_refused(self):
+        def run(home):
+            for cmd in self.REACHING + (
+                    "bash -c 'shopt -s dotglob; cat ~/?config/a?a/g?ail/token.json'",
+                    "bash -O dotglob -c 'cat ~/?config/a?a/g?ail/token.json'",
+                    "shop''t -s dot''glob; cat ~/?config/a?a/g?ail/token.json",
+                    "o=dotglob; shopt -s $o; cat ~/?config/a?a/g?ail/token.json",
+                    "shopt -s dotglob; cd ~/.config && cat */*/t*",
+                    "cd ~ && shopt -s dotglob && cp -r * /tmp/x",
+                    "shopt -s dotglob; cat $HOME/?config/a?a/g?ail/token.json",
+                    "shopt -s dotglob; cat ~/docs/../?config/a?a/g?ail/token.json"):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_review_cases_are_refused(self):
+        """Blind review and security review of PR 264: an array assignment, an option set through a variable, a bundled -O, BASHOPTS, a front
+        that is a parent (/ or the home folder), a brace list, ~+ and a shopt argument built from a brace or a glob."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -s dotglob; x=(~/%s); cat $x" % tok,
+                        "shopt -s dotglob; declare -a x=(~/%s); cat ${x[0]}" % tok,
+                        "s=shopt; o=dotglo; $s -s $o\"b\"; cat ~/%s" % tok,
+                        "o=dotglo; bash -eO $o\"b\" -c 'cat ~/%s'" % tok,
+                        "o=dotglo; env BASHOPTS=$o\"b\" bash -c 'cat ~/%s'" % tok,
+                        "BASHOPTS=dotglob bash -c 'cat ~/%s'" % tok,
+                        "shopt -s dotglo{b,x}; cat ~/%s" % tok,
+                        "shopt -s dotglo?; cat ~/%s" % tok,
+                        "shopt -s dotglob; cat /*/*/.config/afa/gmail/token.json",
+                        "shopt -s dotglob; cat /ho?e/*/.config/afa/gmail/token.json",
+                        "shopt -s dotglob; cat ~/*/*/*/token.json",
+                        "shopt -s dotglob; cat {~,/tmp}/%s" % tok,
+                        "shopt -s dotglob; cd ~/.config/afa; cat ~+/g?ail/token.json",
+                        "shopt -s dotglob; x=a:~/%s; cat $x" % tok,
+                        "setopt globdots; cat ~/%s" % tok,
+                        "bash <<'EOF'\ns=shopt; $s -s dotglob\ncat ~/%s\nEOF" % tok,
+                        "bash <<'EOF'\no=dotglo; shopt -s $o\"b\"\ncat ~/%s\nEOF" % tok):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_third_review_cases_are_refused(self):
+        """Blind review a5ef976a3912098ad of PR 264: the option name built by eval, a glob in a variable, IFS, and globskipdots turned off."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("eval $'shopt -s \\x64otglob'; cat ~/%s" % tok,
+                        "eval \"$(printf 'shopt -s dot%%s' glob)\"; cat ~/%s" % tok,
+                        "shopt -s dotglob; b='*/%s'; cat %s/$b" % (tok, os.path.dirname(home)),
+                        "shopt -s dotglob; read b <<< '*/%s'; cat %s/$b" % (tok, os.path.dirname(home)),
+                        "shopt -s dotglob; IFS=,; x=/q,/home/*/%s; cat $x" % tok,
+                        "shopt -u globskipdots; cat .*/.*/.*/.c*/a*/g*/token.json"):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_fourth_review_cases_are_refused(self):
+        """Blind review of PR 264, second round: .* with globskipdots off anywhere in a word, an option name spelled around an empty expansion,
+        one very long word, and a variable first component with a glob after it."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -u globskipdots; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "shopt -u glob${e}skipdots; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "shopt -u $'globskip\\x64ots'; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "shopt -s dotglob; o=skipdots; shopt -u glob$o; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "declare GLOB${e}IGNORE=x; cat ~/%s" % tok,
+                        "env BASH${e}OPTS=dot${e}glob bash -c 'cat ~/%s'" % tok,
+                        "shopt -s dotglob; d=/home; cat $d/*/%s" % tok,
+                        "shopt -s dotglob; cat %s" % ("a" * 2500 + "/*"),
+                        "IFS=' '; x=/q:/home/*/%s; cat $x" % tok):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_fifth_review_cases_are_refused(self):
+        """Blind review of PR 264, third round: a substitution in front of a glob, IFS changed without IFS=, an option variable's name built at run time,
+        a working folder moved by env -C or sudo -D, and a call that would cost more than the hook's budget."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -s dotglob; cat $(echo /home)/*/%s" % tok,
+                        "shopt -s dotglob; cat `echo /`home/*/%s" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; for IFS in q; do cat $x; done" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; read IFS <<< q; cat $x" % tok,
+                        "shopt -s dotglob; x=q/home/*/%s; printf -v IFS q; cat $x" % tok,
+                        "x=GLOB; declare ${x}IGNORE=x; cat ~/%s" % tok,
+                        "declare GLOB\"$e\"IGNORE=x; cat ~/%s" % tok,
+                        "a=BASH b=dot; env ${a}OPTS=${b}glob bash -c 'cat ~/%s'" % tok,
+                        # security review: an IFS prefix of read with a separator that makes a new path, IFS set apart from it, and HOME reassigned
+                        "shopt -s dotglob; IFS=q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=q; read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; HOME=/home; cat \"$HOME\"/*/%s" % tok,
+                        # fourth security review: letters and $ are not separators, and \t inside plain quotes is a backslash and a t
+                        "shopt -s dotglob; IFS=t read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS='\\t' read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=\"\\t\" read a b <<< \"t/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; t=q; IFS=$t read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        # fifth blind review: .. or the whole front from a variable, find -execdir, globasciiranges, zsh spellings
+                        # security review: an empty quote glued to a letter is not an empty value
+                        "shopt -s dotglob; IFS=''q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; IFS=\"\"q read a b <<< \"q/home/*/%s\"; cat $b" % tok,
+                        "shopt -s dotglob; u=..; cat /tmp/$u/home/*/%s" % tok,
+                        "shopt -s dotglob; H=/home; p='*/%s'; cat $H/$p" % tok,
+                        "shopt -s dotglob; p='*/%s'; cat $(printf /home)/$p" % tok,
+                        "find ~ -maxdepth 1 -name .config -execdir bash -O dotglob -c 'cat ?config/a?a/g?ail/token.json' \\;",
+                        "LC_ALL=en_US.UTF-8; shopt -u globasciiranges; cat ~/.[A-Z]onfig/a[A-Z]a/g[A-Z]ail/token.json",
+                        "unsetopt caseglob; cat ~/.CONFI?/A?A/G?AIL/token.json",
+                        "setopt GLOB_DOTS; cat ~/?config/a?a/g?ail/token.json",
+                        "setopt G_LOB_DOTS; cat ~/?config/a?a/g?ail/token.json"):
+                self.blocked(cmd, "G")
+            for cmd in ("env -C ~ bash -O dotglob -c 'cat %s'" % tok, "sudo -D ~ bash -O dotglob -c 'cat %s'" % tok):
+                r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": cmd}})
+                self.assertEqual(r[0], "G", cmd)
+            import time
+            t = time.time()
+            word = ":t/" * 600 + "{a,b}" * 8
+            self.blocked("shopt -s dotglob; : " + " ".join([word] * 5) + "; cat ~/%s" % tok, "G")
+            self.assertLess(time.time() - t, 5)
+        self.with_home(run)
+
+    def test_ordinary_ifs_and_home_variable_commands_are_allowed(self):
+        def run(home):
+            for cmd in ('IFS=, read -r a b <<< "$l"; ls src/*.py',
+                        "while IFS=$'\\t' read -r id p; do ls \"$p\"/*.json; done < f.tsv",
+                        'shopt -s extglob; ls "$HOME"/repos/*/package.json',
+                        'shopt -s globstar; for f in **/*.py; do wc -l "$f"; done',
+                        'shopt -s nullglob; rm -f "$OUT"/*.tmp'):
+                self.allowed(cmd)
+        self.with_home(run)
+
+    def test_options_spelled_without_naming_the_folder_are_refused_by_the_option_check(self):
+        """Each of these is refused by the glob-option check itself, not by an older check that sees the folder's name in the text."""
+        def run(home):
+            for cmd in ("shopt -s nocaseglob; cat ~/.CONFI*/A?A/G?AIL/T*",
+                        "shopt -s extglob\ncat ~/.config/@(afa)/@(gmail)/t*",
+                        "shopt -s dotglob; cat /*/*/.c?nfig/a?a/g?ail/token.json",
+                        "shopt -s dotglob; cat /ho?e/*/.c?nfig/a?a/g?ail/token.json"):
+                self.assertTrue(sg._glob_option_reaches_folder(cmd, None), cmd)
+        self.with_home(run)
+
+    def test_ordinary_globs_beside_other_shell_words_are_allowed(self):
+        def run(home):
+            for cmd in ('while IFS= read -r f; do rm -f "$OUT"/*.tmp; done < list.txt',
+                        'IFS= read -r line; ls *.md',
+                        'for f in "$d"/*.json; do jq . "$f"; done',
+                        'if [ -d "$OUT" ]; then rm -f "$OUT"/*.tmp; fi',
+                        '[ -f a ] && cd src && ls *.py',
+                        'export X=1; cd build && ls *.o'):
+                self.allowed(cmd)
+        self.with_home(run)
+
+    def test_other_uses_of_dash_o_and_variables_are_allowed(self):
+        def run(home):
+            for cmd in ('wget -O "$out" "${url}"', 'curl -O "$u" ~/docs/*.md'):
+                self.allowed(cmd)
+        self.with_home(run)
+
+    def test_the_working_folder_is_the_start_of_a_relative_glob(self):
+        def run(home):
+            r = sg.evaluate({"tool_name": "Bash", "cwd": home, "tool_input": {"command": "shopt -s dotglob; cat ?config/a?a/g?ail/token.json"}})
+            self.assertEqual(r[0], "G")
+            r = sg.evaluate({"tool_name": "Bash", "cwd": os.path.join(home, "docs"), "tool_input": {"command": "shopt -s dotglob; ls *.md"}})
+            self.assertIsNone(r)
+        self.with_home(run)
+
+    def test_a_word_with_a_variable_is_read_as_a_path_only_for_a_literal_absolute_assignment(self):
+        # security review of the commit after 36d3160: words holding $ must keep being judged; only a variable assigned once to a literal absolute path is read as it
+        for c in ("shopt -s dotglob; x=..; y=.config; z=afa; w=gmail; cd ~/docs && cat $x/$y/$z/$w/token.json",
+                  "shopt -s dotglob; x=.; cd ~ && cat `echo $x`$x/$x/token.json",
+                  "$s; x='.?onfig'; y=afa; z=gmail; cd ~ && cat $x/$y/$z/token.json",
+                  "$s; x=/home/u; cd ~ && cat $x/.?onfig/afa/gmail/token.json",
+                  "$s; x=/home/u; x+=/.config; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u; read x; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u; x=/home/u/.config; cd ~ && cat $x/afa/gmail/token.json",
+                  "$s; x=/home/u/.config; y=afa; z=gmail; cd ~ && cat $x/$y/$z/token.json"):
+            self.blocked(c, "G")
+        for c in ("cd ~ && S=/tmp/x && cat $S/body.md", "cd ~/repos && S=/tmp/x && u=$(gh issue view 1) && python3 - $S/b.md"):
+            self.allowed(c)
+
+    def test_an_extglob_group_that_matches_dotdot_is_refused(self):
+        """Sixth review of PR 264: @(..) matches .. in bash, so two groups climb from a folder two below home to home."""
+        def run(home):
+            deep = os.path.join(home, "a", "b")
+            os.makedirs(deep)
+            for tok in ("@(..)/@(..)/?config/a?a/g?ail/token.json", "?(..)/@(..)/?config/a?a/g?ail/token.json",
+                        "@(x|..)/@(..)/?config/a?a/g?ail/token.json"):
+                cmd = "shopt -s extglob dotglob\ncat " + tok
+                real = subprocess.run(["bash", "-c", cmd.replace("cat ", "ls ", 1)], env={"HOME": home, "PATH": os.environ["PATH"]},
+                                      capture_output=True, text=True, cwd=deep).stdout
+                if "token.json" in real:  # bash itself must reach the token for the row to count
+                    r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": cmd}})
+                    self.assertEqual(r[0], "G", cmd)
+            r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": "shopt -s extglob dotglob\ncat @(..)/@(..)/?config/a?a/g?ail/token.json"}})
+            self.assertEqual(r[0], "G")
+            # seventh review: other spellings of .. made only of groups and brackets, refused without asking bash (fail closed)
+            for tok in ("[.][.]/[.][.]/?config/a?a/g?ail/token.json", "@(.)@(.)/@(.)@(.)/?config/a?a/g?ail/token.json",
+                        "?(.)?(.)/?(.)?(.)/?config/a?a/g?ail/token.json", "@(.?)/@(.?)/?config/a?a/g?ail/token.json",
+                        "@(?)@(?)/@(?)@(?)/?config/a?a/g?ail/token.json", "!(x)/!(x)/?config/a?a/g?ail/token.json",
+                        "[!a][!a]/[!a][!a]/?config/a?a/g?ail/token.json", "[^a][^a]/[^a][^a]/?config/a?a/g?ail/token.json",
+                        "[[:punct:]][[:punct:]]/[[:punct:]][[:punct:]]/?config/a?a/g?ail/token.json",
+                        "@(a|@(.))@(a|@(.))/@(a|@(.))@(a|@(.))/?config/a?a/g?ail/token.json",
+                        "@(.)" * 30 + "/?config/a?a/g?ail/token.json",
+                        ".?(x).*/.?(x).*/?config/a?a/g?ail/token.json", ".*(a)./.*(a)./?config/a?a/g?ail/token.json"):
+                cmd = "shopt -s extglob dotglob\ncat " + tok
+                r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": cmd}})
+                self.assertEqual(r[0], "G", cmd)
+            # a part with a letter outside its groups is an ordinary pattern
+            r = sg.evaluate({"tool_name": "Bash", "cwd": deep, "tool_input": {"command": "shopt -s extglob\nrm -f !(keep).log"}})
+            self.assertIsNone(r)
+        self.with_home(run)
+
+    def test_the_same_options_elsewhere_are_allowed(self):
+        def run(home):
+            for cmd in ("shopt -s nullglob; ls ~/docs/*.md",
+                        "shopt -s extglob; ls src/+(a|b).txt",
+                        "shopt -s dotglob; ls ~/docs/*.md",
+                        "shopt -s nocaseglob; ls /var/log/*.TXT",
+                        "GLOBIGNORE='*.bak'; ls /var/log/*"):
+                self.allowed(cmd)
+        self.with_home(run)
+
+
 class RuleA(Base):
     def test_blocks(self):
         for c in [

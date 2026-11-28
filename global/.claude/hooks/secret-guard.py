@@ -964,6 +964,8 @@ def _body_path_runs_hit(body):
 def _shell_body_use(body):
     """A body that bash may run, read the way bash reads it: its own comments and heredocs split out, quote state carried across rows, a segment
     that cannot be split refused, no allowlist."""
+    if _glob_option_reaches_folder(str(body), None, wide=True):  # a body bash runs may set a glob option in a way only the wide reading sees
+        return "folder"
     code, bodies, opaque, _send = split_data_heredocs(str(body))
     for b in bodies:
         norm = gmail_norm(b)
@@ -978,12 +980,243 @@ def _shell_body_use(body):
     return _opaque_use(opaque)
 
 
-def gmail_credential_use(cmd):
+# Claude_Commandz issue 255: shell options change what a glob matches, and gmail_resolves_into_folder expands globs the way Python does. dotglob lets
+# ? * [ match a leading dot, nocaseglob ignores case, extglob adds +(..) @(..) !(..) groups, globstar lets ** cross folders, GLOBIGNORE (any value)
+# turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
+# the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
+# (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
+# Second blind review of PR 264: the bare word IFS anywhere counts (for IFS in q, read IFS, printf -v IFS q, ${IFS}, IFS=,); only IFS= and IFS='' (empty) and an
+# IFS=value that is a prefix of read, mapfile or readarray (it lasts for that one command and bash splits that command's words before it applies) are ordinary
+# Security review of the third round: IFS=q read a b <<< "q/home/*/.." makes /home/*/.. a word the text never shows, so the read prefix is ordinary only for a value
+# that holds nothing but separator characters: unquoted only , : | (no letters, no $), in plain quotes only space , : | ;, and the \t \n \r escapes only inside $'..'
+# (a tab written IFS=$'\t' reads as $t in the text with quotes removed, which is then a variable and counts as a set IFS: a harmless extra look, never a miss)
+IFS_SET = re.compile(r"""(?<![\w-])IFS(?![\w-])(?!=(?:$|[\s;&|)]|''(?=$|[\s;&|)])|""(?=$|[\s;&|)]))|=(?:\$'(?:\\[tnr]|[ ,:|;])*'|'[ ,:|;]*'|"[ ,:|;]*"|[,:|]*)[ \t]+(?:read|mapfile|readarray)\b)""")
+# a variable name built at run time in a declare, typeset, local, export, readonly or env assignment, or in printf -v or read: declare ${x}IGNORE=x
+BUILT_NAME = r"(?<![\w.-])(?:(?:declare|typeset|local|export|readonly|env)\b(?:[ \t]+-\S+)*[ \t]+[\w]*[$`{][^\s=;&|]*=|printf[ \t]+-v[ \t]*\S*[$`{]|(?:read|mapfile|readarray)\b(?:[ \t]+-\S+)*[ \t]+\S*[$`{])"
+GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|unsetopt|globskipdots|globasciiranges)(?![\w-])",
+                                   # fifth blind review: zsh reads option names without regard to case or underscores (GLOB_DOTS, NO_CASE_GLOB), and globasciiranges off
+                                   # makes [A-Z] follow the locale's order
+                                   r"(?i:(?<![\w-])(?:no_?)?(?:glob_?dots|case_?glob|extended_?glob|ksh_?glob|glob_?skip_?dots)(?![\w-]))",
+                                   IFS_SET.pattern,  # an IFS set to something (or ${IFS} used as a separator) splits words on other characters; while IFS= read -r is ordinary
+                                   BUILT_NAME,
+                                   r"(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]",
+                                   r"(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")))
+EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
+# In the text with quotes and backslashes removed, a tab written IFS=$'\t' reads as IFS=$t; there (and only there) a $ and t, n or r are the escape, so that
+# ordinary line is not flagged. The raw text is searched with the strict pattern, so a real IFS=$t or IFS=t is still caught.
+_TAB_SPELLING = "|[,:|]*)[ \\t]+"
+GLOB_OPTION_BARE = re.compile(GLOB_OPTION.pattern.replace(_TAB_SPELLING, "|[,:|]*|\\$[tnr]+)[ \\t]+"))
+IFS_SET_BARE = re.compile(IFS_SET.pattern.replace(_TAB_SPELLING, "|[,:|]*|\\$[tnr]+)[ \\t]+"))
+assert GLOB_OPTION_BARE.pattern != GLOB_OPTION.pattern and IFS_SET_BARE.pattern != IFS_SET.pattern
+# What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
+# BASH_ENV or an rc file named in the text (.bashrc, --rcfile; an rc file an earlier call already changed is not seen: filed on issue 265), a function or
+# alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
+OPTION_SETTER = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*"
+                           r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+)[ \t]+)*[\w.-]*(?:[$`]|\w\{)"
+                           r"|(?<![\w.-])(?:--rcfile|--init-file)(?![\w-])|[\w.-]+[ \t]*\([ \t]*\)")
+
+
+def _mask_substitutions(text):
+    """text with every $(..) span (nested parentheses counted) and every backtick span replaced by $S, so a word that holds one is not cut at its spaces."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("$(", i):
+            depth, j = 0, i + 1
+            while j < n:
+                depth += (text[j] == "(") - (text[j] == ")")
+                if depth == 0:
+                    break
+                j += 1
+            out.append("$S")
+            i = j + 1
+        elif text[i] == "`":
+            j = text.find("`", i + 1)
+            out.append("$S")
+            i = n if j < 0 else j + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def _could_be_dotdot(c):
+    """True for a path part that is only extglob groups and bracket expressions (no letter or digit outside them) and could match ..: an inside that holds a
+    dot, a * ? or [, or a group that starts with !. A part with a literal letter outside (!(keep).log) is an ordinary pattern."""
+    stripped = c
+    inner = []
+    for _ in range(200):
+        m = re.search(r"[?*+@!]\(([^()]*)\)|\[([^\[\]]*)\]", stripped)
+        if not m:
+            break
+        inner.append((m.group(1) if m.group(1) is not None else m.group(2), m.group(0).startswith("!(")))
+        stripped = stripped[:m.start()] + stripped[m.end():]
+    else:
+        return True  # more groups than the loop reads: refused
+    if not inner:
+        return False  # (a piece cut from a word at a ( or | has no whole group; the whole word is read as well)
+    if re.search(r"[()\[\]]", stripped):
+        return True  # an opener or closer left over that was not understood
+    if re.search(r"[A-Za-z0-9_-]", stripped):
+        return False
+    if "." in stripped:
+        return True  # dots beside a group that can be empty (.?(x). , .*(a).) are .. when the group matches nothing
+    # a bracket or group body is safe only when it is plain letters and digits (and ranges between them, none of which can include a dot); anything else, a !, ^, a
+    # class such as [:alpha:], a | list holding a dot or glob character, may match ..
+    return any(neg or not re.fullmatch(r"[A-Za-z0-9_|]*(?:[A-Za-z0-9_]-[A-Za-z0-9_][A-Za-z0-9_|]*)*", body) for body, neg in inner)
+
+
+_LITERAL_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def _literal_path_vars(bare):
+    """Variables that the command assigns exactly once, to a literal absolute path (no glob character, no expansion, no ~, no . or .. part, not HOME),
+    and never changes another way (+=, read, for, mapfile, printf -v, declare -n, unset, export -n). bare is the command without its quotes."""
+    values = {}
+    counts = {}
+    for m in re.finditer(r"(?:^|[\s;&|(])(?:(?:export|declare|local|readonly|typeset)\s+(?:-\w+\s+)*)?([A-Za-z_]\w*)=([^\s;&|<>()]*)", bare):
+        name = m.group(1)
+        counts[name] = counts.get(name, 0) + 1
+        values[name] = m.group(2)
+    result = {}
+    for name, value in values.items():
+        if counts[name] != 1 or name == "HOME" or not value.startswith("/") or re.search(r"[*?\[\]{}$`~\\!]", value):
+            continue
+        if any(part in (".", "..") for part in value.split("/")):
+            continue
+        n = re.escape(name)
+        if re.search(rf"(?<!\w){n}\+=|\b(?:read|mapfile|readarray|getopts|for|select|unset)\b[^;&|\n]*(?<!\w){n}(?!\w)|-v\s*{n}(?!\w)|declare\s+-\w*n|typeset\s+-\w*n|export\s+-\w*n", bare):
+            continue
+        result[name] = value
+    return result
+
+
+def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
+    """True when cmd sets (or could set) a glob-changing shell option and holds a glob word whose fixed front (the folders before the first glob
+    character) is the token folder, one of its parents or a folder inside it. A relative glob word starts at the working folder: the payload's
+    cwd, or anything at all once the command has a cd, pushd or popd. A word that holds $ or .., or a ~+ ~- ~N form, cannot be resolved from the
+    text and is refused. The option counts as possibly set when the command word is a variable, a function or alias could stand in for shopt
+    (OPTION_SETTER, ALIAS_DEFINER; looked at only with wide, on the command text without its data heredoc bodies), a shopt or
+    bash -O argument is built at run time, or a variable name is (BUILT_NAME). One budget covers the whole call."""
+    bare = re.sub(r"[\"'\\]", "", cmd)
+    decoded = re.sub(r"[\"'\\]", "", gmail_norm(cmd))  # gmail_norm also decodes $'\x64otglob' words
+    # an option name spelled around an expansion that is empty (GLOB${e}IGNORE=x, dot${e}glob) is read with every expansion removed too
+    # (taken from the raw text, so GLOB"$e"IGNORE is GLOBIGNORE and not the variable $eIGNORE)
+    emptied = re.sub(r"[\"'\\]", "", re.sub(r"\$\{[^{}]*\}|\$\w+", "", cmd))
+    # zsh ignores underscores anywhere in an option name (G_LOB_DOTS), so the text without them is read too (no zsh is installed on our machines; this is cheap insurance)
+    named = bool(GLOB_OPTION_BARE.search(bare) or GLOB_OPTION_BARE.search(bare.replace("_", "")) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd))
+    if not (named or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
+        return False
+    possible_only = not named  # an option that is only possible (a variable as the command word), nothing in the text sets one
+    ifs = bool(IFS_SET.search(cmd) or IFS_SET_BARE.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
+    skipdots = True  # globskipdots can be turned off by a name built at run time ($eskipdots, a brace, a quote shift): while any glob option is named or possible, a .* or .? component may match ..
+    folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
+
+    seen = {}
+
+    def reaches(directory):  # the folder, below it, or any folder above it (/, /home, the home folder, ~/.config, ~/.config/afa); remembered per folder
+        if directory not in seen:
+            real = os.path.realpath(directory).rstrip(os.sep)
+            seen[directory] = real == folder or folder.startswith(real + os.sep) or real.startswith(folder + os.sep)
+        return seen[directory]
+
+    # cd, pushd, popd, and the commands that start another process in another working folder (env -C, sudo -D, ssh, su -, runuser -l, nsenter -w ..):
+    # a relative glob word then starts somewhere the payload's cwd does not say
+    # (fifth blind review: find -execdir, chdir and cwd= in an interpreter's code, tmux and screen start a process in another folder too)
+    moves = bool(re.search(r"(?<![\w.-])(?:cd|pushd|popd|env|sudo|doas|su|runuser|ssh|nsenter|chroot|systemd-run|setpriv|machinectl|tmux|screen)(?![\w-])|--chdir|--cwd|-execdir|chdir|cwd", bare))
+    try:
+        base = os.path.realpath(cwd if isinstance(cwd, str) and cwd else os.getcwd())
+    except OSError:
+        return True
+    home_trusted = not (re.search(r"(?<![$\w{])HOME(?!\w)", bare) or re.search(BUILT_NAME, bare))  # HOME= or export HOME or a built name: $HOME is not the folder it was
+    budget = 1000000  # characters of words and expanded forms for the whole call: a call that costs more than this is refused, never left to run out the hook's time
+    # a $(..) or backtick span is cut where it holds spaces, so it is also read as one marker word ($S): $(echo /home)/*/?config/.. is $S/*/?config/..
+    masked = _mask_substitutions(bare)
+    literal_vars = _literal_path_vars(bare)
+    # (a word of the masked text may carry the marker $S for a whole $(..): that is not the variable S, so a word that is only in the masked text never has its
+    # variables read as literal paths)
+    bare_toks = re.split(r"[\s;&|<>`]+", bare)
+    bare_set = set(bare_toks)
+    for tok, from_masked in [(t, False) for t in bare_toks] + ([(t, t not in bare_set) for t in re.split(r"[\s;&|<>`]+", masked)] if masked != bare else []):
+        if len(tok) > 2000:
+            return True  # one very long word is refused rather than expanded in the hook's time
+        # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
+        # (a path list x=a:~/... is split at its colons too: bash expands the ~ after each one in an assignment)
+        # with IFS set, bash splits the result of an expansion or of an assignment's value on any character, so /home/... after a q is a word of its own
+        # (literal text on the command line is never split by IFS)
+        starts = {i + 1 for i, ch in enumerate(tok) if ch in "=(:,"} | ({i for i, ch in enumerate(tok) if ch in "/~"} if ifs else set())
+        budget -= len(tok) * (len(starts) + 1)
+        if budget < 0:
+            return True
+        for word in {tok} | {tok[i:] for i in starts}:
+            if home_trusted:
+                word = re.sub(r"^\$\{?HOME\}?(?=/|$)", "~", word)  # "$HOME"/repos/*/x is the home folder, as ~ is (unless the command names HOME in some other way)
+            # a variable that is assigned once in this command to a literal absolute path ($S/body.md after S=/tmp/x/scratchpad, the hub's body command, PR 261's test)
+            # is read as that path; every other word with a $ or a backtick counts as it did (security review of the commit after 36d3160)
+            substituted = False
+            # (a word that also holds a glob is not read this way: its glob can match what the variable's value does not say)
+            if "$" in word and "`" not in word and literal_vars and not from_masked and not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
+                swapped = _LITERAL_VAR.sub(lambda m: literal_vars.get(m.group(1) or m.group(2), m.group(0)), word)
+                if swapped != word and "$" not in swapped:
+                    word, substituted = swapped, True
+            # a word with a $ or a backtick counts too (issue 255 review): bash globs an unquoted expansion, so /home/$b is a glob when b holds one
+            if not word or not (substituted or GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
+                continue
+            comps = word.split("/")
+            # sixth review: an extglob group can match .. (@(..)/@(..)/?config/..), so a part that holds .. beside a ( or ) counts as .. itself
+            if any(c == ".." or (".." in c and ("(" in c or ")" in c)) for c in comps):
+                return True
+            # seventh review: so can any part made only of groups and brackets whose insides hold a dot, a glob character or a leading ! ([.][.], ?(.)?(.), !(x))
+            if len(comps) > 1 and any(_could_be_dotdot(c) for c in comps):
+                return True
+            # (a word with one part only (.[] in a jq filter, .* alone) names no path through ..: it is not read here, the false refusal of the jq filter test of PR 261)
+            if skipdots and len(comps) > 1 and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
+                return True  # with globskipdots off a .* or .? component anywhere matches ..
+            # a variable can hold the home folder, any parent of the token folder or ..: $d/*/?config/... and /tmp/$u/home/*/?config/... are refused while an
+            # option is named, a glob after a variable anywhere in the front; only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
+            var_at = next((i for i, c in enumerate(comps) if "$" in c or "`" in c), None)  # (one pass: a long word is not checked part by part against every later part)
+            if var_at is not None and any(GMAIL_GLOB.search(d) or EXT_GLOB_GROUP.search(d) for d in comps[var_at + 1:-1]):
+                return True
+            # the glob may come from a variable's value instead (p='*/?config/a?a/g?ail/token.json'; cat $H/$p): a relative word with nothing fixed in front and a
+            # glob before its last part, taken from an assignment or a read, is a start nothing here can place
+            if ((word != tok or re.search(r"\b(?:read|mapfile|readarray)\b|<<<", bare)) and re.search(r"\$[\w{@*(]", bare)
+                    and (GMAIL_GLOB.search(comps[0]) or EXT_GLOB_GROUP.search(comps[0])) and len(comps) > 1):
+                return True
+            expanded = _brace_expand(word, BRACE_LIMIT)
+            if expanded is None:
+                return True
+            for one in expanded:
+                budget -= len(one) + 1
+                if budget < 0:
+                    return True
+                one = os.path.expanduser(gmail_norm(one))
+                if one.startswith("~"):
+                    return True  # ~+ ~- ~N and ~name: a folder this text does not say
+                front = []
+                for comp in one.split("/"):
+                    if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp) or "$" in comp or "`" in comp:
+                        break
+                    front.append(comp)
+                fixed = "/".join(front)
+                if os.path.isabs(one):
+                    if reaches(fixed or "/"):
+                        return True
+                elif (moves and not (possible_only and "/" not in one)) or reaches(os.path.join(base, fixed)):
+                    # (when no option is named, only possible, a word of one part such as the python s[:i] of a heredoc body after a cd is not taken for a path: the false
+                    # refusal of the hub's body command, PR 261's test; the gap is noted on issue 265)
+                    return True
+    return False
+
+
+def gmail_credential_use(cmd, cwd=None):
     """Return "folder" or "send" when cmd would touch the mail token's folder or names a Gmail send address; else None."""
+    if _glob_option_reaches_folder(cmd, cwd):
+        return "folder"
     whole = gmail_norm(cmd)
     if re.search(r"gmail_api\.py|redact_view\.py", whole) and GMAIL_ENV_INJECT.search(whole):
         return "folder"  # the two scripts that may hold the token must not run with variables that load other code
     cmd, bodies, opaque, send_cmd = split_data_heredocs(cmd)
+    if _glob_option_reaches_folder(cmd, cwd, wide=True):
+        return "folder"
     for body in bodies:  # a data body is not split into words, but one that names the token folder is still refused
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
@@ -1361,7 +1594,7 @@ def evaluate(payload):
             return "A", ("secret-guard: rule A, this command contains a literal secret (%s). "
                          "Never put secrets inline in commands; read them from a file or env var "
                          "inside a script, and reference them as $VAR." % s)
-        g = gmail_credential_use(cmd)
+        g = gmail_credential_use(cmd, payload.get("cwd"))
         if g == "send":
             return "G", ("secret-guard: rule G, this command names a Gmail send address. The mail tool makes drafts and never "
                          "sends; the owner sends from Gmail's own page.")
