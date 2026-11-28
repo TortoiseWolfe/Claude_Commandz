@@ -904,10 +904,15 @@ def _shell_body_use(body):
 # turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
 # the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
 # (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
-GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt)(?![\w-])"
+GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots|IFS)(?![\w-])"
                          r"|(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]"
                          r"|(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")
 EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
+# What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
+# BASH_ENV or an rc file, a function or alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
+OPTION_SETTER = re.compile(r"(?:^|[;&|\n(){!]|(?<![\w.-])(?:then|do|else|elif|time|if|while|until|coproc))[ \t]*"
+                           r"(?:(?:[A-Za-z_]\w*=\S*|\d*[<>]+&?[ \t]*\S+)[ \t]+)*[\w.-]*(?:[$`]|\w\{)"
+                           r"|(?<![\w.-])(?:--rcfile|--init-file)(?![\w-])|[\w.-]+[ \t]*\([ \t]*\)")
 
 
 def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
@@ -918,8 +923,12 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     (VARIABLE_COMMAND_WORD, NAME_SHADOW; looked at only with wide, on the command text without its data heredoc bodies), or a shopt or
     bash -O argument is built at run time."""
     bare = re.sub(r"[\"'\\]", "", cmd)
-    if not (GLOB_OPTION.search(bare) or (wide and (VARIABLE_COMMAND_WORD.search(bare) or NAME_SHADOW.search(bare)))):
+    decoded = re.sub(r"[\"'\\]", "", gmail_norm(cmd))  # gmail_norm also decodes $'\x64otglob' words
+    if not (GLOB_OPTION.search(bare) or GLOB_OPTION.search(decoded)
+            or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
+    ifs = bool(re.search(r"(?<![\w-])IFS(?![\w-])", bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
+    skipdots = bool(re.search(r"globskipdots", bare))  # off, a .* component matches ..
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
 
     def reaches(directory):  # the folder, below it, or any folder above it (/, /home, the home folder, ~/.config, ~/.config/afa)
@@ -934,10 +943,12 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     for tok in re.split(r"[\s;&|<>`]+", bare):
         # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
         # (a path list x=a:~/... is split at its colons too: bash expands the ~ after each one in an assignment)
-        for word in {tok} | {tok[i + 1:] for i, ch in enumerate(tok) if ch in "=(:"}:
-            if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
+        starts = {i + 1 for i, ch in enumerate(tok) if ch in "=(:,"} | ({i for i, ch in enumerate(tok) if ch in "/~"} if ifs and len(tok) < 2000 else set())
+        for word in {tok} | {tok[i:] for i in starts}:
+            # a word with a $ or a backtick counts too (issue 255 review): bash globs an unquoted expansion, so /home/$b is a glob when b holds one
+            if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue
-            if "$" in word or ".." in word.split("/"):
+            if ".." in word.split("/") or (skipdots and not word.startswith(("/", "~")) and word.startswith(".") and GMAIL_GLOB.search(word.split("/")[0])):
                 return True
             expanded = _brace_expand(word, BRACE_LIMIT)
             if expanded is None:
@@ -948,7 +959,7 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
                     return True  # ~+ ~- ~N and ~name: a folder this text does not say
                 front = []
                 for comp in one.split("/"):
-                    if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp):
+                    if GMAIL_GLOB.search(comp) or EXT_GLOB_GROUP.search(comp) or "$" in comp or "`" in comp:
                         break
                     front.append(comp)
                 fixed = "/".join(front)

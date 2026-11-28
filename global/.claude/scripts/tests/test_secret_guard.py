@@ -123,6 +123,28 @@ class RuleGGlobOptions(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_third_review_cases_are_refused(self):
+        """Blind review a5ef976a3912098ad of PR 264: the option name built by eval, a glob in a variable, IFS, and globskipdots turned off."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("eval $'shopt -s \\x64otglob'; cat ~/%s" % tok,
+                        "eval \"$(printf 'shopt -s dot%%s' glob)\"; cat ~/%s" % tok,
+                        "shopt -s dotglob; b='*/%s'; cat %s/$b" % (tok, os.path.dirname(home)),
+                        "shopt -s dotglob; read b <<< '*/%s'; cat %s/$b" % (tok, os.path.dirname(home)),
+                        "shopt -s dotglob; IFS=,; x=/q,/home/*/%s; cat $x" % tok,
+                        "shopt -u globskipdots; cat .*/.*/.*/.c*/a*/g*/token.json"):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_ordinary_globs_beside_other_shell_words_are_allowed(self):
+        def run(home):
+            for cmd in ('for f in "$d"/*.json; do jq . "$f"; done',
+                        'if [ -d "$OUT" ]; then rm -f "$OUT"/*.tmp; fi',
+                        '[ -f a ] && cd src && ls *.py',
+                        'export X=1; cd build && ls *.o'):
+                self.allowed(cmd)
+        self.with_home(run)
+
     def test_other_uses_of_dash_o_and_variables_are_allowed(self):
         def run(home):
             for cmd in ('wget -O "$out" "${url}"', 'curl -O "$u" ~/docs/*.md'):
