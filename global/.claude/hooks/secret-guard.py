@@ -903,9 +903,9 @@ HEREDOC_DATA_GH = {"issue", "pr", "release", "gist", "discussion"}
 # is not one, $(dirname $f) is). It runs in a subshell, so nothing in it can change a name or an option of the command that holds it, and it holds nothing
 # that bash would read as a quote, a heredoc or a comment: split_data_heredocs steps over it and _names_cannot_change reads the text without it
 # Bash ends a substitution at the ) its parser reaches, which is the first ) only when nothing inside holds a ) of its own: a case pattern (x) cmd) or a
-# ${..} word (${y:-)}). So a { or } or the word case keeps the text out of this pattern, and the whole call is read strictly as before.
+# ${..} word (${y:-)}). $[ ..] and name[..] pairs also swallow a ). So a { } [ ] or the word case keeps the text out of this pattern, and the whole call is read strictly as before.
 # (issue 269, the hub's note case: mkdir -p $(dirname $N) on the line before a quoted heredoc made the body "opaque", and its apostrophe refused the call).
-SIMPLE_SUBST = re.compile(r"\$\((?![^()`\"'\\\n<>;&|#{}]*(?<![\w.-])case(?![\w.-]))[^()`\"'\\\n<>;&|#{}]*\)")
+SIMPLE_SUBST = re.compile(r"\$\((?![^()`\"'\\\n<>;&|#{}\[\]]*(?<![\w.-])case(?![\w.-]))[^()`\"'\\\n<>;&|#{}\[\]]*\)")
 HEREDOC_OP = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([\w.-]+)|([\w.-]+))")
 
 
@@ -1086,7 +1086,7 @@ def split_data_heredocs(cmd):
             continue
         if c == "`" or (c == "$" and i + 1 < n and cmd[i + 1] in "('\"{"):
             sub = SIMPLE_SUBST.match(cmd, i) if c == "$" and cmd[i + 1] == "(" else None
-            if not sub:
+            if not sub or not echo_ok:  # (an alias could stand for case or a quote: the strict reading stays when one can be defined)
                 return cmd, [], [], cmd
             line.append(sub.group(0))  # kept in the code text, so it is still word-split and checked there
             i = sub.end()

@@ -1932,6 +1932,12 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         self.blocked("x=$(echo ${y:-)}; cat <<'EOF'\n%s\nEOF\n)" % send)
         self.assertIsNone(gsm_match("$(case x in x) echo hi esac)"))
         self.assertIsNone(gsm_match("$(echo ${y:-)})"))
+        self.assertIsNone(gsm_match("$(echo $[1) + 2])"))  # old arithmetic: bash reads on to the ]
+        self.assertIsNone(gsm_match("$(a[1) ]=2)"))  # an array subscript
+        self.assertIsNone(gsm_match("$(echo [[ x ]])"))
+        send = "svc.users().messages().send(userId='me', body=b).execute()"
+        self.blocked("x=$(echo $[1) + 2]; cat <<'EOF'\n%s\nEOF\n)" % send)
+        self.blocked("x=$(a[1) ]=2; cat <<'EOF'\n%s\nEOF\n)" % send)
         self.assertIsNotNone(gsm_match("$(dirname /tmp/test-case)"))  # the word case inside a name is not the keyword
         self.assertIsNotNone(gsm_match("$(date +%F)"))
 
