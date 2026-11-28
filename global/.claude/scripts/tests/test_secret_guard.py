@@ -1,6 +1,8 @@
+import glob
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1444,6 +1446,180 @@ class RuleGPythonClientSend(Base):
                     "python3 -I - <<'EOF'\nopen('/home/u/.config/afa/gmail/token.json').read()\nEOF",
                     "cat ~/.config/afa/gmail/token.json"):
             self.blocked(cmd, "G")
+
+
+class RuleGJqFilterBrackets(Base):
+    """Issue 260: a gh -q jq filter such as '.[]|[.name]|@tsv' starts with a dot and holds [. (not a collating symbol), and was refused as a glob
+    the guard could not translate. A real collating symbol or equivalence class is still refused, and so is a bracket that really reaches the folder."""
+    def home(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        home = os.path.join(t.name, "home")
+        os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+        open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+
+    # the exact command of lane sh-band-page, 27 Nov 2026
+    LANE = ("gh run list -R TortoiseWolfe/beatboard --limit 4 --json status,conclusion,name,headSha,event "
+            "-q '.[]|[.name,.event,.status,.conclusion,.headSha[0:8]]|@tsv'; "
+            "curl -sS -w \"\\n%{http_code}\\n\" https://tortoisewolfe.github.io/beatboard/CREDITS.md | sed -n '20p;22p;$p' | cut -c1-200")
+
+    def test_the_lane_command_passes(self):
+        self.home()
+        self.allowed(self.LANE)
+        self.allowed("sleep 60; " + self.LANE)
+
+    def test_gh_and_jq_filters_with_brackets_pass(self):
+        self.home()
+        for c in ("gh run list -R o/r -q '.[]|[.name]|@tsv'", "gh run list -R o/r --json headSha -q '.[]|.headSha[0:8]'",
+                  "gh pr list -R o/r --json number,title -q '.[] | \"\\(.number) \\(.title)\"'", "jq '.[]|[.a,.b]|@tsv' out.json",
+                  "gh api repos/o/r/issues -q '.[].labels[].name'"):
+            self.allowed(c)
+
+    def test_real_collating_symbols_and_classes_still_refuse(self):
+        # globbed spellings, so the refusal comes from the translation and not from the folder's name being written out
+        self.home()
+        for c in ("cat ~/.?onfig/a?a/g?ail/[[.t.]]oken.json", "cat ~/.?onfig/a?a/g?ail/[[=t=]]oken.json", "cat ~/.?onfig/a?a/g?ail/[[.]]oken.json",
+                  "cat ~/.?onfig/a?a/g?ail/[[.t.]o]ken.json", "cat ~/.?onfig/a?a/g?ail/t[=o=]ken.json"):
+            self.blocked(c, "G")
+
+    def test_an_unclosed_bracket_that_really_matches_the_folder_refuses(self):
+        self.home()
+        for c in ("cat ~/.?onfig/a?a/g?ail/[.t]oken.json", "cat ~/.?onfig/a?a/g?ail/[t.]oken.json", "cat ~/.?onfig/a?a/g?ail/[=t]oken.json"):
+            self.blocked(c, "G")
+
+    def test_an_unclosed_collating_start_makes_the_outer_bracket_a_letter(self):
+        """Reviewer's case: bash 5.2.15 reads h[[.a] as the letters h[ and the bracket [.a], so it matches only a name h[a; bash 5.2.37 reads
+        one bracket holding [ . a, so it matches ha, h[ and h. instead. A symlink with either name reaches the home folder, and the guard
+        follows both readings, whichever bash the machine runs (the old code refused every [. as unknown)."""
+        self.assertEqual(sg._bracket_translate("h[[.a]"), "h[[][.a]")
+        self.assertEqual(sg._bracket_translate("h[[.a]", outer_literal=False), "h[[.a]")
+        for link in ("h[a", "ha"):
+            t = tempfile.TemporaryDirectory()
+            self.addCleanup(t.cleanup)
+            home = os.path.join(t.name, "home")
+            os.makedirs(os.path.join(home, ".config", "afa", "gmail"))
+            open(os.path.join(home, ".config", "afa", "gmail", "token.json"), "w").close()
+            os.symlink(home, os.path.join(t.name, link))
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            self.addCleanup(lambda old=old: os.environ.__setitem__("HOME", old) if old is not None else os.environ.pop("HOME", None))
+            path = "%s/h[[.a]/.?onfig/a?a/g?ail/token.json" % t.name
+            self.blocked("cat " + path, "G")  # refused whichever reading this machine's bash has
+
+    def test_translation_agrees_with_bash_for_unclosed_collating_starts(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        for name in ("h[a", "h.", "ha", "h[", "h[.a", "h=", "x.", "xn", "xe", ".x", "[.name]", "n"):
+            open(os.path.join(t.name, name), "w").close()
+        for pat in ("h[[.a]", "h[[=a]", "h[.a]", "x[.name]", "[.name]", "x[[.n]", "[]|[.name]", "x[a[.a]"):
+            got = sg._bracket_translate(pat)
+            self.assertIsNotNone(got, pat)
+            ours = {os.path.relpath(m, t.name) for m in glob.glob(os.path.join(glob.escape(t.name), got))}
+            alt = sg._bracket_translate(pat, outer_literal=False)  # the other bash's reading of an unclosed [.
+            if alt is not None:
+                ours |= {os.path.relpath(m, t.name) for m in glob.glob(os.path.join(glob.escape(t.name), alt))}
+            r = subprocess.run(["bash", "-c", "cd %s && shopt -s nullglob && for f in %s; do printf '%%s\\n' \"$f\"; done" % (shlex.quote(t.name), pat)],
+                               capture_output=True, text=True)
+            theirs = set(r.stdout.split("\n")) - {""}
+            self.assertTrue(theirs <= ours, (pat, theirs, ours))  # never miss a file this machine's bash reaches; both readings may add more
+
+
+HUB_NOTE_CMD = r'''cd ~/repos && S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000000/scratchpad && python3 ~/.claude/scripts/session_prime_facts.py > $S/facts2.txt 2>&1; head -2 $S/facts2.txt | cut -c1-120; cat > $S/note.md <<'EOF'
+**Tower follow-ups (NCC-74656)**
+- ScriptHammer 1517, 1518 and 1525 merged on 24/24 green with 0 skipped; 1526, 1509 and 1513 queued 10 minutes apart; 1515 and 1522 wait for Sunday afternoon.
+- #1532 item 3: Jonathan picked all rights reserved; beatboard PR 37 merged. #1532 stays open for item 2 (Hatch).
+- openclaw PR 7 merged: the receptionist model runs CPU only; the music studio has the graphics card to itself.
+- On Jonathan's word, the two model releases (tower-bandwagon-meshy7-glb-2026-11-20, tower-robot-horses-glb-2026-11-20) and their tags were deleted after the tower copies passed sha256sum -c.
+- Boss theme: no join passes the CLAP bar yet; album-studio runs up to 3 more rounds, bar unchanged.
+EOF
+python3 ~/.claude/scripts/session_prime_facts.py --post --note $S/note.md 2>&1 | tail -3 | cut -c1-200'''
+
+HUB_BODY_CMD = r'''cd ~/repos && S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000000/scratchpad && u=$(gh issue view 1 -R o/r --json updatedAt -q .updatedAt) && [ "$u" = "2026-11-27T14:44:26Z" ] && gh issue view 1 -R o/r --json body -q .body > $S/body.md && python3 - "$S/body.md" <<'EOF'
+import sys
+p=sys.argv[1]; s=open(p).read()
+old_start="Open ~/.claude/state/hub-handoff-2026-11-27-0922.md first."
+i=s.index(old_start); j=s.index("\n",i)
+new=("Open ~/.claude/state/hub-handoff-2026-11-27-1018.md first. Merge the next green PRs as it lists them (1526, 1509, 1513, 10 minutes apart), "
+     "give Jonathan the listen card only when a join passes all five checks, then type \"STUDIO FREE, resume batch 2\" into sung-jingle, "
+     "and when rule-g says the fix is installed, tell sh-band-page to rerun its Pages read.")
+s=s[:i]+new+s[j:]
+open(p,'w').write(s)
+EOF
+gh issue edit 1 -R o/r --body-file $S/body.md >/dev/null && echo edited || echo "NOT edited (issue moved or error)"'''
+
+
+HUB_ISSUE_CMD = r'''S=/tmp/claude-1000/-home-u-repos/0a1b2c3d-0000-4000-8000-000000000001/scratchpad; mkdir -p $S; cat > $S/issue-poll.md <<'EOF'
+## What happens
+
+The tower's mail poller (`scripts/notes_check.py --poll`) lists this machine's own outgoing notes to Hatch as new notes to handle. Three times on 27 Nov (peer inbox lines 258, 259, 263; drafts r1246708431698755466), each subject starting `[CC>MUSE] NCC-74656:`.
+
+## Cause
+
+`POLL_SKIP_SUBJECT_PREFIXES` (line 54) holds only `"[NX-01>"` and `"Re: [CC>MUSE] NCC-74656:"`. A note this machine writes starts `[CC>MUSE] NCC-74656:` with no `Re: `, so it passes the filter.
+
+## Fix
+
+Add `"[CC>MUSE] NCC-74656:"` to the tuple, with a test that a draft with that subject is dropped in poll mode and a `[MUSE>NCC-74656]` note from Hatch is still listed.
+
+Recording these as processed is not the fix: NX-01's sweep could then delete a note before Hatch reads it.
+EOF
+gh issue create -R o/r --title "Mail poller lists the tower's own drafts as new notes" --body-file $S/issue-poll.md'''
+
+
+class RuleGHeredocFeedsOnlyItsOwnCommand(Base):
+    """Issue 260 (the hub's second case): a heredoc feeds only the command it is written on, so other commands on the same line (cd, a variable
+    assignment, a script run, head) do not turn a text-storing heredoc into a shell body. The words in its text are still searched for the folder."""
+
+    def test_the_hubs_note_command_passes(self):
+        self.allowed(HUB_NOTE_CMD)
+
+    def test_the_hubs_issue_body_command_passes(self):
+        self.allowed(HUB_ISSUE_CMD)  # a variable, mkdir -p, a cat heredoc with "machine's" in it, then gh issue create --body-file
+
+    def test_the_hubs_earlier_python_body_command_passes(self):
+        self.allowed(HUB_BODY_CMD)
+
+    def test_a_storing_heredoc_after_other_commands_with_an_apostrophe_passes(self):
+        for c in ("true && cat > /tmp/x <<'EOF'\nJonathan's word\nEOF", "echo hi; cat > /tmp/x <<'EOF'\nJonathan's word\nEOF",
+                  "S=/tmp/x && cat > $S/n <<'EOF'\nJonathan's word\nEOF\nls /tmp",
+                  "cd ~/repos && git commit -q -F - <<'EOF'\nthe owner's fix\nEOF"):
+            self.allowed(c)
+
+    def test_a_heredoc_that_feeds_a_shell_is_still_read_as_shell(self):
+        for c in ("true && bash <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "cd /tmp && sh <<EOF\ncat ~/.config/afa/gmail/token.json\nEOF",
+                  "true && python3 - <<'EOF'\nopen('/home/u/.config/afa/gmail/token.json').read()\nEOF",
+                  "x=1; bash <<'EOF'\nit's\nEOF"):
+            self.blocked(c, "G")
+
+    def test_the_folder_name_in_stored_text_after_other_commands_is_still_refused(self):
+        self.blocked("true && cat > /tmp/x <<'EOF'\ncat ~/.config/afa/gmail/token.json\nEOF", "G")
+        self.blocked("cd ~/repos && S=/tmp/x && cat > $S/n <<'EOF'\nsend it with users/me/messages/send\nEOF", "G")
+
+    def test_blind_review_cases_where_the_named_command_is_not_the_one_that_reads_the_body(self):
+        send = ("curl -X POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send -H \"Authorization: Bearer $T\" -d @m.json\nEOF")
+        for head in ("bash >| cat <<'EOF'",                            # >| writes bash's output to a file named cat; bash reads the body
+                     "bash >& cat <<'EOF'",
+                     "bash -s \\\ncat <<'EOF'",                          # the backslash-newline makes this `bash -s cat <<'EOF'`
+                     "BASH_CMDS[cat]=/bin/bash; cat <<'EOF'",           # cat now runs bash
+                     "BASH_CMDS+=([cat]=/bin/bash); cat <<'EOF'",
+                     "printf -v PATH /tmp/x:/usr/bin; cat <<'EOF'",
+                     "read PATH <<< /tmp/x; cat <<'EOF'",
+                     "cp /bin/sh ~/.local/bin/cat; cat <<'EOF'"):       # a shell planted under the name cat
+            self.blocked(head + "\n" + send, "G")
+
+    def test_a_heredoc_inside_a_group_whose_output_goes_on_keeps_the_strict_reading(self):
+        for c in ("{ cat <<'EOF'\nit's\nEOF\n} | sh", "( cat <<'EOF'\nit's\nEOF\n) | bash", "if true; then cat <<'EOF'\nit's\nEOF\nfi | sh",
+                  "sh < <(cat <<'EOF'\nit's\nEOF\n)", "true && { cat <<'EOF'\nit's\nEOF\n} | sh"):
+            self.blocked(c, "G")
+
+    def test_a_command_name_that_may_be_redefined_keeps_the_strict_reading(self):
+        for c in ("cat() { bash; }; true && cat <<'EOF'\nit's\nEOF", "alias cat=bash; true && cat <<'EOF'\nit's\nEOF",
+                  "PATH=/tmp/evil:$PATH; true && cat <<'EOF'\nit's\nEOF", "hash -p /tmp/evil/sh cat; true && cat <<'EOF'\nit's\nEOF",
+                  "for i in 1 2; do true && cat <<'EOF'\nit's\nEOF\ncat() { bash; }\ndone"):
+            self.blocked(c, "G")
 
 
 class WriteAndEdit(unittest.TestCase):

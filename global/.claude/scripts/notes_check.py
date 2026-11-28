@@ -51,7 +51,7 @@ POLL_DRAFT_QUERIES = [q.replace("newer_than:3d", "newer_than:2d") for q in DRAFT
 POLL_MAIL_QUERIES = [q.replace("newer_than:3d", "newer_than:2d") for q in MAIL_QUERIES]
 POLL_DRAFT_QUERIES[-1] = '"H-7CH" -subject:"[CC>MUSE]" -subject:"NCC-74656" newer_than:2d'
 POLL_MAIL_QUERIES[-1] = '"H-7CH" -subject:"[CC>MUSE]" -subject:"NCC-74656" newer_than:2d -in:draft -label:agent-notes-cc-processed'
-POLL_SKIP_SUBJECT_PREFIXES = ("[NX-01>", "Re: [CC>MUSE] NCC-74656:")
+POLL_SKIP_SUBJECT_PREFIXES = ("[NX-01>", "[CC>MUSE] NCC-74656:", "Re: [CC>MUSE] NCC-74656:")  # notes this machine wrote itself, to NX-01 or to Hatch (issue 262)
 
 LABEL_CC_PROCESSED = "Label_32"
 
