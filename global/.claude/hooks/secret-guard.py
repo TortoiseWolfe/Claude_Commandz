@@ -1069,9 +1069,10 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     # (taken from the raw text, so GLOB"$e"IGNORE is GLOBIGNORE and not the variable $eIGNORE)
     emptied = re.sub(r"[\"'\\]", "", re.sub(r"\$\{[^{}]*\}|\$\w+", "", cmd))
     # zsh ignores underscores anywhere in an option name (G_LOB_DOTS), so the text without them is read too (no zsh is installed on our machines; this is cheap insurance)
-    if not (GLOB_OPTION_BARE.search(bare) or GLOB_OPTION_BARE.search(bare.replace("_", "")) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd)
-            or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
+    named = bool(GLOB_OPTION_BARE.search(bare) or GLOB_OPTION_BARE.search(bare.replace("_", "")) or GLOB_OPTION.search(decoded) or GLOB_OPTION_BARE.search(emptied) or GLOB_OPTION.search(cmd))
+    if not (named or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
+    possible_only = not named  # an option that is only possible (a variable as the command word), nothing in the text sets one
     ifs = bool(IFS_SET.search(cmd) or IFS_SET_BARE.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
     skipdots = True  # globskipdots can be turned off by a name built at run time ($eskipdots, a brace, a quote shift): while any glob option is named or possible, a .* or .? component may match ..
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
@@ -1114,13 +1115,18 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue
             comps = word.split("/")
+            # a word with no glob character and no extglob group ($S/body.md) is the same path with or without a glob option: not judged here (the false refusal of the hub's
+            # body command, PR 261's test). A variable that holds a glob is caught where it is assigned or read.
+            if not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word)):
+                continue
             # sixth review: an extglob group can match .. (@(..)/@(..)/?config/..), so a part that holds .. beside a ( or ) counts as .. itself
             if any(c == ".." or (".." in c and ("(" in c or ")" in c)) for c in comps):
                 return True
             # seventh review: so can any part made only of groups and brackets whose insides hold a dot, a glob character or a leading ! ([.][.], ?(.)?(.), !(x))
             if len(comps) > 1 and any(_could_be_dotdot(c) for c in comps):
                 return True
-            if skipdots and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
+            # (a word with one part only (.[] in a jq filter, .* alone) names no path through ..: it is not read here, the false refusal of the jq filter test of PR 261)
+            if skipdots and len(comps) > 1 and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
                 return True  # with globskipdots off a .* or .? component anywhere matches ..
             # a variable can hold the home folder, any parent of the token folder or ..: $d/*/?config/... and /tmp/$u/home/*/?config/... are refused while an
             # option is named, a glob after a variable anywhere in the front; only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
@@ -1151,7 +1157,9 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
                 if os.path.isabs(one):
                     if reaches(fixed or "/"):
                         return True
-                elif moves or reaches(os.path.join(base, fixed)):
+                elif (moves and not (possible_only and "/" not in one)) or reaches(os.path.join(base, fixed)):
+                    # (when no option is named, only possible, a word of one part such as the python s[:i] of a heredoc body after a cd is not taken for a path: the false
+                    # refusal of the hub's body command, PR 261's test; the gap is noted on issue 265)
                     return True
     return False
 
