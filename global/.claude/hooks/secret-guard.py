@@ -1268,7 +1268,7 @@ NAME_GREP_FLAGS = re.compile(r"^-[EFGivwxonhHsq]+$|^--(?:ignore-case|extended-re
 
 def _names_producer(seg):
     """Claude_Commandz issue 267: True for a plain ls or find that only prints file names (no substitution, redirect or find action)."""
-    if re.search(r"[$`<>(){}\\]", seg):
+    if re.search(r"[$`<>(){}\\#\n]", seg):  # # and a newline can hide a quote that makes the splitter read a later command as part of this one
         return False
     try:
         words = shlex.split(seg, posix=True)

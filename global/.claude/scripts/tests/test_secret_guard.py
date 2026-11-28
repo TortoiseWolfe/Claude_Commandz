@@ -1437,7 +1437,11 @@ class RuleBNamesOnlyGrep(Base):
                "find . -name '*.env' -exec grep KEY {} + | grep '\\.env'",
                "find . -name x -exec cat .env \\; | grep y",
                "ls -a | grep -e '\\.env'",
-               "ls -a | grep -v .env*",                  # security review of PR 268: the shell expands the glob into file operands
+               "ls -a | grep -x '\\.env' | xargs cat",   # a third stage reads what the names search found
+               "ls -a | grep -x '\\.env' | while read f; do cat \"$f\"; done",
+               "find . -maxdepth 0 -exec cat .e'nv' ';' | grep -v '\\.env'",  # a find action runs a command
+               "ls -a #'\ncat .env #' | grep '\\.env'",  # a quote hidden in a comment
+               "ls -a | grep -v .env*",                # security review of PR 268: the shell expands the glob into file operands
                "ls -a | grep -v ~/.env",
                "ls() { cat .env; }; ls | grep '\\.env'",  # an earlier segment can shadow ls or grep
                "alias grep='cat'; ls -a | grep '\\.env'",
