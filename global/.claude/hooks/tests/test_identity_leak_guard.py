@@ -25,7 +25,7 @@ ADDRS = {ME}
 ALLOWED = set(g.DEFAULT_ALLOWED_SCRIPTS)
 
 
-PLACEHOLDER_DOMAINS = {"example.com", "example.org", "example.net", "users.noreply.github.com"}
+PLACEHOLDER_DOMAINS = {"example.com", "example.org", "example.net", "users.noreply.github.com", "example.invalid"}
 
 
 def _private_values():
@@ -196,7 +196,7 @@ class Refuses(unittest.TestCase):
             self.deny("python3 pack.py %s %s" % (ME, big), cwd=d)
             # a mail tool is trusted only in its plainest form; any hijack route puts the attachment back under the old rules
             self.deny("PYTHONPATH=/tmp/evil python3 %s/gmail_api.py draft-create --to %s --attach %s" % (TOOLS, ME, big))
-            self.deny("cd %s && python3 %s/gmail_api.py draft-create --to %s --attach pack.zip" % (d, TOOLS, ME))
+            self.assertIsNone(verdict(bash("cd %s && python3 %s/gmail_api.py draft-create --to %s --attach pack.zip" % (d, TOOLS, ME))))
             self.deny("/tmp/evil/python3 %s/gmail_api.py draft-create --to %s --attach %s" % (TOOLS, ME, big))
             self.deny("python3 -u %s/gmail_api.py draft-create --to %s --attach %s" % (TOOLS, ME, big))
             # a file with the same token as the program but another folder (cd) is the program, not an attachment
@@ -236,9 +236,9 @@ class Refuses(unittest.TestCase):
                 # (d) the refusal names the file
                 self.assertIn(str(data), r)
                 self.assertNotIn(ME, r)
-            # (c) not for a relative script path, a cd, an interpreter setting, inline code or a shadowed interpreter
+            # (c) not for a relative script path, a cd (allowed for absolute quiet scripts), an interpreter setting, inline code or a shadowed interpreter
             self.assertIsNotNone(verdict(bash("python3 size.py %s" % data, cwd=d)))
-            self.assertIsNotNone(verdict(bash("cd %s && python3 %s %s" % (d, quiet, data))))
+            self.assertIsNone(verdict(bash("cd %s && python3 %s %s" % (d, quiet, data))))
             self.assertIsNotNone(verdict(bash("PYTHONPATH=/tmp/evil python3 %s %s" % (quiet, data))))
             self.assertIsNotNone(verdict(bash("python3 -c 'print(1)' %s" % data)))
             self.assertIsNotNone(verdict(bash("python3 -u %s %s" % (quiet, data))))
@@ -304,6 +304,67 @@ class Refuses(unittest.TestCase):
             with self.subTest(pre=pre):
                 self.deny("%spython3 %s/gmail_api.py draft-create --to %s" % (pre, TOOLS, ME))
 
+    def test_new_refusal_reasons(self):
+        addr = "probe@example.invalid"
+        addrs = {addr}
+
+        def check(cmd):
+            return g.check(bash(cmd), addrs, ALLOWED)
+
+        # pushd with absolute mail tool path
+        r = check("pushd sub && python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a pushd in the line", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # popd with absolute mail tool path
+        r = check("popd && python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a popd in the line", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # cd - with absolute mail tool path
+        r = check("cd - && python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a cd - in the line", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # cd with variable target
+        r = check("cd $WORK && python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a folder change with a variable or glob", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # cd with glob target
+        r = check("cd *.tmp && python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a folder change with a variable or glob", r)
+
+        # relative script path (not absolute)
+        r = check("cd %s && python3 gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a relative path to the script", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # Path unsafe (relative entry in PATH)
+        old_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = ".:/usr/bin"
+            r = check("python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+            self.assertIn("a relative entry in PATH", r)
+            self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+        finally:
+            os.environ["PATH"] = old_path
+
+        # Shadowing (alias)
+        r = check("alias python3=/tmp/evil; python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("a shadowing command", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # Interpreter env var
+        r = check("PYTHONPATH=/tmp/evil python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("an interpreter environment variable", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
+        # Odd interpreter path
+        r = check("/tmp/evil/python3 %s/gmail_api.py --to %s" % (TOOLS, addr))
+        self.assertIn("an interpreter at an odd path", r)
+        self.assertIn("plain form: python3 %s/gmail_api.py" % TOOLS, r)
+
     def test_webfetch_and_websearch(self):
         for url in ("https://example.com/?e=%s" % ME, "https://example.com/?e=owner.name%40example.org", "https://example.com/" + ME):
             with self.subTest(url=url):
@@ -359,6 +420,18 @@ class Allows(unittest.TestCase):
         self.ok("python3 %s/gmail_api.py draft-create --to %s --subject s --html f.html" % (TOOLS, ME))
         self.ok("python3 %s/gmail_api.py draft-raw r123 --to %s" % (TOOLS, ME))
         self.ok("python3 %s/calendar_api.py events --account %s" % (TOOLS, ME))
+
+    def test_a_followable_cd_with_an_absolute_mail_tool_is_allowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sub").mkdir()
+            self.ok("cd sub && python3 %s/gmail_api.py --to probe@example.invalid" % TOOLS, cwd=d)
+            self.ok("cd %s/sub && python3 %s/gmail_api.py --to probe@example.invalid" % (d, TOOLS), cwd="/tmp")
+
+    def test_a_followable_cd_with_an_absolute_mail_tool_and_real_address_is_allowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sub").mkdir()
+            self.ok("cd sub && python3 %s/gmail_api.py draft-create --to %s --subject test" % (TOOLS, ME), cwd=d)
+            self.ok("cd %s/sub && python3 %s/gmail_api.py draft-create --to %s --subject test" % (d, TOOLS, ME), cwd="/tmp")
 
     def test_a_script_with_a_mail_tool_name_elsewhere_is_not_a_mail_tool(self):
         with tempfile.TemporaryDirectory() as d:

@@ -73,7 +73,9 @@ INTERPRETER_ENV = re.compile(r"\b(?:PYTHON\w*|NODE_\w+|RUBY\w*|PERL5?\w*|BUN_\w+
 # Anything that can make the word "python3" mean something else on the same line: PATH changes, aliases, functions, hash.
 SHADOWING = re.compile(r"\bPATH\b|\b(?:alias|hash|enable|function|command_not_found_handle)\b|\w+\s*\(\s*\)\s*\{")
 SYSTEM_INTERPRETER_DIRS = ("/usr/bin/", "/usr/local/bin/", "/bin/", "/opt/homebrew/bin/")
-CHANGES_FOLDER = re.compile(r"\b(?:cd|pushd|popd|chdir)\b")
+# Folder changes that the hook cannot reliably follow: pushd, popd, cd -, or a target with variables/globs.
+# A plain cd to a literal folder is followable and does not by itself untrust a mail tool at an absolute path.
+UNFOLLOWABLE_CD = re.compile(r"\b(?:pushd|popd)\b|(\bcd\b.*\b-\b)|(\bcd\b.*[$`*?])")
 INLINE_FLAGS = ("-c", "-e", "-E", "-p", "-r", "-m", "--eval", "--print")
 INLINE_PREFIXES = ("-c", "-m", "-e", "-E", "-p", "-r", "--eval", "--print", "--require", "--import", "--loader", "--input-type")
 
@@ -190,11 +192,26 @@ def cd_targets(cmd):
     return re.findall(r"\bcd\s+([^\s;&|]+)", cmd)
 
 
-def cd_unfollowable(cmd):
-    """True when the line changes folder in a way this hook can't work out: pushd, popd, cd - or a target built at run time."""
-    if re.search(r"\b(?:pushd|popd)\b", cmd):
-        return True
-    return any(d.strip("'\"") == "-" or re.search(r"[$`*?]", d) for d in cd_targets(cmd))
+def is_path_safe():
+    """True when PATH holds no relative entries (including '.' and empty entries)."""
+    path = os.environ.get("PATH", "")
+    for e in path.split(os.pathsep):
+        if not e or e == "." or not os.path.isabs(e):
+            return False
+    return True
+
+
+def cd_unfollowable_reason(cmd):
+    """The reason a folder change is unfollowable, or None if it is followable (literal folders)."""
+    if re.search(r"\bpushd\b", cmd):
+        return "a pushd in the line"
+    if re.search(r"\bpopd\b", cmd):
+        return "a popd in the line"
+    if any(d.strip("'\"") == "-" for d in cd_targets(cmd)):
+        return "a cd - in the line"
+    if any(re.search(r"[$`*?]", d) for d in cd_targets(cmd)):
+        return "a folder change with a variable or glob"
+    return None
 
 
 def candidate_files(tokens, cwd, cmd):
@@ -263,8 +280,12 @@ def sinks(cmd, cwd, allowed):
     found = []
     if CLIENT_RE.search(cmd):
         found.append("network client")
-    # A mail tool is trusted only when nothing in the line can change what runs: no folder change, no interpreter settings.
-    hijackable = bool(INTERPRETER_ENV.search(cmd) or CHANGES_FOLDER.search(cmd) or SHADOWING.search(cmd))
+
+    shadowed = bool(SHADOWING.search(cmd))
+    env_hijack = bool(INTERPRETER_ENV.search(cmd))
+    unfollow_reason = cd_unfollowable_reason(cmd)
+    path_safe = is_path_safe()
+
     for m in INTERP_RE.finditer(cmd):
         # The interpreter itself must be a bare name or a system path; one at any other path is a program like any other.
         odd_interpreter = bool(m.group("dir")) and m.group("dir") not in SYSTEM_INTERPRETER_DIRS
@@ -275,16 +296,21 @@ def sinks(cmd, cwd, allowed):
             found.append("inline code that uses the network")
         if any(t.startswith("-m") for t in toks):
             found.append("a module this hook can't read")
-        if cd_unfollowable(cmd):
-            found.append("a folder change this hook can't follow")
+        if unfollow_reason:
+            found.append(unfollow_reason)
         files = candidate_files(toks, cwd, cmd)
         if not files:
             if not inline:
                 found.append("a script this hook can't find")
             continue
         first = words[0] if words and not inline else None
-        plain_form = first is not None and not odd_interpreter and toks and toks[0].strip("'\"") == first \
-            and os.path.isabs(os.path.expanduser(first)) and not hijackable
+        is_abs = first is not None and os.path.isabs(os.path.expanduser(first))
+        # A mail tool is trusted only in its plainest form: absolute path, no hijacks.
+        # An unfollowable folder change (pushd, popd, cd -, cd with variable/glob) untrusts it.
+        hijackable = env_hijack or shadowed or bool(unfollow_reason)
+        plain_form = (first is not None and not odd_interpreter and toks and toks[0].strip("'\"") == first
+                      and is_abs and not hijackable and path_safe)
+
         trusted = False  # the program is a mail tool in its plainest form: the files it is given are its data
         for tok, path in files:
             if tok == first and plain_form and is_allowed_tool(path, allowed):
@@ -311,7 +337,28 @@ def sinks(cmd, cwd, allowed):
             if len(body) > MAX_SCRIPT_BYTES:
                 found.append("a script too large to read in full")
             elif NETWORK_CODE.search(body):
-                found.append(("script file", body, path))
+                if is_allowed_tool(path, allowed):
+                    trigger = None
+                    plain_form = "%s %s" % (m.group("name"), path)
+                    if not path_safe:
+                        trigger = "a relative entry in PATH"
+                    elif shadowed:
+                        trigger = "a shadowing command (alias, function or PATH=...)"
+                    elif env_hijack:
+                        trigger = "an interpreter environment variable"
+                    elif unfollow_reason:
+                        trigger = unfollow_reason
+                    elif not is_abs:
+                        trigger = "a relative path to the script"
+                    elif odd_interpreter:
+                        trigger = "an interpreter at an odd path"
+
+                    if trigger:
+                        found.append("%s — plain form: %s" % (trigger, plain_form))
+                    else:
+                        found.append(("script file", body, path))
+                else:
+                    found.append(("script file", body, path))
         if first is not None and not any(t == first for t, _ in files):
             found.append("a script this hook can't find")
     return found
@@ -408,7 +455,13 @@ def check_bash(cmd, cwd, addrs, allowed, hosts=frozenset()):
     if hosts and found == ["network client"] and not DYNAMIC_ADDRESS.search(cmd) and body_only_to_approved_host(cmd, addrs, hosts):
         return None
     if has_address(cmd, addrs) or DYNAMIC_ADDRESS.search(cmd):
-        return "a Bash call carries the address to a network sink"
+        best_reason = "a Bash call carries the address to a network sink"
+        for f in found:
+            if isinstance(f, str) and f != "network client":
+                if " (use " in f:
+                    return f
+                best_reason = f
+        return best_reason
     for f in found:
         if isinstance(f, tuple) and has_address(f[1], addrs):
             return "the file %s holds the address and uses the network" % (f[2] if len(f) > 2 else "a script this call runs")
