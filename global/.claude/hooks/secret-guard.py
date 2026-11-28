@@ -932,7 +932,7 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
             or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
     ifs = bool(IFS_SET.search(cmd) or IFS_SET.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
-    skipdots = any(re.search(r"globskipdots", s) for s in (bare, decoded, emptied, cmd))  # off, a .* component matches ..; read in every view of the text (glob$e skipdots, $'\x67lobskipdots')
+    skipdots = True  # globskipdots can be turned off by a name built at run time ($eskipdots, a brace, a quote shift): while any glob option is named or possible, a .* or .? component may match ..
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
 
     def reaches(directory):  # the folder, below it, or any folder above it (/, /home, the home folder, ~/.config, ~/.config/afa)

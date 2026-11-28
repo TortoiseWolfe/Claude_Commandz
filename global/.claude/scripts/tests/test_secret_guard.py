@@ -144,6 +144,7 @@ class RuleGGlobOptions(Base):
             for cmd in ("shopt -u globskipdots; cat docs/.*/.c?nfig/a?a/g?ail/t*",
                         "shopt -u glob${e}skipdots; cat docs/.*/.c?nfig/a?a/g?ail/t*",
                         "shopt -u $'globskip\\x64ots'; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "shopt -s dotglob; o=skipdots; shopt -u glob$o; cat docs/.*/.c?nfig/a?a/g?ail/t*",
                         "declare GLOB${e}IGNORE=x; cat ~/%s" % tok,
                         "env BASH${e}OPTS=dot${e}glob bash -c 'cat ~/%s'" % tok,
                         "shopt -s dotglob; d=/home; cat $d/*/%s" % tok,
