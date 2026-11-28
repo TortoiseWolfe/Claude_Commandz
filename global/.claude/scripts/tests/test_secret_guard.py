@@ -108,6 +108,17 @@ class RuleGCdGlobAndWrappers(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_security_review_cases_are_refused(self):
+        """Security review of PR 266: a ${ cmd; } substitution in a printing line, a relative cd from an ancestor of the home folder,
+        and a word of many ${x:-..} expansions (refused, never rebuilt quadratically)."""
+        def run(home):
+            for cmd in ("echo ${ cat ~/.?onfig/a?a/g?ail/token.json; }",
+                        "cd /tmp && cd %s/.?onfig/a?a/g?ail && cat token.json" % os.path.basename(home),
+                        "cd %s/.?onfig/a?a/g?ail" % os.path.basename(home),
+                        "cat " + "${x:-a}" * 50):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
     def test_the_same_shapes_without_the_token_folder_pass(self):
         def run(home):
             os.makedirs(os.path.join(home, "docs"))

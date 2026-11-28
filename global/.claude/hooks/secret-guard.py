@@ -580,12 +580,18 @@ def gmail_resolves_into_folder(seg, tolerant=False):
     # Text that only prints or stores (echo, printf, cat and the like, gh issue, git commit) is prose, as in issues 228 and 235, and stays one word.
     lead = os.path.basename(words[0]) if words else ""
     prose = (lead in ECHO_WORDS or lead in HEREDOC_DATA_WORDS or (lead == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH)
-             or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)) and not re.search(r"[<>$]\(|`", seg)
+             or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)) and not re.search(r"\$|[<>]\(|`", seg)  # any $ expansion (${ cmd; } too) ends the prose exemption
     if not prose:
         words = words + [piece for w in words if re.search(r"\s", w) for piece in re.split(r"[\s;&|]+", w) if piece]
     if len(words) > 2000:
         return True
     cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
+    home = os.path.realpath(os.path.expanduser("~"))
+    bases = set(parents) | {home, os.sep}  # a relative cd target starts wherever an earlier cd left the shell: every ancestor of home too
+    up = home
+    while os.path.dirname(up) != up:
+        up = os.path.dirname(up)
+        bases.add(up)
 
     def glob_inside(cand):  # every file a glob word can match, expanded as bash would, is checked; a form not understood or too many matches is refused
         n = 0
@@ -608,7 +614,7 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             if GMAIL_GLOB.search(w) and glob_inside(w):  # issue 257: cd ~/.?onfig/a?a/g?ail goes into the folder
                 return True
             if not w.startswith(("/", "~", "$")):  # a relative target starts wherever an earlier cd left the shell: try it from the folders that matter
-                for base in parents | {os.path.realpath(os.path.expanduser("~"))}:
+                for base in bases:
                     if inside(os.path.join(base, w)) or (GMAIL_GLOB.search(w) and glob_inside(os.path.join(base, w))):
                         return True
             continue
@@ -619,7 +625,10 @@ def gmail_resolves_into_folder(seg, tolerant=False):
         # issue 257: ${x:-PATH} ${x:+PATH} ${x:=PATH} ${x:?PATH} (and the forms without the colon) hold PATH as a word of their own, closing brace cut off
         cands = {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}
         for c in (w, after_eq):
-            for m in re.finditer(r"\$\{[^{}$]*?:?[-+=?]", c):
+            exps = list(re.finditer(r"\$\{[^{}$]*?:?[-+=?]", c))
+            if len(exps) > 40 or (exps and len(c) > 4000):
+                return True  # a long word full of expansions is refused rather than rebuilt in the hook's time
+            for m in exps:
                 depth, close = 1, None
                 for k in range(m.end(), len(c)):
                     depth += (c[k] == "{") - (c[k] == "}")
