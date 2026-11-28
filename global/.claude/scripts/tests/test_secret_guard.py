@@ -76,6 +76,17 @@ class RuleGCdGlobAndWrappers(Base):
                "cat ~/${x:-.?onfig/a?a}/g?ail/token.json",
                "cd ~/.config && cd ?fa/g?ail && cat token.json",
                "cd ~ && cd .?onfig/a?a/g?ail && cat token.json",
+               # blind review of PR 266
+               "cd ~ && x=1 cd .?onfig/a?a/g?ail && cat token.json",
+               "cd ~ && command cd .?onfig/a?a/g?ail && cat token.json",
+               "cd ~ && builtin cd .?onfig/a?a/g?ail && cat token.json",
+               "bash -c 'cd; cd .?onfig/a?a/g?ail; cat token.json'",
+               "bash -c 'cd ~ && cd .?onfig/a?a/g?ail && cat token.json'",
+               "cat ${x:-~}/${y:-.?onfig}/a?a/g?ail/token.json",
+               "cat ${x:-$HOME}/${y:-.?onfig}/a?a/g?ail/token.json",
+               "echo 'cat ~/.?onfig/a?a/g?ail/token.json' | bash",
+               "cat <<< 'cat ~/.?onfig/a?a/g?ail/token.json' | sh",
+               "cd && cat .?onfig/a?a/g?ail/token.json",
                "echo hi <(cat ~/.?onfig/a?a/g?ail/token.json)",
                "echo $(bash -c 'cat ~/.?onfig/a?a/g?ail/token.json')")
 
@@ -99,7 +110,7 @@ class RuleGCdGlobAndWrappers(Base):
             for cmd in self.REFUSED:
                 if ":?" in cmd:
                     continue  # ${x:?word} only prints word as an error message; the guard still refuses it
-                r = subprocess.run(["bash", "-c", cmd.replace("cat ", "ls ")], env={"HOME": home, "PATH": os.environ["PATH"]}, capture_output=True, text=True, cwd="/tmp")
+                r = subprocess.run(["bash", "-c", cmd.replace("cat <<<", "CATHERE").replace("cat ", "ls ").replace("CATHERE", "cat <<<")], env={"HOME": home, "PATH": os.environ["PATH"]}, capture_output=True, text=True, cwd="/tmp")
                 self.assertEqual(r.returncode, 0, (cmd, r.stderr))
                 self.assertTrue(r.stdout.strip(), cmd)  # the glob matched a real file or folder and listed it
         self.with_home(run)
@@ -126,6 +137,8 @@ class RuleGCdGlobAndWrappers(Base):
             os.makedirs(os.path.join(home, "docs"))
             for cmd in ("cd ~/d?cs && ls",
                         "cat ${x:-~/docs/*.md}",
+                        "cd .. && ls", "cd . && ls", "cd ../ && ls", "pushd ..", "cd gmail", "cd afa",  # blind review of PR 266: ordinary cd words
+                        "cd src && ls */*/*.py", "cd docs && cat ${x:-~/docs/*.md}",
                         "bash -c 'ls ~/docs/*.md'",
                         "sh -c 'echo hello world'",
                         "bash <<< 'ls ~/docs'",

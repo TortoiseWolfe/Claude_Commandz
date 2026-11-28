@@ -571,7 +571,57 @@ def _bracket_translate(w, outer_literal=True):
     return "".join(out)
 
 
-def gmail_resolves_into_folder(seg, tolerant=False):
+SHELLISH = {"bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "xargs", "env", "python", "python3", "perl", "node", "ruby", "exec", "command", "builtin"}
+DEFAULT_EXPANSION = re.compile(r"\$\{[^{}$]*?:?[-+=?]([^{}]*)\}|\$\{\w+/[^{}/]*/([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
+
+
+def _command_index(words):
+    """Index of the command word: past NAME=value words and the command and builtin prefixes (with their options)."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if re.match(r"^[A-Za-z_]\w*=", w) or w in ("command", "builtin", "exec") or (i > 0 and words[i - 1] in ("command", "builtin") and w.startswith("-")):
+            i += 1
+            continue
+        break
+    return i
+
+
+def _is_cd_segment(seg):
+    try:
+        words = shlex.split(seg, posix=True)
+    except ValueError:
+        return True  # unclear: counts as a cd, so later relative words are checked more widely
+    i = _command_index(words)
+    return i < len(words) and os.path.basename(words[i]) in ("cd", "pushd")
+
+
+def _feeds_shell(text):
+    """True when some segment of the text runs a shell, an interpreter or xargs: an echoed or here-string text is then code, not prose."""
+    for seg in split_segments(text):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            return True
+        i = _command_index(words)
+        if i < len(words) and os.path.basename(words[i]) in SHELLISH:
+            return True
+    return False
+
+
+def _defaults_applied(c, empty=False):
+    """The word with every ${x:-word} (and ${x/pat/word}) replaced by its word at once, innermost first; with empty, every other $name or ${..} removed."""
+    for _ in range(40):
+        m = DEFAULT_EXPANSION.search(c)
+        if not m:
+            break
+        c = c[:m.start()] + (m.group(1) if m.group(1) is not None else m.group(2)) + c[m.end():]
+    if empty:
+        c = re.sub(r"\$\{[^{}]*\}|\$\w+", "", c)
+    return c
+
+
+def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, level=0):
     """True when a word of the segment, once globs are expanded and symlinks followed, is the token folder or lands inside it,
     or the segment is a cd/pushd into the folder or one of its parents (~/.config/afa, ~/.config). This looks at the real
     file system, so a spelling the text patterns miss (a symlink, a glob, a ./ or ../ path) is still seen.
@@ -603,14 +653,29 @@ def gmail_resolves_into_folder(seg, tolerant=False):
     # Text that only prints or stores (echo, printf, cat and the like, gh issue, git commit) is prose, as in issues 228 and 235, and stays one word.
     lead = os.path.basename(words[0]) if words else ""
     prose = (lead in ECHO_WORDS or lead in HEREDOC_DATA_WORDS or (lead == "gh" and len(words) > 1 and words[1] in HEREDOC_DATA_GH)
-             or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)) and not re.search(r"\$|[<>]\(|`", seg)  # any $ expansion (${ cmd; } too) ends the prose exemption
+             or (lead == "git" and len(words) > 1 and words[1] in GMAIL_GIT_QUOTING)) and not re.search(r"\$|[<>]\(|`", seg) and prose_ok  # any $ expansion (${ cmd; } too), or a shell later in the line that the text could be piped to, ends the prose exemption
     if not prose:
-        words = words + [piece for w in words if re.search(r"\s", w) for piece in re.split(r"[\s;&|]+", w) if piece]
+        spaced = [w for w in words if re.search(r"\s", w)]
+        words = words + [piece for w in spaced for piece in re.split(r"[\s;&|]+", w) if piece]
+        # Security review of PR 266: the text of a bash -c word or a here-string is a command line of its own, so its own cd words set the folder for
+        # what follows it; it is read again as segments (two levels deep at most, and not past a size that fits the hook's time)
+        if spaced and level < 2:
+            if len(spaced) > 20 or sum(len(w) for w in spaced) > 8000:
+                return True
+            for w in spaced:
+                inner_rel = rel
+                for inner in split_segments(w):
+                    # tolerant: a piece of ordinary text (a lone apostrophe in a message, an unbalanced quote in a regex) can't be split as shell and is
+                    # not refused for that; it is cut at quotes and spaces and every piece is still checked as a path
+                    if inner.strip() and gmail_resolves_into_folder(inner, True, inner_rel, prose_ok, level + 1):
+                        return True
+                    inner_rel = inner_rel or _is_cd_segment(inner)
     if len(words) > 2000:
         return True
-    cd = bool(words) and os.path.basename(words[0]) in ("cd", "pushd")
+    ci = _command_index(words)  # past NAME=value words and command or builtin in front of cd
+    cd = ci < len(words) and os.path.basename(words[ci]) in ("cd", "pushd")
     home = os.path.realpath(os.path.expanduser("~"))
-    bases = set(parents) | {home, os.sep}  # a relative cd target starts wherever an earlier cd left the shell: every ancestor of home too
+    bases = {home, os.sep}  # a relative cd target starts wherever an earlier cd left the shell: home, every ancestor of it and / (not the token folder's own parents: cd .. from there is ordinary)
     up = home
     while os.path.dirname(up) != up:
         up = os.path.dirname(up)
@@ -631,7 +696,7 @@ def gmail_resolves_into_folder(seg, tolerant=False):
     for i, w in enumerate(words):
         if not w:
             continue
-        if cd and i > 0 and not w.startswith("-"):
+        if cd and i > ci and not w.startswith("-"):
             if inside(w):
                 return True
             if GMAIL_GLOB.search(w) and glob_inside(w):  # issue 257: cd ~/.?onfig/a?a/g?ail goes into the folder
@@ -652,21 +717,29 @@ def gmail_resolves_into_folder(seg, tolerant=False):
             if len(exps) > 40 or (exps and len(c) > 4000):
                 return True  # a long word full of expansions is refused rather than rebuilt in the hook's time
             for m in exps:
-                depth, close = 1, None
+                nest, close = 1, None
                 for k in range(m.end(), len(c)):
-                    depth += (c[k] == "{") - (c[k] == "}")
-                    if depth == 0:
+                    nest += (c[k] == "{") - (c[k] == "}")
+                    if nest == 0:
                         close = k
                         break
                 inner = c[m.end():close] if close is not None else c[m.end():]
                 rest = c[close + 1:] if close is not None else ""
                 cands |= {inner.rstrip("}"), inner + rest, c[:m.start()] + inner + rest}  # the word with the expansion replaced by its default too
+            if "$" in c:  # every default applied at once (left to right), and with every other variable empty: ${x:-~}/${y:-.?onfig}/a?a/..., ${IFS}/path
+                cands |= {_defaults_applied(c), _defaults_applied(c, True)}
         for cand in cands:
             if cand and ("/" in cand or cand.startswith(("~", "."))):
                 if inside(cand):
                     return True
                 if GMAIL_GLOB.search(cand) and glob_inside(cand):
                     return True
+                # Security review of PR 266: after a cd (any, a bare cd goes home) a relative path starts wherever the shell then stands: try a
+                # glob of three or more parts from home, every ancestor of it and /, as the cd targets are
+                if rel and GMAIL_GLOB.search(cand) and not cand.startswith(("/", "~", "$")) and cand.count("/") >= 2:
+                    for base in bases:
+                        if glob_inside(os.path.join(base, cand)):
+                            return True
     return False
 
 
@@ -968,7 +1041,7 @@ def _opaque_use(opaque):
         for row in _body_rows(body):
             for seg in split_segments(row):
                 norm = gmail_norm(seg)
-                if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True):
+                if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, True, True, False):
                     return "folder"
                 if names_send(norm):
                     return "send"
@@ -1002,10 +1075,12 @@ def _shell_body_use(body):
         norm = gmail_norm(b)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"
+    after_cd, prose_ok = False, not _feeds_shell(code)
     for seg in split_segments(code):
         norm = gmail_norm(seg)
-        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg):
+        if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm) or gmail_resolves_into_folder(seg, False, after_cd, prose_ok):
             return "folder"
+        after_cd = after_cd or _is_cd_segment(seg)
         if names_send(norm):
             return "send"
     return _opaque_use(opaque)
@@ -1021,11 +1096,13 @@ def gmail_credential_use(cmd):
         norm = gmail_norm(body)
         if GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm):
             return "folder"
+    after_cd, prose_ok = False, not _feeds_shell(cmd)
     for seg in split_segments(cmd):
         norm = gmail_norm(seg)
         if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
-                or gmail_resolves_into_folder(seg)) and not gmail_segment_ok(seg):
+                or gmail_resolves_into_folder(seg, False, after_cd, prose_ok)) and not gmail_segment_ok(seg):
             return "folder"
+        after_cd = after_cd or _is_cd_segment(seg)
     bare = re.sub(r"[\"'\\]", "", cmd)
     if ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(cmd) or _echo_shadowed(cmd) or VARIABLE_COMMAND_WORD.search(bare) \
             or NAME_SHADOW.search(bare) or QUOTE_SHIFTER.search(cmd):
@@ -1041,7 +1118,7 @@ def gmail_credential_use(cmd):
         for seg in re.split(r"[;&|\n]", cmd) + re.split(r"[;&|\n()`]", cmd):
             norm = gmail_norm(seg)
             if (GMAIL_DIR.search(norm) or GMAIL_AFA_GLOB.search(norm) or GMAIL_CD_CONFIG.search(norm)
-                    or gmail_resolves_into_folder(seg, tolerant=True)):
+                    or gmail_resolves_into_folder(seg, True, True, False)):
                 return "folder"
     hit = _opaque_use(opaque)  # a comment or an interpreter's code: no allowlist and no quoted-mention exemption, any hit is refused
     if hit:
