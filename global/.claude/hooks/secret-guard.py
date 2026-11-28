@@ -574,7 +574,11 @@ def _bracket_translate(w, outer_literal=True):
 
 SHELLISH = {"bash", "sh", "zsh", "dash", "ksh", "eval", "source", ".", "xargs", "env", "python", "python3", "perl", "node", "ruby", "exec", "command", "builtin",
             "timeout", "nice", "nohup", "stdbuf", "setsid", "busybox", "fish", "csh", "tcsh", "awk", "gawk", "php", "lua", "pwsh", "ssh", "sudo", "doas"}
-DEFAULT_EXPANSION = re.compile(r"\$\{[^{}$]*?:?[-+=?]([^{}]*)\}|\$\{\w+/[^{}/]*/([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
+# Blind re-review of PR 266: the operator sits right after the parameter name (and a subscript); a lazy "anything up to ?" took the ? of a glob inside
+# ${x/a/~/.?onfig/..} for the ${x?word} operator and rebuilt the wrong word
+_EXPANSION_HEAD = r"\$\{(?:\w+|[@*#?$!-])(?:\[[^\]]*\])?"
+EXPANSION_START = re.compile(_EXPANSION_HEAD + r"(?::?[-+=?]|/[/#%]?[^{}/]*/)")  # ${x:-  ${x=  ${x?  ${x/pat/  ${x//pat/ : what follows is a word of its own
+DEFAULT_EXPANSION = re.compile(_EXPANSION_HEAD + r":?[-+=?]([^{}]*)\}|\$\{\w+/[/#%]?[^{}/]*/([^{}]*)\}")  # ${x:-word} and ${x/pat/word}: the word is what runs when x is empty or matches
 
 
 def _command_index(words):
@@ -639,8 +643,8 @@ def _pattern_reaches(folder, base, pattern, below_only=False):
         parts = [c for c in os.path.normpath(one).split(os.sep) if c not in ("", ".")]
         if any(c == ".." for c in parts):
             return True
-        if below_only and len(parts) < len(fparts):
-            continue  # a pattern that stops above the folder lands on a parent, which below_only does not count
+        if len(parts) < len(fparts) - (0 if below_only else 2):
+            continue  # a pattern that stops above ~/.config lands on an ordinary folder (*/ from /), and one above the folder lands on a parent, which below_only does not count
         # security review of PR 266: each part is written the way Python's fnmatch reads a bracket ([^x] is [!x], a POSIX class is its characters) first;
         # a part that cannot be translated exactly is a hit. An unclosed [. is read both ways, as bash_glob does.
         readings = []
@@ -713,6 +717,8 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
                     if inner.strip() and gmail_resolves_into_folder(inner, True, inner_rel, prose_ok, level + 1):
                         return True
                     inner_rel = inner_rel or _is_cd_segment(inner)
+        elif spaced and any(re.search(r"(?<![\w.-])(?:cd|pushd)(?![\w.-])", w) for w in spaced):
+            return True  # blind re-review of PR 266: a cd three shells deep sets a folder the hook no longer follows, so it is refused rather than guessed
     elif level < 2:
         # Blind review of PR 266: prose that is echoed, stored or posted may still be code later (piped to a wrapped shell, written to a file and run),
         # whichever shell or wrapper that is, so the list of shells decides nothing here: a path-like glob piece of a spaced word that lands IN the
@@ -751,12 +757,13 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
 
     def from_bases(word, below=False):  # a relative word (and the same without its leading ../ parts) tried from every folder the shell may stand in
         # below: a glob that lands on a parent (*/* from /) is not a hit; a relative word after a cd is tried that way, since the shell stands in an unknown base
+        # security review of PR 266: a plain path is judged as ever (a parent such as .config/afa after a cd home is a hit); below is for globs only
         below = below or strict
         for variant in _rel_variants(word):
             if variant.startswith(("/", "~")):
                 continue
             for base in bases:
-                if inside(os.path.join(base, variant), below):
+                if inside(os.path.join(base, variant), strict):
                     return True
                 if GMAIL_GLOB.search(variant):
                     # the parts are matched against the folder's real parts (nothing walked), and, outside prose, the files the glob really matches under
@@ -783,7 +790,7 @@ def gmail_resolves_into_folder(seg, tolerant=False, rel=False, prose_ok=True, le
         # issue 257: ${x:-PATH} ${x:+PATH} ${x:=PATH} ${x:?PATH} (and the forms without the colon) hold PATH as a word of their own, closing brace cut off
         cands = {p.lstrip("@") for c in (w, after_eq) for p in [c] + re.split(r"[<>()`]+&?", c)}
         for c in (w, after_eq):
-            exps = list(re.finditer(r"\$\{[^{}$]*?:?[-+=?]", c))
+            exps = list(EXPANSION_START.finditer(c))
             if len(exps) > 40 or (exps and len(c) > 4000):
                 return True  # a long word full of expansions is refused rather than rebuilt in the hook's time
             for m in exps:

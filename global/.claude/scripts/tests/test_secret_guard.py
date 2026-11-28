@@ -148,7 +148,14 @@ class RuleGCdGlobAndWrappers(Base):
                         "cat $x$HOME/%s" % t, "cat${IFS}$HOME/%s" % t, "cat ${HOME:0}/%s" % t, "cat ${HOME%%x}/%s" % t,
                         # security review of PR 266: bash's bracket spellings, which Python's fnmatch reads differently
                         "cd ~ && cat .c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[:lower:]]nfig/a[[:lower:]]a/g[[:lower:]]ail/token.json",
-                        "cd ~/repos && cat ../.c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[=o=]]nfig/a?a/g?ail/token.json"):
+                        "cd ~/repos && cat ../.c[^x]nfig/a[^x]a/g[^x]ail/token.json", "cd ~ && cat .c[[=o=]]nfig/a?a/g?ail/token.json",
+                        # third blind review: a replacement word with a ? glob, and a cd three shells deep
+                        "x=a; cat ${x/a/~/.?onfig/a?a/g?ail/token.json}",
+                        "cat ${PWD/*/%s/.?onfig/a?a/g?ail/token.json}" % home,
+                        "x=a; cat ${x//a/~/.?onfig/a?a/g?ail/token.json}",
+                        "bash -c \"bash -c \\\"bash -c 'cd; cat .?onfig/a?a/g?ail/token.json'\\\"\"",
+                        # security review: a plain parent path after a cd is still a parent
+                        "cd ~ && tar czf /tmp/x .config/afa", "cd ~/repos && grep -r tok ../.config"):
                 self.blocked(cmd, "G")
             # a symlink that leads into the folder is followed by a glob after a cd
             os.symlink(os.path.join(home, ".config", "afa"), os.path.join(home, "lnk"))
@@ -159,7 +166,9 @@ class RuleGCdGlobAndWrappers(Base):
     def test_broad_relative_globs_after_a_cd_pass(self):
         def run(home):
             for cmd in ("cd src && wc -l */*/*", "cd src && git add */*/*", "cd src && rm -f */*/*", "cd src && cat */*/*.py",
-                        "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
+                        "cd && wc -l */*/*", "cd src && ls */*", "cd ~ && wc -l */*",
+                        # third blind review: shallow globs after a cd stop above ~/.config
+                        "cd ~/repos && for d in */; do git -C \"$d\" status -s; done", "cd src && du -sh */", "cd src && wc -l */*", "cd build && rm -rf */","echo \"see ~/.config/* for settings\"", "echo 'a note about ~/.config/*.json'"):
                 self.allowed(cmd)
         self.with_home(run)
 
