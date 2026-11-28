@@ -1958,6 +1958,15 @@ class RuleGOrdinaryWorkIsNotARead(Base):
         self.assertTrue(sg._names_cannot_change("A=1 B=$(date +%F) ls"))
         self.assertTrue(sg._names_cannot_change("ls $(dirname /tmp/x)/b && ls $(pwd); cat"))
 
+    def test_a_docker_playwright_run_on_a_scratchpad_folder_is_allowed(self):
+        # the game-music lane's call, 28 Nov: PW=<scratchpad>/pw then a heavy-slot docker run with -v $PW:/w, after a cd ~ and with a & at the end
+        self.allowed("PW=/tmp/claude-1000/-home-turtle-wolfe-repos-scripthammer-stage-play/8c1675be-abcb-4e75-9abb-5919f6a8109c/scratchpad/pw; "
+                     "cd ~ && nohup ~/.claude/scripts/docker-heavy.sh --light --mem 4g --cpus 2 --timeout 1800 --tag game-music-studio -- "
+                     "docker run --rm --ipc=host -v $PW:/w -w /w mcr.microsoft.com/playwright:v1.65.1-noble node studio.js > $PW/studio.out 2>&1 &\n")
+        self.allowed("PW=/tmp/x/pw; cd ~ && docker run --rm -v $PW:/w -w /w img node a.js > $PW/a.out 2>&1")
+        self.allowed("PW=/tmp/x/pw; cd ~ && docker run --rm -v \"$PW\":/w -w /w img node a.js")
+        self.blocked("PW=~/.config/afa; cd ~ && docker run --rm -v $PW/gmail:/w -w /w img cat token.json")
+
     def test_a_name_built_by_a_substitution_does_not_make_the_heredoc_data(self):
         send = "svc.users().messages().send(userId='me', body=b).execute()"
         self.blocked("cp /bin/sh /tmp/ca$(echo t); cat <<'EOF'\n%s\nEOF" % send)

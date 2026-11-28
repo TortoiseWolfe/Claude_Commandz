@@ -1015,7 +1015,7 @@ NAME_CHANGERS = re.compile(r"(?<![\w-])(?:PATH|BASH_ENV|ENV|IFS|LD_PRELOAD|LD_LI
 
 # commands whose arguments are never run as a program (not env, command, exec, time, nohup, xargs, find, sort, tar, git, a shell or an interpreter)
 SUBST_SAFE_COMMANDS = {"mkdir", "rmdir", "touch", "rm", "ls", "cat", "echo", "dirname", "basename", "date", "pwd", "cd", "head", "tail", "wc",
-                       "grep", "readlink", "realpath", "stat", "test"}
+                       "grep", "readlink", "realpath", "stat"}
 
 
 def _names_cannot_change(cmd):
