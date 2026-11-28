@@ -136,9 +136,35 @@ class RuleGGlobOptions(Base):
                 self.blocked(cmd, "G")
         self.with_home(run)
 
+    def test_fourth_review_cases_are_refused(self):
+        """Blind review of PR 264, second round: .* with globskipdots off anywhere in a word, an option name spelled around an empty expansion,
+        one very long word, and a variable first component with a glob after it."""
+        def run(home):
+            tok = "?config/a?a/g?ail/token.json"
+            for cmd in ("shopt -u globskipdots; cat docs/.*/.c?nfig/a?a/g?ail/t*",
+                        "declare GLOB${e}IGNORE=x; cat ~/%s" % tok,
+                        "env BASH${e}OPTS=dot${e}glob bash -c 'cat ~/%s'" % tok,
+                        "shopt -s dotglob; d=/home; cat $d/*/%s" % tok,
+                        "shopt -s dotglob; cat %s" % ("a" * 2500 + "/*"),
+                        "IFS=' '; x=/q:/home/*/%s; cat $x" % tok):
+                self.blocked(cmd, "G")
+        self.with_home(run)
+
+    def test_options_spelled_without_naming_the_folder_are_refused_by_the_option_check(self):
+        """Each of these is refused by the glob-option check itself, not by an older check that sees the folder's name in the text."""
+        def run(home):
+            for cmd in ("shopt -s nocaseglob; cat ~/.CONFI*/A?A/G?AIL/T*",
+                        "shopt -s extglob\ncat ~/.config/@(afa)/@(gmail)/t*",
+                        "shopt -s dotglob; cat /*/*/.c?nfig/a?a/g?ail/token.json",
+                        "shopt -s dotglob; cat /ho?e/*/.c?nfig/a?a/g?ail/token.json"):
+                self.assertTrue(sg._glob_option_reaches_folder(cmd, None), cmd)
+        self.with_home(run)
+
     def test_ordinary_globs_beside_other_shell_words_are_allowed(self):
         def run(home):
-            for cmd in ('for f in "$d"/*.json; do jq . "$f"; done',
+            for cmd in ('while IFS= read -r f; do rm -f "$OUT"/*.tmp; done < list.txt',
+                        'IFS= read -r line; ls *.md',
+                        'for f in "$d"/*.json; do jq . "$f"; done',
                         'if [ -d "$OUT" ]; then rm -f "$OUT"/*.tmp; fi',
                         '[ -f a ] && cd src && ls *.py',
                         'export X=1; cd build && ls *.o'):

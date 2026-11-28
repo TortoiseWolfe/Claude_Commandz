@@ -904,9 +904,11 @@ def _shell_body_use(body):
 # turns dotglob on and hides . and .. from a match. So with one of them set, a glob word that can start at or above the token folder is refused, since
 # the Python expansion no longer says what bash would match. The options are looked for by name in the text with quotes and backslashes removed
 # (shop""t is still shopt), and a shopt or -O that is given a word built at run time ($x, a backtick) counts too. Fails closed.
-GLOB_OPTION = re.compile(r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots|IFS)(?![\w-])"
-                         r"|(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]"
-                         r"|(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")
+IFS_SET = re.compile(r"""(?<![\w-])IFS=(?:[^\s;&|)'"]|["'][^"'\s]|["'][ \t]|\$')|\$\{?IFS""")  # IFS given a value (a quoted space counts), or ${IFS} used as a separator; IFS= and IFS='' are empty and ordinary
+GLOB_OPTION = re.compile("|".join((r"(?<![\w-])(?:dotglob|nocaseglob|extglob|globstar|GLOBIGNORE|BASHOPTS|globdots|glob_dots|extendedglob|extended_glob|kshglob|ksh_glob|setopt|globskipdots)(?![\w-])",
+                                   IFS_SET.pattern,  # only an IFS set to something (or ${IFS} used as a separator) splits words on other characters; while IFS= read -r is ordinary
+                                   r"(?<![\w.-])shopt\b[^;&|\n]*[$`{*?\[]",
+                                   r"(?<![\w.-])(?:bash|sh|zsh|ksh)\b[^;&|\n]*[ \t]-[A-Za-z]*[Oo][ \t]*[^\s;&|]*[$`{*?\[]")))
 EXT_GLOB_GROUP = re.compile(r"[?*+@!]\(")
 # What can set a glob option without naming it: a command word built at run time ($s -s ..., `x` ..., sho{p,q}t), eval, source, a dot-source,
 # BASH_ENV or an rc file, a function or alias of the name shopt. A test bracket, a group brace, a for-loop word list, export and PATH= cannot.
@@ -924,10 +926,12 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     bash -O argument is built at run time."""
     bare = re.sub(r"[\"'\\]", "", cmd)
     decoded = re.sub(r"[\"'\\]", "", gmail_norm(cmd))  # gmail_norm also decodes $'\x64otglob' words
-    if not (GLOB_OPTION.search(bare) or GLOB_OPTION.search(decoded)
+    # an option name spelled around an expansion that is empty (GLOB${e}IGNORE=x, dot${e}glob) is read with every expansion removed too
+    emptied = re.sub(r"\$\{[^{}]*\}|\$\w+", "", bare)
+    if not (GLOB_OPTION.search(bare) or GLOB_OPTION.search(decoded) or GLOB_OPTION.search(emptied) or GLOB_OPTION.search(cmd)
             or (wide and (OPTION_SETTER.search(bare) or OPTION_SETTER.search(decoded) or ALIAS_DEFINER.search(bare) or ALIAS_DEFINER.search(decoded)))):
         return False
-    ifs = bool(re.search(r"(?<![\w-])IFS(?![\w-])", bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
+    ifs = bool(IFS_SET.search(cmd) or IFS_SET.search(bare))  # any character can split a word then: every /... or ~... inside a word is a start of its own
     skipdots = bool(re.search(r"globskipdots", bare))  # off, a .* component matches ..
     folder = os.path.realpath(os.path.expanduser("~/.config/afa/gmail"))
 
@@ -941,6 +945,8 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
     except OSError:
         return True
     for tok in re.split(r"[\s;&|<>`]+", bare):
+        if len(tok) > 2000:
+            return True  # one very long word is refused rather than expanded in the hook's time
         # a word after an = or a ( is a word of its own: x=~/?config/..., x=(~/?config/...), declare -a x=(...)
         # (a path list x=a:~/... is split at its colons too: bash expands the ~ after each one in an assignment)
         starts = {i + 1 for i, ch in enumerate(tok) if ch in "=(:,"} | ({i for i, ch in enumerate(tok) if ch in "/~"} if ifs and len(tok) < 2000 else set())
@@ -948,8 +954,14 @@ def _glob_option_reaches_folder(cmd, cwd=None, wide=False):
             # a word with a $ or a backtick counts too (issue 255 review): bash globs an unquoted expansion, so /home/$b is a glob when b holds one
             if not word or not (GMAIL_GLOB.search(word) or EXT_GLOB_GROUP.search(word) or "$" in word or "`" in word):
                 continue
-            if ".." in word.split("/") or (skipdots and not word.startswith(("/", "~")) and word.startswith(".") and GMAIL_GLOB.search(word.split("/")[0])):
+            comps = word.split("/")
+            if ".." in comps:
                 return True
+            if skipdots and any(c.startswith(".") and GMAIL_GLOB.search(c) for c in comps):
+                return True  # with globskipdots off a .* or .? component anywhere matches ..
+            if ("$" in comps[0] or "`" in comps[0]) and any(GMAIL_GLOB.search(c) or EXT_GLOB_GROUP.search(c) for c in comps[1:-1]):
+                return True  # a variable can hold the home folder or any parent of the token folder: $d/*/?config/... is refused while an option is named;
+                #              only a glob in the last part ("$OUT"/*.tmp, "$d"/*.json) is the ordinary loop and passes
             expanded = _brace_expand(word, BRACE_LIMIT)
             if expanded is None:
                 return True
